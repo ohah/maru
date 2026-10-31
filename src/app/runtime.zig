@@ -99,10 +99,14 @@ pub const PtyIo = struct {
     resize_fn: *const fn (ctx: *anyopaque, size: terminal.Size) anyerror!void,
     // non-blocking 변형(없으면 writeInputNonBlocking이 blocking으로 폴백). 실제 PTY만 채운다.
     write_input_nb: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!usize = null,
+    // Ordered UI owners opt into frame protection; legacy producers keep their
+    // existing queue contract until they install an ordered admission owner.
+    write_protocol_response_nb: ?*const fn (ctx: *anyopaque, bytes: []const u8) anyerror!usize = null,
     // Phase 3 위임 채널(docs/plans/io-render-threading.md §9 P3-2~): 메인발 코어 mutate를 reader로 보낸다. interactive
     // 백엔드(live_pty WriteQueueIo)만 채운다 — null이면 위임 경로 없음(runtime이 직접 적용으로 폴백). 순환 import를
     // 피해 명령 타입은 중립 `core_command`에 둔다(opaque ctx로 큐 타입은 백엔드가 숨김).
     enqueue_command: ?*const fn (ctx: *anyopaque, cmd: core_command.CoreCommand) anyerror!void = null,
+    enqueue_command_nb: ?*const fn (ctx: *anyopaque, cmd: core_command.CoreCommand) anyerror!bool = null,
     // 메인이 명령 밖에서 코어에 남긴 응답(resize 의 DECSET 2048 크기 통지)을 reader 가 비우게 깨운다. 응답은 reader 가
     // 유일한 PTY writer 로서 비차단·상한 응답 버퍼로 보내는 것이 계약이다 — 입력 큐(`write_input`)로 보내면 paste 로 찬
     // 큐에서 호출 스레드가 막힌다. interactive 백엔드(live_pty WriteQueueIo)만 채운다 — null 이면 직접 쓰기로 폴백.
@@ -174,9 +178,19 @@ fn exitCode(status: pty.ExitStatus) ?i32 {
     };
 }
 
+/// Optional host-owned FIFO admission. Register only while its context is stable.
+/// The host owns admitted bytes/commands until backend acceptance or target drop.
+pub const InputAdmission = struct {
+    context: *anyopaque,
+    bytes: *const fn (*anyopaque, SurfaceId, []const u8, bool) RuntimeError!void,
+    command: *const fn (*anyopaque, SurfaceId, core_command.CoreCommand) RuntimeError!void,
+    drop: *const fn (*anyopaque, SurfaceId) void,
+};
+
 pub const SurfaceRuntime = struct {
     allocator: std.mem.Allocator,
     links: std.ArrayList(Link) = .empty,
+    input_admission: ?InputAdmission = null,
     // host가 켜면 PTY 출력의 제어 시퀀스를 진단 로깅한다(MARU_DEBUG 드래그 분석용). 기본 off.
     debug_input: bool = false,
     // MARU_TRACE 라이브 trace 레코더는 **per-link**(각 `Link.trace_recorder`)다 — runtime은 앱-전역 공유라, 싱글톤 한
@@ -188,6 +202,7 @@ pub const SurfaceRuntime = struct {
     }
 
     pub fn deinit(self: *SurfaceRuntime) void {
+        if (self.input_admission) |admission| for (self.links.items) |link| admission.drop(admission.context, link.surface_id);
         self.links.deinit(self.allocator);
         self.* = undefined;
     }
@@ -242,6 +257,7 @@ pub const SurfaceRuntime = struct {
 
     pub fn detachSurface(self: *SurfaceRuntime, surface_id: SurfaceId) void {
         if (self.findBySurface(surface_id)) |index| {
+            if (self.input_admission) |admission| admission.drop(admission.context, surface_id);
             _ = self.links.orderedRemove(index);
         }
     }
@@ -267,6 +283,11 @@ pub const SurfaceRuntime = struct {
     pub fn writeInput(self: *SurfaceRuntime, surface_id: SurfaceId, input: TerminalInput) RuntimeError!void {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
+        if (self.input_admission) |admission| {
+            if (link.pty_io.write_input_nb == null) return error.WriteFailed;
+            try admission.bytes(admission.context, surface_id, input.bytes, false);
+            return;
+        }
         // 진단: Maru가 PTY로 보내는 키 바이트(키 인코딩 검증용 — 예: Option+Backspace가 \e\x7f인지).
         // pty->core(출력)와 대칭으로 core->pty(입력)를 찍는다. MARU_DEBUG에서만.
         if (self.debug_input) {
@@ -285,20 +306,53 @@ pub const SurfaceRuntime = struct {
     /// non-blocking 쓰기: 지금 쓸 수 있는 만큼만 쓰고 길이를 돌려준다(0 = 다음에). paste 큐가
     /// 자식이 stdin을 안 읽는 동안에도 UI tick을 동결시키지 않으려고 쓴다.
     pub fn writeInputNonBlocking(self: *SurfaceRuntime, surface_id: SurfaceId, bytes: []const u8) RuntimeError!usize {
+        return self.writeNonBlocking(surface_id, bytes, false, false);
+    }
+
+    /// Protocol replies can contain clipboard data. Never log/trace their bytes,
+    /// and never fall back to a blocking writer on the UI thread.
+    pub fn writeProtocolResponseNonBlocking(self: *SurfaceRuntime, surface_id: SurfaceId, bytes: []const u8) RuntimeError!usize {
+        return self.writeNonBlocking(surface_id, bytes, true, false);
+    }
+
+    /// FIFO owner flushes an already-owned chunk without readmitting it.
+    pub fn flushInputChunkNonBlocking(self: *SurfaceRuntime, surface_id: SurfaceId, bytes: []const u8, sensitive: bool) RuntimeError!usize {
+        return self.writeNonBlocking(surface_id, bytes, sensitive, true);
+    }
+
+    pub fn flushCoreCommandNonBlocking(self: *SurfaceRuntime, surface_id: SurfaceId, cmd: core_command.CoreCommand) RuntimeError!bool {
+        const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
+        if (link.surface.process_state == .exited) return error.ProcessExited;
+        const send = link.pty_io.enqueue_command_nb orelse return error.WriteFailed;
+        return send(link.pty_io.ctx, cmd) catch return error.WriteFailed;
+    }
+
+    fn writeNonBlocking(self: *SurfaceRuntime, surface_id: SurfaceId, bytes: []const u8, sensitive: bool, bypass: bool) RuntimeError!usize {
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
         // writeInput과 대칭으로 core->pty 비차단 입력(paste·IME 확정·OSC 52 read 응답)도 진단 로깅한다. MARU_DEBUG에서만.
-        if (self.debug_input) {
+        if ((sensitive or bypass or self.input_admission != null) and link.pty_io.write_input_nb == null) return error.WriteFailed;
+        if (!bypass) if (self.input_admission) |admission| {
+            try admission.bytes(admission.context, surface_id, bytes, sensitive);
+            return bytes.len;
+        };
+        if (self.debug_input and !sensitive) {
             var ebuf: [320]u8 = undefined;
             input_diag.info("core->pty(nb) {d}B: {s}", .{ bytes.len, escapeForLog(bytes, &ebuf) });
         }
-        const written = link.pty_io.writeInputNonBlocking(bytes) catch |err| return switch (err) {
+        const written = (if (sensitive and bypass and link.pty_io.write_protocol_response_nb != null)
+            link.pty_io.write_protocol_response_nb.?(link.pty_io.ctx, bytes)
+        else
+            link.pty_io.writeInputNonBlocking(bytes)) catch |err| return switch (err) {
             error.Unauthorized => error.InputSuppressed,
             else => error.WriteFailed,
         };
         // MARU_TRACE: **실제 전송된 만큼만**(written) 기록한다 — 호출자가 나머지를 재시도하며 다시 호출하므로,
         // 전체를 매번 기록하면 부분 write가 중복 기록된다. 이어붙이면 전송된 입력 스트림 전체가 된다.
-        if (link.trace_recorder) |rec| rec.recordInput(surface_id, bytes[0..written]);
+        if (written > bytes.len) return error.WriteFailed;
+        if (!sensitive) {
+            if (link.trace_recorder) |rec| rec.recordInput(surface_id, bytes[0..written]);
+        }
         return written;
     }
 
@@ -323,6 +377,11 @@ pub const SurfaceRuntime = struct {
             defer link.surface.unlockCore(io);
             link.surface.core.cell_metrics_epoch +%= 1;
             cm.epoch = link.surface.core.cell_metrics_epoch;
+        }
+        if (self.input_admission) |admission| {
+            if (link.pty_io.enqueue_command_nb == null) return error.WriteFailed;
+            try admission.command(admission.context, surface_id, cmd);
+            return;
         }
         if (link.pty_io.enqueue_command) |enqueue| {
             enqueue(link.pty_io.ctx, cmd) catch return error.WriteFailed;
@@ -1275,4 +1334,134 @@ test "escapeForLog escapes controls and never writes past the buffer (OOB regres
         const out = escapeForLog(input[0..16], &small);
         try std.testing.expect(out.len <= small.len); // 패닉 없이 버퍼 안에서 끝나야 한다
     }
+}
+
+const ProtocolProbe = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    limit: usize = std.math.maxInt(usize),
+    blocking_called: bool = false,
+    overreport: bool = false,
+    suppressed: bool = false,
+    calls: usize = 0,
+    frame_calls: usize = 0,
+    fn framed(ctx: *anyopaque, bytes: []const u8) !usize {
+        const self: *ProtocolProbe = @ptrCast(@alignCast(ctx));
+        self.frame_calls += 1;
+        return nonblocking(ctx, bytes);
+    }
+    fn io(self: *ProtocolProbe) PtyIo {
+        return .{ .ctx = self, .write_input = blocking, .write_input_nb = nonblocking, .resize_fn = resize };
+    }
+    fn blocking(ctx: *anyopaque, _: []const u8) !void {
+        const self: *ProtocolProbe = @ptrCast(@alignCast(ctx));
+        self.blocking_called = true;
+        return error.ForbiddenBlocking;
+    }
+    fn nonblocking(ctx: *anyopaque, bytes: []const u8) !usize {
+        const self: *ProtocolProbe = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        if (self.suppressed) return error.Unauthorized;
+        const count = @min(bytes.len, self.limit);
+        try self.bytes.appendSlice(std.testing.allocator, bytes[0..count]);
+        return if (self.overreport) bytes.len + 1 else count;
+    }
+    fn resize(_: *anyopaque, _: terminal.Size) !void {}
+};
+
+// Initialize in place: runtime links and the recorder borrow these fields.
+const ProtocolFixture = struct {
+    runtime: SurfaceRuntime,
+    surface: surface_mod.Surface,
+    probe: ProtocolProbe,
+    output: std.Io.Writer.Allocating,
+    recorder: TraceRecorder,
+    initial_trace_len: usize,
+    fn init(self: *ProtocolFixture) !void {
+        self.runtime = .init(std.testing.allocator);
+        self.surface = try .init(std.testing.allocator, 45, .{ .cols = 8, .rows = 2 });
+        self.probe = .{};
+        self.output = .init(std.testing.allocator);
+        self.recorder = .init(&self.output.writer);
+        _ = try self.runtime.attach(&self.surface, 9, self.probe.io());
+        try self.runtime.setSurfaceTraceRecorder(self.surface.id, &self.recorder);
+        self.initial_trace_len = self.output.written().len;
+        self.runtime.debug_input = true;
+    }
+    fn deinit(self: *ProtocolFixture) void {
+        self.runtime.deinit();
+        self.surface.deinit();
+        self.probe.bytes.deinit(std.testing.allocator);
+        self.output.deinit();
+    }
+};
+
+test "runtime protocol response sends raw bytes without trace input" {
+    var f: ProtocolFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const bytes = "response-secret\r\n";
+    try std.testing.expectEqual(bytes.len, try f.runtime.writeProtocolResponseNonBlocking(45, bytes));
+    try std.testing.expectEqualStrings(bytes, f.probe.bytes.items);
+    try std.testing.expectEqual(f.initial_trace_len, f.output.written().len);
+    try std.testing.expect(!f.probe.blocking_called);
+}
+
+test "runtime protocol response preserves partial and stalled progress" {
+    var f: ProtocolFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.probe.limit = 3;
+    try std.testing.expectEqual(@as(usize, 3), try f.runtime.writeProtocolResponseNonBlocking(45, "abcdef"));
+    f.probe.limit = 0;
+    try std.testing.expectEqual(@as(usize, 0), try f.runtime.writeProtocolResponseNonBlocking(45, "def"));
+    f.probe.limit = 2;
+    try std.testing.expectEqual(@as(usize, 2), try f.runtime.writeProtocolResponseNonBlocking(45, "def"));
+    try std.testing.expectEqualStrings("abcde", f.probe.bytes.items);
+    try std.testing.expectEqual(f.initial_trace_len, f.output.written().len);
+}
+
+test "runtime protocol response refuses blocking fallback" {
+    var f: ProtocolFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.runtime.linkBySurface(45).?.pty_io.write_input_nb = null;
+    try std.testing.expectError(error.WriteFailed, f.runtime.writeProtocolResponseNonBlocking(45, "secret"));
+    try std.testing.expect(!f.probe.blocking_called);
+}
+
+test "runtime protocol response rejects impossible backend progress" {
+    var f: ProtocolFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.probe.overreport = true;
+    try std.testing.expectError(error.WriteFailed, f.runtime.writeProtocolResponseNonBlocking(45, "secret"));
+    try std.testing.expectEqual(f.initial_trace_len, f.output.written().len);
+}
+
+test "runtime protocol response keeps target liveness suppression and user trace" {
+    var f: ProtocolFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try std.testing.expectError(error.UnknownSurface, f.runtime.writeProtocolResponseNonBlocking(99, "secret"));
+    const state = f.surface.process_state;
+    f.surface.process_state = .exited;
+    try std.testing.expectError(error.ProcessExited, f.runtime.writeProtocolResponseNonBlocking(45, "secret"));
+    try std.testing.expectEqual(@as(usize, 0), f.probe.calls);
+    f.surface.process_state = state;
+    f.probe.suppressed = true;
+    try std.testing.expectError(error.InputSuppressed, f.runtime.writeProtocolResponseNonBlocking(45, "secret"));
+    f.probe.suppressed = false;
+    f.probe.limit = 3;
+    try std.testing.expectEqual(@as(usize, 3), try f.runtime.writeInputNonBlocking(45, "user-key"));
+    try std.testing.expect(std.mem.indexOf(u8, f.output.written(), "use") != null);
+    const before = f.output.written().len;
+    _ = try f.runtime.writeProtocolResponseNonBlocking(45, "secret");
+    try std.testing.expectEqual(before, f.output.written().len);
+    f.runtime.linkBySurface(45).?.pty_io.write_protocol_response_nb = ProtocolProbe.framed;
+    _ = try f.runtime.flushInputChunkNonBlocking(45, "secret", true);
+    try std.testing.expectEqual(@as(usize, 1), f.probe.frame_calls);
+    try std.testing.expectEqual(before, f.output.written().len);
+    _ = try f.runtime.flushInputChunkNonBlocking(45, "user", false);
+    try std.testing.expectEqual(@as(usize, 1), f.probe.frame_calls);
+    try std.testing.expect(f.output.written().len > before);
 }

@@ -2425,3 +2425,22 @@ settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 
 독립 immutable recovery job의 실제 native I/O, 현재 문서에 맞는 ack/drop 승인,
 소유권/실패/backoff와 앱 debounce/close 보존을 검증한다. 기존
 `test-win32-editor-backup` 34개의 private store/restore 검사는 그대로 유지한다.
+
+## Windows OSC 52 읽기 실앱 검증
+
+`mise exec -- zig build test-clipboard-response test-windows-clipboard-raw test-typed-input-queue test-command-admission test-input-dispatcher test-protocol-response-write test-protocol-frame-queue test-input-queue-regression -j1`로 중립 인코딩·소유권과 native raw 읽기 계약을 검사한다.
+실앱은 Windows 대화형 데스크톱에서 별도 캐시 실행 파일로 검사한다. 기존 설치본이나 실행 중인 앱은 대상이 아니다.
+
+```powershell
+mise exec -- zig build -p .zig-cache/windows-osc52 -j1
+New-Item -ItemType Directory -Force .zig-cache/windows-osc52/bin/assets
+Copy-Item -LiteralPath assets/fonts -Destination .zig-cache/windows-osc52/bin/assets -Recurse -Force
+python -X utf8 tools/windows/check-osc52-read.py --exe .zig-cache/windows-osc52/bin/maru.exe --output .zig-cache/osc52-read-result
+python -X utf8 tools/windows/check-osc52-read.py --exe .zig-cache/windows-osc52/bin/maru.exe --output .zig-cache/osc52-large-result --large
+```
+
+출력 폴더는 매번 새 경로를 준다. 기본 검사는 클립보드를 읽기만 하며 텍스트 대신 길이·해시를 기록한다.
+`--large`는 기존 클립보드가 비어 있을 때만 생성 데이터를 설치하고, 마지막으로 관측한 sequence·전체 생성 데이터·텍스트 형식을 대조한 뒤 원래의 빈 상태로 복구한다. 외부 변경은 보존하고 검사를 실패 처리한다.
+다섯 policy/target 사례를 모두 실행하거나 `--case allow-c`처럼 한 사례를 선택할 수 있다.
+큰 사례는 약 7 MB 응답을 여러 tick에 나눠 받는 동안 소유한 Maru 창만 반복 resize하고, 전체 OSC 응답 뒤에 in-band resize 통지가 오는지 검사한다. 자식이 prefix를 받은 뒤 DSR을 보내는 초기 방식은 리더 순서 결함을 놓쳤으므로 중간 삽입 방지의 증거로 쓰지 않는다.
+각 앱은 격리된 프로필·설정·자식과 PID 소유 창을 쓰며, 클립보드 내용을 로그에 남기거나 물리 키·IME 입력을 증명하지 않는다.

@@ -634,3 +634,35 @@ run = "zig build test-windows-run-frame"
 [tasks.test-windows-run-allocation-path]
 description = "Compare native frame output across allocation strategies"
 run = "zig build test-windows-run-allocation-path"
+
+[tasks.test-clipboard-response]
+description = "Verify shared OSC52 response encoding and bounds"
+run = "zig build test-clipboard-response"
+
+[tasks.test-windows-clipboard-raw]
+description = "Verify raw clipboard text and bounded native storage scans"
+run = "zig build test-windows-clipboard-raw"
+
+[tasks.test-protocol-response-write]
+description = "Verify private nonblocking response transport"
+run = "zig build test-protocol-response-write"
+
+[tasks.test-typed-input-queue]
+description = "Verify typed FIFO privacy and transfer ownership"
+run = "zig build test-typed-input-queue"
+
+[tasks.test-command-admission]
+description = "Verify nonblocking command backpressure and byte fences"
+run = "zig build test-command-admission"
+
+[tasks.test-input-dispatcher]
+description = "Verify ordered byte and command admission ownership"
+run = "zig build test-input-dispatcher"
+
+[tasks.test-protocol-frame-queue]
+description = "Verify bounded protocol frame reservations and reply boundaries"
+run = "zig build test-protocol-frame-queue"
+
+[tasks.test-input-queue-regression]
+description = "Verify existing FIFO, blocking backpressure, close wakeup and command fences"
+run = "zig build test-input-queue-regression"

@@ -287,6 +287,10 @@ pub const PtyWriteQueue = struct {
     // 명령 큐 fence의 단일 시간축. enqueue 성공 바이트와 reader가 실제 PTY write한 바이트를 각각 단조 누적한다.
     enqueued_total: u64 = 0,
     consumed_total: u64 = 0,
+    // One protocol frame is reserved through its final accepted byte. A new
+    // frame waits for consumption so it cannot replace an active boundary.
+    protocol_begin: u64 = 0,
+    protocol_end: u64 = 0,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, capacity_bytes: usize) QueueError!PtyWriteQueue {
         if (capacity_bytes == 0) return error.ZeroCapacity;
@@ -317,7 +321,9 @@ pub const PtyWriteQueue = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         // data가 cap보다 크면 단독으로도 상한을 넘으므로, 버퍼가 빌 때까지 기다렸다 통째로 넣는다(분할은 호출자 몫이 아님).
-        while (!self.closed and self.pendingAssumeLocked() + data.len > self.cap and self.pendingAssumeLocked() > 0) {
+        while (!self.closed and (self.enqueued_total < self.protocol_end or
+            (self.pendingAssumeLocked() + data.len > self.cap and self.pendingAssumeLocked() > 0)))
+        {
             self.not_full.waitUncancelable(self.io, &self.mutex);
         }
         if (self.closed) return error.QueueClosed;
@@ -333,12 +339,45 @@ pub const PtyWriteQueue = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.QueueClosed;
+        if (self.enqueued_total < self.protocol_end) return 0;
         const room = self.cap -| self.pendingAssumeLocked(); // pending이 cap을 넘긴 직후엔 0(saturating)
         const n = @min(room, data.len);
         if (n == 0) return 0;
         try self.bytes.appendSlice(self.allocator, data[0..n]);
         self.enqueued_total += @intCast(n);
         return n;
+    }
+
+    /// Reserve the entire remaining frame but copy only available capacity.
+    /// The producer owns the suffix and retries it unchanged on a later tick.
+    pub fn enqueueProtocolSome(self: *PtyWriteQueue, data: []const u8) QueueError!usize {
+        if (data.len == 0) return 0;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.QueueClosed;
+        const continuing = self.enqueued_total < self.protocol_end;
+        if (continuing) {
+            if (data.len != self.protocol_end - self.enqueued_total) return error.QueueFull;
+        } else if (self.consumed_total < self.protocol_end) return 0;
+        const n = @min(self.cap -| self.pendingAssumeLocked(), data.len);
+        if (n == 0) return 0;
+        const end = if (continuing) self.protocol_end else std.math.add(u64, self.enqueued_total, @intCast(data.len)) catch return error.QueueFull;
+        // Do not publish a reservation if allocation fails.
+        try self.bytes.appendSlice(self.allocator, data[0..n]);
+        if (!continuing) {
+            self.protocol_begin = self.enqueued_total;
+            self.protocol_end = end;
+        }
+        self.enqueued_total += @intCast(n);
+        return n;
+    }
+
+    /// A response at the frame's start still precedes it. Once any frame byte
+    /// is written, reader-generated replies wait for the complete frame.
+    pub fn protocolInFlight(self: *PtyWriteQueue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.consumed_total > self.protocol_begin and self.consumed_total < self.protocol_end;
     }
 
     pub fn hasPending(self: *PtyWriteQueue) bool {
@@ -397,7 +436,7 @@ pub const PtyWriteQueue = struct {
     pub fn drainedAtFence(self: *PtyWriteQueue) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return !self.closed and self.pendingAssumeLocked() == 0 and self.enqueued_total == self.consumed_total;
+        return !self.closed and self.pendingAssumeLocked() == 0 and self.enqueued_total == self.consumed_total and self.consumed_total >= self.protocol_end;
     }
 };
 
@@ -484,6 +523,18 @@ pub const CoreCommandQueue = struct {
         const ts: i96 = if (self.debug) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         try self.items.append(self.allocator, .{ .cmd = cmd, .input_fence = input_fence, .enqueued_ns = ts });
         if (self.debug) coreq.info("enqueue {s} (depth={d})", .{ @tagName(cmd), self.pendingAssumeLocked() });
+    }
+
+    /// UI-owned ordered admission retries a full queue on the next tick. The
+    /// reader still observes the same input fence as the blocking producer.
+    pub fn tryEnqueueAfterInput(self: *CoreCommandQueue, cmd: CoreCommand, input_fence: u64) QueueError!bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.QueueClosed;
+        if (self.pendingAssumeLocked() >= self.cap) return false;
+        const ts: i96 = if (self.debug) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+        try self.items.append(self.allocator, .{ .cmd = cmd, .input_fence = input_fence, .enqueued_ns = ts });
+        return true;
     }
 
     /// 메인: 코어에 남긴 응답을 다음 명령 단계에서 비워 달라고 표시한다. 호출자가 wake 로 reader poll 을 깨운다.
@@ -1204,7 +1255,8 @@ pub const PtyReader = struct {
                     }
                 }
             }
-            const reply_pending = out_head.* < out_buf.items.len;
+            const hold_reply = if (self.write_queue) |wq| wq.protocolInFlight() else false;
+            const reply_pending = out_head.* < out_buf.items.len and !hold_reply;
             const main_pending = if (self.write_queue) |wq| wq.hasPending() else false;
             const ready = self.session.waitIo(reply_pending or main_pending) catch |err| {
                 if (err != error.SessionClosed and err != error.NoMoreEvents) {
@@ -1218,7 +1270,8 @@ pub const PtyReader = struct {
                 // EAGAIN(버퍼 참)은 writeInputNonBlocking이 0으로 돌려준다(에러 아님 — 다음 poll에 이어 씀).
                 // catch로 잡히는 건 치명적 write 실패(EIO 등)/SessionClosed뿐 — `catch 0`로 삼키면 head가 안 늘어
                 // POLLOUT 스핀(라이브락)·입력 조용한 손실이 되므로, 에러면 reader를 종료한다(read 에러 경로와 동일).
-                if (out_head.* < out_buf.items.len) {
+                const protocol_in_flight = if (self.write_queue) |wq| wq.protocolInFlight() else false;
+                if (out_head.* < out_buf.items.len and !protocol_in_flight) {
                     const written = self.session.writeInputNonBlocking(out_buf.items[out_head.*..]) catch |err| {
                         if (err != error.SessionClosed) self.pushProcessingTerminationForIoError(@errorName(err));
                         return;
@@ -2018,3 +2071,129 @@ test "sync(2026): 끝나지 않는 프레임은 상한에서 접어 스트림을
 }
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+// These cases exercise the UI producer without a consumer thread: saturation
+// must return immediately, retain the existing command, and preserve its fence.
+test "nonblocking command admission accepts and preserves value" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 1);
+    defer q.deinit();
+    try std.testing.expect(try q.tryEnqueueAfterInput(.{ .scroll = 7 }, 9));
+    const entry = q.popReady(9).?;
+    try std.testing.expectEqual(@as(isize, 7), entry.cmd.scroll);
+    try std.testing.expectEqual(@as(u64, 9), entry.input_fence);
+}
+test "nonblocking command admission full queue retains original" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 1);
+    defer q.deinit();
+    try std.testing.expect(try q.tryEnqueueAfterInput(.{ .scroll = 1 }, 0));
+    try std.testing.expect(!try q.tryEnqueueAfterInput(.{ .scroll = 2 }, 0));
+    try std.testing.expectEqual(@as(isize, 1), q.pop().?.cmd.scroll);
+    try std.testing.expect(q.pop() == null);
+}
+test "nonblocking command admission retries after consumption" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 1);
+    defer q.deinit();
+    _ = try q.tryEnqueueAfterInput(.{ .scroll = 1 }, 0);
+    _ = q.pop();
+    try std.testing.expect(try q.tryEnqueueAfterInput(.{ .scroll = 2 }, 0));
+    try std.testing.expectEqual(@as(isize, 2), q.pop().?.cmd.scroll);
+}
+test "nonblocking command admission refuses closed queue" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 1);
+    defer q.deinit();
+    q.close();
+    try std.testing.expectError(error.QueueClosed, q.tryEnqueueAfterInput(.scroll_to_bottom, 0));
+    try std.testing.expect(q.pop() == null);
+}
+test "nonblocking command admission cannot overtake input fence" {
+    var q = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 2);
+    defer q.deinit();
+    _ = try q.tryEnqueueAfterInput(.{ .report_focus = true }, 10);
+    _ = try q.tryEnqueueAfterInput(.{ .report_focus = false }, 11);
+    try std.testing.expect(q.popReady(9) == null);
+    try std.testing.expect(q.popReady(10).?.cmd.report_focus);
+    try std.testing.expect(q.popReady(10) == null);
+    try std.testing.expect(!q.popReady(11).?.cmd.report_focus);
+}
+
+// Frame boundaries describe accepted input positions, not queue storage offsets:
+// compaction and partial writes must leave the protocol interval unchanged.
+test "protocol frame queue partial progress holds replies and ordinary suffix" {
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 2);
+    defer q.deinit();
+    try std.testing.expectEqual(@as(usize, 2), try q.enqueueProtocolSome("abcd"));
+    try std.testing.expect(!q.protocolInFlight());
+    q.consume(1);
+    try std.testing.expect(q.protocolInFlight());
+    try std.testing.expectEqual(@as(usize, 0), try q.enqueueSome("X"));
+    try std.testing.expectEqual(@as(usize, 1), try q.enqueueProtocolSome("cd"));
+    q.consume(2);
+    try std.testing.expect(q.protocolInFlight());
+    try std.testing.expectEqual(@as(usize, 1), try q.enqueueProtocolSome("d"));
+    try std.testing.expectEqual(@as(usize, 1), try q.enqueueSome("X"));
+    q.consume(1);
+    try std.testing.expect(!q.protocolInFlight());
+    var buf: [2]u8 = undefined;
+    const n = q.drainChunk(&buf);
+    try std.testing.expectEqualStrings("X", buf[0..n]);
+}
+test "protocol frame queue cannot replace accepted unconsumed frame" {
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 8);
+    defer q.deinit();
+    _ = try q.enqueueProtocolSome("first");
+    try std.testing.expectEqual(@as(usize, 0), try q.enqueueProtocolSome("next"));
+    try std.testing.expectEqual(@as(u64, 5), q.protocol_end);
+    q.consume(5);
+    try std.testing.expectEqual(@as(usize, 4), try q.enqueueProtocolSome("next"));
+    try std.testing.expectEqual(@as(u64, 5), q.protocol_begin);
+    try std.testing.expectEqual(@as(u64, 9), q.protocol_end);
+}
+test "protocol frame queue validates continuation and closed state" {
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 2);
+    defer q.deinit();
+    _ = try q.enqueueProtocolSome("abcdef");
+    try std.testing.expectError(error.QueueFull, q.enqueueProtocolSome("bad"));
+    try std.testing.expectEqual(@as(u64, 2), q.enqueuedTotal());
+    try std.testing.expectEqual(@as(u64, 6), q.protocol_end);
+    q.close();
+    try std.testing.expectError(error.QueueClosed, q.enqueueProtocolSome("cdef"));
+}
+fn protocolFrameAllocation(a: std.mem.Allocator) !void {
+    var q = try PtyWriteQueue.init(std.testing.io, a, 2);
+    defer q.deinit();
+    const n = q.enqueueProtocolSome("abcdef") catch |err| {
+        try std.testing.expectEqual(@as(u64, 0), q.protocol_begin);
+        try std.testing.expectEqual(@as(u64, 0), q.protocol_end);
+        try std.testing.expectEqual(@as(u64, 0), q.enqueuedTotal());
+        try std.testing.expect(q.drainedAtFence());
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(u64, 6), q.protocol_end);
+}
+test "protocol frame queue allocation failure publishes no reservation" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, protocolFrameAllocation, .{});
+}
+test "protocol frame queue full stall reserves nothing and prior command retains boundary" {
+    var q = try PtyWriteQueue.init(std.testing.io, std.testing.allocator, 2);
+    defer q.deinit();
+    var commands = try CoreCommandQueue.init(std.testing.io, std.testing.allocator, 1);
+    defer commands.deinit();
+    _ = try q.enqueueSome("AB");
+    _ = try commands.tryEnqueueAfterInput(.{ .report_focus = true }, q.enqueuedTotal());
+    try std.testing.expectEqual(@as(usize, 0), try q.enqueueProtocolSome("secret"));
+    try std.testing.expectEqual(@as(u64, 0), q.protocol_end);
+    q.consume(2);
+    try std.testing.expect(commands.popReady(q.consumedTotal()).?.cmd.report_focus);
+    _ = try q.enqueueProtocolSome("secret");
+    try std.testing.expect(!q.protocolInFlight());
+    q.consume(2);
+    try std.testing.expect(q.protocolInFlight());
+    try std.testing.expect(!q.drainedAtFence());
+    _ = try q.enqueueProtocolSome("cret");
+    q.consume(2);
+    _ = try q.enqueueProtocolSome("et");
+    q.consume(2);
+    try std.testing.expect(!q.protocolInFlight());
+    try std.testing.expect(q.drainedAtFence());
+}

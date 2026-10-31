@@ -632,7 +632,7 @@ pub const placeholder_cell_width_px = input_math.placeholder_cell_width_px; // s
 pub const placeholder_cell_height_px = input_math.placeholder_cell_height_px; // session core 단일 출처(휠 환산과 공유)
 // OSC 52 읽기 응답 상한(원문 클립보드 바이트). 과대 클립보드를 base64 OSC 52로 PTY에 쏟는 폭주를 막는다
 // (코어 OSC 52 write 상한 max_clipboard_bytes와 같은 16MB). 초과하면 응답하지 않는다(F2-6).
-const max_clipboard_read_bytes: usize = 16 * 1000 * 1000;
+const max_clipboard_read_bytes = maru.app.clipboard_response.max_bytes;
 // 배경 이미지(window.background-image, F2-1)용 예약 kitty image id — kg 텍스처 캐시·live_ids에서 배경 이미지를
 // 가리킨다. u32 최댓값이라 kitty 프로그램 id(보통 작은 값)와 충돌 가능성이 낮다(충돌 시 텍스처 슬롯 공유 — 드묾).
 const background_image_id: u32 = 0xFFFF_FFFF;
@@ -11147,7 +11147,7 @@ pub const AppSession = struct {
         entries: std.ArrayList(Entry) = .empty,
 
         pub fn deinit(self: *PreparedPendingPasteTransfer) void {
-            for (self.entries.items) |*entry| entry.queue.buf.deinit(self.allocator);
+            for (self.entries.items) |*entry| entry.queue.deinit(self.allocator);
             self.entries.deinit(self.allocator);
         }
 
@@ -11158,12 +11158,12 @@ pub const AppSession = struct {
             for (self.entries.items) |*entry| {
                 if (dst.pending_pastes.get(entry.surface_id)) |destination| {
                     if (destination.offset < destination.buf.items.len) {
-                        entry.queue.buf.appendSliceAssumeCapacity(destination.buf.items[destination.offset..]);
+                        entry.queue.appendRemainingAssumeCapacity(destination);
                     }
                 }
                 if (src.pending_pastes.get(entry.surface_id)) |source| {
                     if (source.offset < source.buf.items.len) {
-                        entry.queue.buf.appendSliceAssumeCapacity(source.buf.items[source.offset..]);
+                        entry.queue.appendRemainingAssumeCapacity(source);
                     }
                 }
             }
@@ -11173,7 +11173,7 @@ pub const AppSession = struct {
             for (self.entries.items) |*entry| {
                 if (dst.pending_pastes.fetchRemove(entry.surface_id)) |kv| {
                     var old = kv.value;
-                    old.buf.deinit(dst.allocator);
+                    old.deinit(dst.allocator);
                 }
                 dst.pending_pastes.putAssumeCapacity(entry.surface_id, entry.queue);
                 entry.queue = .{}; // destination map으로 buffer ownership 이전
@@ -11200,7 +11200,9 @@ pub const AppSession = struct {
                     // 복사본까지 옮기면 cross-Window adoption 뒤 stale bytes를 재생하므로 제외한다. local Term의
                     // caller-owned queue는 계속 이 transaction으로 transfer한다.
                     if (term.surface.remote != null) continue;
-                    const source_len = if (src.pending_pastes.get(term.surface.id)) |source|
+                    // Payload and privacy metadata reservations use one queue snapshot.
+                    const source_queue = src.pending_pastes.get(term.surface.id);
+                    const source_len = if (source_queue) |source|
                         if (source.offset < source.buf.items.len) source.buf.items.len - source.offset else 0
                     else
                         0;
@@ -11212,9 +11214,10 @@ pub const AppSession = struct {
                         .queue = .{},
                     };
                     var appended = false;
-                    defer if (!appended) entry.queue.buf.deinit(dst.allocator);
+                    defer if (!appended) entry.queue.deinit(dst.allocator);
 
-                    const destination_len = if (dst.pending_pastes.get(term.surface.id)) |destination|
+                    const destination_queue = dst.pending_pastes.get(term.surface.id);
+                    const destination_len = if (destination_queue) |destination|
                         if (destination.offset < destination.buf.items.len) destination.buf.items.len - destination.offset else 0
                     else
                         0;
@@ -11224,6 +11227,10 @@ pub const AppSession = struct {
                         reserved_extra,
                     ) catch return error.OutOfMemory;
                     try entry.queue.buf.ensureTotalCapacity(dst.allocator, total);
+                    const destination_spans = if (destination_queue) |q| q.spans.items.len else 0;
+                    const source_spans = if (source_queue) |q| q.spans.items.len else 0;
+                    const span_count = std.math.add(usize, destination_spans, source_spans) catch return error.OutOfMemory;
+                    try entry.queue.spans.ensureTotalCapacity(dst.allocator, span_count);
                     try prepared.entries.append(dst.allocator, entry);
                     appended = true;
                 }
@@ -16789,7 +16796,7 @@ pub const AppSession = struct {
                 if (self.session.pending_pastes.getPtr(target_id)) |queue| {
                     std.debug.assert(queue.buf.items.len == 0);
                     std.debug.assert(queue.offset == 0);
-                    queue.buf.deinit(self.session.allocator);
+                    queue.deinit(self.session.allocator);
                 }
                 _ = self.session.pending_pastes.remove(target_id);
                 self.created_queue = null;
@@ -18654,15 +18661,10 @@ pub const AppSession = struct {
 
     /// surface 하나의 미전송 입력 잔여(paste·IME 확정·OSC 52 응답 공유 — 전송 순서를 지킨다).
     /// `offset`은 이미 PTY에 쓴 바이트 수(non-blocking write가 부분 성공하므로 필요).
-    const PasteQueue = struct {
-        buf: std.ArrayList(u8) = .empty,
-        offset: usize = 0,
-    };
+    const PasteQueue = app.typed_input_queue.Queue;
 
     /// 비운 큐가 버퍼를 계속 붙잡고 있어도 되는 상한. 작은 버퍼는 재사용해 입력마다 malloc/free가 돌지 않게 하고
     /// (IME 음절·Cmd+V·OSC 52 응답이 전부 이 경로), 큰 paste(멀티MB)는 다 쓰고 나면 반납한다.
-    const paste_queue_retain_max: usize = 64 * 1024;
-
     /// remote surface만 현재 stable backend input owner를 순간 조회한다. Term 값이나 backend 포인터를 Window queue에
     /// 저장하지 않아 close/reconnect가 이후 슬라이스에서 owner를 교체할 수 있게 한다.
     fn remoteInputOwner(self: *AppSession, target_id: u64) ?app.InputOwner {
@@ -18719,22 +18721,13 @@ pub const AppSession = struct {
 
         const gop = self.pending_pastes.getOrPut(self.allocator, target_id) catch return false;
         if (!gop.found_existing) gop.value_ptr.* = .{};
-        const additional = std.math.add(usize, first.len, second.len) catch {
-            if (!gop.found_existing) _ = self.pending_pastes.remove(target_id);
-            return false;
-        };
-        const start = gop.value_ptr.buf.items.len;
-        gop.value_ptr.buf.ensureUnusedCapacity(self.allocator, additional) catch {
-            if (!gop.found_existing) _ = self.pending_pastes.remove(target_id); // 방금 만든 빈 엔트리 회수
-            return false;
-        };
-        gop.value_ptr.buf.appendSliceAssumeCapacity(first);
-        if (normalize_first_newlines) {
-            for (gop.value_ptr.buf.items[start..][0..first.len]) |*b| {
-                if (b.* == '\n') b.* = '\r';
+        gop.value_ptr.append(self.allocator, .{ .kind = kind, .first = first, .second = second, .normalize_first_newlines = normalize_first_newlines }) catch {
+            if (!gop.found_existing) {
+                gop.value_ptr.deinit(self.allocator);
+                _ = self.pending_pastes.remove(target_id);
             }
-        }
-        gop.value_ptr.buf.appendSliceAssumeCapacity(second);
+            return false;
+        };
         return true;
     }
 
@@ -18763,14 +18756,9 @@ pub const AppSession = struct {
     }
 
     /// 다 썼거나 더 쓸 수 없는 큐를 비운다 — 엔트리 자체는 **남긴다**(맵 순회 중 remove는 iterator를 무효화한다;
-    /// 엔트리는 surface 수만큼이고 Term이 죽을 때 destroyTerm이 지운다). 큰 버퍼만 반납(paste_queue_retain_max).
+    /// 엔트리는 surface 수만큼이고 Term이 죽을 때 destroyTerm이 지운다). 큰 버퍼만 반납(typed_input_queue.retain_max).
     fn resetPasteQueue(self: *AppSession, q: *PasteQueue) void {
-        q.offset = 0;
-        if (q.buf.capacity > paste_queue_retain_max) {
-            q.buf.clearAndFree(self.allocator); // 멀티MB paste 버퍼가 세션 내내 붙잡히지 않게 반납
-        } else {
-            q.buf.clearRetainingCapacity(); // 작은 버퍼는 재사용(입력마다 malloc 회피)
-        }
+        q.reset(self.allocator);
     }
 
     /// 어느 surface든 아직 못 보낸 잔여가 있는가(테스트·진단용).
@@ -18785,10 +18773,7 @@ pub const AppSession = struct {
     /// 입력 backend가 명시적으로 억제한 바이트는 transient backpressure가 아니다. observer가 나중에
     /// controller가 되더라도 과거 paste/IME를 재생하면 안 되므로 수명 종료와 같은 영구 폐기 분기로 보낸다.
     fn discardPendingPasteOnError(err: app.runtime.RuntimeError) bool {
-        return switch (err) {
-            error.ProcessExited, error.UnknownSurface, error.InputSuppressed => true,
-            else => false,
-        };
+        return app.typed_input_queue.discardOnError(err);
     }
 
     /// 각 surface 큐의 잔여를 지금 쓸 수 있는 만큼 non-blocking으로 흘려보낸다(0이 나오면 다음 tick에 이어서).
@@ -18804,7 +18789,11 @@ pub const AppSession = struct {
             if (q.offset >= q.buf.items.len) continue; // 이미 빈 큐(엔트리만 남음)
             // tick당 surface별 한 번만 시도한다. 원격 backend의 16 KiB 상한을 여기서 while로 반복하면
             // 같은 tick에 큰 paste 전체를 동기 RPC로 밀어 UI를 다시 막으므로, 잔여는 다음 tick으로 넘긴다.
-            const written = self.runtime.writeInputNonBlocking(target_id, q.buf.items[q.offset..]) catch |err| {
+            const chunk = q.next() orelse continue;
+            const written = (if (chunk.sensitive)
+                self.runtime.writeProtocolResponseNonBlocking(target_id, chunk.bytes)
+            else
+                self.runtime.writeInputNonBlocking(target_id, chunk.bytes)) catch |err| {
                 // 대상 수명이 끝났거나 권위상 영구 억제됐으면 잔여를 회수한다. transient
                 // OOM/WriteFailed는 queue ownership을 보존해 다음 tick에 재시도한다.
                 if (discardPendingPasteOnError(err)) {
@@ -18813,7 +18802,7 @@ pub const AppSession = struct {
                 }
                 continue;
             };
-            q.offset += written;
+            q.advance(written) catch continue;
             if (q.offset >= q.buf.items.len) self.resetPasteQueue(q);
         }
     }
@@ -19452,29 +19441,7 @@ pub const AppSession = struct {
     /// 클립보드 바이트를 OSC 52 읽기 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)으로 인코딩한다(owned, 호출자 free).
     /// target(Pc) 빈 값은 `c`(클립보드)로 채운다. 실패(OOM) 시 null. 순수 함수라 포맷을 단위 테스트로 고정(F2-6).
     fn formatOsc52ReadResponse(self: *AppSession, target: []const u8, bytes: []const u8) ?[]u8 {
-        const tgt: []const u8 = if (target.len == 0) "c" else target;
-        const enc = std.base64.standard.Encoder;
-        const b64_len = enc.calcSize(bytes.len);
-        const resp_len = 2 + 3 + tgt.len + 1 + b64_len + 2; // ESC ] | "52;" | Pc | ";" | base64 | ESC \
-        const buf = self.allocator.alloc(u8, resp_len) catch return null;
-        var i: usize = 0;
-        buf[i] = 0x1b;
-        i += 1;
-        buf[i] = ']';
-        i += 1;
-        @memcpy(buf[i..][0..3], "52;");
-        i += 3;
-        @memcpy(buf[i..][0..tgt.len], tgt);
-        i += tgt.len;
-        buf[i] = ';';
-        i += 1;
-        _ = enc.encode(buf[i..][0..b64_len], bytes);
-        i += b64_len;
-        buf[i] = 0x1b;
-        i += 1;
-        buf[i] = '\\';
-        i += 1;
-        return buf;
+        return maru.app.clipboard_response.format(self.allocator, target, bytes) catch null;
     }
 
     /// OSC 9/777 데스크톱 알림 pending(title, body)을 내부 버퍼로 돌려준다(없으면 null). Swift가
@@ -25118,7 +25085,7 @@ pub const AppSession = struct {
         if (self.config_path_buffer) |b| self.allocator.free(b);
         {
             var it = self.pending_pastes.valueIterator();
-            while (it.next()) |q| q.buf.deinit(self.allocator);
+            while (it.next()) |q| q.deinit(self.allocator);
             self.pending_pastes.deinit(self.allocator);
         }
         self.pending_paste_confirm.deinit(self.allocator);
@@ -80082,7 +80049,7 @@ fn deinitCr2d4StableState(
 
 fn installCr2d4StaleWindowPaste(session: *AppSession, surface_id: u64, bytes: []const u8) !void {
     var queue: AppSession.PasteQueue = .{};
-    errdefer queue.buf.deinit(session.allocator);
+    errdefer queue.deinit(session.allocator);
     try queue.buf.appendSlice(session.allocator, bytes);
     try session.pending_pastes.put(session.allocator, surface_id, queue);
 }

@@ -7941,6 +7941,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 
     var runtime = maru.app.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
+    var input_dispatcher: maru.app.input_dispatcher.Dispatcher = .{ .allocator = allocator, .target = &runtime };
+    try input_dispatcher.install();
+    defer input_dispatcher.deinit();
 
     // **`size` 는 spawn 시점에 덮어쓴다** — 여기 박아 두면 창을 키운 뒤 만든 세션이 **옛 격자**를
     // 받는다(실측: `sessions_wrong_size=1`).
@@ -8774,7 +8777,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
     var osc52_writes: usize = 0;
     var osc52_reads: usize = 0;
-    var osc52_reads_denied_unimplemented: usize = 0;
+    var osc52_read_responses_queued: usize = 0;
+    var osc52_read_failures: usize = 0;
     // W7.4d 마우스. **갈래별로 센다** — 합치면 "선택이 안 되는데 이벤트는 왔다"를 못 가른다.
     var mouse_events: usize = 0;
     var mouse_reports: usize = 0;
@@ -14205,6 +14209,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // **요약은 활성 세션 것을 넘긴다.** 프레임을 만드는 것은 활성 표면 하나이고, 종료 판정도
         // 그 세션의 것이어야 한다(다른 탭이 끝났다고 창을 닫으면 안 된다).
+        input_dispatcher.flush();
         var active_drain: maru.app.RuntimePumpDrainSummary = .{};
         for (sessions.items, 0..) |s, i| {
             const ds = s.pump.drainAvailable() catch continue;
@@ -14248,10 +14253,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 
         // **OSC 52 를 배수한다.** 셸이 클립보드 읽기·쓰기를 요청하면 코어가 pending 으로 들고 있고
         // 플랫폼이 정책을 확인한 뒤 OS 를 만진다 — 코어가 OS 를 직접 만지지 않는 것이 그 설계다.
-        if (app_window.active()) |active| {
+        // Background shells retain their own request/response target too.
+        for (sessions.items) |session| {
+            const active = &session.surface;
             active.lockCore(io);
             const pending = active.core.pendingClipboardWrite();
             const want_read = active.core.clipboardReadPending();
+            const read_target_id = active.id;
+            // Snapshot Pc before clearing the core-owned storage. Denied reads
+            // never allocate a target or touch the OS clipboard.
+            const read_target: ?[]u8 = if (want_read and osc52_read_policy == .allow)
+                allocator.dupe(u8, active.core.clipboardReadTarget()) catch null
+            else
+                null;
             // **락 안에서 OS 를 부르지 않는다** — 클립보드 호출은 다른 프로세스를 기다릴 수 있어(소유자가
             // 지연 렌더링하면 블록된다) 그 사이 PTY 리더가 코어 락에 막힌다. 복사해 두고 락 밖에서 쓴다.
             var write_copy: ?[]u8 = null;
@@ -14259,7 +14273,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 복사에 실패했는데도 pending 을 비우면 요청이 **아무 흔적 없이** 사라진다. 세어서 알린다.
             if (pending.len > 0 and write_copy == null) clipboard_errors += 1;
             if (pending.len > 0) active.core.clearClipboardWrite();
-            if (want_read) active.core.clearClipboardRead();
+            if (want_read and (osc52_read_policy != .allow or read_target != null)) active.core.clearClipboardRead();
             active.unlockCore(io);
 
             if (write_copy) |bytes| {
@@ -14273,19 +14287,38 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     clipboard_errors += 1;
                 }
             }
-            if (want_read) {
+            if (read_target) |target| {
+                defer allocator.free(target);
                 osc52_reads += 1;
-                // **읽기는 정책이 막는다.** `osc52.read` 기본값이 `deny` 다 — 원격/내부 프로그램이 로컬
-                // 클립보드를 탈취하는 것을 막는 사용자 결정이고(`config/theme.zig`), macOS 도 같은 판정을
-                // 한다. pending 은 정책과 무관하게 위에서 이미 소비했다(안 그러면 매 tick 재트리거된다).
-                //
-                // `allow` 일 때 보낼 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)을 여기서 만들지 않는다. 그
-                // 인코더(`formatOsc52ReadResponse`)가 **중립이 아니라 macOS `app_session.zig` 안에** 있어,
-                // Windows 가 쓰려면 중립으로 들어올려야 한다 — 그것은 이 슬라이스 밖의 설계 결정이라
-                // 사용자에게 보고하고 정한다(AGENTS.md 핵심 원칙).
-                if (osc52_read_policy == .allow) osc52_reads_denied_unimplemented += 1;
+                read_response: {
+                    const clipboard = win32_clipboard.readRaw(allocator, window.hwnd) catch {
+                        clipboard_errors += 1;
+                        osc52_read_failures += 1;
+                        break :read_response;
+                    };
+                    defer if (clipboard) |bytes| allocator.free(bytes);
+                    // No text is an empty reply. Native read errors are failures;
+                    // no diagnostic includes clipboard payload bytes.
+                    const response = maru.app.clipboard_response.format(allocator, target, clipboard orelse "") catch {
+                        clipboard_errors += 1;
+                        osc52_read_failures += 1;
+                        break :read_response;
+                    };
+                    defer allocator.free(response);
+                    const accepted = runtime.writeProtocolResponseNonBlocking(read_target_id, response) catch {
+                        clipboard_errors += 1;
+                        osc52_read_failures += 1;
+                        break :read_response;
+                    };
+                    if (accepted == response.len) osc52_read_responses_queued += 1 else osc52_read_failures += 1;
+                }
+            } else if (want_read) {
+                if (osc52_read_policy == .allow) {
+                    clipboard_errors += 1; // Target allocation failed; core retries next tick.
+                } else osc52_reads += 1;
             }
         }
+        input_dispatcher.flush();
 
         // ⑴ 아틀라스가 커졌으면 텍스처를 다시 만든다(중립 쪽이 전체를 무효화하고 재배치했으므로 안전하다).
         const now_w = renderer_state.atlas.config.atlas_width_px;
@@ -16966,9 +16999,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
     // **읽기 요청을 갈라 찍는다.** `osc52_reads` 는 정책과 무관하게 오르므로 그것만으로는 "정책이 막았다" 와
-    // "정책은 allow 인데 응답 인코더가 없어 못 보냈다" 가 구분되지 않는다 — 후자는 사용자가
-    // `osc52.read = allow` 로 켠 뒤에야 나타나고, 조용하면 원인을 못 찾는다.
-    try stdout.print("osc52_reads_unanswered_allow={d}\n", .{osc52_reads_denied_unimplemented});
+    // "허용된 읽기가 실패했다" 가 구분되지 않는다. queued는 host FIFO 인수 횟수이며,
+    // 실제 PTY 왕복 성공은 별도 앱 검증으로 확인한다.
+    try stdout.print("osc52_reads_unanswered_allow={d}\n", .{osc52_read_failures});
+    try stdout.print("osc52_read_responses_queued={d}\n", .{osc52_read_responses_queued});
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
     // **어느 ConPTY 를 썼는지 찍는다.** `conpty.dll` 은 `OpenConsole.exe` 를 못 찾으면 시스템 conhost 로

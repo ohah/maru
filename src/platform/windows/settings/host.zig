@@ -79,6 +79,8 @@ pub const Host = struct {
     path: ?[]const u8,
     job: ?*Job = null,
     changed: bool = false,
+    // Only a successful explicit save of this row permits irreversible trim.
+    scrollback_shrink: ?u32 = null,
     saves: usize = 0,
     save_errors: usize = 0,
     request_errors: usize = 0,
@@ -91,6 +93,11 @@ pub const Host = struct {
     scroll_peak: u32 = 0,
     swallow_left_up: bool = false,
     scrollbar: settings_scrollbar.Bar = .{},
+    pub fn takeScrollbackShrink(self: *Host) ?u32 {
+        const value = self.scrollback_shrink;
+        self.scrollback_shrink = null;
+        return value;
+    }
     pub fn init(a: std.mem.Allocator, config_arena: std.mem.Allocator, io: std.Io, cfg: *maru.config.Config) !Host {
         return .{ .a = a, .config_arena = config_arena, .io = io, .cfg = cfg, .path = try maru.config.loader.defaultConfigPath(a) };
     }
@@ -124,6 +131,7 @@ pub const Host = struct {
         if (success) {
             self.saves += 1;
             self.cfg.* = job.cfg;
+            if (std.mem.eql(u8, job.request.key.slice(), "scrollback.lines")) self.scrollback_shrink = job.cfg.scrollback.lines;
             self.changed = true;
             self.form.state.clearMessage();
             if (self.preview_generation == job.request.generation) self.preview_generation = null;
@@ -1013,4 +1021,71 @@ test "Windows settings wheel resets on search and section changes" {
     host.key(.{ .key = .arrow_left });
     host.key(.{ .key = .arrow_up });
     try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+}
+
+// Complete the real host tick with an asynchronous success/failure receipt.
+// File replacement itself is covered by the existing settings persistence tests.
+fn shrinkCommit(host: *Host, key: []const u8, value: []const u8, succeeds: bool) !void {
+    try host.form.edit.begin(key, "1000");
+    const request = (try host.form.edit.request(key, value, true)).?;
+    const next = try candidate(host.config_arena, host.cfg.*, request);
+    const job = try std.heap.smp_allocator.create(Job);
+    job.* = .{ .io = host.io, .path = "", .request = request, .cfg = next, .failure = if (succeeds) null else error.InjectedSaveFailure };
+    const Worker = struct {
+        fn run(result: *Job) void {
+            result.done.store(true, .release);
+        }
+    };
+    job.thread = try std.Thread.spawn(.{}, Worker.run, .{job});
+    host.job = job;
+    while (!job.done.load(.acquire)) try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    host.tick();
+}
+test "Windows settings shrink preview never authorizes history deletion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try host.form.edit.begin("scrollback.lines", "1000");
+    try host.apply(.{ .request = try host.form.edit.request("scrollback.lines", "5", false) });
+    try std.testing.expectEqual(@as(u32, 5), cfg.scrollback.lines);
+    try std.testing.expect(host.takeScrollbackShrink() == null);
+}
+test "Windows settings shrink successful zero commit is a one shot permit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try shrinkCommit(&host, "scrollback.lines", "0", true);
+    try std.testing.expectEqual(@as(u32, 0), cfg.scrollback.lines);
+    try std.testing.expectEqual(@as(?u32, 0), host.takeScrollbackShrink());
+    try std.testing.expect(host.takeScrollbackShrink() == null and host.saves == 1);
+}
+test "Windows settings shrink failed save leaves history permission absent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try shrinkCommit(&host, "scrollback.lines", "5", false);
+    try std.testing.expectEqual(@as(u32, 1000), cfg.scrollback.lines);
+    try std.testing.expect(host.takeScrollbackShrink() == null and host.save_errors == 1);
+}
+test "Windows settings shrink unrelated save cannot grant permission" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try shrinkCommit(&host, "font.size", "24", true);
+    try std.testing.expectEqual(@as(f32, 24), cfg.font.size);
+    try std.testing.expect(host.takeScrollbackShrink() == null);
+}
+test "Windows settings shrink undelivered permit survives unrelated completion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try shrinkCommit(&host, "scrollback.lines", "5", true);
+    try shrinkCommit(&host, "font.size", "24", true);
+    try std.testing.expectEqual(@as(?u32, 5), host.takeScrollbackShrink());
+    try std.testing.expect(host.takeScrollbackShrink() == null);
 }

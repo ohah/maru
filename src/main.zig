@@ -1926,11 +1926,12 @@ fn applyCoreConfig(
     cell_w: u32,
     cell_h: u32,
 ) void {
+    const text_values = maru.app.text_config.Values.fromConfig(cfg);
     _ = maru.session.core_command.apply(core, .{
         .set_runtime_config = .{
-            .max_scrollback = cfg.scrollback.lines,
-            .ambiguous_wide = cfg.ambiguous_width == .wide,
-            .emoji_wide = cfg.emoji_width == .wide,
+            .max_scrollback = text_values.scrollback,
+            .ambiguous_wide = text_values.ambiguous_wide,
+            .emoji_wide = text_values.emoji_wide,
             .palette = appearance.theme.palette,
             .default_colors = .{ .foreground = appearance.theme.foreground, .background = appearance.theme.background },
             .cell_metrics = .{ .width = cell_w, .height = cell_h },
@@ -7972,6 +7973,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var font_apply_errors: usize = 0;
     var font_resize_errors: usize = 0;
     var font_recovery_notice: win_layout_resize.RecoveryNotice = .{};
+    var text_apply_errors: usize = 0;
+    var text_apply_pending_peak: usize = 0;
+    var text_spawn_while_changed: usize = 0;
+    var text_notice_owned = false;
     var renderer_resources = windows_renderer_resources.RendererResources.init(
         allocator,
         present.device,
@@ -11275,6 +11280,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **판정을 먼저 켠다.** 실패했을 때 판정이 사라지면(`unjudgeable`) 빨간 줄이 안 나오고,
             // 없는 줄은 눈에 안 띈다 — 실측으로 옛 동작 뮤턴트가 그렇게 조용히 지나갔다.
             idcheck_judgeable = true;
+            spawn_opts.refreshText(cfg);
             if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts)) {
                 idcheck_spawned = true;
                 // **제품의 ＋ 경로가 하는 것을 그대로 한다** — 목록을 안 새로 지으면 카드 수가
@@ -12333,6 +12339,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (settings_host.changed) {
             spawn_opts.refreshShell(cfg.shell);
+            spawn_opts.refreshText(cfg);
+            const shrink = settings_host.takeScrollbackShrink();
+            const values = maru.app.text_config.Values.fromConfig(cfg);
+            for (sessions.items) |session| session.text_config.request(values, shrink == values.scrollback);
             paste_protection = cfg.input.paste_protection;
             bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
             option_as_meta = cfg.input.option_as_meta;
@@ -12342,6 +12352,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             clipboard_host.paste_protection = paste_protection;
             clipboard_host.bracketed_paste_is_safe = bracketed_paste_is_safe;
             settings_host.changed = false;
+        }
+        var text_pending: usize = 0;
+        for (sessions.items) |session| {
+            session.text_config.pump(&runtime, session.surface.id, io) catch {
+                text_apply_errors += 1;
+            };
+            text_pending += @intFromBool(session.text_config.pending());
+        }
+        text_apply_pending_peak = @max(text_apply_pending_peak, text_pending);
+        const text_message = maru.i18n.t(.app_config_apply_pending);
+        if (text_pending != 0 and settings_host.form.state.message().len == 0) {
+            settings_host.form.state.setMessage(text_message);
+            text_notice_owned = true;
+        } else if (text_pending == 0 and text_notice_owned) {
+            if (std.mem.eql(u8, settings_host.form.state.message(), text_message)) settings_host.form.state.clearMessage();
+            text_notice_owned = false;
         }
         // Each session owns its latest request; closing it also removes its retry.
         const layout_retry_now = std.Io.Clock.awake.now(io).nanoseconds;
@@ -14830,6 +14856,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (!confirm_state.open and pending_file_close == null and pending_file_conflict == null) {
                 var spawned = false;
                 for (0..requests) |_| {
+                    text_spawn_while_changed += @intFromBool(settings_host.changed);
+                    // A rollback and new-tab action can share one input batch.
+                    // Read current text policy at admission, not only at frame start.
+                    spawn_opts.refreshText(cfg);
                     const admitted = win_session_actions.spawnFocused(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts, &active_view, max_win_sessions, spawnWinSession) catch |err| {
                         session_spawn_failures += 1;
                         stderr.print("  warning: new terminal failed({s})\n", .{@errorName(err)}) catch {};
@@ -16996,6 +17026,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try stdout.print("core_modes: mouse_tracking={s} mouse_format={s} alt_active={} alternate_scroll={} bracketed_paste={}\n", .{
             @tagName(tracking), @tagName(fmt_mode), alt, alt_scroll, bracketed,
         });
+    }
+    try stdout.print("text_apply_errors={d} text_apply_pending_peak={d} text_spawn_while_changed={d}\n", .{ text_apply_errors, text_apply_pending_peak, text_spawn_while_changed });
+    for (sessions.items) |session| {
+        session.surface.lockCore(io);
+        const live_text: maru.app.text_config.Values = .{
+            .scrollback = @intCast(session.surface.core.maxScrollback()),
+            .ambiguous_wide = session.surface.core.ambiguous_wide,
+            .emoji_wide = session.surface.core.emoji_wide,
+        };
+        const live_history = session.surface.core.screen.sb.count;
+        session.surface.unlockCore(io);
+        try stdout.print("text_core: surface={d} scrollback={d} ambiguous_wide={} emoji_wide={} pending={} history={d}\n", .{ session.surface.id, live_text.scrollback, live_text.ambiguous_wide, live_text.emoji_wide, session.text_config.pending(), live_history });
     }
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
     // **읽기 요청을 갈라 찍는다.** `osc52_reads` 는 정책과 무관하게 오르므로 그것만으로는 "정책이 막았다" 와

@@ -1281,3 +1281,28 @@ ReleaseFast에서 할당 실패 검사 횟수가 달라지는 문제를 재현�
 `.zig-cache/native-wire-cross-recovery.log`, `.zig-cache/native-allocation-path-trace.log`다.
 통합 후 네 경계 샤드는 코드 해시 보존 상태에서 통과했다. 이후 할당 검사 수정도 Debug·ReleaseFast 14개, 적대적 변이 5개와
 정상 복원, 교차 타깃·문서·전체 네 경계 샤드 재검증을 통과했다. 전체 Windows 기능과 설치본 갱신의 완료를 뜻하지 않는다.
+
+### 2026-11-01 스크롤백·문자 폭 설정 — 검증 중
+
+Windows의 기존 세션에는 reader 명령으로 스크롤백 상한과 ambiguous/emoji 폭을
+반영하고, 다음 세션은 최신 설정으로 초기화한다. 공유 `app.text_config`는 macOS의
+기존 정책을 추출한다. 자동 재적용은 기록을 줄이지 않고, 성공한
+`scrollback.lines` 저장만 해당 값의 축소 권한을 한 번 부여한다. 명령 수락 실패는
+재시도하며 수락한 접두부만 진행한다. 저장 실패나 다른 필드 저장은 축소 권한이 아니다.
+
+격리한 실제 Windows 앱에서 숫자 편집 취소, 0줄 확정, 저장 실패 후 취소, 두 문자 폭
+변경, 확정 후 새 세션 생성의 다섯 경우를 확인했다. 마지막 경우 기존/새 세션 모두
+2000줄·ambiguous wide·emoji narrow였고 미처리 명령과 셸 입력 누출은 0이었다.
+숫자 편집은 확정 전 미리보기를 하지 않는다. 이를 미리보기로 취급한 초기 새 세션
+검사는 실패했으며 증거에서 제외했다. 같은 이벤트 배치의 취소/생성 경쟁은 미검증이다.
+증거: `.zig-cache/live-text-ui-evidence-20261101.json`. HWND 합성 입력이므로 물리
+키보드·IME 검증을 대신하지 않는다.
+
+상태 전이와 저장 완료 처리에 각각 다섯 독립 결함을 실제 컴파일·실행해 검출했고,
+원본 복구 후 Debug·ReleaseFast 검사를 통과했다. 증거는
+`.zig-cache/live-text-adversarial-20261031/result.json`이다. 전체 경계 4개 묶음과 macOS·Linux·Windows 교차 컴파일, 문서 링크·코드 위치 참조·
+설정 문서 검사, 형식 검사를 통과했다. 검사 전후 소스 해시도 일치했다. 증거는
+`.zig-cache/live-text-boundaries-20261101/result.json`과
+`.zig-cache/live-text-cross-docs-20261101.json`이다. 교차 컴파일은 다른 OS의 실앱
+실행을 뜻하지 않으며 조건부 SSH 서버 검사 3개는 건너뛰었다. 최종 배포 검증은
+남아 있으며 설치된 프리뷰는 이전 OSC 52 빌드를 유지한다.

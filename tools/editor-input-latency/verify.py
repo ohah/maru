@@ -33,8 +33,9 @@ def validate(value,run,events):
  return value
 
 def percentile(xs,p):return sorted(xs)[math.ceil(len(xs)*p)-1]
-def verify(root):
- manifest=json.loads((root/'manifest.json').read_text());require(not manifest.get('diagnostic',False),'diagnostic timing')
+def verify(root, *, diagnostic=False):
+ require(type(diagnostic) is bool,'diagnostic request')
+ manifest=json.loads((root/'manifest.json').read_text());require(type(manifest.get('diagnostic',False)) is bool and manifest.get('diagnostic',False)==diagnostic,'diagnostic timing')
  require(manifest['source'].get('optimize')=='ReleaseFast','unoptimized measurement');require(not manifest['source'].get('continuation_fix',False),'experimental product change');events=manifest['events'];runs=manifest['runs']
  expected={(size,flow,rep,mode) for size in manifest['sizes'] for flow in manifest['flows'] for rep in range(manifest['repetitions']) for mode in ['sync','async']}
  require(len(runs)==len(expected) and {(r['size'],r['flow'],r['repeat'],r['mode']) for r in runs}==expected,'missing paired run')

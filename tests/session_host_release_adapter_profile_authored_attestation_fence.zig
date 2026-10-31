@@ -679,7 +679,7 @@ test "fence command parser rejects duplicate control and profile tuple exchange"
 }
 
 test "actual fresh fence processes verify both profiles without FD or stderr residue" {
-    const samples = 20;
+    const samples = 200; // Temporary diagnostic sample count; do not merge.
     if (_NSGetArgc().* < 4) return error.SkipZigTest;
     const process_argv = _NSGetArgv().*;
     const executable_input = std.mem.span(process_argv[2] orelse return error.SkipZigTest);

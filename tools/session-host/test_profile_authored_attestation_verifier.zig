@@ -5,7 +5,14 @@ const c = std.c;
 
 const source_sha = "1111111111111111111111111111111111111111";
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) void {
+    mainFallible(init) catch |err| {
+        diagnosticError("verifier", @errorName(err), false);
+        std.process.exit(1);
+    };
+}
+
+fn mainFallible(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();
     _ = args.next();
@@ -80,4 +87,16 @@ fn validScalar(value: []const u8) bool {
     if (value.len == 0) return false;
     for (value) |byte| if (byte < 0x20 or byte == 0x7f or byte == '\\' or byte == '"') return false;
     return true;
+}
+
+// Temporary CI diagnosis only. Remove before proposing a product change.
+extern "c" fn getdtablesize() c_int;
+fn diagnosticError(component: []const u8, name: []const u8, expected: bool) void {
+    var buffer: [512]u8 = undefined;
+    const line = std.fmt.bufPrint(&buffer, "component={s} pid={d} ppid={d} mode={s} error={s} expected={} fd_limit={d}\n", .{ component, c.getpid(), c.getppid(), @tagName(@import("builtin").mode), name, expected, getdtablesize() }) catch return;
+    const fd = c.open("zig-out/fence-child-errors.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+    if (fd >= 0) {
+        _ = c.write(fd, line.ptr, line.len);
+        _ = c.close(fd);
+    }
 }

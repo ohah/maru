@@ -651,7 +651,17 @@ jobs:
             zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-sessionhost-debug-
       - name: Verify session host and live-upgrade fixtures
-        run: zig build test-session-host -Doptimize=Debug
+        run: |
+          mkdir -p zig-out
+          zig build test-session-host -Doptimize=Debug
+      - name: Upload temporary fence diagnosis
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fence-child-errors
+          path: zig-out/fence-child-errors.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: 저장 전에 캐시를 예산 안으로 줄인다
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: sh tools/ci/prune-zig-cache.sh 3072

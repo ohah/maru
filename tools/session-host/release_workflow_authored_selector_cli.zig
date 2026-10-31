@@ -8,7 +8,10 @@ const projection = @import("release_adapter_profile_authored_attestation_project
 const fence_command = @import("release_adapter_profile_authored_attestation_fence_command");
 
 pub fn main(init: std.process.Init) void {
-    mainFallible(init) catch std.process.exit(1);
+    mainFallible(init) catch |err| {
+        diagnosticError("selector", @errorName(err), diagnostic_expected_rejection);
+        std.process.exit(1);
+    };
 }
 
 fn mainFallible(init: std.process.Init) !void {
@@ -22,6 +25,7 @@ fn mainFallible(init: std.process.Init) !void {
         values[count] = value;
         count += 1;
     }
+    diagnostic_expected_rejection = count > 14 and std.mem.eql(u8, values[14], "forged-evidence.json");
     const context = try environment_mod.readCurrent();
     var marker: u8 = 0;
     const profile_environment: profile_mod.Environment = .{ .context = @ptrCast(&marker), .read_fn = readProfileEnvironment };
@@ -52,4 +56,18 @@ fn mainFallible(init: std.process.Init) !void {
 
 fn readProfileEnvironment(_: *anyopaque, name: [:0]const u8) ?[]const u8 {
     return std.mem.span(c.getenv(name) orelse return null);
+}
+
+var diagnostic_expected_rejection = false;
+
+// Temporary CI diagnosis only. Remove before proposing a product change.
+extern "c" fn getdtablesize() c_int;
+fn diagnosticError(component: []const u8, name: []const u8, expected: bool) void {
+    var buffer: [512]u8 = undefined;
+    const line = std.fmt.bufPrint(&buffer, "component={s} pid={d} ppid={d} mode={s} error={s} expected={} fd_limit={d}\n", .{ component, c.getpid(), c.getppid(), @tagName(@import("builtin").mode), name, expected, getdtablesize() }) catch return;
+    const fd = c.open("zig-out/fence-child-errors.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+    if (fd >= 0) {
+        _ = c.write(fd, line.ptr, line.len);
+        _ = c.close(fd);
+    }
 }

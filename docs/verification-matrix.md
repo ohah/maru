@@ -5829,3 +5829,41 @@ Windows cursor fade의 GPU 합성과 suffix 경계는 `test-windows-positioned-f
 ReleaseFast 설치본 자체의 언어 저장·미리보기·취소와 OS 자동 언어 시작을 실제 Windows
 앱에서 추가 검증했다. 내장/창 아이콘과 바로가기 3개도 확인했다. 설치 증거와 실행 코드
 커밋은 위 Windows 진행 기록의 ReleaseFast 설치 절을 따른다.
+
+
+Windows native picker adapter (in progress): `test-windows-file-dialog` checks
+request ownership, one-shot result routing, cancellation and COM options. The
+opt-in `tools/windows/check-file-dialog.py --show --output <new-receipt.json>`
+checks actual file/folder modal cancellation with a private owner; repeat with
+`--optimize O3` for optimized C. Native cancellation requires actual modal return,
+dialog disappearance and owner restoration. These C checks do not prove Windows
+sidebar/tab/file-tree menu routing, accepted-file opening or Zig detached-worker
+scheduling. The explicit `test-windows-file-dialog-live` additionally exercises
+real Zig worker scheduling, modal cancellation and one-shot request tokens in
+Debug/ReleaseFast. Menu routing and accepted-file opening still require app tests
+before marking menus complete.
+
+
+Windows app file picker: isolated ReleaseFast app cancellation and acceptance of a
+Korean-named text file passed using synthetic HWND input. A reviewed screen capture
+shows the exact fixture marker and Korean contents in the editor; app diagnostics
+confirm one registered document. Evidence: `.zig-cache/windows-file-dialog-app-reviewed-20261101.json`.
+This proves the first-open keyboard route, not context menus, reopening an existing
+file, physical input or installed-preview delivery.
+
+- Windows explorer background popup: `zig build test-windows-explorer-menu`
+  verifies command mapping, stale-generation rejection and input capture. Actual
+  popup drawing and native folder selection need the isolated
+  `tools/windows/check-app-explorer-menu.py` runtime probe and image review.
+
+  The cache-built ReleaseFast app passed folder replace/add and cancel in an
+  isolated profile; reviewed pixels show both Korean folder roots and child rows.
+  Keyboard file-open still shows the fixture marker and Korean document contents.
+  Evidence and source binding:
+  `.zig-cache/windows-explorer-menu-app-reviewed-20261101.json`.
+  Installation delivery and row/sidebar/tab menus remain outside this proof.
+
+  Background Open File and both Esc/outside-click dismissal also passed, with
+  document pixels reviewed and zero menu input delivered to the shell. The
+  expanded five-receipt source binding is
+  `.zig-cache/windows-explorer-menu-app-reviewed-r2-20261101.json`.

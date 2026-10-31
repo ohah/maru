@@ -2454,3 +2454,54 @@ Windows 스크롤백·문자 폭 설정 집중 검사는 `zig build test-live-te
 `zig build test-native-cell-rect`는 macOS·Windows가 공유하는 커서 변·텍스트 장식선·거터·divider 사각형을 검사한다. `test-windows-positioned-frame`은 Windows 클리핑·suffix·실제 GPU 합성을 함께 확인한다.
 
 `zig build test-language-config test-windows-locale test-settings-form test-windows-settings`는 언어 적용·알림 소유권·OS 로케일의 UTF-16 경계·표시명/저장값 분리를 검사한다. 실제 네이티브 로케일 호출은 Windows에서 실행하고 다른 OS에서는 해당 경우를 건너뛴다.
+
+- File-tree context menu catalog: `mise exec -- zig build test-file-tree-context-menu`. Verifies visible rows, command selection, symlink policy and invalid selections. Native popup routing requires separate app verification.
+
+- Windows native file dialog: `mise exec -- zig build test-windows-file-dialog`.
+  Checks request ownership, result routing, cancellation and real COM option flags without opening a dialog.
+- Native dialog integration on Windows: `python tools/windows/check-file-dialog.py --show --output <new-receipt.json>`.
+  Pass `--zig <zig.exe>` when Zig is outside PATH; `--optimize O3` checks the optimized C adapter.
+  The opt-in probe opens private file and folder dialogs, cancels each through the adapter, and verifies
+  that the modal call returns, the dialog disappears and its private owner becomes enabled again.
+  These probes do not establish app menu routing, selected-file acceptance or Zig worker scheduling.
+
+- `mise exec -- zig build test-windows-file-dialog-live` is an explicit UI probe.
+  It opens and cancels private file/folder dialogs through the actual Zig detached
+  worker and verifies one-shot results, routing tokens and owner restoration.
+  Run again with `-Doptimize=ReleaseFast`; this is excluded from ordinary checks.
+
+- Root validation protocol: `mise exec -- zig build test-file-tree-root-validation`.
+  Checks reply routing, two-round identity checks, capability requirements and
+  stale generations. Native root switching still needs separate host validation.
+
+- Windows root request host: `mise exec -- zig build test-windows-tree-root-host`.
+  Exercises real two-round directory validation, cancellation, monotonic request
+  IDs and rejected submissions. A ready reply still requires tree/watcher/row
+  staging; this does not establish app folder switching or popup routing.
+
+- Native watcher retirement: `mise exec -- zig build test-windows-watch-retirement`.
+  Verifies cancellation start, idempotence, completion polling and stable ownership.
+  `test-win32-editor-watch` also runs these cases with the existing watch tests.
+
+- Root watch preparation: `mise exec -- zig build test-windows-root-watch-prepare`.
+  Uses real validated directory handles and a detached native preparation worker.
+  Checks cancellation, result ownership, identity rejection and reference retirement.
+  It does not exercise root model commit or app menu routing.
+
+- Root transaction: `mise exec -- zig build test-windows-root-transaction`.
+  Uses real native watch preparation and first-scan capability transfer. Checks
+  replace/add publication, stale metadata, failed allocation/submission and root
+  identity before the first successful enumeration. App popup routing is separate.
+
+- Root flow: `mise exec -- zig build test-windows-root-flow`.
+  Exercises validation, native watch preparation and root publication together,
+  including cancellation, close priority and allocation-free emergency retirement.
+  Actual app folder picker and popup interaction require separate UI validation.
+
+- Explorer background menu: `mise exec -- zig build test-windows-explorer-menu`.
+  Checks the three visible shared catalog commands, generation rejection, key
+  release suppression and pointer capture. This does not prove app rendering.
+  `python tools/windows/check-app-explorer-menu.py --exe <cache-build>/bin/maru.exe
+  --case file|replace|add|cancel|dismiss --output <new-receipt.json>` exercises
+  the actual app popup, native selection, root publication and dismissal in an
+  isolated profile.

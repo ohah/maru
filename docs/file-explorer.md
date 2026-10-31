@@ -583,3 +583,65 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
 - **root picker 보안(ABI v137)**: Swift `NSOpenPanel`은 directory-only 단일 선택 adapter이고 정책 상태를 소유하지 않는다. ABI one-shot `replace | add`와 선택 path를 받은 Zig가 위의 normalize/no-follow/identity 정책과 root transaction을 실행한다. 성공 commit만 watcher reset·lazy scan을 예약하고 실패·취소·busy는 `FileTreeRootOutcome`(`picker_canceled`, `invalid_path`, `busy`, `stale_generation`, `identity_changed`, staging 실패, `committed_replace|add|remove` 등)의 안정된 typed reason과 사용자 notice를 남긴다. frame tick에는 directory stat이나 picker I/O를 넣지 않는다.
 - **외부 변경 정책**: clean으로 열린 Markdown은 shell의 직렬 mutation queue에서 disk 내용을 다시 읽고, clean HTML은 핀 URL을 reload한다. dirty/dirty-sync-pending이면 CM6 buffer를 덮지 않고 `external_change`를 latch해 트리·헤더에 `!`를 표시하며 저장은 `ExternalConflict`로 거부한다. 사용자가 헤더 `!`를 누르고 "다시 읽기" 확인을 통과하면 2-phase reload를 시작하고, web shell이 실제 disk read와 editor replacement 성공을 ack한 뒤에만 dirty/conflict를 내린다. 읽기 실패·취소·일반 clean ack는 원래 buffer 보호를 유지하며 reload 중 더 새 event가 오면 generation 불일치로 성공 ack도 conflict를 지우지 못한다. atomic save 직후 event는 background content hash가 저장 bytes와 같을 때만 자기 event로 소비하므로 grace 구간의 실제 외부 overwrite도 conflict가 된다. create/delete/rename은 가장 깊은 펼친 ancestor snapshot을 background에서 다시 만든다.
 - **레이아웃 비용(2차 검증 정정)**: `termRect`(app_session.zig)는 폭(사이드바)+높이(titlebar strip) inset 선례가 이미 있고 파생 ~30 호출처가 자동 추종한다. **단 "한 곳"이 아니라 두 곳 동기 규율** — spawn/resize grid는 termRect 파생이 아니라 `gridFromBacking`+`gridPadding()` 별도 경로(호출처 3곳)라, 도크 inset도 titlebar 선례대로 rect 한 곳+grid 한 곳을 동기한다. 비용의 본체는 도크 자신의 렌더·스크롤·hit-test 배관(사이드바 급 신규) + ChromeProps 소비처 4곳(폭 기준 — modal_box·overlay_input·context_menu·dropdown) + **하단 도크의 높이 방향 추가 대상**(modal_box 세로 중앙[backing_height 전체 기준]·context_menu/dropdown 하단 clamp·notifications 가용 높이·settings 행 수). 추가 표면 2개(실측): ⑴ **web seam** — collectWebSurfaces가 "termRect 바깥 경계=divider 없음"을 가정(app_session/web.zig:206)해 도크 경계에 붙은 워크스페이스 web pane의 WKWebView가 도크 리사이즈 드래그를 삼킨다 → `seam_edges`에 도크 edge 비트 추가. ⑵ **드래그 중 WKWebView 가림 규범([web-panel.md] §3)은 현재 미구현**(4c 생략 상태) — 도크 리사이즈는 도크 웹뷰 자체가 매 tick resize라 FP3에서 실물 구현(드래그 세션 단위 hide)하거나 명시 백로그로.
+
+## 파일 트리 컨텍스트 메뉴의 항목과 실행
+
+`app.file_tree_context_menu`가 표시 순서와 각 행의 명령을 함께 소유한다. 호스트는
+같은 목록의 라벨을 그리고 선택 인덱스를 명령으로 해석한다. 심볼릭 링크 root와
+디렉터리는 하위 생성 항목을 생략한다. 따라서 심볼릭 링크 root의 첫 항목은
+Open File이며, 생성 항목이 있는 일반 root의 인덱스로 해석하지 않는다. 실제 root는
+앞서 설명한 canonical root 계약을 따르며, 이 분기는 메뉴 입력 경계도 정의한다.
+링크 파일은 부모 폴더의 생성 항목을 유지한다. 배경 메뉴는 Open File·Open Folder·
+Add Folder의 세 항목이고, 목록 밖 선택은 명령을 실행하지 않는다. root 세대·행
+정체성 재검증과 파일 작업의 권한 검증은 호스트 및 mutation backend가 담당한다.
+
+
+루트 검증의 공통 판정은 `app.file_tree_root_validation`이 소유한다. 호스트는
+요청·루트 세대·replace/add·round가 일치하는 로컬 root-validation 결과만 받는다.
+첫 검증은 identity를 남기고 재검증을 요구하며, 두 번째 검증은 같은 scan identity와
+열린 디렉터리 capability를 모두 요구한다. 다른 요청의 결과는 현재 요청을 소비하지
+않는다. 현재 루트 세대가 바뀐 경우에는 취소하고, 알 수 없는 round도 commit하지
+않는다. 기존 macOS 루트 처리도 같은 판정을 사용한다. OS별 watcher·행 staging과
+최종 root transaction은 호스트가 계속 소유한다.
+
+
+Windows 디렉터리 감시를 렌더 루프에서 교체할 때는 취소 요청과 완료 확인을
+분리한다. `Watcher.beginDestroy`는 취소를 요청하고, `finishDestroy`는 기다리지
+않고 완료 여부를 확인한다. false 또는 오류면 기존 객체·핸들·OVERLAPPED 저장소를
+계속 보유하고 재시도한다. true일 때만 포인터를 즉시 비운다. 취소 중에는 poll/rearm을
+허용하지 않는다. 종료와 기존 lifecycle 호출을 위한 blocking `destroy`는 별도로
+유지한다. root 교체 commit은 staging이 성공한 뒤 수행하고 이전 watcher의 정리
+완료와 섞지 않는다.
+
+
+Windows root 감시는 검증된 열린 디렉터리 핸들로 별도 작업자에서 준비한다.
+준비 시 동일 identity를 재확인하고, 원래 핸들은 첫 스캔에 넘길 수 있도록
+준비 결과가 보유한다. 취소 뒤 도착한 준비 결과는 commit용 ready가 아니라
+정리용 discard로 반환한다. 활성 작업자나 미수령 native 결과가 있으면 요청
+해제를 거절하므로, 호스트는 취소 후에도 결과를 수령할 때까지 요청을 보유한다.
+준비 자원은 모델 참조가 모두 해제된 뒤에만 취소·완료 확인으로 정리하며,
+정리 완료 전 또는 오류 시에는 기존 포인터를 유지한다.
+
+
+루트 핀은 validated 디렉터리의 fstat identity이므로 scan identity도 함께 고정한다.
+아직 성공한 열거가 없거나 첫 열거 실패 후 재시도하는 경우에도 다른 객체의 결과를
+받아들이지 않는다. 자식 행의 readdir identity와 혼합하지 않는다.
+
+Windows root commit은 후보 모델·행·감시 목록·기본 경로와 이전 감시 정리 큐
+용량을 먼저 준비하고, validated 디렉터리의 첫 스캔이 접수된 뒤 한 번에 교체한다.
+실패 시 입력 capability는 호출자가 계속 보유한다. 기존 루트에 해당하는 감시는
+유지하고 제거된 감시는 정리 큐로 넘긴다. 정리 큐와 후보 루트의 총량은 두 세대의
+루트 상한으로 제한하며 초과 시 기존 모델을 유지하고 busy를 반환한다.
+
+
+Windows root flow는 준비 결과를 commit한 경우 재그리기 신호를 반환한다. 취소나
+닫기 요청을 먼저 처리한 뒤에만 준비 결과를 수령한다. 정리 큐 할당 실패·상한
+도달 시에는 단일 보유 슬롯을 직접 취소·완료 확인 대상으로 전환하며, 그 슬롯이
+완전히 정리되기 전에는 새 root 요청을 받지 않는다. 예외 종료용 blocking 정리는
+렌더 루프 밖에서만 사용한다.
+
+Windows 탐색기 빈 영역의 우클릭은 공통 catalog의 파일 열기·폴더 열기·폴더
+추가 3항목을 사용한다. 선택 당시 루트 세대를 요청과 native picker 토큰에
+유지하며, 폴더 결과는 동일 세대에서만 root flow의 replace/add로 전달한다.
+메뉴를 닫은 키의 반복·release와 바깥 클릭의 release는 메뉴가 소유한다.
+파일·디렉터리 행 및 왼쪽 사이드바·탭 메뉴의 연결은 별도 잔여 작업이다.

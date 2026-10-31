@@ -29,10 +29,8 @@ pub const Popup = struct {
     }
 
     pub fn dismiss(self: *Popup) void {
-        self.swallow_left_up = self.swallow_left_up or self.pressed != null;
-        self.state.hide();
+        menu.capture.dismiss(&self.state, &self.pressed, &self.swallow_left_up);
         self.surface_id = null;
-        self.pressed = null;
     }
 
     pub fn cancelCapture(self: *Popup) void {
@@ -64,37 +62,10 @@ pub const Popup = struct {
     }
 
     pub fn pointer(self: *Popup, event: input.PointerEvent, props: Props, current: ?u64) PointerResult {
-        if (!self.state.open) {
-            if (!self.swallow_left_up) return .{};
-            if (event.phase == .up and event.button == .left) self.swallow_left_up = false;
-            return .{ .consumed = true };
-        }
         const items = labels();
-        const hit = menu.itemAt(&self.state, &items, props, event.x_px, event.y_px);
-        switch (event.phase) {
-            .move => if (hit) |row| {
-                self.state.selected = row;
-            },
-            .down => {
-                if (event.button != .left) {
-                    self.dismiss();
-                } else if (hit) |row| {
-                    self.state.selected = row;
-                    self.pressed = row;
-                } else if (!menu.contains(&self.state, &items, props, event.x_px, event.y_px)) {
-                    self.dismiss();
-                    self.swallow_left_up = true;
-                } else {
-                    self.pressed = null;
-                }
-            },
-            .up => if (event.button == .left) {
-                const pressed = self.pressed;
-                self.pressed = null;
-                if (pressed != null and hit == pressed) return .{ .consumed = true, .request = self.accept(current) };
-            },
-        }
-        return .{ .consumed = true };
+        const result = menu.capture.pointer(&self.state, &self.pressed, &self.swallow_left_up, event, props, &items);
+        if (!self.state.open) self.surface_id = null;
+        return .{ .consumed = result.consumed, .request = if (result.accept) self.accept(current) else null };
     }
 };
 

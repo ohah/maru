@@ -3337,38 +3337,9 @@ pub const PendingFileTreeDelete = struct {
     }
 };
 
-pub const FileTreeRootOperation = enum(u32) { none = 0, replace = 1, add = 2 };
-pub const FileTreeRootOutcome = enum(u8) {
-    none,
-    picker_requested,
-    picker_canceled,
-    busy,
-    invalid_path,
-    request_id_exhausted,
-    allocation_failed,
-    backend_busy,
-    validation_failed,
-    stale_generation,
-    identity_missing,
-    identity_changed,
-    model_stage_failed,
-    watcher_stage_failed,
-    row_stage_failed,
-    root_missing,
-    committed_replace,
-    committed_add,
-    committed_remove,
-};
-pub const PendingFileTreeRootValidation = struct {
-    request_id: u64,
-    expected_root_generation: u64,
-    operation: FileTreeRootOperation,
-    round: u8 = 0,
-    identity: ?file_tree.Identity = null,
-    /// 사용자가 고른 것이 아니라 **활성 터미널을 따라가느라** 자동으로 건 전환인가(file-explorer.md §1).
-    /// 자동 전환은 사용자 조작보다 항상 아래다 — 사용자가 폴더를 고르려 하면 이건 버려지고 자리를 내준다.
-    auto: bool = false,
-};
+pub const FileTreeRootOperation = maru.app.file_tree_root_validation.Operation;
+pub const FileTreeRootOutcome = maru.app.file_tree_root_validation.Outcome;
+pub const PendingFileTreeRootValidation = maru.app.file_tree_root_validation.Pending;
 
 const FileTreeTrashAction = struct {
     id: u64,

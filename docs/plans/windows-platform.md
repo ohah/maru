@@ -1532,3 +1532,220 @@ PID 27472로 실행해 두었다. PID는 기록 당시 값이며 후속 실행�
 `.zig-cache/language-delivery-binding-20261101.json`이다. 파일 트리 메뉴 공통 목록과
 pointer capture는 별도 작업 폴더에서 검증 중이며 이 설치본에는 포함하지 않았다.
 Windows 사이드바·탭·파일 트리 메뉴 연결, 외부 reload·나머지 설정/플랫폼 기능은 남아 있다.
+
+
+### Windows 컨텍스트 메뉴 후속 작업 — 진행 중
+
+공통 파일 트리 메뉴 목록과 popup pointer capture를 기존 macOS 경로와 공유하도록
+정리했다. Windows 사이드바·탭·파일 트리의 실제 메뉴 연결은 아직 남아 있다.
+이 작업 트리의 네이티브 파일/폴더 선택기도 현재 설치본에는 포함되지 않았다.
+
+선택기 C 어댑터는 별도 STA에서 동작한다. 실제 모달 창을 띄운 검증에서
+`IFileDialog.Close`의 성공 반환만으로는 `Show` 완료를 보장하지 못하는 문제가
+확인되었다. 취소는 요청별 메시지 창과 cookie로 전달하고, 공개 `IOleWindow`
+인터페이스로 얻은 창의 PID·STA 소유권을 확인한 뒤 `WM_CLOSE`를 큐에 넣는다.
+반환 완료는 `Show`가 실제로 돌아온 때만 인정한다. 앱 소유권은 대기 없이
+해제하므로 allocator는 detached worker와 반환 결과보다 오래 살아야 한다.
+
+`.zig-cache/file-dialog-final-adversarial-20261101/result.json`은 최종 C 어댑터의
+독립 결함 5개를 검출했고, 복원 후 O0/O3 대조군에서 실제 파일·폴더 모달 취소를
+확인했다. 이 증거는 네이티브 어댑터 범위이며 앱 메뉴·선택 파일 열기·Zig
+비동기 worker 스케줄링의 완료 증거가 아니다. 실패한 초기 취소 실험과 캐시
+입력 누락은 통과나 결함 검출 횟수로 계산하지 않는다.
+
+
+추가로 실제 Zig `Picker.start`의 detached worker를 거치는 독립 통합 실행을
+추가했다(`test-windows-file-dialog-live`). 파일·폴더 두 모달의 취소, 요청 token,
+결과 1회 수령, 부모 창 복구를 Debug/ReleaseFast에서 확인했고 이 경로에도 결함
+5개를 주입해 모두 런타임 오류로 검출했다. 증거:
+`.zig-cache/windows-file-dialog-worker-adversarial-20261101/result.json`.
+앱의 `open_file_panel` 입력을 선택기에 연결하는 변경은 현재 컴파일·실앱 검증
+진행 중이며 메뉴 연결이나 선택 파일 열기 완료로 계산하지 않는다.
+
+
+실앱의 첫 선택기 검증은 실패했다. 공통 레이어의 정규화된 `C:/…` 경로를
+그대로 `SHCreateItemFromParsingName`에 넘기면 `E_INVALIDARG`가 발생했다.
+동일 C 어댑터와 실제 모달 probe에 slash 경로를 전달해 별도 재현했으며, 실패
+실행은 통과로 계산하지 않는다(`windows-file-dialog-app-cancel-20261101.json`,
+`windows-file-dialog-slash-diagnostic-20261101.json`, 모두 `.zig-cache/` 아래).
+
+네이티브 UTF-16 변환 경계에서 구분자만 역슬래시로 복원했다. 드라이브·혼합
+구분자·UNC·확장 드라이브·확장 UNC의 코드 단위 기대값과 한글/서로게이트를
+검사한다. UNC 서버 연결 성공을 이 단위 검사로 주장하지 않는다. 공통 앱
+경로는 계속 slash 형식이다. `windows-file-dialog-path-adversarial-20261101/result.json`은
+독립 결함 5개를 검출했고, 복원 후 37개 테스트 및 정규화된 초기 폴더를 받는
+실제 worker의 파일·폴더 모달 취소를 Debug/ReleaseFast에서 통과했다.
+수정된 앱의 재실행과 선택 파일 열기는 아직 후속 검증 대상이다.
+
+
+수정된 ReleaseFast 앱(`b27b96521f8fab9ec3e7b832811189547efdb185708775d7a73e388624024b0c`)
+에서 `Ctrl+Shift+O`의 선택기 표시·취소·부모 창 복구를 확인했다. 별도 프로필에서
+한글 이름의 텍스트 파일을 실제 선택해 문서 1개 등록과 편집기 화면의 시험 문구
+`MARU_PICKER_ACCEPTANCE_20261101` 및 한글 내용을 직접 확인했다. 시험 앱은
+정상 종료했고 기존 사용자 앱은 종료하지 않았다. 합성 HWND 입력 검사이므로
+물리 입력 검증으로 확대하지 않는다. 화면 검사 초기 3회는 다른 창 가림 때문에
+실패했고 통과로 계산하지 않았다. 최종 시도는 시험 창만 일시적으로 topmost에
+두고 복원해 촬영했다.
+
+증거: `.zig-cache/windows-file-dialog-app-cancel-r2-20261101.json`,
+`.zig-cache/windows-file-dialog-app-open-r4-20261101.json`,
+`.zig-cache/windows-file-dialog-app-reviewed-20261101.json`.
+선택 파일의 첫 열기까지 검증했으며 같은 파일 재열기·메뉴 연결·설치본 갱신은
+아직 완료로 계산하지 않는다.
+
+
+폴더 메뉴 후속 준비로 Windows 트리 스캔의 루트 세대 전달·소비 검사를 추가했다.
+이전에는 worker에 세대 0을 보내고 결과 적용에서도 이를 확인하지 않아, 런타임
+루트 변경을 연결하면 동일 경로의 오래된 결과가 현재 트리에 반영될 수 있었다.
+이제 현재 세대를 제출하고, 로컬 directory 결과이면서 세대가 일치할 때만 적용한다.
+오래된 실패도 현재 loading을 지우거나 재시도를 예약하지 않는다. 별도 루트 검증
+결과의 실제 라우팅과 폴더 picker/menu 연결은 아직 남아 있다.
+
+`test-win32-editor-watch`는 26개로 늘었다. 실제 worker의 세대 전달, 같은 경로의
+오래된 성공·실패, 원격 결과와 root-validation 결과 격리를 검사한다.
+`.zig-cache/windows-tree-generation-adversarial-20261101/result.json`에서 독립 결함
+5개를 런타임 검출했고 복원 후 Debug/ReleaseFast의 26개 테스트가 통과했다.
+이 변경은 현재 설치본이나 앞선 파일 선택기 화면 검증 바이너리에 포함되지 않았다.
+
+
+Windows 폴더 메뉴를 위한 루트 검증 판정을 `app.file_tree_root_validation`으로
+분리했다. 기존 macOS 타입 이름과 ABI 값은 alias로 유지하고 기존 처리 경로도
+공통 판정을 사용한다. 다른 요청/세대/작업/round의 결과는 무시하고, 0차 identity
+확인 후 1차 재검증에서 identity와 디렉터리 capability를 모두 확인한다. 실제
+root model·watcher·행 staging과 commit은 각 호스트가 계속 소유한다.
+
+`test-file-tree-root-validation` 36개가 통과했다. 공통 판정의 독립 결함 5개를
+정상 테스트 실패로 검출했고, 복원 후 Debug/ReleaseFast에서 이 36개와 메뉴
+목록 35개·Windows 감시 26개 회귀 검사가 통과했다. 증거:
+`.zig-cache/file-tree-root-protocol-adversarial-20261101/result.json`.
+초기 개발 중 컴파일 오류는 결함 검출로 세지 않았다. Windows 실제 폴더 root
+교체·메뉴 연결과 macOS 네이티브 앱 실행은 이 증거로 완료를 주장하지 않는다.
+
+
+Windows 루트 요청 소유자 `platform/windows/file_tree_roots.zig`를 추가했다.
+실제 공통 worker의 0차·1차 디렉터리 검증을 연결하고, 준비된 결과를 한 번만
+반환한다. 취소·현재 세대 변경·요청 ID 고갈·busy·입력 할당 실패·worker 제출 및
+재검증 거절은 기존 요청을 잘못 덮어쓰거나 경로 소유권을 남기지 않는다.
+준비 결과는 검증된 path/dir을 소유한 기존 backend 결과를 빌릴 뿐이며 root
+commit이 아니다. 실제 모델·watcher·행 staging과 메뉴 배선은 계속 남아 있다.
+
+`test-windows-tree-root-host` 10개가 통과했다. 독립 결함 5개를 정상 테스트 실패로
+검출했고, 복원 후 Debug/ReleaseFast에서 이 10개와 공통 root protocol 36개 및
+Windows 감시 26개가 통과했다. 증거:
+`.zig-cache/windows-root-host-adversarial-20261101/result.json`.
+시험 allocator가 끝나기 전에 worker 참조를 회수하는 `quietForTest`를 호출하며,
+제품 소유자는 렌더 루프에서 디스크 검증 완료를 기다리지 않는다.
+
+
+Windows 감시 해제를 시작과 완료 확인으로 나눴다. `beginDestroy`는 취소만
+요청하고 `finishDestroy`는 `GetOverlappedResult(..., FALSE)`로 완료를 확인한다.
+대기 중이거나 오류면 객체와 OVERLAPPED 저장소의 소유권을 유지한다. 취소 중
+poll/rearm을 거절하며 종료용 기존 `destroy`는 blocking 정리를 계속 제공한다.
+이 API는 루트 교체 후 이전 감시를 프레임을 기다리지 않고 정리하기 위한 준비이며,
+실제 root transaction과 worker 준비·메뉴 연결은 아직 남아 있다.
+
+`test-windows-watch-retirement` 6개 및 전체 Windows 감시 30개가 통과했다.
+첫 결함 주입의 세 번째 경우는 시험 정리 코드가 중복 해제되어 종료했으므로
+통과로 세지 않았다. inert 핸들 시험의 저장소를 stack-backed allocator로 바꿔
+잘못된 해제 호출에도 시험 저장소가 유효하도록 했다. 새 실행에서 독립 결함 5개를
+정상 테스트 실패로 모두 검출했고 복원 후 Debug/ReleaseFast에서 retirement 6개,
+전체 감시 30개, root host 10개가 통과했다. 증거:
+`.zig-cache/windows-watch-retirement-adversarial-r2-20261101/result.json`.
+실패한 첫 실행 로그는 별도로 보존했다.
+
+
+검증된 디렉터리 capability로 native watcher를 준비하는 Windows 작업자를 추가했다.
+핸들의 identity를 같은 scan 축으로 다시 검사하고, 원래 디렉터리는 첫 스캔에
+넘기도록 준비 결과가 보유한다. 작업 중 또는 native 자원을 수령하기 전에는
+요청 해제를 거절한다. 늦은 취소는 ready 대신 discard로 전달하고, 모델 참조가
+모두 해제된 뒤 감시 취소와 완료 확인으로 자원을 정리한다.
+
+초기 취소 검사에서 union을 자기 자신에 다시 대입하며 태그를 바꾸는 오류가
+발생했다. payload를 별도 지역 값으로 보관한 뒤 태그를 바꾸도록 수정했으며
+실패한 최초 실행은 통과로 세지 않았다. 최종 `test-windows-root-watch-prepare`
+9개와 독립 결함 5개가 통과했고 복원 후 Debug/ReleaseFast에서 준비 9개,
+root host 10개, 전체 감시 30개와 retirement 6개가 통과했다. 증거:
+`.zig-cache/windows-root-prepare-adversarial-20261101/result.json`.
+실제 root model commit과 앱의 폴더 picker·우클릭 메뉴 배선 및 설치본 갱신은
+계속 남아 있다.
+
+
+Windows root transaction manager를 추가했다. 후보 모델·행·감시 목록·기본 경로와
+정리 큐 용량을 모두 준비한 뒤, validated 디렉터리의 첫 스캔이 접수되면 모델과
+감시 소유권을 함께 교체한다. add는 기존 감시를 유지하고 replace로 빠진 감시는
+비동기 정리 큐로 넘긴다. 할당 실패·작업자 거절·오래된 세대·미완성 검증에서는
+기존 모델과 행 및 입력 capability가 유지된다. 아직 앱 picker/menu에는 배선하지 않았다.
+
+새 검사에서 첫 열거 전 루트 pin이 scan identity에 고정되지 않는 경우를 재현했다.
+validated fstat identity를 scan 축에도 고정하도록 공통 모델을 수정했다. 최초 재현
+실패는 통과로 세지 않았다. 최종 `test-windows-root-transaction` 9개와 독립 결함
+5개를 정상 테스트 실패로 검출했고, 복원 후 Debug/ReleaseFast에서 transaction 9개,
+native 준비 9개, 공통 protocol 36개 및 감시 30개가 통과했다. 증거:
+`.zig-cache/windows-root-transaction-adversarial-20261101/result.json`.
+root 제거·시작 감시 인수·실앱 폴더 교체·우클릭 메뉴와 설치본 갱신은 계속 남아 있다.
+
+
+Windows root 제거와 시작 감시 인수를 추가했다. 제거는 모델에서만 수행하고 실제
+폴더를 삭제하지 않는다. 남은 감시와 기본 경로를 함께 갱신하며 마지막 root를
+제거하면 empty 행으로 전환한다. Native 시작 감시는 검증 identity와 함께 인수하고,
+실패·중복 시 입력 감시의 소유권을 가져가지 않는다. native 경로 구분자는 인수
+경계에서 공통 형식으로 정규화한다.
+
+17개 transaction 검사와 독립 결함 5개가 통과했고 복원 후 Debug/ReleaseFast에서
+transaction 17개, 준비 9개, root host 10개 및 감시 30개가 통과했다. 증거:
+`.zig-cache/windows-root-remove-adversarial-20261101/result.json`.
+
+그 뒤 종료 시 active/retired 감시를 추가 큐 할당 없이 정리하는 lifecycle 경로를
+추가했고 transaction 검사는 18개로 늘었다. 실제 Windows 앱의 시작 감시 등록과
+변경 알림 폴링을 새 manager로 배선했다. transaction 18개·준비 9개·감시 30개는
+통과했고 플랫폼별 컴파일도 통과했다. 이 배선의 실앱 재실행, 폴더
+picker 결과 처리와 우클릭 메뉴 연결·설치본 갱신은 아직 완료로 계산하지 않는다.
+
+
+Windows root flow를 추가해 검증 결과→native 감시 준비→모델 commit을 연결했다.
+새 요청은 검증·준비·정리 대기 중 거절한다. 취소와 닫기는 준비 완료 결과보다
+먼저 반영하고, 취소된 결과는 정리만 한다. 정리 큐 할당 실패나 상한 도달 시에는
+단일 보유 슬롯에서 추가 할당 없이 native 정리를 이어가므로 소유권을 잃지 않는다.
+
+최종 `test-windows-root-flow` 9개가 통과했다. 독립 결함 5개를 정상 테스트 실패로
+검출했고 복원 후 Debug/ReleaseFast에서 flow 9개, transaction 18개, 준비 9개,
+감시 30개가 통과했다. 증거:
+`.zig-cache/windows-root-flow-adversarial-r2-20261101/result.json`.
+실제 앱 루프에도 root-validation 결과 전달, 닫기 취소·종료 정리와 변경 후 도크
+재그리기를 배선했고 플랫폼별 컴파일도 통과했다. 폴더 picker의 목적
+분기와 우클릭 메뉴 및 이 배선의 실앱 재실행·설치본 갱신은 계속 남아 있다.
+
+탐색기 빈 영역의 우클릭 3항목을 앱 입력·그리기 및 native picker 목적 분기에
+연결했다. 파일 열기는 기존 문서 열기 경로, 폴더 열기·추가는 root flow로
+전달한다. 선택 시 세대가 바뀌었으면 게시하지 않으며 닫기 요청을 우선한다.
+`test-windows-explorer-menu` 8개와 공통 catalog 35개·root flow 9개가
+Debug/ReleaseFast에서 통과했다. 독립 결함 5개를 모두 런타임 테스트 실패로
+검출하고 원본 복원을 확인했다. 증거:
+`.zig-cache/windows-explorer-menu-adversarial-20261101/result.json`.
+실앱 검증·설치 반영, 파일·디렉터리 행 메뉴 및 사이드바·탭 메뉴는 아직
+완료로 계산하지 않는다.
+
+그 뒤 별도 프로필의 실제 ReleaseFast 앱에서 배경 메뉴 3항목 표시, 한글 경로의
+폴더 교체와 파일 행 표시, 두 번째 루트 추가·표시 및 선택 취소를 확인했다.
+루트 게시 횟수는 교체·추가 각각 1회이며 취소는 0회다. 앱 소유 창은 다시
+활성화됐고 메뉴 입력의 셸 전송은 0바이트였다. 기존 파일 열기 키보드 경로도
+재검증해 fixture 문자열과 한글 본문 표시를 확인했다. 증거와 소스 해시:
+`.zig-cache/windows-explorer-menu-app-reviewed-20261101.json`.
+이는 캐시 빌드의 HWND 입력·화면 검증이다. 설치본 반영과 파일·디렉터리 행,
+사이드바·탭 메뉴는 계속 남아 있다.
+
+배경 메뉴의 파일 열기도 실제 fixture 본문 표시까지 확인했다. Esc 및 바깥
+클릭으로 메뉴를 닫으면 뒤의 셸에 입력을 보내지 않았으며, 명령 실행과 루트
+변경 횟수는 0이었다. 추가 화면 검토와 동일 제품 소스 해시를 포함한 증거는
+`.zig-cache/windows-explorer-menu-app-reviewed-r2-20261101.json`이다.
+
+배선 후 전체 `check-boundaries`가 통과했다. fstat 축 재고에는 공유 Pending과
+Windows 시작 감시 adopt를 명시하고 Windows root 파일도 검사 범위에 넣었다.
+원격/로컬 root 경계 검사는 capability 필드의 실제 결과 연결, 공통 검증의
+remote 거절·capability 필수 조건과 두 호스트 호출을 함께 확인한다.
+문서 링크·줄 참조·config 문서 검사와 전체 Zig 형식 검사도 통과했으며,
+격리 prefix에서 새로 빌드한 wasm은 커밋된 산출물과 SHA-256이 같았다.
+증거: `.zig-cache/windows-explorer-boundaries-r2-20261101.log`,
+`.zig-cache/windows-explorer-docs-wasm-r2-20261101.log`,
+`.zig-cache/windows-explorer-wasm-sync-20261101.json`.
+이는 리베이스 전 검증이며 최신 main 통합 이후 검증은 별도로 수행한다.

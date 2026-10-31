@@ -694,3 +694,39 @@ run = "zig build test-language-config"
 [tasks.test-windows-locale]
 description = "Verify bounded native UTF16 locale reads and the actual Windows API"
 run = "zig build test-windows-locale"
+
+[tasks.test-file-tree-context-menu]
+description = "Verify shared file-tree menu rows, actions and symlink policy"
+run = "zig build test-file-tree-context-menu"
+
+[tasks.test-file-tree-root-validation]
+description = "Verify shared two-round root validation and reply isolation"
+run = "zig build test-file-tree-root-validation"
+
+[tasks.test-windows-root-flow]
+description = "Verify asynchronous Windows root validation preparation and publication"
+run = "zig build test-windows-root-flow"
+
+[tasks.test-windows-explorer-menu]
+description = "Verify explorer background menu commands and input ownership"
+run = "zig build test-windows-explorer-menu"
+
+[tasks.test-windows-root-transaction]
+description = "Verify atomic Windows root model rows and native watch publication"
+run = "zig build test-windows-root-transaction"
+
+[tasks.test-windows-root-watch-prepare]
+description = "Verify native root watch preparation outside the frame thread"
+run = "zig build test-windows-root-watch-prepare"
+
+[tasks.test-windows-watch-retirement]
+description = "Verify nonblocking native directory watcher retirement"
+run = "zig build test-windows-watch-retirement"
+
+[tasks.test-windows-tree-root-host]
+description = "Verify Windows root validation request ownership and native worker routing"
+run = "zig build test-windows-tree-root-host"
+
+[tasks.test-windows-file-dialog]
+description = "Verify Windows native file dialog request ownership and pre-show cancellation"
+run = "zig build test-windows-file-dialog"

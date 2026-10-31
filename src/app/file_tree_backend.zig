@@ -883,6 +883,11 @@ fn entryInode(io: std.Io, dir: std.Io.Dir, ids: *const FileIdMap, entry: std.Io.
     return @intCast(stat.inode);
 }
 
+/// Capture an already-open directory on the same identity axis as root validation.
+pub fn captureDirectoryIdentity(io: std.Io, dir: std.Io.Dir) !file_tree.ScanIdentity {
+    return .{ .value = try directoryIdentity(io, dir) };
+}
+
 fn directoryIdentity(io: std.Io, dir: std.Io.Dir) !file_tree.Identity {
     if (comptime builtin.os.tag == .macos) {
         var stat: std.posix.Stat = undefined;

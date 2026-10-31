@@ -30,6 +30,7 @@ pub const Watcher = struct {
     overlapped: Overlapped = .{},
     buffer: [16 * 1024]u8 align(4) = undefined,
     pending: bool = false,
+    closing: bool = false,
     address: *Watcher,
     recursive: bool = false,
 
@@ -64,6 +65,7 @@ pub const Watcher = struct {
 
     fn arm(self: *Watcher) !void {
         if (self.address != self) return error.CopiedWatcher;
+        if (self.closing) return error.WatchClosing;
         if (self.pending) return error.WatchAlreadyPending;
         if (!ResetEvent(self.event).toBool()) return error.WatchEventFailed;
         self.overlapped = .{ .event = self.event };
@@ -79,6 +81,7 @@ pub const Watcher = struct {
 
     pub fn poll(self: *Watcher) !bool {
         if (self.address != self) return error.CopiedWatcher;
+        if (self.closing) return error.WatchClosing;
         if (!self.pending) {
             // A completed/cancelled watch or failed re-arm may be retried.
             // Ask for a full rescan because changes in the gap are not known.
@@ -102,20 +105,46 @@ pub const Watcher = struct {
         return true;
     }
 
-    pub fn destroy(self: *Watcher) !void {
+    /// Cancellation starts retirement; OVERLAPPED storage remains owned until completion.
+    pub fn beginDestroy(self: *Watcher) !void {
         if (self.address != self) return error.CopiedWatcher;
+        if (self.closing) return;
+        if (self.pending and !CancelIoEx(self.handle, &self.overlapped).toBool() and w.GetLastError() != .NOT_FOUND)
+            return error.WatchCancelFailed;
+        self.closing = true;
+    }
+
+    /// Frame-safe completion check: false retains this exact object and its handles.
+    /// The caller must clear its pointer immediately after true; errors retain ownership.
+    pub fn finishDestroy(self: *Watcher) !bool {
+        if (self.address != self) return error.CopiedWatcher;
+        if (!self.closing) return error.WatchCloseNotStarted;
         if (self.pending) {
-            // Cancellation requests are not completion. Microsoft CancelIoEx
-            // forbids releasing OVERLAPPED storage until I/O has completed.
-            if (!CancelIoEx(self.handle, &self.overlapped).toBool() and w.GetLastError() != .NOT_FOUND) return error.WatchCancelFailed;
             var bytes: u32 = 0;
-            if (!GetOverlappedResult(self.handle, &self.overlapped, &bytes, .TRUE).toBool() and w.GetLastError() != .OPERATION_ABORTED) return error.WatchCompletionUnresolved;
+            if (!GetOverlappedResult(self.handle, &self.overlapped, &bytes, .FALSE).toBool()) {
+                const failure = w.GetLastError();
+                if (failure == .IO_INCOMPLETE) return false;
+                if (failure != .OPERATION_ABORTED) return error.WatchCompletionUnresolved;
+            }
             self.pending = false;
         }
         _ = CloseHandle(self.event);
         _ = CloseHandle(self.handle);
         const a = self.allocator;
         a.destroy(self);
+        return true;
+    }
+
+    /// Blocking cleanup remains available for shutdown and existing lifecycle callers.
+    pub fn destroy(self: *Watcher) !void {
+        try self.beginDestroy();
+        if (self.pending) {
+            var bytes: u32 = 0;
+            if (!GetOverlappedResult(self.handle, &self.overlapped, &bytes, .TRUE).toBool() and w.GetLastError() != .OPERATION_ABORTED)
+                return error.WatchCompletionUnresolved;
+            self.pending = false;
+        }
+        _ = try self.finishDestroy();
     }
 };
 
@@ -524,4 +553,66 @@ test "Windows editor directory watch recursive root observes nested create and d
     try awaitHint(watcher);
     try tmp.dir.deleteFile(io, "nested/new.txt");
     try awaitHint(watcher);
+}
+
+// Independent fixture cleanup also works when a retirement method is fault-injected.
+fn cleanupRetiringWatcherForTest(watch: *Watcher) void {
+    if (watch.pending) {
+        _ = CancelIoEx(watch.handle, &watch.overlapped);
+        var bytes: u32 = 0;
+        _ = GetOverlappedResult(watch.handle, &watch.overlapped, &bytes, .TRUE);
+    }
+    _ = CloseHandle(watch.event);
+    _ = CloseHandle(watch.handle);
+    watch.allocator.destroy(watch);
+}
+test "Windows editor directory watch retirement is idempotent and blocks rearming" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const watch = try Watcher.createRecursive(std.testing.allocator, tmp.dir);
+    defer cleanupRetiringWatcherForTest(watch);
+    try watch.beginDestroy();
+    try std.testing.expect(watch.closing and watch.pending);
+    try watch.beginDestroy();
+    try std.testing.expectError(error.WatchClosing, watch.poll());
+}
+test "Windows editor directory watch retirement requires begin before native completion checks" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // Stack-backed storage stays valid even if a faulty method calls destroy.
+    // No native operation owns this inert OVERLAPPED, and neither handle is valid.
+    var storage: [@sizeOf(Watcher) + @alignOf(Watcher)]u8 align(@alignOf(Watcher)) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const a = fixed.allocator();
+    const watch = try a.create(Watcher);
+    watch.* = .{ .allocator = a, .handle = w.INVALID_HANDLE_VALUE, .event = w.INVALID_HANDLE_VALUE, .address = watch, .pending = true };
+    try std.testing.expectError(error.WatchCloseNotStarted, watch.finishDestroy());
+}
+test "Windows editor directory watch retirement finishes canceled native IO without blocking polling" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var watch: ?*Watcher = try Watcher.createRecursive(std.testing.allocator, tmp.dir);
+    defer if (watch) |owned| cleanupRetiringWatcherForTest(owned);
+    try watch.?.beginDestroy();
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 3 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (try watch.?.finishDestroy()) {
+            watch = null;
+            return;
+        }
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.WatchRetirementTimeout;
+}
+test "Windows editor directory watch retirement rejects copied owner storage" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const watch = try Watcher.createRecursive(std.testing.allocator, tmp.dir);
+    defer cleanupRetiringWatcherForTest(watch);
+    var copy = watch.*;
+    try std.testing.expectError(error.CopiedWatcher, copy.beginDestroy());
+    try std.testing.expectError(error.CopiedWatcher, copy.finishDestroy());
 }

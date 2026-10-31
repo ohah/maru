@@ -37,6 +37,13 @@ const linkSessionHostNotificationAdapter = support.linkSessionHostNotificationAd
 fn attachNativeCellGeometry(b: *std.Build, module: *std.Build.Module) void {
     module.addCSourceFile(.{ .file = b.path("src/renderer/native_cell_rect.c"), .flags = &.{"-std=c11"} });
 }
+fn attachWindowsFileDialog(b: *std.Build, module: *std.Build.Module) void {
+    if (module.resolved_target.?.result.os.tag != .windows) return;
+    module.addCSourceFile(.{ .file = b.path("src/platform/windows/file_dialog/native.c"), .flags = &.{"-std=c11"} });
+    module.linkSystemLibrary("user32", .{});
+    module.linkSystemLibrary("shell32", .{});
+    module.linkSystemLibrary("ole32", .{});
+}
 const attachPngCodec = support.attachPngCodec;
 const session_host_gates = @import("build/session_host_gates.zig");
 const session_host_release_gates = @import("build/session_host_release_gates.zig");
@@ -536,6 +543,7 @@ pub fn build(b: *std.Build) void {
     // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
     // (maru ssh 자기완결성 — 로컬 설치 없이 원격 전파). 파일을 옮기지 않아 참조 중복이 없다.
     attachNativeCellGeometry(b, maru_mod);
+    attachWindowsFileDialog(b, maru_mod);
     attachPngCodec(b, maru_mod);
     const pcre2_header_dir = b.addWriteFiles();
     const pcre2_header = pcre2_header_dir.addCopyFile(
@@ -965,6 +973,7 @@ pub fn build(b: *std.Build) void {
                 .pic = if (mt.pic) true else null,
             });
             attachNativeCellGeometry(b, mobile_maru_mod);
+            attachWindowsFileDialog(b, mobile_maru_mod);
             attachPngCodec(b, mobile_maru_mod);
             const lib = b.addLibrary(.{
                 .name = mt.lib_name,
@@ -997,6 +1006,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .small,
         });
         attachNativeCellGeometry(b, wasm_maru_mod);
+        attachWindowsFileDialog(b, wasm_maru_mod);
         attachPngCodec(b, wasm_maru_mod);
         const wasm = b.addExecutable(.{
             .name = "maru-vt",
@@ -1879,6 +1889,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         });
         attachNativeCellGeometry(b, cross_mod);
+        attachWindowsFileDialog(b, cross_mod);
         attachPngCodec(b, cross_mod);
         cross_mod.addIncludePath(pcre2_source_dir);
         cross_mod.addImport("pcre2_c", cross_pcre2_api.mod);
@@ -1906,6 +1917,7 @@ pub fn build(b: *std.Build) void {
         // `maru.zig` 는 아니지만 **같은 그래프를 자기 루트로 다시 세운다** — 그래서 PNG 코덱도
         // 여기 있어야 `@import("png_codec")` 이 풀린다(실측: 안 주면 세 타깃이 다 빨개진다).
         attachNativeCellGeometry(b, surface_mod);
+        attachWindowsFileDialog(b, surface_mod);
         attachPngCodec(b, surface_mod);
         surface_mod.addIncludePath(pcre2_source_dir);
         surface_mod.addImport("pcre2_c", cross_pcre2_api.mod);
@@ -2200,6 +2212,44 @@ pub fn build(b: *std.Build) void {
     const run_registry_raster_tests = b.addRunArtifact(registry_raster_tests);
     run_registry_raster_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-registry-raster", "Verify styled registry face raster selection").dependOn(&run_registry_raster_tests.step);
+    const windows_dialog_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Windows file dialog"} });
+    const run_windows_dialog_tests = b.addRunArtifact(windows_dialog_tests);
+    run_windows_dialog_tests.addArg("--maru-expect-tests=37");
+    b.step("test-windows-file-dialog", "Verify native dialog options, request ownership and cancellation before Show").dependOn(&run_windows_dialog_tests.step);
+
+    // Explicit opt-in: opens private native dialogs; excluded from normal checks.
+    const picker_worker_probe = b.addExecutable(.{
+        .name = "maru-picker-worker-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/windows/file_dialog/threaded.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    picker_worker_probe.root_module.addImport("picker", b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/file_dialog/backend.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    attachWindowsFileDialog(b, picker_worker_probe.root_module);
+    picker_worker_probe.root_module.addCSourceFile(.{
+        .file = b.path("tests/windows/file_dialog/owner.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
+    const run_picker_worker_probe = b.addRunArtifact(picker_worker_probe);
+    b.step("test-windows-file-dialog-live", "Opt-in: open and cancel private dialogs through the real Zig worker").dependOn(&run_picker_worker_probe.step);
+
+    const root_protocol_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"root validation protocol"} });
+    const run_root_protocol_tests = b.addRunArtifact(root_protocol_tests);
+    run_root_protocol_tests.addArg("--maru-expect-tests=36");
+    b.step("test-file-tree-root-validation", "Verify shared two-round root validation and stale reply isolation").dependOn(&run_root_protocol_tests.step);
+
+    const file_tree_menu_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"file tree context menu"} });
+    const run_file_tree_menu_tests = b.addRunArtifact(file_tree_menu_tests);
+    run_file_tree_menu_tests.addArg("--maru-expect-tests=35");
+    b.step("test-file-tree-context-menu", "Verify file-tree visible menu actions and symlink target policy").dependOn(&run_file_tree_menu_tests.step);
+
     const language_config_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"language config"} });
     const run_language_config_tests = b.addRunArtifact(language_config_tests);
     run_language_config_tests.addArg("--maru-expect-tests=33");
@@ -2322,10 +2372,40 @@ pub fn build(b: *std.Build) void {
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
     run_editor_host_tests.addArg("--maru-expect-tests=98"); // 2 aggregation blocks + 84 native tests + 12 pure policies
     editor_host_step.dependOn(&run_editor_host_tests.step);
+    const explorer_menu_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows explorer background menu"} });
+    const run_explorer_menu_tests = b.addRunArtifact(explorer_menu_tests);
+    run_explorer_menu_tests.addArg("--maru-expect-tests=8");
+    b.step("test-windows-explorer-menu", "Verify explorer background popup ownership and visible commands").dependOn(&run_explorer_menu_tests.step);
+
+    const root_flow_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows root flow"} });
+    const run_root_flow_tests = b.addRunArtifact(root_flow_tests);
+    run_root_flow_tests.addArg("--maru-expect-tests=9");
+    b.step("test-windows-root-flow", "Verify the complete asynchronous root validation and publication flow").dependOn(&run_root_flow_tests.step);
+
+    const root_commit_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows root transaction"} });
+    const run_root_commit_tests = b.addRunArtifact(root_commit_tests);
+    run_root_commit_tests.addArg("--maru-expect-tests=18");
+    b.step("test-windows-root-transaction", "Verify atomic model row and native watch publication").dependOn(&run_root_commit_tests.step);
+
+    const root_prepare_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows root watch preparation"} });
+    const run_root_prepare_tests = b.addRunArtifact(root_prepare_tests);
+    run_root_prepare_tests.addArg("--maru-expect-tests=9");
+    b.step("test-windows-root-watch-prepare", "Verify off-thread native root watch preparation and owned retirement").dependOn(&run_root_prepare_tests.step);
+
+    const windows_root_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows tree root host"} });
+    const run_windows_root_host_tests = b.addRunArtifact(windows_root_host_tests);
+    run_windows_root_host_tests.addArg("--maru-expect-tests=10");
+    b.step("test-windows-tree-root-host", "Verify native two-round root requests and window-owned routing").dependOn(&run_windows_root_host_tests.step);
+
+    const watch_retirement_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch retirement"} });
+    const run_watch_retirement_tests = b.addRunArtifact(watch_retirement_tests);
+    run_watch_retirement_tests.addArg("--maru-expect-tests=6");
+    b.step("test-windows-watch-retirement", "Verify nonblocking native watcher retirement and stable storage").dependOn(&run_watch_retirement_tests.step);
+
     const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
     const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
     const run_directory_watch_tests = b.addRunArtifact(directory_watch_tests);
-    run_directory_watch_tests.addArg("--maru-expect-tests=21"); // 2 aggregation blocks + 19 native/queue/failure tests
+    run_directory_watch_tests.addArg("--maru-expect-tests=30"); // 2 aggregation blocks + 28 native/queue/failure tests
     directory_watch_step.dependOn(&run_directory_watch_tests.step);
     const backup_worker_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows recovery backup worker"} });
     const backup_worker_step = b.step("test-win32-backup-worker", "Verify immutable recovery jobs and current native cleanup approval");
@@ -3150,6 +3230,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "UT1", "UT2", "UT3", "UT4", "UB", "U4c-", "U4d-", "FSBIND" }, // UB = 백업 레코드 규칙(§3.10), U4c- = workspace 영속
     });
     attachNativeCellGeometry(b, untitled_rule_tests.root_module);
+    attachWindowsFileDialog(b, untitled_rule_tests.root_module);
     attachPngCodec(b, untitled_rule_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다
     untitled_rule_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_untitled_rule_tests = b.addRunArtifact(untitled_rule_tests);
@@ -5924,6 +6005,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"RF5a"},
     });
     attachNativeCellGeometry(b, file_tree_model_tests.root_module);
+    attachWindowsFileDialog(b, file_tree_model_tests.root_module);
     attachPngCodec(b, file_tree_model_tests.root_module);
     file_tree_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_file_tree_model_tests = b.addRunArtifact(file_tree_model_tests);
@@ -5946,6 +6028,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "MP1", "CSP1", "context_menu", "dropdown", "로케일마다 달라야" },
     });
     attachNativeCellGeometry(b, marker_preview_tests.root_module);
+    attachWindowsFileDialog(b, marker_preview_tests.root_module);
     attachPngCodec(b, marker_preview_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다(위 주석)
     marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
@@ -5964,6 +6047,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "2031", "996 색 구성" },
     });
     attachNativeCellGeometry(b, color_scheme_tests.root_module);
+    attachWindowsFileDialog(b, color_scheme_tests.root_module);
     attachPngCodec(b, color_scheme_tests.root_module);
     color_scheme_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_color_scheme_tests = b.addRunArtifact(color_scheme_tests);
@@ -5984,6 +6068,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "병합 충돌의 세 판은", "stage 셋", "spec 버퍼가 모자라면", "비교 기준마다 탭 라벨이" },
     });
     attachNativeCellGeometry(b, merge_stage_tests.root_module);
+    attachWindowsFileDialog(b, merge_stage_tests.root_module);
     attachPngCodec(b, merge_stage_tests.root_module);
     merge_stage_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_merge_stage_tests = b.addRunArtifact(merge_stage_tests);
@@ -6003,6 +6088,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"TBPROBE"},
     });
     attachNativeCellGeometry(b, placeholder_e2e_tests.root_module);
+    attachWindowsFileDialog(b, placeholder_e2e_tests.root_module);
     attachPngCodec(b, placeholder_e2e_tests.root_module);
     placeholder_e2e_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_placeholder_e2e_tests = b.addRunArtifact(placeholder_e2e_tests);
@@ -6081,6 +6167,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌", "마커가 없어진 충돌 행에는", "conflict-markers argv", "모두 스테이지의 계획", "헤더 충돌 이동 버튼", "턴 파일 배지" },
     });
     attachNativeCellGeometry(b, scm_row_model_tests.root_module);
+    attachWindowsFileDialog(b, scm_row_model_tests.root_module);
     attachPngCodec(b, scm_row_model_tests.root_module);
     scm_row_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_scm_row_model_tests = b.addRunArtifact(scm_row_model_tests);
@@ -6098,6 +6185,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"RF6a wire"},
     });
     attachNativeCellGeometry(b, remote_mutation_wire_tests.root_module);
+    attachWindowsFileDialog(b, remote_mutation_wire_tests.root_module);
     attachPngCodec(b, remote_mutation_wire_tests.root_module);
     remote_mutation_wire_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_remote_mutation_wire_tests = b.addRunArtifact(remote_mutation_wire_tests);
@@ -6404,6 +6492,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"chrome artifact:"},
         });
         attachNativeCellGeometry(b, chrome_system_text_win_tests.root_module);
+        attachWindowsFileDialog(b, chrome_system_text_win_tests.root_module);
         attachPngCodec(b, chrome_system_text_win_tests.root_module);
         chrome_system_text_win_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
         const run_chrome_system_text_win_tests = b.addRunArtifact(chrome_system_text_win_tests);

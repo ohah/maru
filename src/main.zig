@@ -7327,6 +7327,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var loaded = try maru.config.loader.loadDefault(io, allocator);
     defer loaded.deinit();
     var cfg = loaded.config;
+    var locale_buffer: [255]u8 = undefined;
+    maru.i18n.setOsLocale(maru.win32_locale.read(&locale_buffer) orelse "");
+    _ = maru.app.language_config.apply(cfg.ui_language);
     var settings_host = try windows_settings.Host.init(allocator, loaded.arena.allocator(), io, &cfg);
     defer settings_host.deinit();
     // **hex 문자열을 여기서 파싱하지 않는다.** `appearance.resolve` 가 색 해석·대비 보정·기본값 폴백을
@@ -7972,6 +7975,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var appearance_apply_errors: usize = 0;
     var appearance_ui_errors: usize = 0;
     var appearance_ui_pending = false;
+    var chrome_strips_pending = false;
     var cursor_phase: maru.app.cursor_presentation.Phase = .{};
     var cursor_surface: ?maru.app.SurfaceId = null;
     var cursor_focus_generation: u64 = 0;
@@ -12340,6 +12344,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         if (settings_host.changed) {
+            if (maru.app.language_config.apply(cfg.ui_language)) |change| {
+                if (change.ownedMessage(text_notice_owned, settings_host.form.state.message(), .app_config_apply_pending)) |message| settings_host.form.state.setMessage(message);
+                if (change.ownedMessage(font_recovery_notice.owned, settings_host.form.state.message(), .app_font_apply_failed)) |message| settings_host.form.state.setMessage(message);
+                for (status_items_buf[0..status_items.len]) |*item| {
+                    if (item.id == .notifications) if (change.ownedMessage(true, item.text, .editor_backup_restored)) |message| {
+                        item.text = message;
+                    };
+                }
+                appearance_ui_pending = true;
+                chrome_strips_pending = true;
+            }
             // Resolve once per accepted edit or rollback; the same value owns
             // core query defaults, terminal paint and cached chrome colors.
             cursor_phase.reset();
@@ -12352,6 +12367,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             for (sessions.items) |session| session.appearance_config.request(appearance_values);
             if (visual_changed) {
                 appearance_ui_pending = true;
+                chrome_strips_pending = true;
                 colors.default_fg = appearance.theme.foreground;
                 colors.default_bg = appearance.theme.background;
                 colors.cursor = .{ .block = appearance.cursor.color orelse appearance.theme.cursor, .text = appearance.cursor.text orelse appearance.theme.background };
@@ -12388,6 +12404,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 complete = false;
                 appearance_ui_errors += 1;
             };
+            if (chrome_strips_pending) {
+                rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {
+                    complete = false;
+                    appearance_ui_errors += 1;
+                };
+                status_cells.clearRetainingCapacity();
+                appendStatusBarCells(allocator, &status_cells, geom.status_bar, chrome_cell_w, chrome_cell_h, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch) catch {
+                    complete = false;
+                    appearance_ui_errors += 1;
+                };
+                status_rebuilds += 1;
+            }
+            if (complete) chrome_strips_pending = false;
             appearance_ui_pending = !complete;
         }
         var text_pending: usize = @intFromBool(appearance_ui_pending);
@@ -17107,6 +17136,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             @tagName(tracking), @tagName(fmt_mode), alt, alt_scroll, bracketed,
         });
     }
+    try stdout.print("config_language: preference={s} effective={s}\n", .{ @tagName(cfg.ui_language), @tagName(maru.i18n.lang()) });
     try stdout.print("appearance_apply_errors={d} appearance_ui_errors={d}\n", .{ appearance_apply_errors, appearance_ui_errors });
     try stdout.print("text_apply_errors={d} text_apply_pending_peak={d} text_spawn_while_changed={d}\n", .{ text_apply_errors, text_apply_pending_peak, text_spawn_while_changed });
     for (sessions.items) |session| {

@@ -2081,7 +2081,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-windows-settings", "Verify Windows settings candidate validation").dependOn(&run_windows_settings_tests.step);
     const settings_form_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings form"} });
     const run_settings_form_tests = b.addRunArtifact(settings_form_tests);
-    run_settings_form_tests.addArg("--maru-expect-tests=35"); // Seven form judges and 28 anonymous aggregation blocks.
+    run_settings_form_tests.addArg("--maru-expect-tests=40"); // Twelve form judges and 28 anonymous aggregation blocks.
     b.step("test-settings-form", "Verify schema settings rows and edit requests").dependOn(&run_settings_form_tests.step);
     const settings_model_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings model"} });
     const run_settings_model_tests = b.addRunArtifact(settings_model_tests);
@@ -2200,6 +2200,14 @@ pub fn build(b: *std.Build) void {
     const run_registry_raster_tests = b.addRunArtifact(registry_raster_tests);
     run_registry_raster_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-registry-raster", "Verify styled registry face raster selection").dependOn(&run_registry_raster_tests.step);
+    const language_config_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"language config"} });
+    const run_language_config_tests = b.addRunArtifact(language_config_tests);
+    run_language_config_tests.addArg("--maru-expect-tests=33");
+    b.step("test-language-config", "Verify shared live language application and owned notice translation").dependOn(&run_language_config_tests.step);
+    const windows_locale_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Windows locale"} });
+    const run_windows_locale_tests = b.addRunArtifact(windows_locale_tests);
+    run_windows_locale_tests.addArg("--maru-expect-tests=33");
+    b.step("test-windows-locale", "Verify native locale counts, encoding and actual Windows API").dependOn(&run_windows_locale_tests.step);
     const native_cell_rect_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"native cell rect"} });
     const run_native_cell_rect_tests = b.addRunArtifact(native_cell_rect_tests);
     run_native_cell_rect_tests.addArg("--maru-expect-tests=33");

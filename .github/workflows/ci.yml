@@ -638,7 +638,11 @@ jobs:
       - name: Verify session host and live-upgrade fixtures
         run: |
           mkdir -p zig-out
-          zig build test-session-host -Doptimize=Debug
+          # Temporary diagnosis: recreate the original fixture and process tree on every round.
+          for round in $(seq 1 16); do
+            printf 'fence_diagnostic_round=%s\n' "$round"
+            zig build test-session-host-release-adapter-profile-authored-attestation-fence -Doptimize=Debug -j3
+          done
       - name: Upload temporary fence diagnosis
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

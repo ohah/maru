@@ -5920,5 +5920,7 @@ Windows cursor fade의 GPU 합성과 suffix 경계는 `test-windows-positioned-f
 검출했고 정상 Debug·ReleaseFast 대조를 통과했다. 실제 격리 Windows 앱에서 한국어
 저장→영어 미리보기→취소 복원과 `auto` 시작의 OS `ko-KR` 일치를 확인했다.
 전체 경계 4묶음·교차 타깃·문서·wasm 검사도 통과했다. 증거와 실패한 초기 판정의
-제외 이유는 [Windows 진행 기록](plans/windows-platform.md)에 둔다. 최종 설치 갱신,
-외부 설정 reload 및 Windows 전체 설정 연결의 완료를 뜻하지 않는다.
+제외 이유는 [Windows 진행 기록](plans/windows-platform.md)에 둔다. 외부 설정 reload 및 Windows 전체 설정 연결의 완료를 뜻하지 않는다.
+ReleaseFast 설치본 자체의 언어 저장·미리보기·취소와 OS 자동 언어 시작을 실제 Windows
+앱에서 추가 검증했다. 내장/창 아이콘과 바로가기 3개도 확인했다. 설치 증거와 실행 코드
+커밋은 위 Windows 진행 기록의 ReleaseFast 설치 절을 따른다.

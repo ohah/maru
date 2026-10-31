@@ -1506,3 +1506,29 @@ UTF-16 유효성과 필요한 UTF-8 용량을 검사하도록 고쳤다. 이 초
 최종 실제 앱 전환/자동 언어 증거를 함께 사용한다. 최종 커밋과 ReleaseFast 설치본
 갱신은 아직 남아 있으며, 현재 설치본은 `d902c3524`다. 우클릭 메뉴의 사이드바·탭·
 파일 트리 연결 및 나머지 Windows 설정·플랫폼 기능도 완료 처리하지 않는다.
+
+### 2026-11-01 Windows 언어 설정 — ReleaseFast 설치와 실행
+
+실행 코드 `163bff619f8fbf4354e50b3e2eb209386cfed246`을 ReleaseFast로 빌드해
+`%LOCALAPPDATA%/Programs/Maru/preview-language-163bff619f8f/maru.exe`에 설치했다.
+SHA-256은 `9934bf43514a048959a7840eb8c95a17b2ee09bc56b84641d87b6dfc0d3a0d9a`다.
+manifest 대상 63개 파일(디버그 PDB 포함), 폰트 18개, 고지 36개와 ConPTY 쌍의 해시를
+확인했다. 큰/작은 내장 아이콘 두 개와 실제 창의 class icon을 확인했고, 바탕화면·
+시작 메뉴·기존 고정 작업표시줄 바로가기 세 개는 새 exe와 icon index 0을 가리킨다.
+이전 바로가기 바이트는 백업했고 기존 사용자 창은 종료하지 않았다. 새 사용자 창은
+PID 27472로 실행해 두었다. PID는 기록 당시 값이며 후속 실행의 고정 식별자가 아니다.
+
+설치 경로의 실행 파일 자체를 private HOME/config에서 실행해 한국어 저장→영어
+미리보기→취소 후 한국어 복원을 실제 설정 섹션 픽셀과 config/진단 값으로 확인했다.
+셸로 전달된 키·바이트, 격자 불일치, dock/text/appearance 적용 오류는 모두 0이었다.
+별도 설치본 실행의 `auto` 시작도 실제 OS API의 `ko-KR`과 `effective=ko`가 일치했다.
+시험 앱 두 개는 정상 종료했으며 사용자 창은 유지했다. 합성 HWND 입력 검사이므로
+물리 키보드·IME 또는 macOS 앱 실행 증거로 확대하지 않는다.
+
+증거는 `.zig-cache/language-release-stage-20261101.json`,
+`.zig-cache/installed-language-ui-20261101.json`,
+`.zig-cache/installed-language-auto-ui-20261101.json`,
+`.zig-cache/installed-language-user-launch-20261101.json` 및
+`.zig-cache/language-delivery-binding-20261101.json`이다. 파일 트리 메뉴 공통 목록과
+pointer capture는 별도 작업 폴더에서 검증 중이며 이 설치본에는 포함하지 않았다.
+Windows 사이드바·탭·파일 트리 메뉴 연결, 외부 reload·나머지 설정/플랫폼 기능은 남아 있다.

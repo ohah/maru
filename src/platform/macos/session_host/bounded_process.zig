@@ -10,6 +10,9 @@ const posix = std.posix;
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn getdtablesize() c_int;
+extern "c" fn getpgrp() c.pid_t;
+extern "c" fn getpgid(pid: c.pid_t) c.pid_t;
+extern "c" fn getsid(pid: c.pid_t) c.pid_t;
 
 const poll_quantum_ms: c_int = 50;
 const CaptureMode = enum { merged, stdout_only };
@@ -878,7 +881,7 @@ fn childExec(
 fn diagnosticSetupFailure(stage: []const u8) noreturn {
     const saved_errno = c._errno().*;
     var buffer: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(&buffer, "component=child-setup pid={d} parent={d} stage={s} errno={d}\n", .{ c.getpid(), c.getppid(), stage, saved_errno }) catch c._exit(126);
+    const line = std.fmt.bufPrint(&buffer, "component=child-setup pid={d} parent={d} stage={s} errno={d} pgid={d} sid={d} parent_pgid={d} parent_sid={d}\n", .{ c.getpid(), c.getppid(), stage, saved_errno, getpgrp(), getsid(0), getpgid(c.getppid()), getsid(c.getppid()) }) catch c._exit(126);
     const fd = c.open("zig-out/fence-child-errors.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
     if (fd >= 0) {
         _ = c.write(fd, line.ptr, line.len);

@@ -155,6 +155,31 @@ test "Windows positioned terminal actual GPU preserves earlier ink outside a lat
     try present.beginFrame(.{ 1, 1, 1, 1 });
     try pipeline.draw(cells.items, 64, 64);
 
+    // Exercise every pixel-shader branch over an unchanged blue base, then
+    // an ordinary draw. GPU readback detects missing PS constants, inherited
+    // opacity and accidental RGB scaling without relying on desktop focus.
+    const blue = maru.d3d11_cells.solidCell(30, 0, 34, 30, .{ 0, 0, 1, 1 }, @splat(0));
+    try pipeline.draw(&.{blue}, 64, 64);
+    const red = maru.d3d11_cells.solidCell(32, 0, 6, 6, .{ 1, 0, 0, 1 }, @splat(0));
+    try pipeline.drawOpacity(&.{red}, 64, 64, 500);
+    var glyph = red;
+    glyph.rect[0] = 42;
+    glyph.uv = .{ 0, 0, 4.0 / 16.0, 6.0 / 8.0 };
+    glyph.fg = .{ 1, 0, 0, 1 };
+    glyph.bg = @splat(0);
+    try pipeline.drawOpacity(&.{glyph}, 64, 64, 500);
+    glyph.rect[0] = 52;
+    glyph.bg = .{ 0, 0, 1, 1 };
+    try pipeline.drawOpacity(&.{glyph}, 64, 64, 500);
+    var zero = red;
+    zero.rect[1] = 10;
+    try pipeline.drawOpacity(&.{zero}, 64, 64, 0);
+    var clamped = red;
+    clamped.rect = .{ 42, 10, 6, 6 };
+    try pipeline.drawOpacity(&.{clamped}, 64, 64, 2000);
+    const green = maru.d3d11_cells.solidCell(32, 20, 6, 6, .{ 0, 1, 0, 1 }, @splat(0));
+    try pipeline.draw(&.{green}, 64, 64);
+
     // Read the owned backbuffer through a staging texture, independent of
     // desktop occlusion, screenshots and foreground input. The IID is the same
     // ID3D11Texture2D contract owned by platform/windows/d3d11.zig.
@@ -179,6 +204,16 @@ test "Windows positioned terminal actual GPU preserves earlier ink outside a lat
     try std.testing.expectEqual([4]u8{ 0, 255, 0, 255 }, pixel(mapped, 6, 3));
     try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, pixel(mapped, 9, 10));
     try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, pixel(mapped, 20, 20));
+    for ([_]usize{ 33, 43, 53 }) |x| {
+        const half = pixel(mapped, x, 2);
+        try std.testing.expect(half[0] >= 127 and half[0] <= 128);
+        try std.testing.expectEqual(@as(u8, 0), half[1]);
+        try std.testing.expect(half[2] >= 127 and half[2] <= 128);
+        try std.testing.expectEqual(@as(u8, 255), half[3]);
+    }
+    try std.testing.expectEqual([4]u8{ 255, 0, 0, 255 }, pixel(mapped, 33, 12));
+    try std.testing.expectEqual([4]u8{ 0, 0, 255, 255 }, pixel(mapped, 43, 12));
+    try std.testing.expectEqual([4]u8{ 0, 255, 0, 255 }, pixel(mapped, 33, 22));
     var bitmap: [54 + 64 * 64 * 4]u8 = @splat(0);
     @memcpy(bitmap[0..2], "BM");
     std.mem.writeInt(u32, bitmap[2..6], bitmap.len, .little);
@@ -195,4 +230,27 @@ test "Windows positioned terminal actual GPU preserves earlier ink outside a lat
     try std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache");
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = &bitmap });
     std.debug.print(" positioned_gpu_bgra=red,green,blue,white capture={s} ", .{path});
+}
+
+test "Windows positioned terminal cursor suffix excludes decorations and accounts for clipping" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var fixture: Fixture = .{};
+    var overlays = [_]mf.NativeMetalCell{ nativeFill(0xff00ffff), nativeFill(0xff00ff00) };
+    var frame = fixture.frame();
+    frame.overlays = &overlays;
+    frame.cursor_cells = 1;
+    var cells: std.ArrayList(maru.d3d11_cells.Cell) = .empty;
+    defer cells.deinit(std.testing.allocator);
+    const suffix = try maru.win32_terminal.appendPositionedFrameSplit(std.testing.allocator, &cells, frame, 10, 20, 32, 32, .{ 0, 0, 10, 20 });
+    try std.testing.expectEqual(@as(usize, 5), cells.items.len);
+    try std.testing.expectEqual(@as(usize, 2), suffix);
+    try std.testing.expectEqual([4]f32{ 0, 1, 1, 1 }, cells.items[cells.items.len - suffix - 1].bg);
+    cells.clearRetainingCapacity();
+    overlays[1].col = 10;
+    const clipped = try maru.win32_terminal.appendPositionedFrameSplit(std.testing.allocator, &cells, frame, 10, 20, 32, 32, .{ 0, 0, 10, 20 });
+    try std.testing.expectEqual(@as(usize, 1), clipped);
+    const before = cells.items.len;
+    frame.cursor_cells = 3;
+    try std.testing.expectError(error.InvalidCursorSuffix, maru.win32_terminal.appendPositionedFrameSplit(std.testing.allocator, &cells, frame, 10, 20, 32, 32, .{ 0, 0, 10, 20 }));
+    try std.testing.expectEqual(before, cells.items.len);
 }

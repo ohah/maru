@@ -1,3 +1,5 @@
+pub const cursor_presentation = @import("app/cursor_presentation.zig");
+pub const appearance_config = @import("app/appearance_config.zig");
 pub const text_config = @import("app/text_config.zig");
 pub const config_write_lock = @import("app/config/write_lock.zig");
 pub const settings_form = @import("app/settings/form.zig");

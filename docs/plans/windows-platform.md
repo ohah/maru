@@ -1306,3 +1306,126 @@ Windows의 기존 세션에는 reader 명령으로 스크롤백 상한과 ambigu
 `.zig-cache/live-text-cross-docs-20261101.json`이다. 교차 컴파일은 다른 OS의 실앱
 실행을 뜻하지 않으며 조건부 SSH 서버 검사 3개는 건너뛰었다. 최종 배포 검증은
 남아 있으며 설치된 프리뷰는 이전 OSC 52 빌드를 유지한다.
+
+### 2026-11-01 테마·팔레트·기본 커서 — 연결 중
+
+공유 `app.appearance_config`가 해석된 팔레트·기본 전경/배경·기본 커서 값을 소유한다.
+macOS의 기존 값 추출과 명시적 커서 enum 매핑도 이 경계를 사용한다. Windows는 설정
+변경 시 기존 세션에 reader 명령을 보내고 다음 세션의 초기 appearance도 갱신한다.
+터미널 색·clear 색과 캐시된 사이드바/도크의 테마 재그리기를 연결했으며 네이티브
+앱 빌드는 통과했다. 화면 검증 전인 미커밋 작업이다.
+
+집중 `test-live-appearance-config`는 실제 코어에 명령을 적용해 팔레트·기본 색,
+DECSCUSR override 보존과 기본 모양 복귀, 수락 실패 후 최신 suffix 재시도, 닫힌
+대상 폐기를 검사한다. 정상 전후 Debug와 ReleaseFast 33개 검사를 통과했다.
+커서 매핑 뒤바뀜·팔레트 누락·기본 색 누락·실패 명령 수락 처리·닫힌 대상 잔류의
+다섯 독립 결함을 실제 컴파일·실행해 검출했다. 증거는
+`.zig-cache/live-appearance-adversarial-20261101/result.json`이다. 초기 잘못된 테스트
+필드명으로 발생한 컴파일 실패는 결함 검출로 계산하지 않는다.
+
+Windows 실제 화면·기존/신규 세션·취소 복원, 재그리기 실패 후 복구, 커서 blink와
+포커스 정책, 최종 경계·교차 검사와 배포는 남아 있다. 상태 처리의 다섯 결함
+검출만으로 Windows 테마 설정 전체가 완료됐다고 계산하지 않는다.
+
+테마 재그리기 실패 후 invalidation을 유지해 다음 프레임에 재시도하도록 추가했다.
+실패 주입으로 복구를 입증한 상태는 아니다. 수정 앱 빌드와 형식 검사는 통과했다.
+격리 앱에서 `cursor.shape = bar` 확정, underline 미리보기 취소, 새 세션 생성을
+실행했고 두 reader 코어의 기본 커서는 bar, pending/명령 오류/그리기 오류/셸 입력
+누출은 0이었다. 화면도 확인했다. 증거는
+`.zig-cache/live-appearance-ui-20261101.json`이다. 이 실행은 시작 후 폰트 자산을
+복사했으므로 패키지 폰트 초기화 검증으로 사용하지 않는다. 터미널 커서 모양의
+픽셀 판정·blink·테마 색 전체·실패 복구·최종 경계·배포 검증은 계속 남아 있다.
+
+테마 색의 실앱 검사도 추가했다. 자산을 실행 전에 갖춘 앱에서 전경 `#fedcba`의
+완전 커버리지 픽셀 100개 초과, 배경 `#123456`의 빈 셀 픽셀과 사이드바 색 변화를
+판정하고, 색 입력 취소 후 저장값 및 기존/새 reader의 기본 색을 확인했다.
+터미널 전경 누락·clear 배경 누락·chrome 토큰 누락·기존 reader 전달 누락·새 reader
+초기 기본 색 오류의 다섯 앱을 각각 실제 빌드해 동일 검사에서 검출했다.
+모든 결함 앱은 정상 종료했고 정상 전후 대조군은 통과했다. 증거는
+`.zig-cache/live-theme-app-adversarial-20261101/result.json`이다. 코드·도구·바이너리
+해시와 원본 복구를 확인했다. 공유 상태의 다섯 결함 검사와 별도의 실앱 증거다.
+재그리기 할당/업로드 실패 복구와 blink·focus, 최종 경계·배포는 아직 미검증이다.
+
+커서 정책은 `app.cursor_presentation`으로 추출해 기존 macOS의 blink 조건·포커스
+매핑·페이드 계산도 같은 함수를 사용한다. 긴 u32 주기의 페이드 중간 곱셈은 u64로
+넓혀 오버플로를 막았다. 새 Phase는 0 시각을 유효한 값으로 처리하며 시간 역행·
+장시간 정지 후 반주기 parity·나머지 보존과 입력/출력 리셋을 검사한다. 사용자 끔
+무시·포커스 상실 무시·페이드 곱셈 오버플로·0 시각 sentinel·리셋 후 숨김 잔류의
+다섯 독립 결함을 컴파일·실행해 검출했고 원본 Debug·ReleaseFast 33개 검사를
+통과했다. `.zig-cache/cursor-presentation-adversarial-20261101/result.json`이 증거다.
+
+Windows는 keyboard focus를 [WM_SETFOCUS](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-setfocus)·
+[WM_KILLFOCUS](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-killfocus)로
+관측한다. 콜백은 상태만 기록하며 다른 창을 표시·활성화하지 않는다. 커서 주기,
+사용자/DECSCUSR blink 조건, 조합·모달 중 중지, unfocused hidden/hollow를 소유한
+프레임 overlay에 연결했다. 코어의 canonical cursor는 바꾸지 않는다. 입력·출력·
+세션/포커스 전환 시 위상을 리셋한다. 네이티브 앱 빌드는 통과했으나 이 새 경로의
+실제 픽셀·focus 검증과 회귀는 아직 남아 있다. Windows fade는 아직 0으로 처리하며
+커서 전용 alpha pass가 필요하다. 앞의 테마 실앱 결함 대조는 커서 경로 추가 전
+소스의 기록이며 최종 통합 버전 검증으로 재사용하지 않는다. 최종 경계·교차 검사와
+설치본 갱신은 계속 남아 있다.
+
+Windows fade를 커서 전용 alpha pass로 연결했다. `PositionedTerminalFrame`은
+장식선을 제외한 cursor suffix 길이를 공유 DTO로 제공하고, Windows adapter는
+클리핑 후 실제 suffix 길이를 반환한다. 고정 셀 경로도 기존 `BuiltCells`의 길이를
+사용한다. 본문·일반 장식은 불투명하게, 커서 overlay와 반전 ink만 같은 opacity로
+그리며 뒤의 chrome은 다시 opacity 1로 그린다. D3D11은 straight-alpha 출력의
+최종 coverage만 조절하고 RGB를 곱하지 않는다.
+
+네이티브 빌드가 통과했고 실제 GPU staging readback으로 solid·투명 glyph·배경
+있는 glyph의 50% 합성, 0/초과 입력, 뒤의 일반 draw 불투명 복원을 확인했다.
+투명도 무시·PS 상수 미연결·RGB 잘못 스케일·일반 draw 페이드 잔류·장식선 suffix
+혼입의 다섯 독립 compiled 결함을 실행해 검출했다. 정상 전후 Debug·ReleaseFast
+및 클리핑/append 원자성 검사를 통과했다. 증거는
+`.zig-cache/cursor-fade-gpu-adversarial-20261101/result.json`이며 정상 GPU 화면은
+`.zig-cache/positioned-terminal-gpu-debug.bmp`·`positioned-terminal-gpu-fast.bmp`다.
+`test-positioned-glyph`·`test-cursor-presentation`·`test-live-appearance-config`도
+최종 공유 코드에서 통과했다. 이 GPU fixture는 앱의 시간 위상·native focus·
+실제 편집 중 커서까지 증명하지 않는다. 해당 실앱 검증과 재그리기 실패 복구,
+최종 전체 경계·교차 검사·설치는 계속 남아 있다.
+
+실앱 시간 샘플링에서 본문 픽셀을 유지하며 커서가 표시·숨김·중간 alpha로 전환되는
+것을 확인했다. 사용자 blink=false와 DECSCUSR steady는 전체 샘플에서 고정됐다.
+초기 포커스 상태를 가정한 hidden 검사는 잘못된 전제 때문에 실패했으며, owned
+HWND에 명시적으로 focus-loss를 입력한 뒤 다시 검사했다. 이 메시지는 합성이므로
+실제 OS foreground 전환 증거로 계산하지 않는다.
+
+그 검사에서 hollow가 꽉 찬 셀로 보이는 실제 버그를 발견했다. Windows의
+`cellFromNative`가 NativeMetalCell.reserved를 무시해 커서 bar·underline와 텍스트
+장식선도 셀 전체를 칠하던 원인이었다. 기존 Metal renderer의 사각형 규칙을
+`renderer/native_cell_rect.h`로 추출하고 원래 Objective-C 소비자도 같은 헤더를
+사용한다. Windows는 freestanding C shim·Zig adapter로 같은 계산을 소비한다.
+수학 런타임 의존성 없이 기존 유한 픽셀 메트릭 정책을 유지한다. 픽셀 사각형을
+정한 뒤 클리핑하므로 hollow 중앙이 비고 기존 glyph가 가려지지 않는다.
+
+수정 앱은 `.zig-cache/live-cursor-geometry-preview-20261101/bin/binary.json`으로
+고정했다. 테두리의 중앙 0·가장자리 255와 합성 focus 획득 시 중앙 255, 상실 시
+중앙 0을 측정했다. `.zig-cache/cursor-hollow-fixed-ui-20261101.json` 및
+`.zig-cache/cursor-fixed-ui-4dfebaa7b4ed4e17a6b4568e511e32ae/batch.json`에
+동일 바이너리의 fade·disabled·steady·hidden·hollow 정상 결과가 있다. 이전
+hollow 실패 화면도 보존해 수정 전 대조로 사용한다. 이 후속 수정 전의 테마·
+커서 GPU 자료만으로 최종 통합 버전이 검증됐다고 계산하지 않는다. 새 공통 C
+경계의 교차 컴파일·wasm·macOS 소스 경계 및 전체 검증과 설치는 아직 남아 있다.
+
+공유 사각형의 하단·좌측·상단을 전체 셀로 넓힘, 우측 kind 누락, 텍스트 선을
+굵게 만드는 다섯 독립 compiled 결함을 검출했다. 원본 복구 후 Debug·ReleaseFast의
+`test-native-cell-rect`와 실제 GPU 포함 `test-windows-positioned-frame`을 통과했다.
+첫 결함 도구 실행의 중복 문자열 가드 실패는 검출 횟수에서 제외하고 보존했다.
+최종 증거는 `.zig-cache/native-cell-rect-adversarial-r2-20261101/result.json`,
+실앱 다섯 경우의 해시·바이너리 대조는
+`.zig-cache/cursor-geometry-ui-binding-20261101.json`이다.
+
+현재 appearance·cursor·공통 C geometry 소스는 전체 경계 4/4, macOS·Linux·Windows
+교차 컴파일, 문서 링크·코드 위치 참조·config 문서 검사와 격리 wasm 빌드를 통과했다.
+검사 전후와 확인 시점의 소스 해시가 일치했다. 조건부 SSH 검사 3개는 skip이며,
+macOS Objective-C renderer의 실제 빌드·GPU 실행을 뜻하지 않는다. wasm 산출물은
+배포 파일과 SHA-256 `e6c1acddd4e723795ba7c572c21a905b2ce7a50c35875f1f5c44ff588b01e722`이
+일치해 추적 wasm 파일을 바꾸지 않았다. 증거는
+`.zig-cache/appearance-boundaries-20261101/result.json` 및
+`.zig-cache/appearance-cross-wasm-20261101/result.json`이다.
+
+이전 Metal 사각형 알고리즘과 새 공통 헤더의 유한 픽셀 경계 7,344건을 네이티브 C
+실행으로 대조해 모두 일치했다. 기존 소스는 현재 HEAD의 저장소 원문에서 추출했다.
+증거는 `.zig-cache/native-cell-rect-baseline-parity-20261101/result.json`이다.
+실제 OS foreground 전환과 재그리기 실패 복구의 앱 증거, 최종 설치본 갱신 및
+나머지 Windows 기능은 계속 남아 있다.

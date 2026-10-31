@@ -34,6 +34,9 @@ const addProjectTest = support.addProjectTest;
 const rootPath = support.rootPath;
 const addRunWithArtifactEnv = support.addRunWithArtifactEnv;
 const linkSessionHostNotificationAdapter = support.linkSessionHostNotificationAdapter;
+fn attachNativeCellGeometry(b: *std.Build, module: *std.Build.Module) void {
+    module.addCSourceFile(.{ .file = b.path("src/renderer/native_cell_rect.c"), .flags = &.{"-std=c11"} });
+}
 const attachPngCodec = support.attachPngCodec;
 const session_host_gates = @import("build/session_host_gates.zig");
 const session_host_release_gates = @import("build/session_host_release_gates.zig");
@@ -532,6 +535,7 @@ pub fn build(b: *std.Build) void {
     // terminfo 소스는 src/ 밖(terminfo/maru.terminfo — tools/·docs가 공유하는 단일 출처)이라 @embedFile이
     // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
     // (maru ssh 자기완결성 — 로컬 설치 없이 원격 전파). 파일을 옮기지 않아 참조 중복이 없다.
+    attachNativeCellGeometry(b, maru_mod);
     attachPngCodec(b, maru_mod);
     const pcre2_header_dir = b.addWriteFiles();
     const pcre2_header = pcre2_header_dir.addCopyFile(
@@ -960,6 +964,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .pic = if (mt.pic) true else null,
             });
+            attachNativeCellGeometry(b, mobile_maru_mod);
             attachPngCodec(b, mobile_maru_mod);
             const lib = b.addLibrary(.{
                 .name = mt.lib_name,
@@ -991,6 +996,7 @@ pub fn build(b: *std.Build) void {
             .target = wasm_target,
             .optimize = .small,
         });
+        attachNativeCellGeometry(b, wasm_maru_mod);
         attachPngCodec(b, wasm_maru_mod);
         const wasm = b.addExecutable(.{
             .name = "maru-vt",
@@ -1878,6 +1884,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         });
+        attachNativeCellGeometry(b, cross_mod);
         attachPngCodec(b, cross_mod);
         cross_mod.addIncludePath(pcre2_source_dir);
         cross_mod.addImport("pcre2_c", cross_pcre2_api.mod);
@@ -1904,6 +1911,7 @@ pub fn build(b: *std.Build) void {
         });
         // `maru.zig` 는 아니지만 **같은 그래프를 자기 루트로 다시 세운다** — 그래서 PNG 코덱도
         // 여기 있어야 `@import("png_codec")` 이 풀린다(실측: 안 주면 세 타깃이 다 빨개진다).
+        attachNativeCellGeometry(b, surface_mod);
         attachPngCodec(b, surface_mod);
         surface_mod.addIncludePath(pcre2_source_dir);
         surface_mod.addImport("pcre2_c", cross_pcre2_api.mod);
@@ -2198,6 +2206,18 @@ pub fn build(b: *std.Build) void {
     const run_registry_raster_tests = b.addRunArtifact(registry_raster_tests);
     run_registry_raster_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-registry-raster", "Verify styled registry face raster selection").dependOn(&run_registry_raster_tests.step);
+    const native_cell_rect_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"native cell rect"} });
+    const run_native_cell_rect_tests = b.addRunArtifact(native_cell_rect_tests);
+    run_native_cell_rect_tests.addArg("--maru-expect-tests=33");
+    b.step("test-native-cell-rect", "Verify shared cursor and decoration pixel geometry").dependOn(&run_native_cell_rect_tests.step);
+    const cursor_presentation_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"cursor presentation"} });
+    const run_cursor_presentation_tests = b.addRunArtifact(cursor_presentation_tests);
+    run_cursor_presentation_tests.addArg("--maru-expect-tests=33");
+    b.step("test-cursor-presentation", "Verify shared cursor focus, blink gating, phase and fade").dependOn(&run_cursor_presentation_tests.step);
+    const live_appearance_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"live appearance"} });
+    const run_live_appearance_tests = b.addRunArtifact(live_appearance_tests);
+    run_live_appearance_tests.addArg("--maru-expect-tests=33");
+    b.step("test-live-appearance-config", "Verify appearance policy, application overrides and retry ownership").dependOn(&run_live_appearance_tests.step);
     const live_text_config_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"live text config"} });
     const run_live_text_config_tests = b.addRunArtifact(live_text_config_tests);
     run_live_text_config_tests.addArg("--maru-expect-tests=33");
@@ -2259,7 +2279,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-shaping-runs", "Verify shared native style keys and lossless UTF16 ownership preparation").dependOn(&run_shaping_run_tests.step);
     const positioned_frame_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows positioned terminal"} });
     const run_positioned_frame_tests = b.addRunArtifact(positioned_frame_tests);
-    run_positioned_frame_tests.addArg("--maru-expect-tests=8");
+    run_positioned_frame_tests.addArg("--maru-expect-tests=9");
     const positioned_frame_step = b.step("test-windows-positioned-frame", "Verify positioned terminal packet order clipping and append ownership");
     positioned_frame_step.dependOn(&run_positioned_frame_tests.step);
     const positioned_clip_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -3127,6 +3147,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{ "UT1", "UT2", "UT3", "UT4", "UB", "U4c-", "U4d-", "FSBIND" }, // UB = 백업 레코드 규칙(§3.10), U4c- = workspace 영속
     });
+    attachNativeCellGeometry(b, untitled_rule_tests.root_module);
     attachPngCodec(b, untitled_rule_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다
     untitled_rule_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_untitled_rule_tests = b.addRunArtifact(untitled_rule_tests);
@@ -5931,6 +5952,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{ "RF5a", "selection follows identity and falls back after rebuild", "all navigation intents use actionable rows and tree hierarchy" },
     });
+    attachNativeCellGeometry(b, file_tree_model_tests.root_module);
     attachPngCodec(b, file_tree_model_tests.root_module);
     file_tree_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_file_tree_model_tests = b.addRunArtifact(file_tree_model_tests);
@@ -5952,6 +5974,7 @@ pub fn build(b: *std.Build) void {
         // (`app_session` 은 maru 를 **모듈**로 임포트해 그쪽 test 가 안 딸려온다).
         .filters = &.{ "MP1", "CSP1", "context_menu", "dropdown", "로케일마다 달라야" },
     });
+    attachNativeCellGeometry(b, marker_preview_tests.root_module);
     attachPngCodec(b, marker_preview_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다(위 주석)
     marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
@@ -5969,6 +5992,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{ "2031", "996 색 구성" },
     });
+    attachNativeCellGeometry(b, color_scheme_tests.root_module);
     attachPngCodec(b, color_scheme_tests.root_module);
     color_scheme_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_color_scheme_tests = b.addRunArtifact(color_scheme_tests);
@@ -5988,6 +6012,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{ "병합 충돌의 세 판은", "stage 셋", "spec 버퍼가 모자라면", "비교 기준마다 탭 라벨이" },
     });
+    attachNativeCellGeometry(b, merge_stage_tests.root_module);
     attachPngCodec(b, merge_stage_tests.root_module);
     merge_stage_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_merge_stage_tests = b.addRunArtifact(merge_stage_tests);
@@ -6006,6 +6031,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{"TBPROBE"},
     });
+    attachNativeCellGeometry(b, placeholder_e2e_tests.root_module);
     attachPngCodec(b, placeholder_e2e_tests.root_module);
     placeholder_e2e_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_placeholder_e2e_tests = b.addRunArtifact(placeholder_e2e_tests);
@@ -6083,6 +6109,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌", "마커가 없어진 충돌 행에는", "conflict-markers argv", "모두 스테이지의 계획", "헤더 충돌 이동 버튼", "턴 파일 배지" },
     });
+    attachNativeCellGeometry(b, scm_row_model_tests.root_module);
     attachPngCodec(b, scm_row_model_tests.root_module);
     scm_row_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_scm_row_model_tests = b.addRunArtifact(scm_row_model_tests);
@@ -6099,6 +6126,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{"RF6a wire"},
     });
+    attachNativeCellGeometry(b, remote_mutation_wire_tests.root_module);
     attachPngCodec(b, remote_mutation_wire_tests.root_module);
     remote_mutation_wire_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_remote_mutation_wire_tests = b.addRunArtifact(remote_mutation_wire_tests);
@@ -6404,6 +6432,7 @@ pub fn build(b: *std.Build) void {
             }),
             .filters = &.{"chrome artifact:"},
         });
+        attachNativeCellGeometry(b, chrome_system_text_win_tests.root_module);
         attachPngCodec(b, chrome_system_text_win_tests.root_module);
         chrome_system_text_win_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
         const run_chrome_system_text_win_tests = b.addRunArtifact(chrome_system_text_win_tests);

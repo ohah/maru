@@ -219,6 +219,7 @@ const sw_restore: i32 = 9;
 const WM_NCCALCSIZE: UINT = 0x0083;
 const WM_NCHITTEST: UINT = 0x0084;
 const WM_SETCURSOR: UINT = 0x0020;
+const WM_SETFOCUS: UINT = 0x0007;
 const WM_KILLFOCUS: UINT = 0x0008;
 // `WM_NCHITTEST` 반환값. 창이 프레임을 안 그려도 **OS 가 이 값들로 드래그·리사이즈·더블클릭
 // 최대화를 대신 해 준다** — Electron 의 `-webkit-app-region: drag` 가 하는 일을 Win32 에서는
@@ -444,6 +445,8 @@ pub const Window = struct {
     ime_ui_options: usize = 0xC000000F,
     /// Sticky generation: focus loss remains observable even if focus returns in one poll.
     focus_loss_serial: u64 = 0,
+    keyboard_focused: bool = false,
+    focus_generation: u64 = 0,
     retained_overlay_blurs: usize = 0,
     dismissed_overlay_blurs: usize = 0,
     present: PresentTarget = .{},
@@ -842,6 +845,8 @@ pub const Window = struct {
         self.overlay_focus_policy = if (open) policy else .dismiss_on_blur;
     }
     pub fn noteFocusLoss(self: *Window) void {
+        self.keyboard_focused = false;
+        self.focus_generation +%= 1;
         const was_open = self.input_overlay_open;
         self.focus_loss_serial +%= 1;
         if (self.overlay_focus_policy == .dismiss_on_blur) self.input_overlay_open = false;
@@ -1012,6 +1017,16 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
     }
     const self = windowFrom(hwnd);
     switch (msg) {
+        // Microsoft WM_SETFOCUS/WM_KILLFOCUS define keyboard focus. Keep
+        // the callback passive: loss must not activate or show another window.
+        // https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-setfocus
+        WM_SETFOCUS => {
+            if (self) |w| {
+                w.keyboard_focused = true;
+                w.focus_generation +%= 1;
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
         WM_KILLFOCUS => {
             if (self) |w| {
                 w.noteFocusLoss();

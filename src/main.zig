@@ -1937,11 +1937,7 @@ fn applyCoreConfig(
             .cell_metrics = .{ .width = cell_w, .height = cell_h },
             // config 의 모양 enum 과 코어의 것은 **다른 타입**이다(같은 세 값이지만 층이 다르다).
             // macOS 도 같은 자리에서 옮긴다(`configCursorShape`).
-            .default_cursor_shape = switch (appearance.cursor.shape) {
-                .block => .block,
-                .bar => .bar,
-                .underline => .underline,
-            },
+            .default_cursor_shape = maru.app.appearance_config.cursorShape(appearance.cursor.shape),
         },
     });
 }
@@ -7336,7 +7332,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **hex 문자열을 여기서 파싱하지 않는다.** `appearance.resolve` 가 색 해석·대비 보정·기본값 폴백을
     // 소유한다(macOS 도 같은 함수를 쓴다). 실패하면 값이 잘못된 것이므로 **조용히 기본값으로 접지 않고**
     // 알린 뒤 빌트인으로 간다 — 키바인딩 검증과 같은 규율이다.
-    const appearance = maru.config.appearance.resolve(cfg) catch |err| blk: {
+    var appearance = maru.config.appearance.resolve(cfg) catch |err| blk: {
         try stderr.print("  warning: theme colors are invalid({s}) — falling back to built-ins\n", .{@errorName(err)});
         break :blk try maru.config.appearance.resolve(.{});
     };
@@ -7442,7 +7438,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 
     var client_w = initial.width_px;
     var client_h = initial.height_px;
-    const chrome_tokens = chromeTokensFor(cfg);
+    var chrome_tokens = chromeTokensFor(cfg);
     var geom = dockGeometryFor(client_w, client_h, chrome_cell_w, chrome_cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
 
     // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
@@ -7973,6 +7969,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var font_apply_errors: usize = 0;
     var font_resize_errors: usize = 0;
     var font_recovery_notice: win_layout_resize.RecoveryNotice = .{};
+    var appearance_apply_errors: usize = 0;
+    var appearance_ui_errors: usize = 0;
+    var appearance_ui_pending = false;
+    var cursor_phase: maru.app.cursor_presentation.Phase = .{};
+    var cursor_surface: ?maru.app.SurfaceId = null;
+    var cursor_focus_generation: u64 = 0;
     var text_apply_errors: usize = 0;
     var text_apply_pending_peak: usize = 0;
     var text_spawn_while_changed: usize = 0;
@@ -8748,7 +8750,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     };
     // **지우는 색도 테마 배경이다.** 이 값이 셀 배경과 다르면 창 가장자리(격자에 안 맞는 나머지 픽셀)만
     // 다른 색으로 남아 테두리처럼 보인다 — 리터럴이던 동안은 테마를 바꿔도 그 띠가 안 따라왔다.
-    const clear = d3d11_present.clearColorFromArgb(0xFF000000 |
+    var clear = d3d11_present.clearColorFromArgb(0xFF000000 |
         (@as(u32, appearance.theme.background.r) << 16) |
         (@as(u32, appearance.theme.background.g) << 8) |
         @as(u32, appearance.theme.background.b));
@@ -12338,6 +12340,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         if (settings_host.changed) {
+            // Resolve once per accepted edit or rollback; the same value owns
+            // core query defaults, terminal paint and cached chrome colors.
+            cursor_phase.reset();
+            const next_appearance = try maru.config.appearance.resolve(cfg);
+            const visual_changed = !std.meta.eql(maru.app.appearance_config.Values.fromAppearance(appearance), maru.app.appearance_config.Values.fromAppearance(next_appearance)) or
+                !std.meta.eql(appearance.theme, next_appearance.theme) or !std.meta.eql(appearance.cursor, next_appearance.cursor);
+            appearance = next_appearance;
+            spawn_opts.appearance = appearance;
+            const appearance_values = maru.app.appearance_config.Values.fromAppearance(appearance);
+            for (sessions.items) |session| session.appearance_config.request(appearance_values);
+            if (visual_changed) {
+                appearance_ui_pending = true;
+                colors.default_fg = appearance.theme.foreground;
+                colors.default_bg = appearance.theme.background;
+                colors.cursor = .{ .block = appearance.cursor.color orelse appearance.theme.cursor, .text = appearance.cursor.text orelse appearance.theme.background };
+                colors.selection_bg = appearance.theme.selection;
+                colors.search_match_bg = appearance.theme.search_match;
+                colors.current_match_bg = appearance.theme.search_match_current;
+                clear = d3d11_present.clearColorFromArgb(0xFF000000 | (@as(u32, appearance.theme.background.r) << 16) | (@as(u32, appearance.theme.background.g) << 8) | @as(u32, appearance.theme.background.b));
+                chrome_tokens = maru.chrome_theme.tokensFor(appearance);
+            }
             spawn_opts.refreshShell(cfg.shell);
             spawn_opts.refreshText(cfg);
             const shrink = settings_host.takeScrollbackShrink();
@@ -12353,8 +12376,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             clipboard_host.bracketed_paste_is_safe = bracketed_paste_is_safe;
             settings_host.changed = false;
         }
-        var text_pending: usize = 0;
+        // A paint allocation/upload failure must retain invalidation. Otherwise
+        // an unchanged next frame would keep old chrome colors indefinitely.
+        if (appearance_ui_pending) {
+            var complete = true;
+            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                complete = false;
+                appearance_ui_errors += 1;
+            };
+            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {
+                complete = false;
+                appearance_ui_errors += 1;
+            };
+            appearance_ui_pending = !complete;
+        }
+        var text_pending: usize = @intFromBool(appearance_ui_pending);
         for (sessions.items) |session| {
+            session.appearance_config.pump(&runtime, session.surface.id, io) catch {
+                appearance_apply_errors += 1;
+            };
+            text_pending += @intFromBool(session.appearance_config.pending());
             session.text_config.pump(&runtime, session.surface.id, io) catch {
                 text_apply_errors += 1;
             };
@@ -12442,6 +12483,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
             .key => |key_ev| {
+                cursor_phase.reset();
                 if (file_close_waiting) {
                     if (key_ev.key == .escape) {
                         confirm_pending_click = .cancelled;
@@ -14392,6 +14434,33 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         colors.selection = if (app_window.active()) |a| a.core.selectionViewportSpan() else null;
         if (colors.selection != null) selection_frames += 1;
 
+        // Presentation changes only owned frame overlays, never the core's
+        // canonical cursor. Application DECSCUSR and user blink=false both
+        // participate in the same policy as macOS.
+        const terminal_colors = colors;
+        var cursor_fade_milli: u32 = 1000;
+        if (app_window.active()) |active| {
+            active.lockCore(io);
+            const app_blink = active.core.cursor_blink;
+            const app_visible = active.core.cursor_visible;
+            active.unlockCore(io);
+            if (cursor_surface != active.id or cursor_focus_generation != window.focus_generation or active_drain.output_events > 0) cursor_phase.reset();
+            cursor_surface = active.id;
+            cursor_focus_generation = window.focus_generation;
+            const modal = window.input_overlay_open or confirm_state.open or file_notice.open or choice_notice != null;
+            const mode = maru.app.cursor_presentation.unfocusedMode(window.keyboard_focused, modal, appearance.cursor.unfocused);
+            const blink = maru.app.cursor_presentation.shouldBlink(appearance.cursor.blink, app_blink, app_visible, window.preeditText().len != 0, modal);
+            cursor_fade_milli = cursor_phase.sample(std.Io.Clock.awake.now(io).nanoseconds, appearance.cursor.blink_interval_ms, appearance.cursor.blink_fade_ms, blink);
+            const visible = cursor_fade_milli != 0;
+            for (tick.frame.render_frame.glyph_quad_frame.overlays) |*overlay| switch (overlay.*) {
+                .cursor => |*cursor| {
+                    cursor.hollow = mode == .hollow;
+                    cursor.visible = cursor.visible and visible and mode != .hidden;
+                },
+                else => {},
+            };
+        }
+
         // ⑶ 중립 투영 → D3D11 셀.
         var positioned_terminal: ?maru.renderer.metal_frame.PositionedTerminalFrame = null;
         for (tick.frame.render_frame.glyph_quad_frame.glyphs) |glyph| {
@@ -14400,7 +14469,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 allocator,
                 tick.frame.render_frame.glyph_quad_frame,
                 tick.frame.render_frame.draw_list.cells,
-                colors,
+                terminal_colors,
                 cell_w,
                 cell_h,
                 geom.terminal.x,
@@ -14409,12 +14478,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             break;
         }
         defer if (positioned_terminal) |*positioned| positioned.deinit(allocator);
-        const native = if (positioned_terminal) |positioned| positioned.base else try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
+        const legacy_cells = if (positioned_terminal == null) try maru.renderer.metal_frame.buildNativeCellsSplit(
             allocator,
             tick.frame.render_frame.glyph_quad_frame,
             tick.frame.render_frame.draw_list.cells,
-            colors,
-        );
+            terminal_colors,
+        ) else null;
+        const native = if (positioned_terminal) |positioned| positioned.base else legacy_cells.?.cells;
         defer if (positioned_terminal == null) allocator.free(native);
         // **터미널을 자기 사각형에 놓는다**(§2m.31). 원점을 안 찍으면 도크가 있어도 터미널이 창
         // 왼쪽 위에서 시작해 도크 밑으로 깔린다.
@@ -14535,6 +14605,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const atlas_before_h = atlas_h;
         const showing_file = active_view == .file and active_view.file < open_files.items.len;
         const term_first = cells.items.len;
+        var terminal_cursor_cells: usize = 0;
         if (showing_file) {
             const of = &open_files.items[active_view.file];
             // **그리기 직전에 상한을 다시 잡는다.** 휠은 그때의 뷰포트로 clamp 하는데, 창이 **커지면**
@@ -14746,11 +14817,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
             }
         } else if (positioned_terminal) |positioned| {
-            try win32_terminal.appendPositionedFrame(allocator, &cells, positioned, cell_w, cell_h, atlas_w, atlas_h, .{
+            terminal_cursor_cells = try win32_terminal.appendPositionedFrameSplit(allocator, &cells, positioned, cell_w, cell_h, atlas_w, atlas_h, .{
                 @floatFromInt(geom.terminal.x), @floatFromInt(geom.terminal.y),
                 @floatFromInt(geom.terminal.w), @floatFromInt(geom.terminal.h),
             });
-        } else for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+        } else {
+            for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+            terminal_cursor_cells = legacy_cells.?.cursor_cells;
+        }
         // **여기까지가 터미널이다.** 아래 침범 판정이 이 구간만 봐야 한다 — 띠를 함께 세면 띠가 창
         // 폭을 가로지르고 `y=0` 에서 시작하므로 **두 판정이 영원히 0 이 아니게 되어 죽는다**
         // (실측: 둘 다 15600 = 띠 26 셀 × 600 프레임).
@@ -14860,6 +14934,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     // A rollback and new-tab action can share one input batch.
                     // Read current text policy at admission, not only at frame start.
                     spawn_opts.refreshText(cfg);
+                    spawn_opts.appearance = try maru.config.appearance.resolve(cfg);
                     const admitted = win_session_actions.spawnFocused(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts, &active_view, max_win_sessions, spawnWinSession) catch |err| {
                         session_spawn_failures += 1;
                         stderr.print("  warning: new terminal failed({s})\n", .{@errorName(err)}) catch {};
@@ -15153,7 +15228,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             layout_probe = false;
         }
         try present.beginFrame(clear);
-        try pipeline.draw(cells.items, present.width_px, present.height_px);
+        // Draw terminal cursor coverage over its opaque base, then restore
+        // opacity for chrome and overlays that follow the terminal packet.
+        const cursor_first = term_last - terminal_cursor_cells;
+        try pipeline.draw(cells.items[0..cursor_first], present.width_px, present.height_px);
+        try pipeline.drawOpacity(cells.items[cursor_first..term_last], present.width_px, present.height_px, cursor_fade_milli);
+        try pipeline.draw(cells.items[term_last..], present.width_px, present.height_px);
         try present.present(false);
         // **증거를 만들 때만 한 프레임에 머문다**(`--hold-editor-ms`). 스모크는 편집기를 수백 프레임
         // 그리지만 프레임마다 16 ms 라 창을 찍는 하네스가 그 위에 못 앉는다 — 구문 색 슬라이스가
@@ -17027,6 +17107,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             @tagName(tracking), @tagName(fmt_mode), alt, alt_scroll, bracketed,
         });
     }
+    try stdout.print("appearance_apply_errors={d} appearance_ui_errors={d}\n", .{ appearance_apply_errors, appearance_ui_errors });
     try stdout.print("text_apply_errors={d} text_apply_pending_peak={d} text_spawn_while_changed={d}\n", .{ text_apply_errors, text_apply_pending_peak, text_spawn_while_changed });
     for (sessions.items) |session| {
         session.surface.lockCore(io);
@@ -17035,8 +17116,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             .ambiguous_wide = session.surface.core.ambiguous_wide,
             .emoji_wide = session.surface.core.emoji_wide,
         };
+        const live_cursor = session.surface.core.default_cursor_shape;
+        const live_fg = session.surface.core.default_fg_rgb;
+        const live_bg = session.surface.core.default_bg_rgb;
         const live_history = session.surface.core.screen.sb.count;
         session.surface.unlockCore(io);
+        try stdout.print("appearance_core: surface={d} cursor={s} fg={d},{d},{d} bg={d},{d},{d} pending={}\n", .{ session.surface.id, @tagName(live_cursor), live_fg.r, live_fg.g, live_fg.b, live_bg.r, live_bg.g, live_bg.b, session.appearance_config.pending() });
         try stdout.print("text_core: surface={d} scrollback={d} ambiguous_wide={} emoji_wide={} pending={} history={d}\n", .{ session.surface.id, live_text.scrollback, live_text.ambiguous_wide, live_text.emoji_wide, session.text_config.pending(), live_history });
     }
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });

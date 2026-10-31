@@ -674,3 +674,15 @@ run = "zig build test-live-text-config"
 [tasks.test-windows-settings-shrink]
 description = "Verify explicit successful shrink permission without preview data loss"
 run = "zig build test-windows-settings-shrink"
+
+[tasks.test-live-appearance-config]
+description = "Verify shared live appearance policy and reader admission retries"
+run = "zig build test-live-appearance-config"
+
+[tasks.test-cursor-presentation]
+description = "Verify shared cursor focus, blink gating, time and fade policy"
+run = "zig build test-cursor-presentation"
+
+[tasks.test-native-cell-rect]
+description = "Verify shared native cursor and text-decoration pixel geometry"
+run = "zig build test-native-cell-rect"

@@ -262,7 +262,8 @@ test "셀 지문: 한 값만 달라도 갈린다" {
 /// 프레임 상수. **16바이트 배수여야 한다** — D3D11 상수 버퍼의 규약이라 `_pad`가 장식이 아니다.
 const FrameConstants = extern struct {
     viewport_px: [2]f32,
-    _pad: [2]f32 = .{ 0, 0 },
+    opacity: f32 = 1,
+    _pad: f32 = 0,
 };
 
 comptime {
@@ -312,7 +313,8 @@ pub fn uvFromAtlasRect(x_px: u32, y_px: u32, w_px: u32, h_px: u32, atlas_w: u32,
 const hlsl_source =
     \\cbuffer Frame : register(b0) {
     \\    float2 viewport_px;
-    \\    float2 pad_;
+    \\    float opacity;
+    \\    float pad_;
     \\};
     \\
     \\Texture2D<float4> atlas : register(t0);
@@ -426,13 +428,13 @@ const hlsl_source =
     \\        if (i.border_widths.z > 0.0) stroke = max(stroke, 1.0 - smoothstep(i.border_widths.z - aa, i.border_widths.z + aa, i.paint_rect.w - local.y));
     \\        if (i.border_widths.w > 0.0) stroke = max(stroke, 1.0 - smoothstep(i.border_widths.w - aa, i.border_widths.w + aa, local.x));
     \\        float3 rgb = linear_to_srgb(lerp(srgb_to_linear(fill.rgb), srgb_to_linear(i.border_color.rgb), stroke));
-    \\        return float4(rgb, lerp(fill.a, i.border_color.a, stroke) * a);
+    \\        return float4(rgb, lerp(fill.a, i.border_color.a, stroke) * a * opacity);
     \\    }
     \\    float cov = atlas.Sample(samp, i.uv).a;
     \\    if (i.bg.a < 0.5) {
-    \\        return float4(i.fg.rgb, cov * i.fg.a);
+    \\        return float4(i.fg.rgb, cov * i.fg.a * opacity);
     \\    }
-    \\    return float4(lerp(i.bg.rgb, i.fg.rgb, cov), 1.0);
+    \\    return float4(lerp(i.bg.rgb, i.fg.rgb, cov), opacity);
     \\}
 ;
 
@@ -789,6 +791,13 @@ pub const CellPipeline = struct {
     /// 파이프라인이 하나뿐이라 문제가 없고, 둘이 되는 시점(chrome quad·kitty 이미지)에는 각자가 자기
     /// 상태를 걸어야 한다 — macOS 렌더러도 pass마다 그렇게 한다.
     pub fn draw(self: *CellPipeline, cells: []const Cell, viewport_w: u32, viewport_h: u32) Error!void {
+        return self.drawOpacity(cells, viewport_w, viewport_h, 1000);
+    }
+
+    /// Straight-alpha output: scale final coverage, not RGB, so a partially
+    /// visible cursor composites over the unchanged terminal ink below it.
+    pub fn drawOpacity(self: *CellPipeline, cells: []const Cell, viewport_w: u32, viewport_h: u32, opacity_milli: u32) Error!void {
+        if (opacity_milli == 0) return;
         if (cells.len == 0) return;
         if (viewport_w == 0 or viewport_h == 0) return;
         const count: u32 = @intCast(cells.len);
@@ -816,7 +825,7 @@ pub const CellPipeline = struct {
                 return error.MapFailed;
             }
             const dst: *FrameConstants = @ptrCast(@alignCast(mapped.data.?));
-            dst.* = .{ .viewport_px = .{ @floatFromInt(viewport_w), @floatFromInt(viewport_h) } };
+            dst.* = .{ .viewport_px = .{ @floatFromInt(viewport_w), @floatFromInt(viewport_h) }, .opacity = @as(f32, @floatFromInt(@min(opacity_milli, 1000))) / 1000.0 };
             self.context.vtable.Unmap(self.context, @ptrCast(self.constants), 0);
         }
 
@@ -834,6 +843,7 @@ pub const CellPipeline = struct {
         const srvs = [_]?*d3d11.ID3D11ShaderResourceView{self.atlas_srv};
         const samplers = [_]?*d3d11.ID3D11SamplerState{self.sampler};
         self.context.vtable.PSSetShader(self.context, self.ps, null, 0);
+        self.context.vtable.PSSetConstantBuffers(self.context, 0, 1, &cbs);
         self.context.vtable.PSSetShaderResources(self.context, 0, 1, &srvs);
         self.context.vtable.PSSetSamplers(self.context, 0, 1, &samplers);
 

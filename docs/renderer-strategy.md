@@ -233,3 +233,12 @@ opt-in으로 둘 것:
 ## clean-room 기준
 
 renderer 구현도 reference terminal source를 line-by-line으로 참고하지 않는다. Metal/WebGPU platform 문서, Maru의 독립 설계, 동작 비교 artifact를 근거로 삼는다.
+
+### 네이티브 셀의 부분 사각형
+
+커서 bar·underline·hollow, 텍스트 장식선·거터·divider의 픽셀 변 계산은
+`src/renderer/native_cell_rect.h`가 소유한다. 기존 Metal Objective-C 소비자도
+이 헤더를 사용하며 Windows는 C ABI shim과 Zig adapter로 같은 계산을 적용한 뒤
+클리핑한다. `test-native-cell-rect`와 이전 자체 구현 7,344건 대조가 경계를 확인한다.
+Windows 커서 합성은 장식선을 제외한 suffix와 반전 ink에만 opacity를 적용한다.
+실앱·GPU·교차 검사의 정확한 범위와 잔여 검증은 [Windows 계획](plans/windows-platform.md)을 따른다.

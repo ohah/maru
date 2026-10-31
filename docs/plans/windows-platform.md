@@ -1429,3 +1429,27 @@ macOS Objective-C renderer의 실제 빌드·GPU 실행을 뜻하지 않는다. 
 증거는 `.zig-cache/native-cell-rect-baseline-parity-20261101/result.json`이다.
 실제 OS foreground 전환과 재그리기 실패 복구의 앱 증거, 최종 설치본 갱신 및
 나머지 Windows 기능은 계속 남아 있다.
+
+### 2026-11-01 재그리기 할당 실패 복구와 설치
+
+`d902c3524`의 도크·사이드바 재그리기에 실제 FailingAllocator를 넣어 첫 할당,
+부분 작업 후 할당, 양쪽 동시 실패의 다섯 경우를 실행했다. 실제 유도 실패 표시와
+오류 1~2회·pending 대기를 확인하고, 이후 정확한 배경/도크/사이드바 색과 글자가
+복구되는 것을 확인했다. 도크의 밝은 글자 마스크는 정상과 약 99.9% 겹쳤다.
+재시도를 끊은 결함 앱은 거부됐고 도크 글자 픽셀이 1,199개에서 0개로 줄었다.
+원본 전후 대조는 오류 0으로 통과했다. 컴파일 실패나 앱 충돌을 검출로 세지 않았다.
+증거는 `.zig-cache/theme-recovery-app-20261101/result.json` 및
+`pixel-verification.json`이다. 테스트 삽입 코드는 복원했고 제품 소스가 커밋과
+기존 게이트의 바이트에 일치하는 것을 확인했다. GPU upload 실패는 이 시험의 범위가 아니다.
+
+같은 정상 ReleaseFast 빌드를
+`%LOCALAPPDATA%/Programs/Maru/preview-appearance-d902c3524011/maru.exe`에 설치했다.
+SHA-256은 `80b59ad269282795369a336f99053d93d7cef428e251395f8f622f209d9d49cd`다.
+설치 파일 62개·폰트 18개·고지 36개·ConPTY 쌍을 원본 해시와 대조했고 큰/작은
+내장 아이콘을 추출했다. 바탕화면·시작 메뉴·실제 고정 작업표시줄의 바로가기 세 개는
+새 실행 파일과 icon index 0을 가리킨다. 이전 바로가기 바이트는 백업했다.
+설치 경로의 바이너리 자체도 private HOME/config의 실제 앱 검사에서 색 변경·
+취소·기존/새 reader 값을 통과했다. 사용자용 새 창 PID 31640은 native icon을 가진
+1000×640 창으로 실행해 두었고 기존 사용자 창은 종료하지 않았다.
+증거 묶음은 `.zig-cache/appearance-delivery-binding-20261101.json`이다.
+남은 설정·Windows 기능과 실제 OS foreground 전환·macOS 실행 제한은 계속 남아 있다.

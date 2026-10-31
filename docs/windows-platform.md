@@ -13345,3 +13345,243 @@ gates. Subsequent test-source and shared-header formatting changes normalize CRL
 `.zig-cache/native-wire-post-boundary-format.json` records exact byte equivalence
 under that normalization. Focused tests and documentation checks are rerun after
 formatting. Installation and the remaining Windows feature scope remain separate.
+
+
+### Shared OSC 52 read-response formatter (in progress)
+
+`app.clipboard_response` now owns ST-terminated OSC 52 response encoding with
+RFC-4648 standard base64, checked response-size arithmetic and the terminal
+facade's existing 16 MB clipboard cap. Raw bytes, CR/LF and embedded NUL are
+encoded unchanged. The original macOS method delegates to this owner and uses
+the same cap; this is an extraction of existing policy, not a new OS read gate.
+
+The protocol basis is xterm's
+[Manipulate Selection Data (OSC 52)](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Operating-System-Commands).
+Maru preserves its existing desktop empty-Pc default c; xterm instead defaults
+to s0 for its X11 selection/cut-buffer model. Explicit targets are preserved.
+The existing `osc52.read` default deny and host authorization remain separate.
+
+`zig build test-clipboard-response` runs five semantic tests plus twenty-eight
+aggregation blocks. It checks exact bytes, raw line endings/binary/UTF-8, empty
+data/targets, the exact shared cap, overflow preflight and output OOM ownership.
+Five compiled/runtime faults (default target, terminator, base64 alphabet, exact
+cap rejection and wrapping size calculation) were rejected and restored Debug
+and ReleaseFast controls passed. Windows raw clipboard reading and nonblocking
+response delivery are not yet connected. This does not establish real app or
+macOS runtime validation for the extracted formatter.
+
+
+### Raw Windows clipboard text and bounded HGLOBAL scans (in progress)
+
+`win32_clipboard.readRaw` preserves UTF-8 text line endings for protocol replies.
+The existing `read` API keeps paste's CRLF/LF-to-CR conversion. Both share native
+Open/Get/Lock/Unlock/Close ownership and locate NUL within complete UTF-16 units
+reported by GlobalSize and the existing scan cap; odd trailing padding is not
+read as a partial unit. This also closes the old scan's possibility of reading
+beyond an undersized unterminated memory object. The size basis is Microsoft's
+[GlobalSize contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalsize):
+allocation size is an upper bound, not the text length.
+
+`zig build test-windows-clipboard-raw` includes six semantic tests and twenty-eight
+aggregation blocks: raw/paste newline behavior, Unicode, NUL/padding, storage and
+cap bounds, invalid UTF-16 and allocation failures. A native test allocates its
+own HGLOBAL, fills its entire actual extent without NUL, and checks rejection;
+it then tests raw/paste conversion, invalid surrogate and empty text through
+the same GlobalLock/GlobalSize path. It does not open, replace or clear the user's
+clipboard. Actual OSC52 request handling, nonblocking response queuing, privacy
+and real-app end-to-end tests remain pending.
+
+The raw path rejected five compiled/runtime faults: paste normalization in the
+raw decoder, discarded native extent, ignored scan cap, included NUL and invalid
+UTF-16 substitution. Restored Debug and ReleaseFast controls passed all 34
+aggregated tests. Evidence is `.zig-cache/clipboard-raw-adversarial.json`; the
+shared response formatter evidence is
+`.zig-cache/clipboard-response-final-adversarial.json`. Neither receipt proves
+that the Windows host responds to real OSC52 queries yet.
+
+
+### Private nonblocking protocol-response transport (in progress)
+
+`SurfaceRuntime.writeProtocolResponseNonBlocking` shares stable target lookup,
+process-state checks and backend error mapping with ordinary nonblocking input.
+It suppresses response bytes in runtime input diagnostics and MARU_TRACE, and
+requires an explicit nonblocking backend instead of PtyIo's legacy blocking
+fallback. The ordinary user-input API retains its trace behavior. Both paths
+reject backend counts larger than the supplied slice before tracing or progress
+is exposed. This API implements the existing clipboard trace-privacy policy;
+callers must choose it for sensitive replies. Existing caller queues have not
+yet been migrated, so this does not claim application-wide privacy wiring.
+
+`zig build test-protocol-response-write` passes five semantic tests plus
+twenty-eight aggregation blocks: exact bytes and trace exclusion, partial/stalled
+progress, rejected blocking fallback, invalid backend counts, target liveness,
+authorization errors and preserved user tracing. The initial test assumed an
+empty trace buffer, but TraceRecorder writes a header; it was corrected to compare
+against the initial header length (`.zig-cache/protocol-response-control.log`).
+Five compiled/runtime faults (user classification, blocking fallback, full-count
+reporting, overcount acceptance and exited-target acceptance) were rejected;
+restored Debug and ReleaseFast controls passed 33 tests. Evidence is
+`.zig-cache/protocol-response-adversarial.json`. Owned reply queues, request
+handling, call-site migration and actual application tests remain pending.
+
+
+### Shared local typed input FIFO (in progress)
+
+`app.typed_input_queue.Queue` extracts the macOS local FIFO without changing
+its window ownership or per-surface map. Byte offsets and privacy spans travel
+together through partial writes and structural window transfer. Ordinary input
+gaps remain traceable; protocol spans use the private response API. The original
+macOS append/flush/reset/teardown sites now use this owner, including tab/Term
+close and prepared transfer capture. Both byte and span storage are reserved
+before publication; transfer capture remains allocation-free after preparation.
+The existing 64 KiB payload-retention policy is shared, and metadata is also
+released when large. Remote backend-owned admission remains separate.
+
+Five semantic tests plus twenty-eight aggregation blocks check FIFO/raw protocol
+bytes, ordinary newline conversion, partial/stalled/invalid progress, clipped
+privacy spans during transfer, transactional OOM and reset/reuse. The initial
+metadata-before-reserve fault escaped because the short payload fit existing
+capacity. The test now proves real buffer growth with a 1024-byte payload and
+checks the success metadata count. All five compiled/runtime faults were then
+rejected (lost tags, crossed privacy boundary, lost transfer tags, invalid
+progress, premature metadata), with restored Debug/ReleaseFast 33-test controls.
+Initial evidence is retained in `.zig-cache/typed-input-queue-initial-proof`;
+final evidence is `.zig-cache/typed-input-queue-final-adversarial.json`. macOS
+runtime and Windows request/input-admission wiring are not established here.
+
+### Nonblocking ordered command transport (in progress)
+
+The native reader-backed `PtyIo` now exposes optional `enqueue_command_nb`.
+`CoreCommandQueue.tryEnqueueAfterInput` retains the existing byte fence and
+inline command ownership, returns false on saturation without waiting, and
+rejects a closed queue. The caller retains an unaccepted command for a later
+UI tick. Successful admission wakes the reader; rejected admission does not.
+Existing blocking callers retain their previous contract. This is transport
+preparation; application integration is verified separately in the Windows
+OSC 52 app-loop section below.
+
+`zig build test-command-admission` runs five semantic cases and twenty-eight
+aggregation blocks: exact command/fence values, full-queue rejection without
+replacement, retry after consumption, closed-queue rejection, and input-fence
+ordering. Fault controls and restored results are kept locally in
+`.zig-cache/command-admission-adversarial.json`. All five compiled/runtime
+faults were rejected: falsely accepting a full queue, allowing one extra entry,
+losing the byte fence, replacing the command value, and accepting after close.
+Restored Debug and ReleaseFast controls each passed all 33 tests. These queue
+tests do not prove application-level clipboard round trips or UI responsiveness
+under PTY load.
+
+### Ordered UI admission owner (in progress)
+
+`app.input_dispatcher.Dispatcher` owns raw input bytes and inline core commands
+per stable Surface ID. Commands retain byte barriers inside the shared typed
+FIFO. Each flush submits at most one byte chunk per Surface and at most 64
+control operations, so partial replies and saturated command queues retain
+their suffixes for later flushes. Windows invokes it twice per app iteration,
+before pump handling and after OSC 52 drain, for at most two chunks per Surface
+per iteration. Detach drops the target's pending owners. Physical
+flush bypasses admission and records ordinary input only; private protocol
+bytes retain their trace exclusion. The existing macOS permanent-error discard
+policy now delegates to the shared typed-queue helper.
+
+`zig build test-input-dispatcher` checks public admission versus physical
+acceptance, command barriers, partial and stalled writes, command backpressure,
+detach/stale targets, trace privacy, duplicate installation and allocation
+failure cleanup. These tests use a controlled nonblocking backend. Application
+loop installation, native reader response framing and Windows OSC 52 round
+trips are verified separately below; this controlled backend gate alone does
+not establish those behaviors. The optional admission
+callback is process-local and reconstructed by a UI host; session-host runtimes
+leave it null rather than serializing borrowed pointers across exec.
+
+Five compiled/runtime dispatcher faults were rejected: losing protocol privacy,
+losing command barriers, advancing past a partial write, ignoring command
+backpressure, and retaining a detached target. Restored Debug and ReleaseFast
+controls each passed all 33 tests. Local evidence is
+`.zig-cache/input-dispatcher-adversarial.json`. The first compile control exposed
+an opaque-pointer comparison error, fixed before the normal and mutation runs;
+that compiler failure is not counted as an adversarial runtime rejection.
+
+### Windows OSC 52 app-loop integration (verification in progress)
+
+The Windows app installs the stable ordered admission owner before spawning
+sessions and flushes it around each frame's pump/request handling. OSC 52
+requests are drained for every session, including background surfaces. The
+host snapshots Pc and the originating Surface ID under the core lock, reads
+raw UTF-8 outside that lock only for `osc52.read=allow`, formats the shared ST
+reply and admits it through the private FIFO. Denied reads never access the OS
+clipboard. Missing text produces an empty reply; native read/encoding/admission
+errors are counted separately without logging clipboard bytes. The existing
+`osc52_reads_unanswered_allow` diagnostic now counts read failures;
+`osc52_read_responses_queued` reports host ownership, not physical delivery.
+
+The reader-backed queue reserves a protocol frame's complete byte interval
+while copying only available queue capacity. Ordinary suffix bytes cannot
+enter an incomplete frame; another frame waits until the previous frame has
+been consumed. Reader-generated replies retain priority at the frame's start,
+then wait once any frame byte has been consumed. Partial/zero writes retain the
+reservation. Quiesce also requires the reserved frame to be completely consumed.
+Legacy producers keep their existing transport until they install an ordered
+owner; the dedicated framed callback is selected by ordered private flush.
+
+`zig build test-protocol-frame-queue test-protocol-response-write` passed
+33 tests per gate in restored Debug and ReleaseFast controls. Five compiled
+runtime faults were rejected: holding a reply at the start boundary, failing to
+hold mid-frame, allowing an ordinary suffix into an incomplete frame, replacing
+an active frame, and publishing a reservation before allocation succeeds.
+Evidence: `.zig-cache/protocol-frame-adversarial.json`.
+
+A separate private Windows build ran ten actual app cases: deny plus allowed
+c/empty/p/s0 targets with an empty clipboard, and the same policy/target matrix
+with a generated raw UTF-8 fixture. The large replies were 700009/700010 bytes,
+exceeding the 256 KiB transport queue. The child issued DSR after receiving its
+first bytes and verified the complete OSC reply hash followed by CPR. However,
+an actual reader-priority fault later escaped that fixture (also with an OSC 10
+query and a larger payload). These initial cases prove round-trip contents and
+policy only; they are excluded from evidence of reader interleaving protection. Every private
+app exited normally. The original empty clipboard was restored after verifying
+the exact generated text and unchanged observed sequence; no existing clipboard
+content was replaced. Local evidence: `.zig-cache/osc52-live-latest.json`,
+`.zig-cache/osc52-large-live-latest.json`, and
+`.zig-cache/osc52-large-clipboard-restoration.json`.
+
+These cases do not prove physical keyboard/IME input, background-session query
+routing, observer/revocation transitions or all remaining Windows support.
+Checked-in E2E tooling is now `tools/windows/check-osc52-read.py` with the
+private `osc52_read_child.py`; commands are in the development guide. Its large
+fixture uses 7000009/7000010-byte replies and independent owned-window resizes
+with DECSET 2048 reports. Final boundary/digest checks and final app-level fault
+controls remain before committing/installing this phase. The installed
+native preview and the user's running app have not been replaced.
+
+The strengthened app fixture passed all five normal cases before and after
+five runtime fault controls. It rejected policy bypass, raw newline conversion,
+Pc loss, reader reply-priority corruption and wrong originating Surface ID.
+The first four immutable compiled fault executables were replayed with the
+stronger checked-in tool; the wrong-Surface executable was built separately.
+Each rejected case still had a healthy console child, normal app exit and
+verified clipboard restoration. The reader-priority fault changed the received
+frame length/hash under independent window resizing. Its earlier DSR/OSC 10
+escapes are preserved in `.zig-cache/osc52-integration-adversarial` and the
+color-query probes, and are not counted as successful negative controls.
+Final evidence is `.zig-cache/osc52-integration-final-adversarial/result.json`,
+which binds tool hashes, original/restored source hashes and actual binary
+hashes. No clipboard payload is recorded.
+
+Adding the optional callback and protocol interval exposed a compile-time
+inventory budget failure on the macOS target. Stale-field detection now uses
+Zig `@hasField` instead of repeatedly scanning the entire type for every field;
+classification/duplicate checks remain exhaustive and the budget is unchanged.
+A moved `attachSurface` documentation line reference was also corrected by
+retaining the function/file name without a fragile line coordinate. Final
+cross-target and boundary gates still have to establish this combined tree.
+
+The first combined boundary run found two lookups each for source/destination
+queues in prepared macOS paste transfer: payload and privacy reservations had
+been added separately. Preparation now snapshots each optional queue once and
+uses it for both reservations; the existing CR2d4 boundary remains unchanged
+and passes. `test-input-queue-regression` additionally executes thirteen existing
+FIFO/backpressure/close/fence tests (plus twenty-eight aggregation blocks),
+covering legacy producers that do not opt into protocol framing. macOS runtime
+execution remains unavailable on this Windows host; its source boundary and
+cross-target compilation are distinct from an actual macOS app run.

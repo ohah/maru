@@ -5896,3 +5896,13 @@ Windows 전용, POSIX 전용, 무조건 절대/상대 판정의 다섯 변이를
   컴파일 후 런타임 기대값 또는 추적 allocator의 실제 leak 실패로 검출한다. 복원 Debug/ReleaseFast는 각각 7개다.
 - 실제 GPU API 생성/upload/draw를 호출하는 수명 검사이며 GPU 픽셀 readback이나 라이브 폰트 게시 증거가
   아니다. 실제 앱 캡처/입력 회귀는 별도로 확인하고, cached draw list와 core/PTY 격자의 교체는 후속이다.
+
+### Windows OSC 52 읽기와 순서 보존
+
+- `test-clipboard-response`, `test-windows-clipboard-raw`, `test-typed-input-queue`, `test-command-admission`, `test-input-dispatcher`, `test-protocol-response-write`, `test-protocol-frame-queue`: raw 인코딩·cap·할당 실패·typed privacy·부분 전송·명령 byte barrier·대상 폐기·프레임 예약을 검사한다. native clipboard gate는 실제 private HGLOBAL을 검사하며 사용자 클립보드를 쓰지 않는다.
+- [실앱 명령](development-commands.md#windows-osc-52-읽기-실앱-검증)의 `tools/windows/check-osc52-read.py`는 기본 거부와 c/빈 Pc/p/s0 허용의 5개 사례를 실제 ConPTY 앱에서 실행한다. `--large`의 7000009/7000010바이트 응답은 256 KiB 큐를 넘는다. 소유한 창을 반복 resize해 자식 출력과 독립적인 in-band resize 통지를 만들고, 전체 OSC 응답 뒤에 도착하는지 검사한다. 초기 DSR 방식은 리더 순서 결함을 놓쳐 이 판정에서 제외했다.
+- 기본 검사는 클립보드를 읽기만 한다. 큰 검사는 비어 있는 클립보드에만 생성 fixture를 설치하고, 정확한 데이터·sequence·텍스트 형식을 확인해 원래의 빈 상태로 복구한다. 외부 변경은 보존하고 실패한다. 전용 프로필·자식·창만 사용하며 다른 앱을 종료하지 않는다.
+- 거부 정책, raw 줄바꿈, 요청 Pc, 리더의 응답 우선순위, 원래 Surface 라우팅의 앱 수준 결함은 별도 실행 파일과 실제 앱 결과로 판정한다. 컴파일·클립보드 준비·테스트 I/O 실패를 기능 결함 검출로 세지 않는다.
+- 단일 세션 왕복과 프로토콜 순서의 증거다. 배경 세션 질의, 물리 입력·IME, 원격 observer 권한 전환과 Windows 전체 기능 완료를 뜻하지 않는다.
+
+- `test-input-queue-regression`: 기존 PTY/명령 FIFO 13개와 집계 블록 28개를 실행해 blocking backpressure·부분 consume·포화 후 재개·닫힘 대기 해제·입력 fence를 함께 검사한다. 새 protocol 예약을 사용하지 않는 기존 생산자 계약의 회귀 검사다.

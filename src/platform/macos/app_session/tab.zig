@@ -652,7 +652,7 @@ pub fn clearStaleUiTargetsForMovedTab(self: *AppSession, tab: *Tab, clear_pendin
             if (clear_pending_pastes) {
                 if (self.pending_pastes.fetchRemove(term.surface.id)) |kv| {
                     var q = kv.value;
-                    q.buf.deinit(self.allocator);
+                    q.deinit(self.allocator);
                 }
             }
         }

@@ -807,7 +807,7 @@ Windows 설정 연결 검증: `test-windows-settings`는 값 검증과 사이드
 
 | 영역 | 현재 연결 | 남은 적용 경로 |
 | --- | --- | --- |
-| 붙여넣기 보호·bracketed-safe·option-as-meta·우클릭·단어 구분·OSC52 read | `settings_host.changed`에서 입력 정책과 clipboard host 갱신 | 최종 실제 앱 회귀; OSC52 read 요청의 미구현 처리와 구분 |
+| 붙여넣기 보호·bracketed-safe·option-as-meta·우클릭·단어 구분·OSC52 read | `settings_host.changed`에서 입력 정책과 clipboard host 갱신 | 설정 전체의 최종 실제 앱 회귀는 별도; OSC52 read는 기본 거부·허용 응답과 원래 Surface 라우팅의 실앱 결함 5개 검증 완료 |
 | 폰트·셀 격자 | family/fallback/size·행간·자간·family-bold/italic의 font/atlas/chrome/editor 준비 후 게시, resize 자동 재시도와 복구 메시지 소유권 | ligatures, 외부 reload/전체 설정 연계 |
 | 테마·커서·ANSI 팔레트 | 시작 시 appearance, chrome tokens, cell colors와 clear color 생성 | core queue와 chrome/editor paint 캐시를 함께 갱신 |
 | scrollback·문자 폭 | 새 세션의 초기 core config에 포함 | 기존 세션의 reader 소유 queue에 전달하고 다음 spawn의 오래된 snapshot 제거 |

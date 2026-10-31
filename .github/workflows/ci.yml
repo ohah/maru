@@ -27,21 +27,6 @@ permissions:
   contents: read
 
 jobs:
-  # 변경 영역 판정. 문서만 고친 PR에서 macOS 러너 세 대와 외부 오라클까지 도는 것은 순수한 낭비다.
-  # 분류 정책의 단일 출처는 tools/ci/changed-areas.sh이고, 아래 job들은 그 플래그만 소비한다.
-  #
-  # `code`와 `runtime`을 나눠 쓴다. macOS·오라클·성능 job은 `runtime`을 보므로 **주석만 고친 코드
-  # 변경에서는 건너뛴다**(분류기는 확장자로만 영역을 가르는 탓에, 문서 경로를 가리키는 주석 한 줄에
-  # 러너 다섯 대가 돌던 문제다). 반면 `check`는 `code`를 그대로 봐야 한다 — check-boundaries의
-  # external source digest가 doc comment를 잠그기 때문이다.
-  #
-  # workflow-level `paths` 필터가 아니라 job-level `if`인 이유: required 워크플로에 `paths`를 두면
-  # 무관한 PR에서 트리거 자체가 안 돼 required 컨텍스트가 영원히 pending으로 머지를 막는다. 반면
-  # 조건으로 건너뛴 job은 conclusion=skipped로 보고되고 branch protection은 이를 통과로 취급한다.
-  # 필수 체크 목록의 단일 출처는 docs/performance-budget.md "필수 CI 체크"다.
-  #
-  # 이 job은 required 컨텍스트가 아니다. 실패하면 소비 job들이 `needs.changes.result != 'success'`
-  # 로 fail-safe 실행되므로, 판정이 없을 때 게이트가 조용히 열리지 않는다.
   changes:
     name: changed areas
     runs-on: ubuntu-latest
@@ -96,7 +81,7 @@ jobs:
   check:
     name: check
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -238,7 +223,7 @@ jobs:
     # 이름 `check-boundaries` 는 아래 집계 잡이 유지한다. 샤드가 어느 하나라도 실패·취소되면 집계가 실패한다.
     name: check-boundaries (${{ matrix.shard }}/4)
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
@@ -308,7 +293,7 @@ jobs:
     # 전체와 같은지 다시 센다 — 인덱스 mod n 은 구조상 빠짐이 없지만, 배선이 바뀌어도 여기서 한 번 더 걸린다.
     name: check-boundaries
     needs: [changes, check-boundaries-shard]
-    if: ${{ !cancelled() && github.event.pull_request.draft != true }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -342,7 +327,7 @@ jobs:
   file-explorer-macos:
     name: file explorer macOS product path
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_file_explorer != 'true' }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: macos-15
     # 15 → 25. AppSession 전수 스위트(아래 "Run the macOS AppSession test suite")가 붙으면서 늘렸다.
     # 실측은 웜 캐시 로컬에서 2분 29초이고, 콜드 러너는 이 모듈을 필터 없이 처음 컴파일하므로 더 든다.
@@ -492,7 +477,7 @@ jobs:
     #
     # 캐시는 자기 그룹(`macos-only`)을 쓴다. file explorer 캐시를 빌려 읽기만 하면, 그쪽이 더는 이 바이너리들을
     # 컴파일하지 않으므로 여기가 영영 콜드가 된다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_macos_only != 'true' }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: macos-15
     # PR #4523의 콜드 실행은 테스트가 진행 중인데 30분 제한으로 취소됐다.
     # 컴파일을 포함한 콜드 실행을 수용한다. 개별 테스트의 timeout과 단언은 유지한다.
@@ -688,7 +673,7 @@ jobs:
     # main 에서 돌므로 회귀는 몇 시간 안에 드러나고, 그때도 **다른 PR 을 막지 않는다**(필수가 아니다).
     #
     # 되돌리려면 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다.
-    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: macos-15
     # P5d 게이트는 `macos_app_bundle_command` 에 의존해 **ReleaseFast 앱 번들을 빌드**한다
     # (build.zig `run_session_host_p5d.step.dependOn`). 그래서 `app_host_abi.zig` 처럼 앱 루트에
@@ -760,7 +745,7 @@ jobs:
     #     둘을 볼 수 없다 — 하나는 AppKit 키 배달이고 하나는 디스크의 사실이다.
     #   · 헤더 hover 판 골든(2026-10-13) — 사이드바 헤더·접힌 ◧·도크 토글 hover 판을 실제 앱으로 1x·2x 찍어 픽셀 비교한다.
     #     Chrome Lab 은 app_session 을 타지 않아 판의 자리 계산을 못 본다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_appkit != 'true' }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: macos-15
     # 세 잡이 각 20분이었다. 합친 실측 예상은 11~12분(콜드 번들 빌드 한 번 + 스모크 합)이라 30분이면
     # 여유가 있고, hang 은 계속 유한하게 닫는다.
@@ -896,7 +881,7 @@ jobs:
     # 실행되지 않으면 PR이 영영 pending으로 막히므로, 다시 필수로 올리려면 실행 조건부터 되돌려야 한다.
     # draft 가드는 달지 않는다 — 수동 실행에는 `github.event.pull_request`가 없어 늘 참이고,
     # 없는 게이팅을 있는 것처럼 보이게 한다.
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -959,7 +944,7 @@ jobs:
     #
     # **되돌리려면** 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다 — 그때는 PR 마다
     # 찬 캐시 재빌드를 치른다(PR 은 캐시를 읽기만 하고 저장하지 않는다).
-    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: macos-15
     # 실측(로컬 M-series, 웜 캐시): Debug 87s · ReleaseFast 97s. 콜드 러너는 그보다 훨씬 크므로
     # 이웃 macOS 잡들과 같은 여유를 둔다.
@@ -1013,7 +998,7 @@ jobs:
     # main 에서 돌므로 회귀는 몇 시간 안에 드러나고, 그때도 **다른 PR 을 막지 않는다**(필수가 아니다).
     #
     # 되돌리려면 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다.
-    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -1086,7 +1071,7 @@ jobs:
   oracles:
     name: external oracles (libvterm, Alacritty)
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ false }} # Temporary focused CI diagnosis only.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

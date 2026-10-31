@@ -6752,6 +6752,16 @@ pub fn build(b: *std.Build) void {
         run_feature_stop.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_feature_stop.step);
     }
+    const completion_focus_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPFOCUS"} });
+    const run_completion_focus = b.addRunArtifact(completion_focus_tests);
+    run_completion_focus.setCwd(b.path("."));
+    run_completion_focus.addArg("--maru-expect-tests=9");
+    run_completion_focus.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-completion-focused-source", "Verify active completion command and key ownership across focus changes").dependOn(&run_completion_focus.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_completion_focus.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_completion_focus.step);
+    }
     const completion_switch_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPSWITCH"} });
     const run_completion_switch = b.addRunArtifact(completion_switch_tests);
     run_completion_switch.setCwd(b.path("."));
@@ -6797,7 +6807,7 @@ pub fn build(b: *std.Build) void {
     const completion_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CMP", ".test.RLC1 " } });
     const run_completion = b.addRunArtifact(completion_tests);
     run_completion.setCwd(b.path("."));
-    run_completion.addArg("--maru-expect-tests=32");
+    run_completion.addArg("--maru-expect-tests=37");
     run_completion.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-completion", "Run editor completion product regressions").dependOn(&run_completion.step);
     const save_conflict_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.C0a", ".test.C1a-", ".test.C1b-" } });

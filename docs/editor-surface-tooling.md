@@ -832,6 +832,12 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 L2 `completion_ops.requestDisposition`, 취소·전송과 실제 surface 조회는 host가 소유한다.
 예전 원본의 늦은 결과는 기존 seq/클라이언트 검사로 버린다.
 
+표시 중인 목록도 명령·키를 소비하기 전에 현재 활성 surface와 원본을 대조한다.
+다르면 triggerManual은 이전 cancel 뒤 현재 원본의 요청을 계속하고 handleKey는 cancel 후
+false를 돌려 현재 편집기가 Enter/Tab 등을 처리하게 한다. L2 sourceMatches가 동일성
+판정을 소유하며 같은 원본의 문서 패널 토글과 확정은 그대로다. 다음 frame이 먼저
+목록을 숨겨 주리라고 가정하지 않는다.
+
 같은 원본의 상세 정보 요청(resolve)도 주 서버 종료 시 대기를 해제한다. 미리 읽기 항목은
 미해결 상태를 유지해 다음 Enter에서 재요청하며, 이미 Enter로 확정을 기다리던 항목은
 기존 cancel로 입력·이력을 바꾸지 않고 취소한다. 서버 종료나 재시작은 import 없는 부분

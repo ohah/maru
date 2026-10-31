@@ -206,6 +206,9 @@ pub fn triggerManual(self: *AppSession) bool {
     if (term.rt.editor_selection == null) return false;
     // 목록이 보이고 강조 항목이 있으면 같은 키가 문서 패널을 토글한다(§8.2g-d — VS Code 의 `⌃Space` 와 같다).
     const st = &self.editor_completion;
+    // A list can outlive focus until the next frame. A command in another view
+    // must request that view's items, not toggle the old view's docs panel.
+    if (st.active and !completion_ops.sourceMatches(st.surface_id, term.surfaceId())) cancel(self);
     if (st.active and self.chrome_host.suggest_box.open and st.order.items.len > 0) {
         self.chrome_host.suggest_docs.toggle();
         st.docs_toggles += 1;
@@ -742,6 +745,10 @@ pub fn rows(self: *AppSession) []const suggest_box.Row {
 pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.terminal.input.ModifierSet) bool {
     const st = &self.editor_completion;
     if (!st.active) return false;
+    if (!completion_ops.sourceMatches(st.surface_id, pane_ops.activePane(self).activeTerm().surfaceId())) {
+        cancel(self);
+        return false; // The focused editor still owns this key, including Enter/Tab.
+    }
     if (mods.command or mods.control or mods.option) {
         // `trigger_suggest` 로 풀리는 chord(`⌃Space`·`⌥Esc`)는 **닫지 않는다** — 목록이 열린 채 흘러가 `triggerManual` 이 문서 패널을
         // 토글한다(§8.2g-d). 다른 수정자 chord 는 그대로 닫는다(§8.2g ⑻b).

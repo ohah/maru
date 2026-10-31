@@ -16,11 +16,16 @@ const Span = completion.Span;
 
 pub const RequestDisposition = enum { send, coalesce, replace };
 
+/// A completion transaction can consume commands and keys only from its source.
+pub fn sourceMatches(owner_surface: u64, current_surface: u64) bool {
+    return owner_surface == current_surface;
+}
+
 /// A session has one completion wait. Only another trigger from that same view
 /// can share it; a different view must get its own request immediately.
 pub fn requestDisposition(waiting: bool, waiting_surface: u64, current_surface: u64) RequestDisposition {
     if (!waiting) return .send;
-    return if (waiting_surface == current_surface) .coalesce else .replace;
+    return if (sourceMatches(waiting_surface, current_surface)) .coalesce else .replace;
 }
 
 /// Pending Enter requires every additional edit; ordinary preview-era acceptance

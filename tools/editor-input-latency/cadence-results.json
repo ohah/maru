@@ -1,0 +1,417 @@
+{
+  "schema": 1,
+  "complete": true,
+  "method": "requested timer cadence; fixed-order diagnostic, three processes per mode",
+  "analyzers": {
+    "cadence.py": "442b20be955822aa589aa89ce19a98805dfde89d03a5c3a32f5357f83d44ca5c",
+    "stages.py": "1b432d4214960d62e93f1e9b6b889507e7e8905978f10ca8b08f4cbf2b6e0327",
+    "verify.py": "54b16b217c5b88f7f2de9b4a6e34f42e690605003152aacf6c473748d1558704"
+  },
+  "variants": [
+    {
+      "requested_frame_rate_hz": 60,
+      "head": "f590311451e7623c69230c3eb51529ee87292e06",
+      "app_sha256": "c5f94f83702f791854589e431a8f2804178994b989fe42a9b72255806ab6aa97",
+      "host": {
+        "macos": "26.5.1",
+        "logical_cpus": 16
+      },
+      "load_1m_range": [
+        30.62841796875,
+        33.40869140625
+      ],
+      "manifest_sha256": "7ab2c09e3c171647bf129176aade51355486d13ebe3c9325c8985c4fe6e254f5",
+      "groups": {
+        "sync": {
+          "per_process": [
+            {
+              "run": "50000-typing-0-sync",
+              "post_to_native_ms": 0.698292,
+              "native_to_first_ms": 78.486708,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 79.185,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-1-sync",
+              "post_to_native_ms": 1.754083,
+              "native_to_first_ms": 79.75475,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 81.508833,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-2-sync",
+              "post_to_native_ms": 0.829167,
+              "native_to_first_ms": 65.031958,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 65.861125,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            }
+          ],
+          "median": {
+            "post_to_native_ms": 0.829167,
+            "native_to_first_ms": 78.486708,
+            "first_to_syntax_ms": 0.0,
+            "syntax_to_full_ms": 0.0,
+            "post_to_full_ms": 79.185
+          },
+          "syntax_to_full_generations": [
+            0,
+            0,
+            0
+          ],
+          "gap_samples": 0,
+          "syntax_observed_in_gap": 0,
+          "full_observed_in_gap": 0,
+          "median_process_post_spacing_ms": null
+        },
+        "async": {
+          "per_process": [
+            {
+              "run": "50000-typing-0-async",
+              "post_to_native_ms": 0.608542,
+              "native_to_first_ms": 30.162583,
+              "first_to_syntax_ms": 226.749958,
+              "syntax_to_full_ms": 466.838,
+              "post_to_full_ms": 724.359083,
+              "syntax_to_full_generations": 28,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-1-async",
+              "post_to_native_ms": 3.542,
+              "native_to_first_ms": 32.456583,
+              "first_to_syntax_ms": 213.411708,
+              "syntax_to_full_ms": 506.852792,
+              "post_to_full_ms": 756.263083,
+              "syntax_to_full_generations": 30,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-2-async",
+              "post_to_native_ms": 1.33275,
+              "native_to_first_ms": 32.893875,
+              "first_to_syntax_ms": 213.411709,
+              "syntax_to_full_ms": 546.867291,
+              "post_to_full_ms": 794.505625,
+              "syntax_to_full_generations": 32,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            }
+          ],
+          "median": {
+            "post_to_native_ms": 1.33275,
+            "native_to_first_ms": 32.456583,
+            "first_to_syntax_ms": 213.411709,
+            "syntax_to_full_ms": 506.852792,
+            "post_to_full_ms": 756.263083
+          },
+          "syntax_to_full_generations": [
+            28,
+            30,
+            32
+          ],
+          "gap_samples": 0,
+          "syntax_observed_in_gap": 0,
+          "full_observed_in_gap": 0,
+          "median_process_post_spacing_ms": null
+        }
+      },
+      "runner_sha256": "3edec8c4be934548d51bbaab4a8c458ac8507896b6f73b12025073758d977f15"
+    },
+    {
+      "requested_frame_rate_hz": 30,
+      "head": "f590311451e7623c69230c3eb51529ee87292e06",
+      "app_sha256": "c5f94f83702f791854589e431a8f2804178994b989fe42a9b72255806ab6aa97",
+      "host": {
+        "macos": "26.5.1",
+        "logical_cpus": 16
+      },
+      "load_1m_range": [
+        27.3974609375,
+        30.62841796875
+      ],
+      "manifest_sha256": "822779fd496e9e3ff0b2b3ab5da649c274878f9dfde798fecafd919f288b8df0",
+      "groups": {
+        "sync": {
+          "per_process": [
+            {
+              "run": "50000-typing-0-sync",
+              "post_to_native_ms": 4.975375,
+              "native_to_first_ms": 113.060542,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 118.035917,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-1-sync",
+              "post_to_native_ms": 0.682166,
+              "native_to_first_ms": 78.576084,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 79.25825,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-2-sync",
+              "post_to_native_ms": 1.838875,
+              "native_to_first_ms": 74.7005,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 76.539375,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            }
+          ],
+          "median": {
+            "post_to_native_ms": 1.838875,
+            "native_to_first_ms": 78.576084,
+            "first_to_syntax_ms": 0.0,
+            "syntax_to_full_ms": 0.0,
+            "post_to_full_ms": 79.25825
+          },
+          "syntax_to_full_generations": [
+            0,
+            0,
+            0
+          ],
+          "gap_samples": 0,
+          "syntax_observed_in_gap": 0,
+          "full_observed_in_gap": 0,
+          "median_process_post_spacing_ms": null
+        },
+        "async": {
+          "per_process": [
+            {
+              "run": "50000-typing-0-async",
+              "post_to_native_ms": 0.628958,
+              "native_to_first_ms": 46.118083,
+              "first_to_syntax_ms": 186.735167,
+              "syntax_to_full_ms": 947.014375,
+              "post_to_full_ms": 1180.496583,
+              "syntax_to_full_generations": 29,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-1-async",
+              "post_to_native_ms": 0.620083,
+              "native_to_first_ms": 46.493959,
+              "first_to_syntax_ms": 200.0735,
+              "syntax_to_full_ms": 947.014333,
+              "post_to_full_ms": 1194.201875,
+              "syntax_to_full_generations": 29,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-2-async",
+              "post_to_native_ms": 1.068792,
+              "native_to_first_ms": 48.82425,
+              "first_to_syntax_ms": 213.411667,
+              "syntax_to_full_ms": 987.029,
+              "post_to_full_ms": 1250.333709,
+              "syntax_to_full_generations": 30,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            }
+          ],
+          "median": {
+            "post_to_native_ms": 0.628958,
+            "native_to_first_ms": 46.493959,
+            "first_to_syntax_ms": 200.0735,
+            "syntax_to_full_ms": 947.014375,
+            "post_to_full_ms": 1194.201875
+          },
+          "syntax_to_full_generations": [
+            29,
+            29,
+            30
+          ],
+          "gap_samples": 0,
+          "syntax_observed_in_gap": 0,
+          "full_observed_in_gap": 0,
+          "median_process_post_spacing_ms": null
+        }
+      },
+      "runner_sha256": "815befee3f971b59bd0330a7fb71114560a8a4ec8f4c6492e5cabfc5341ddb97"
+    },
+    {
+      "requested_frame_rate_hz": 120,
+      "head": "f590311451e7623c69230c3eb51529ee87292e06",
+      "app_sha256": "c5f94f83702f791854589e431a8f2804178994b989fe42a9b72255806ab6aa97",
+      "host": {
+        "macos": "26.5.1",
+        "logical_cpus": 16
+      },
+      "load_1m_range": [
+        27.60546875,
+        29.318359375
+      ],
+      "manifest_sha256": "39aeaed22dfb4fbcab7d71298e24b3fb3d02d25a8c25e3dba4d3a1b7fe4aae0e",
+      "groups": {
+        "sync": {
+          "per_process": [
+            {
+              "run": "50000-typing-0-sync",
+              "post_to_native_ms": 0.787,
+              "native_to_first_ms": 79.374042,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 80.161042,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-1-sync",
+              "post_to_native_ms": 0.734834,
+              "native_to_first_ms": 79.962208,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 80.697042,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-2-sync",
+              "post_to_native_ms": 0.68175,
+              "native_to_first_ms": 82.32025,
+              "first_to_syntax_ms": 0.0,
+              "syntax_to_full_ms": 0.0,
+              "post_to_full_ms": 83.002,
+              "syntax_to_full_generations": 0,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            }
+          ],
+          "median": {
+            "post_to_native_ms": 0.734834,
+            "native_to_first_ms": 79.962208,
+            "first_to_syntax_ms": 0.0,
+            "syntax_to_full_ms": 0.0,
+            "post_to_full_ms": 80.697042
+          },
+          "syntax_to_full_generations": [
+            0,
+            0,
+            0
+          ],
+          "gap_samples": 0,
+          "syntax_observed_in_gap": 0,
+          "full_observed_in_gap": 0,
+          "median_process_post_spacing_ms": null
+        },
+        "async": {
+          "per_process": [
+            {
+              "run": "50000-typing-0-async",
+              "post_to_native_ms": 0.655083,
+              "native_to_first_ms": 42.608542,
+              "first_to_syntax_ms": 186.735208,
+              "syntax_to_full_ms": 373.470584,
+              "post_to_full_ms": 603.469417,
+              "syntax_to_full_generations": 28,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-1-async",
+              "post_to_native_ms": 0.653042,
+              "native_to_first_ms": 29.224791,
+              "first_to_syntax_ms": 200.073417,
+              "syntax_to_full_ms": 373.470458,
+              "post_to_full_ms": 603.421708,
+              "syntax_to_full_generations": 28,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            },
+            {
+              "run": "50000-typing-2-async",
+              "post_to_native_ms": 7.025375,
+              "native_to_first_ms": 42.431291,
+              "first_to_syntax_ms": 200.073459,
+              "syntax_to_full_ms": 386.808625,
+              "post_to_full_ms": 636.33875,
+              "syntax_to_full_generations": 29,
+              "gap_samples": 0,
+              "syntax_observed_in_gap": 0,
+              "full_observed_in_gap": 0,
+              "post_spacing_ms": null
+            }
+          ],
+          "median": {
+            "post_to_native_ms": 0.655083,
+            "native_to_first_ms": 42.431291,
+            "first_to_syntax_ms": 200.073417,
+            "syntax_to_full_ms": 373.470584,
+            "post_to_full_ms": 603.469417
+          },
+          "syntax_to_full_generations": [
+            28,
+            28,
+            29
+          ],
+          "gap_samples": 0,
+          "syntax_observed_in_gap": 0,
+          "full_observed_in_gap": 0,
+          "median_process_post_spacing_ms": null
+        }
+      },
+      "runner_sha256": "7e5bf4b163c5fa0a027299d157c8d65ad46068bf1329e22802c32495e4d01ec5"
+    }
+  ]
+}

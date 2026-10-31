@@ -1,0 +1,1086 @@
+{
+  "schema": 1,
+  "method": "last-input display envelopes; CPU attribution unavailable",
+  "analyzers": {
+    "stages.py": "1b432d4214960d62e93f1e9b6b889507e7e8905978f10ca8b08f4cbf2b6e0327",
+    "verify.py": "54b16b217c5b88f7f2de9b4a6e34f42e690605003152aacf6c473748d1558704",
+    "compare.py": "f4d29f18dbc99b8da8cd5d71aeef25faed7573a1a86aa9b40af3f3b0faf3fe13"
+  },
+  "source": {
+    "head": "f590311451e7623c69230c3eb51529ee87292e06",
+    "app_sha256": "c5f94f83702f791854589e431a8f2804178994b989fe42a9b72255806ab6aa97",
+    "host": {
+      "logical_cpus": 16,
+      "macos": "26.5.1"
+    },
+    "events": 30,
+    "repetitions": 3,
+    "evidence": [
+      {
+        "case": "3000-ime",
+        "manifest_sha256": "4c52f2d15605bfdccec9c6e68e7d6ad0150416a50f4da7c16def9d1fd4015d69",
+        "runs": [
+          {
+            "path": "3000-ime-0-sync",
+            "result_sha256": "2eeee9354188dd9708d9753e254a537ce2c126fad9f810e3555f8609df44fa1c"
+          },
+          {
+            "path": "3000-ime-0-async",
+            "result_sha256": "1c84a1419935f7e1f85f8da7ba6805664df9844ccb3dfaab781b979a35a2692a"
+          },
+          {
+            "path": "3000-ime-1-async",
+            "result_sha256": "3becda52c3f43780fc4607fc6695a6afceb389b9bc209607904035a0c7828916"
+          },
+          {
+            "path": "3000-ime-1-sync",
+            "result_sha256": "967332766dba8afed2478ef3eac417349bc06559b0a655caef12e7d0fac7463e"
+          },
+          {
+            "path": "3000-ime-2-sync",
+            "result_sha256": "fc782ffe8c8631f5a76e2dd59befa5cc94aa2a1c6e3488e83bf68f799439aaa5"
+          },
+          {
+            "path": "3000-ime-2-async",
+            "result_sha256": "a9d6d12529df00436bc6a1e019ac811a0aae76a034ad8c5c19a60488780f2c97"
+          }
+        ]
+      },
+      {
+        "case": "3000-shared",
+        "manifest_sha256": "697f234fbeb98a9ba03ac3919036198cec4ccb250b802159747bc7910fb7cd29",
+        "runs": [
+          {
+            "path": "3000-shared-0-sync",
+            "result_sha256": "81cc5aaacc9b24e27f00fbcf4d3cfb6972d09e94452054b33f8618c55b411dc4"
+          },
+          {
+            "path": "3000-shared-0-async",
+            "result_sha256": "a66ad2d10d3eeec2cd9fa4f82ddaf1057b5769ce3a8e8a57f4bc37b911497364"
+          },
+          {
+            "path": "3000-shared-1-async",
+            "result_sha256": "069c936298adf7ba74e60469fc347169db68e0112855e657810ec57798bd4ae9"
+          },
+          {
+            "path": "3000-shared-1-sync",
+            "result_sha256": "89f75a77fef8c1ff8bb970b58e8fae7e57656fbdd2c35c6e8323420cf93ae7d0"
+          },
+          {
+            "path": "3000-shared-2-sync",
+            "result_sha256": "9bf6681da17d81629d246edd671c24373ff87466340c17ea7815c3b0cbb967a4"
+          },
+          {
+            "path": "3000-shared-2-async",
+            "result_sha256": "18e09b23e052e77a2611e749b17c9f7d21e84e32e7dca1f6bd964a41fdfb77fb"
+          }
+        ]
+      },
+      {
+        "case": "3000-typing",
+        "manifest_sha256": "c041f36c339e029307426b2b01d12ce4c47006e5dc4f162b2f4bdf149417b014",
+        "runs": [
+          {
+            "path": "3000-typing-0-sync",
+            "result_sha256": "71619987f7f4962294d663eecfa6005f440ad388b092537ff9621c6cf7c78752"
+          },
+          {
+            "path": "3000-typing-0-async",
+            "result_sha256": "9c49baa5f9f4b62061be1e0d8ee02adaa24639502975791b69e605636a1c282f"
+          },
+          {
+            "path": "3000-typing-1-async",
+            "result_sha256": "7c9dfa90d4ff0b93d09a2f0562a1657cc847385cb5ffc0afd9cd0bef5cb0ca16"
+          },
+          {
+            "path": "3000-typing-1-sync",
+            "result_sha256": "381815feb750e8f5c9df31f766b623e8772860bf68ed6c04c506d5058ad544a0"
+          },
+          {
+            "path": "3000-typing-2-sync",
+            "result_sha256": "bb9879b3d6b2816ab7ff3608546e926c2b8aed4be0f1b4d2951479387d44178a"
+          },
+          {
+            "path": "3000-typing-2-async",
+            "result_sha256": "a59862c619dec783ca96a5c312c69b97e4c514362b251962602506566fcc9852"
+          }
+        ]
+      },
+      {
+        "case": "50000-ime",
+        "manifest_sha256": "d10f3c5dc37830a3b4b257e3b483ca048cc8880bc0c3d6263107363f40445c25",
+        "runs": [
+          {
+            "path": "50000-ime-0-sync",
+            "result_sha256": "e0950e1ca3ccff45704c5464b6c590a09c5790edea17feb0c0a3ed71edc01568"
+          },
+          {
+            "path": "50000-ime-0-async",
+            "result_sha256": "6544c0ac43bb0a0dd54cc2cb308a536339c04bebe7bc40a4b3f9b2b996511da5"
+          },
+          {
+            "path": "50000-ime-1-async",
+            "result_sha256": "b0290f952a7a495dd7244e6de45c1f042b36a9574f928e02a119f63afc95c34b"
+          },
+          {
+            "path": "50000-ime-1-sync",
+            "result_sha256": "70e3cb4e9567cbcdee36bde872f322624995091caf7011233958a4e0adf2ceea"
+          },
+          {
+            "path": "50000-ime-2-sync",
+            "result_sha256": "38a52f17e94a402b63e3963ffbd00d69d2f448e9950903810de2f6fd37f7fbb2"
+          },
+          {
+            "path": "50000-ime-2-async",
+            "result_sha256": "83855280e0144163f8c35bdc7fb5c6f97b1b6e0ce77ae67e2a02c46b818273e6"
+          }
+        ]
+      },
+      {
+        "case": "50000-shared",
+        "manifest_sha256": "c74992437c555a88163e66b7d61bc21a1e0b25a0c50bed0e9bc27577431e4fd6",
+        "runs": [
+          {
+            "path": "50000-shared-0-sync",
+            "result_sha256": "f0b233ebff831157179f4c2488fee8359d444afe2a88c1035d70528fc4daf094"
+          },
+          {
+            "path": "50000-shared-0-async",
+            "result_sha256": "1700bb0f6aa1d2f32dd461584304f01c7f2f3529b5c45cf9667469b6ceed886f"
+          },
+          {
+            "path": "50000-shared-1-async",
+            "result_sha256": "7f118d321e7496eb2942cf03aa2766099318e100a61abd5d46d592c23f1d6f39"
+          },
+          {
+            "path": "50000-shared-1-sync",
+            "result_sha256": "38c9fac3415169d8f0f5cdf73e9cd4c92adfdb1db4dcfe3bfbc36d98f7ce1408"
+          },
+          {
+            "path": "50000-shared-2-sync",
+            "result_sha256": "7ac7aa0882976f3bb3ab69712591672e96cda3d428337a11d48bb5d3cf398e2c"
+          },
+          {
+            "path": "50000-shared-2-async",
+            "result_sha256": "d8bf54e60f0c2f93c759cabf3fd6830292820343fae988e556cf6bb8a9da1197"
+          }
+        ]
+      },
+      {
+        "case": "50000-typing",
+        "manifest_sha256": "c5e9a6ab0f700111a70799a21ee7cdeb7a973765b2a58d92c434b38befcdc346",
+        "runs": [
+          {
+            "path": "50000-typing-0-sync",
+            "result_sha256": "22cd9bba0f3d44108e4cc5bcc660b6fa02e9d1b144319da779bf48ba9e9b9396"
+          },
+          {
+            "path": "50000-typing-0-async",
+            "result_sha256": "9ca2130a86ef2663163f869753f03d461c9277f7005f3d0e7abd9ad15b1920bc"
+          },
+          {
+            "path": "50000-typing-1-async",
+            "result_sha256": "32474dc74a2db54a5a13a7553622e166ea2412e4a6b57401cd6dcdae20ce93c5"
+          },
+          {
+            "path": "50000-typing-1-sync",
+            "result_sha256": "abe9292dd0695e115945e2e519ea7fb39a398748f0dcfd70e9a69bd16cfdb8d7"
+          },
+          {
+            "path": "50000-typing-2-sync",
+            "result_sha256": "bc570877777e8cbba8c67feb315ac04764cbb0ba1a2abe2f34f16672045658e4"
+          },
+          {
+            "path": "50000-typing-2-async",
+            "result_sha256": "c6a1b968c4c217a75b605f4c5f5f523169ba21f34c6ac34ab198ac484ca26e60"
+          }
+        ]
+      }
+    ],
+    "rejected": [
+      {
+        "path": "3000-typing-attempt-0",
+        "exit": 1,
+        "error": "presentation_timeout",
+        "result_sha256": "b691ace44a08029845a9494d0cb460b59bd799152d1bddff01fa6c2d84499d76",
+        "manifest_sha256": "faa1c713df2becab3929d341b8d040fe9fe8f0a52f9d77b24159b7faf6704124",
+        "failure_before": [
+          6,
+          0,
+          0,
+          1,
+          1,
+          177784,
+          1
+        ],
+        "failure_state": [
+          49,
+          0,
+          0,
+          1,
+          1,
+          177784,
+          1
+        ]
+      }
+    ],
+    "load_1m_range": [
+      33.21533203125,
+      97.23095703125
+    ]
+  },
+  "groups": {
+    "3000-ime-sync": {
+      "per_process": [
+        {
+          "run": "3000-ime-0-sync",
+          "post_to_native_ms": 1.569333,
+          "native_to_first_ms": 40.949833,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 42.519166,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.124146,
+            "min": 197.290916,
+            "max": 202.891709
+          }
+        },
+        {
+          "run": "3000-ime-1-sync",
+          "post_to_native_ms": 0.51975,
+          "native_to_first_ms": 45.489125,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 46.008875,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.037125,
+            "min": 198.707042,
+            "max": 201.458541
+          }
+        },
+        {
+          "run": "3000-ime-2-sync",
+          "post_to_native_ms": 0.519291,
+          "native_to_first_ms": 33.971,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 34.490291,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.0965415,
+            "min": 183.337708,
+            "max": 202.516708
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 0.51975,
+        "native_to_first_ms": 40.949833,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 0.0,
+        "post_to_full_ms": 42.519166
+      },
+      "syntax_to_full_generations": [
+        0,
+        0,
+        0
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 200.0965415
+    },
+    "3000-ime-async": {
+      "per_process": [
+        {
+          "run": "3000-ime-0-async",
+          "post_to_native_ms": 0.522416,
+          "native_to_first_ms": 52.13475,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 26.676417,
+          "post_to_full_ms": 79.333583,
+          "syntax_to_full_generations": 1,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.0349795,
+            "min": 196.939333,
+            "max": 216.018167
+          }
+        },
+        {
+          "run": "3000-ime-1-async",
+          "post_to_native_ms": 0.519167,
+          "native_to_first_ms": 50.664208,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 26.676458,
+          "post_to_full_ms": 77.859833,
+          "syntax_to_full_generations": 1,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.045271,
+            "min": 181.785292,
+            "max": 217.677625
+          }
+        },
+        {
+          "run": "3000-ime-2-async",
+          "post_to_native_ms": 0.498833,
+          "native_to_first_ms": 51.411875,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 26.676459,
+          "post_to_full_ms": 78.587167,
+          "syntax_to_full_generations": 1,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 199.896229,
+            "min": 197.40975,
+            "max": 202.585666
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 0.519167,
+        "native_to_first_ms": 51.411875,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 26.676458,
+        "post_to_full_ms": 78.587167
+      },
+      "syntax_to_full_generations": [
+        1,
+        1,
+        1
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 200.0349795
+    },
+    "3000-shared-sync": {
+      "per_process": [
+        {
+          "run": "3000-shared-0-sync",
+          "post_to_native_ms": 0.554791,
+          "native_to_first_ms": 38.716959,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 39.27175,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.0654585,
+            "min": 198.243375,
+            "max": 201.963
+          }
+        },
+        {
+          "run": "3000-shared-1-sync",
+          "post_to_native_ms": 0.538,
+          "native_to_first_ms": 37.063708,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 37.601708,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 199.975438,
+            "min": 197.969209,
+            "max": 201.992291
+          }
+        },
+        {
+          "run": "3000-shared-2-sync",
+          "post_to_native_ms": 1.913292,
+          "native_to_first_ms": 41.1865,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 43.099792,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 199.953729,
+            "min": 196.936209,
+            "max": 203.0265
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 0.554791,
+        "native_to_first_ms": 38.716959,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 0.0,
+        "post_to_full_ms": 39.27175
+      },
+      "syntax_to_full_generations": [
+        0,
+        0,
+        0
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 199.975438
+    },
+    "3000-shared-async": {
+      "per_process": [
+        {
+          "run": "3000-shared-0-async",
+          "post_to_native_ms": 0.561792,
+          "native_to_first_ms": 62.135583,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 13.33825,
+          "post_to_full_ms": 76.035625,
+          "syntax_to_full_generations": 1,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 216.92877049999998,
+            "min": 213.751792,
+            "max": 233.76275
+          }
+        },
+        {
+          "run": "3000-shared-1-async",
+          "post_to_native_ms": 4.186041,
+          "native_to_first_ms": 74.794292,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 78.980333,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 215.974458,
+            "min": 198.196916,
+            "max": 221.329167
+          }
+        },
+        {
+          "run": "3000-shared-2-async",
+          "post_to_native_ms": 1.362833,
+          "native_to_first_ms": 67.906834,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 13.338208,
+          "post_to_full_ms": 82.607875,
+          "syntax_to_full_generations": 1,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 216.5562085,
+            "min": 213.506916,
+            "max": 220.069834
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 1.362833,
+        "native_to_first_ms": 67.906834,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 13.338208,
+        "post_to_full_ms": 78.980333
+      },
+      "syntax_to_full_generations": [
+        1,
+        0,
+        1
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 216.5562085
+    },
+    "3000-typing-sync": {
+      "per_process": [
+        {
+          "run": "3000-typing-0-sync",
+          "post_to_native_ms": 4.508167,
+          "native_to_first_ms": 34.900542,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 39.408709,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.073896,
+            "min": 198.234166,
+            "max": 201.776417
+          }
+        },
+        {
+          "run": "3000-typing-1-sync",
+          "post_to_native_ms": 0.511958,
+          "native_to_first_ms": 45.542375,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 46.054333,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.049625,
+            "min": 180.519875,
+            "max": 202.631958
+          }
+        },
+        {
+          "run": "3000-typing-2-sync",
+          "post_to_native_ms": 3.800708,
+          "native_to_first_ms": 35.101417,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 38.902125,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.05525,
+            "min": 198.225167,
+            "max": 201.286333
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 3.800708,
+        "native_to_first_ms": 35.101417,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 0.0,
+        "post_to_full_ms": 39.408709
+      },
+      "syntax_to_full_generations": [
+        0,
+        0,
+        0
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 200.05525
+    },
+    "3000-typing-async": {
+      "per_process": [
+        {
+          "run": "3000-typing-0-async",
+          "post_to_native_ms": 3.986791,
+          "native_to_first_ms": 48.190459,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 26.676416,
+          "post_to_full_ms": 78.853666,
+          "syntax_to_full_generations": 1,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 200.065979,
+            "min": 199.597833,
+            "max": 200.620917
+          }
+        },
+        {
+          "run": "3000-typing-1-async",
+          "post_to_native_ms": 3.882125,
+          "native_to_first_ms": 48.181208,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 26.676458,
+          "post_to_full_ms": 78.739791,
+          "syntax_to_full_generations": 1,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 199.867354,
+            "min": 195.50125,
+            "max": 202.985958
+          }
+        },
+        {
+          "run": "3000-typing-2-async",
+          "post_to_native_ms": 1.099375,
+          "native_to_first_ms": 48.199584,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 26.6765,
+          "post_to_full_ms": 75.975459,
+          "syntax_to_full_generations": 1,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 199.87760400000002,
+            "min": 197.224041,
+            "max": 202.793416
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 3.882125,
+        "native_to_first_ms": 48.190459,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 26.676458,
+        "post_to_full_ms": 78.739791
+      },
+      "syntax_to_full_generations": [
+        1,
+        1,
+        1
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 199.87760400000002
+    },
+    "50000-ime-sync": {
+      "per_process": [
+        {
+          "run": "50000-ime-0-sync",
+          "post_to_native_ms": 0.527417,
+          "native_to_first_ms": 112.167542,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 112.694959,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 283.1643335,
+            "min": 200.102125,
+            "max": 301.305667
+          }
+        },
+        {
+          "run": "50000-ime-1-sync",
+          "post_to_native_ms": 0.498,
+          "native_to_first_ms": 120.283125,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 120.781125,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 282.836125,
+            "min": 215.483458,
+            "max": 315.839083
+          }
+        },
+        {
+          "run": "50000-ime-2-sync",
+          "post_to_native_ms": 0.515667,
+          "native_to_first_ms": 108.034458,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 108.550125,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 282.86429150000004,
+            "min": 216.363834,
+            "max": 300.943625
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 0.515667,
+        "native_to_first_ms": 112.167542,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 0.0,
+        "post_to_full_ms": 112.694959
+      },
+      "syntax_to_full_generations": [
+        0,
+        0,
+        0
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 282.86429150000004
+    },
+    "50000-ime-async": {
+      "per_process": [
+        {
+          "run": "50000-ime-0-async",
+          "post_to_native_ms": 1.370333,
+          "native_to_first_ms": 68.115459,
+          "first_to_syntax_ms": 200.073458,
+          "syntax_to_full_ms": 466.838083,
+          "post_to_full_ms": 736.397333,
+          "syntax_to_full_generations": 28,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 14,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 348.89352099999996,
+            "min": 249.704875,
+            "max": 431.38425
+          }
+        },
+        {
+          "run": "50000-ime-1-async",
+          "post_to_native_ms": 2.144583,
+          "native_to_first_ms": 68.139834,
+          "first_to_syntax_ms": 200.0735,
+          "syntax_to_full_ms": 466.838,
+          "post_to_full_ms": 737.195917,
+          "syntax_to_full_generations": 28,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 13,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 341.8576665,
+            "min": 235.461833,
+            "max": 433.519333
+          }
+        },
+        {
+          "run": "50000-ime-2-async",
+          "post_to_native_ms": 0.7205,
+          "native_to_first_ms": 71.653166,
+          "first_to_syntax_ms": 200.073459,
+          "syntax_to_full_ms": 480.176291,
+          "post_to_full_ms": 752.623416,
+          "syntax_to_full_generations": 29,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 14,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 359.7415415,
+            "min": 236.781458,
+            "max": 433.626875
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 1.370333,
+        "native_to_first_ms": 68.139834,
+        "first_to_syntax_ms": 200.073459,
+        "syntax_to_full_ms": 466.838083,
+        "post_to_full_ms": 737.195917
+      },
+      "syntax_to_full_generations": [
+        28,
+        28,
+        29
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 41,
+      "full_observed_in_gap": 0,
+      "median_process_post_spacing_ms": 348.89352099999996
+    },
+    "50000-shared-sync": {
+      "per_process": [
+        {
+          "run": "50000-shared-0-sync",
+          "post_to_native_ms": 0.981417,
+          "native_to_first_ms": 68.348417,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 69.329834,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 216.7186245,
+            "min": 199.983083,
+            "max": 233.326
+          }
+        },
+        {
+          "run": "50000-shared-1-sync",
+          "post_to_native_ms": 2.342125,
+          "native_to_first_ms": 68.378042,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 70.720167,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 216.797854,
+            "min": 199.234542,
+            "max": 233.864959
+          }
+        },
+        {
+          "run": "50000-shared-2-sync",
+          "post_to_native_ms": 0.543292,
+          "native_to_first_ms": 58.8475,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 59.390792,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 216.453958,
+            "min": 198.85325,
+            "max": 233.435167
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 0.981417,
+        "native_to_first_ms": 68.348417,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 0.0,
+        "post_to_full_ms": 69.329834
+      },
+      "syntax_to_full_generations": [
+        0,
+        0,
+        0
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 216.7186245
+    },
+    "50000-shared-async": {
+      "per_process": [
+        {
+          "run": "50000-shared-0-async",
+          "post_to_native_ms": 0.538542,
+          "native_to_first_ms": 32.533,
+          "first_to_syntax_ms": 346.793875,
+          "syntax_to_full_ms": 466.838125,
+          "post_to_full_ms": 846.703542,
+          "syntax_to_full_generations": 28,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 22,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 498.0235625,
+            "min": 384.223416,
+            "max": 533.883292
+          }
+        },
+        {
+          "run": "50000-shared-1-async",
+          "post_to_native_ms": 0.536458,
+          "native_to_first_ms": 37.468458,
+          "first_to_syntax_ms": 333.455709,
+          "syntax_to_full_ms": 493.514458,
+          "post_to_full_ms": 864.975083,
+          "syntax_to_full_generations": 29,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 21,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 500.31381250000004,
+            "min": 382.498917,
+            "max": 517.8445
+          }
+        },
+        {
+          "run": "50000-shared-2-async",
+          "post_to_native_ms": 0.571708,
+          "native_to_first_ms": 39.091584,
+          "first_to_syntax_ms": 333.455833,
+          "syntax_to_full_ms": 466.838208,
+          "post_to_full_ms": 839.957333,
+          "syntax_to_full_generations": 28,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 22,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 499.7947705,
+            "min": 382.845041,
+            "max": 517.321458
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 0.538542,
+        "native_to_first_ms": 37.468458,
+        "first_to_syntax_ms": 333.455833,
+        "syntax_to_full_ms": 466.838208,
+        "post_to_full_ms": 846.703542
+      },
+      "syntax_to_full_generations": [
+        28,
+        29,
+        28
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 65,
+      "full_observed_in_gap": 0,
+      "median_process_post_spacing_ms": 499.7947705
+    },
+    "50000-typing-sync": {
+      "per_process": [
+        {
+          "run": "50000-typing-0-sync",
+          "post_to_native_ms": 0.525833,
+          "native_to_first_ms": 58.881584,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 59.407417,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 216.3434375,
+            "min": 199.550208,
+            "max": 220.171
+          }
+        },
+        {
+          "run": "50000-typing-1-sync",
+          "post_to_native_ms": 0.578583,
+          "native_to_first_ms": 60.613417,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 61.192,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 216.901667,
+            "min": 181.978958,
+            "max": 233.346208
+          }
+        },
+        {
+          "run": "50000-typing-2-sync",
+          "post_to_native_ms": 0.545959,
+          "native_to_first_ms": 61.069666,
+          "first_to_syntax_ms": 0.0,
+          "syntax_to_full_ms": 0.0,
+          "post_to_full_ms": 61.615625,
+          "syntax_to_full_generations": 0,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 24,
+          "full_observed_in_gap": 24,
+          "post_spacing_ms": {
+            "median": 216.28175,
+            "min": 199.227625,
+            "max": 234.7435
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 0.545959,
+        "native_to_first_ms": 60.613417,
+        "first_to_syntax_ms": 0.0,
+        "syntax_to_full_ms": 0.0,
+        "post_to_full_ms": 61.192
+      },
+      "syntax_to_full_generations": [
+        0,
+        0,
+        0
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 72,
+      "full_observed_in_gap": 72,
+      "median_process_post_spacing_ms": 216.3434375
+    },
+    "50000-typing-async": {
+      "per_process": [
+        {
+          "run": "50000-typing-0-async",
+          "post_to_native_ms": 0.532333,
+          "native_to_first_ms": 37.150834,
+          "first_to_syntax_ms": 186.73525,
+          "syntax_to_full_ms": 480.176208,
+          "post_to_full_ms": 704.594625,
+          "syntax_to_full_generations": 29,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 21,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 341.580854,
+            "min": 233.375125,
+            "max": 352.020542
+          }
+        },
+        {
+          "run": "50000-typing-1-async",
+          "post_to_native_ms": 0.536,
+          "native_to_first_ms": 38.432625,
+          "first_to_syntax_ms": 186.735208,
+          "syntax_to_full_ms": 466.838084,
+          "post_to_full_ms": 692.541917,
+          "syntax_to_full_generations": 28,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 22,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 348.272479,
+            "min": 233.119917,
+            "max": 370.336875
+          }
+        },
+        {
+          "run": "50000-typing-2-async",
+          "post_to_native_ms": 1.5515,
+          "native_to_first_ms": 28.075792,
+          "first_to_syntax_ms": 200.073416,
+          "syntax_to_full_ms": 453.499834,
+          "post_to_full_ms": 683.200542,
+          "syntax_to_full_generations": 28,
+          "gap_samples": 24,
+          "syntax_observed_in_gap": 19,
+          "full_observed_in_gap": 0,
+          "post_spacing_ms": {
+            "median": 347.1522295,
+            "min": 216.153666,
+            "max": 370.681625
+          }
+        }
+      ],
+      "median": {
+        "post_to_native_ms": 0.536,
+        "native_to_first_ms": 37.150834,
+        "first_to_syntax_ms": 186.73525,
+        "syntax_to_full_ms": 466.838084,
+        "post_to_full_ms": 692.541917
+      },
+      "syntax_to_full_generations": [
+        29,
+        28,
+        28
+      ],
+      "gap_samples": 72,
+      "syntax_observed_in_gap": 62,
+      "full_observed_in_gap": 0,
+      "median_process_post_spacing_ms": 347.1522295
+    }
+  }
+}

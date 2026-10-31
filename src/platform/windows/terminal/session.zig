@@ -8,6 +8,7 @@ pub const Session = struct {
     live: maru.app.LivePtySession,
     pump: maru.app.RuntimeEventPump,
     layout_retry: @import("layout_resize.zig").Retry,
+    text_config: maru.app.text_config.State,
     /// 사이드바 카드에 뜨는 이름. 세션이 소유한다(목록이 커져도 슬라이스가 살아 있어야 한다).
     name: [24]u8,
     name_len: usize,
@@ -26,6 +27,13 @@ pub const Session = struct {
         /// Refresh the launch snapshot together so clearing an override cannot
         /// retain either the old executable or its arguments. Config strings
         /// remain borrowed from the application-lifetime settings arena.
+        /// Live text edits also define the next child's initial parse policy.
+        pub fn refreshText(self: *SpawnOptions, cfg: maru.config.Config) void {
+            self.cfg.scrollback = cfg.scrollback;
+            self.cfg.ambiguous_width = cfg.ambiguous_width;
+            self.cfg.emoji_width = cfg.emoji_width;
+        }
+
         pub fn refreshShell(self: *SpawnOptions, shell: maru.config.theme.ShellConfig) void {
             self.command = maru.pty.resolveShell(shell.command, maru.windowsShellKindOf(shell.windows_shell));
             self.args = shell.args;
@@ -63,6 +71,7 @@ pub fn spawn(
     const s = try allocator.create(Session);
     errdefer allocator.destroy(s);
     s.layout_retry = .{};
+    s.text_config = .init(maru.app.text_config.Values.fromConfig(opts.cfg));
 
     // **PTY id 는 겹치면 안 된다** — 라우팅이 그 값으로 세션을 가른다.
     //

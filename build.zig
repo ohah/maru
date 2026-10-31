@@ -2063,9 +2063,13 @@ pub fn build(b: *std.Build) void {
     const run_settings_scrollbar_tests = b.addRunArtifact(settings_scrollbar_tests);
     run_settings_scrollbar_tests.addArg("--maru-expect-tests=8"); // Six scrollbar judges and two root aggregation blocks.
     b.step("test-windows-settings-scrollbar", "Verify published settings scrollbar paint and capture lifecycle").dependOn(&run_settings_scrollbar_tests.step);
+    const settings_shrink_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings shrink"} });
+    const run_settings_shrink_tests = b.addRunArtifact(settings_shrink_tests);
+    run_settings_shrink_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-settings-shrink", "Verify explicit successful shrink permission without preview data loss").dependOn(&run_settings_shrink_tests.step);
     const windows_settings_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings"} });
     const run_windows_settings_tests = b.addRunArtifact(windows_settings_tests);
-    run_windows_settings_tests.addArg("--maru-expect-tests=51"); // Eleven candidate, five rollback, six wheel, five focus, fifteen IME, six scrollbar, concurrent writers and two root blocks.
+    run_windows_settings_tests.addArg("--maru-expect-tests=56"); // Eleven candidate, five rollback, five shrink, six wheel, five focus, fifteen IME, six scrollbar, concurrent writers and two root blocks.
     b.step("test-windows-settings", "Verify Windows settings candidate validation").dependOn(&run_windows_settings_tests.step);
     const settings_form_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings form"} });
     const run_settings_form_tests = b.addRunArtifact(settings_form_tests);
@@ -2188,6 +2192,10 @@ pub fn build(b: *std.Build) void {
     const run_registry_raster_tests = b.addRunArtifact(registry_raster_tests);
     run_registry_raster_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-registry-raster", "Verify styled registry face raster selection").dependOn(&run_registry_raster_tests.step);
+    const live_text_config_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"live text config"} });
+    const run_live_text_config_tests = b.addRunArtifact(live_text_config_tests);
+    run_live_text_config_tests.addArg("--maru-expect-tests=33");
+    b.step("test-live-text-config", "Verify live text commands, shrink consent and retry ownership").dependOn(&run_live_text_config_tests.step);
     const legacy_input_queue_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{ "PtyWriteQueue:", "CoreCommandQueue:", "PTY input fence" } });
     const run_legacy_input_queue_tests = b.addRunArtifact(legacy_input_queue_tests);
     run_legacy_input_queue_tests.addArg("--maru-expect-tests=41");

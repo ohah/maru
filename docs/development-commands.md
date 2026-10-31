@@ -2444,3 +2444,5 @@ python -X utf8 tools/windows/check-osc52-read.py --exe .zig-cache/windows-osc52/
 다섯 policy/target 사례를 모두 실행하거나 `--case allow-c`처럼 한 사례를 선택할 수 있다.
 큰 사례는 약 7 MB 응답을 여러 tick에 나눠 받는 동안 소유한 Maru 창만 반복 resize하고, 전체 OSC 응답 뒤에 in-band resize 통지가 오는지 검사한다. 자식이 prefix를 받은 뒤 DSR을 보내는 초기 방식은 리더 순서 결함을 놓쳤으므로 중간 삽입 방지의 증거로 쓰지 않는다.
 각 앱은 격리된 프로필·설정·자식과 PID 소유 창을 쓰며, 클립보드 내용을 로그에 남기거나 물리 키·IME 입력을 증명하지 않는다.
+
+Windows 스크롤백·문자 폭 설정 집중 검사는 `zig build test-live-text-config test-windows-settings-shrink test-windows-settings -j2`로 실행한다. 공통 상태 전이, 성공 저장의 단발 축소 권한과 기존 설정 회귀를 검사한다.

@@ -2607,7 +2607,7 @@ pub fn reapplyScrollback(self: *AppSession) void {
     // 있는 Term 을 지금 가장 큰 값으로 맞춘다(작은 값으로 만든 새 Term 은 늘어난다 — 줄어든 값은 새 Term 부터).
     const shrink_ok = self.allow_scrollback_shrink;
     self.allow_scrollback_shrink = false;
-    const target = if (shrink_ok or lines >= self.live_scrollback_max) lines else self.live_scrollback_max;
+    const target = maru.app.text_config.liveScrollbackTarget(self.live_scrollback_max, lines, shrink_ok);
     self.live_scrollback_max = target;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
@@ -2706,7 +2706,7 @@ fn synthKey(buf: []u8, prefix: []const u8, tail: []const u8) ?[]const u8 {
 /// surface에도). reader 단일 mutator 계약상 set_max_scrollback과 같이 CoreCommand로 위임한다. 이후 putCell부터
 /// 새 폭이 반영된다(이미 저장된 셀은 옛 폭 유지 — 폭 변경은 본래 redraw 필요; max_scrollback과 같은 best-effort).
 pub fn reapplyAmbiguousWidth(self: *AppSession) void {
-    const wide = self.loaded_config.config.ambiguous_width == .wide;
+    const wide = maru.app.text_config.Values.fromConfig(self.loaded_config.config).ambiguous_wide;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
@@ -2719,7 +2719,7 @@ pub fn reapplyAmbiguousWidth(self: *AppSession) void {
 /// text.emoji-width reload를 라이브 코어에 재적용한다(reapplyAmbiguousWidth와 같은 best-effort 패턴 — 이후
 /// putCell부터 새 폭, 이미 저장된 셀은 옛 폭 유지). 이모지(VS16/키캡)를 2칸으로 볼지를 라이브 surface에 반영.
 pub fn reapplyEmojiWidth(self: *AppSession) void {
-    const wide = self.loaded_config.config.emoji_width == .wide;
+    const wide = maru.app.text_config.Values.fromConfig(self.loaded_config.config).emoji_wide;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {

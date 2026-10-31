@@ -666,3 +666,11 @@ run = "zig build test-protocol-frame-queue"
 [tasks.test-input-queue-regression]
 description = "Verify existing FIFO, blocking backpressure, close wakeup and command fences"
 run = "zig build test-input-queue-regression"
+
+[tasks.test-live-text-config]
+description = "Verify live text commands, shrink consent and retry ownership"
+run = "zig build test-live-text-config"
+
+[tasks.test-windows-settings-shrink]
+description = "Verify explicit successful shrink permission without preview data loss"
+run = "zig build test-windows-settings-shrink"

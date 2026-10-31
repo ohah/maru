@@ -269,10 +269,20 @@ pub fn wordStart(content: []const u8, caret: usize) usize {
 /// Shutdown has already detached proc, so use the surviving document binding.
 pub fn onClientStopped(self: *AppSession, origin: *editor_lsp.Client, term: *Term) void {
     const st = &self.editor_completion;
-    if (!st.waiting or st.waiting_surface != term.surfaceId()) return;
     if (origin.role != .primary or editor_lsp.boundClientFor(self, term) != origin) return;
-    st.waiting = false;
-    st.dirty = false;
+    if (st.waiting and st.waiting_surface == term.surfaceId()) {
+        st.waiting = false;
+        st.dirty = false;
+    }
+    if (!st.resolve_waiting or st.surface_id != term.surfaceId()) return;
+    // The stopped connection cannot complete this item. Keep prefetch items
+    // unresolved so a later Enter retries; a pending Enter must never fall
+    // through to an import-less edit or be revived by the old response.
+    st.resolve_waiting = false;
+    if (st.pending_accept) {
+        st.cancelled_pending += 1;
+        cancel(self);
+    }
 }
 
 /// 응답(`editor_lsp` 가 부른다). 낡은 seq 는 버린다. 목록을 복사해 들고 접두사로 좁혀 연다(0 이면 닫힌 채).

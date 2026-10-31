@@ -1784,3 +1784,4 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [빈 시그니처 응답의 후속 요청](plans/lsp-signature-empty-followup.md): 대기 중 합쳐진 입력을 빈 결과 뒤에도 요청한다.
 - [자동완성 대기와 서버 종료](plans/lsp-completion-stop-origin.md): 같은 문서의 보조 서버 종료가 주 서버 응답 대기를 지우지 않는다.
 - [문서별 LSP 기능의 서버 종료](plans/lsp-feature-stop-origin.md): semantic·inlay·symbols·fold·highlight의 주 서버 대기를 보호한다.
+- [자동완성 상세 요청의 서버 종료](plans/lsp-completion-resolve-stop.md): 미리 읽기 재요청과 Enter 대기의 무편집 취소를 검증한다.

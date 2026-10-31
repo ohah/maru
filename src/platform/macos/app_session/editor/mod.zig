@@ -65767,6 +65767,10 @@ const HelperFx = struct {
     const Ctx = struct { fx: *PaneFixture, term: *Term };
 
     fn init(self: *HelperFx, allocator: std.mem.Allocator, text: []const u8) !void {
+        return self.initNamed(allocator, text, "c.c");
+    }
+
+    fn initNamed(self: *HelperFx, allocator: std.mem.Allocator, text: []const u8, name: []const u8) !void {
         var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
         const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
         const fz = try std.fmt.bufPrintSentinel(&self.fake_z, "{s}", .{fake}, 0);
@@ -65777,8 +65781,8 @@ const HelperFx = struct {
         if (self.fx.session.config_path_buffer) |b| allocator.free(b);
         self.fx.session.config_path_buffer = null;
         self.fx.session.editor_lsp.auto_trust_answer = .allow;
-        try self.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "c.c", .data = text });
-        self.path = try std.fs.path.join(allocator, &.{ root, "c.c" });
+        try self.fx.dir.dir.writeFile(testing.io, .{ .sub_path = name, .data = text });
+        self.path = try std.fs.path.join(allocator, &.{ root, name });
         self.fx.session.git_repo = @constCast(root);
         self.term = (try pane_ops.openFileTermInActivePane(self.fx.session, self.path, .text)).term;
         self.fx.session.surface_initialized = true;
@@ -66108,7 +66112,7 @@ test "HELP9 심볼 이름 상자가 열린 동안 포인터가 낱말에 머물�
 const pending_doc = "int printf(int x);\nint main() {\n  \n}\n"; // CMP4 와 같은 문서 — 셋째 줄 "  " 뒤(34)에서 친다
 
 /// HELP10·11 — `laz` 를 쳐 강조가 `lazy_import`(resolve 전)에 오게 하고 Enter → 확정 보류(`pending_accept`)까지.
-fn pendingAcceptFixture(h: *HelperFx) !void {
+fn prefetchResolveFixtureForTest(h: *HelperFx) !void {
     const s = h.fx.session;
     h.term.rt.editor_selection = .{ .anchor_start = 34, .anchor_end = 34, .focus = 34 };
     try testing.expect(insertText(s, h.term, "laz"));
@@ -66123,6 +66127,21 @@ fn pendingAcceptFixture(h: *HelperFx) !void {
         if (guard > 20) return error.NoLazyItem;
         try pressKey(&h.fx, .arrow_down, .{});
     }
+    // A previous highlighted item's prefetch can still be queued. Wait for the
+    // selected lazy item itself, rather than mistaking any resolve for its one.
+    try testing.expect(pumpLspUntil(&h.fx, 3000, s, struct {
+        fn ready(ss: *AppSession) bool {
+            const st = &ss.editor_completion;
+            if (!st.resolve_waiting or st.order.items.len == 0) return false;
+            const idx = st.order.items[@min(ss.chrome_host.suggest_box.selected, st.order.items.len - 1)];
+            return st.resolve_item == idx and !st.items.items[idx].resolved;
+        }
+    }.ready));
+}
+
+fn pendingAcceptFixture(h: *HelperFx) !void {
+    const s = h.fx.session;
+    try prefetchResolveFixtureForTest(h);
     try pressKey(&h.fx, .enter, .{}); // resolve 응답 전 — 기다린다(CMP4 ⑶)
     try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active);
 }
@@ -75580,6 +75599,231 @@ test "trust picker IME host external trust decisions do not replace the opening 
     try testing.expectEqualStrings("한", fx.session.chrome_host.trust_picker.input.preedit.items);
     try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
 }
+fn resolvePrimaryDeathForTest(pending: bool) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n");
+    const s = h.fx.session;
+    try prefetchResolveFixtureForTest(&h);
+    if (pending) try pressKey(&h.fx, .enter, .{});
+    try testing.expectEqual(pending, s.editor_completion.pending_accept);
+    const owner = lsp_client.readyClientFor(s, h.term).?;
+    const seq = s.editor_completion.resolve_seq;
+    const old_pid = owner.proc.?.pid;
+    const cancelled = s.editor_completion.cancelled_pending;
+    const before = try allocator.dupe(u8, h.content());
+    defer allocator.free(before);
+    const sel = h.term.rt.editor_selection.?;
+    const doc = h.term.rt.editorDocument();
+    const revision = doc.opened.?.file.revision;
+    const undo = doc.history.undo_len;
+    const redo = doc.history.redo_len;
+    try testing.expectEqual(@as(c_int, 0), std.c.kill(old_pid, std.c.SIG.KILL));
+    try testing.expect(pumpLspUntil(&h.fx, 3000, owner, struct {
+        fn down(c: *lsp_client.Client) bool {
+            return c.phase == .restarting;
+        }
+    }.down));
+    try testing.expect(!s.editor_completion.resolve_waiting);
+    try testing.expect(!s.editor_completion.pending_accept);
+    try testing.expectEqual(!pending, s.editor_completion.active);
+    if (!pending) try testing.expect(!s.editor_completion.items.items[s.editor_completion.resolve_item].resolved);
+    try testing.expectEqualStrings(before, h.content());
+    try testing.expectEqualDeep(sel, h.term.rt.editor_selection.?);
+    try testing.expectEqual(revision, doc.opened.?.file.revision);
+    try testing.expectEqual(undo, doc.history.undo_len);
+    try testing.expectEqual(redo, doc.history.redo_len);
+    try testing.expectEqual(cancelled + @as(u64, @intFromBool(pending)), s.editor_completion.cancelled_pending);
+    completion_client.onClientStopped(s, owner, h.term); // Replaying the same stop cannot cancel twice.
+    try testing.expectEqual(cancelled + @as(u64, @intFromBool(pending)), s.editor_completion.cancelled_pending);
+    var reply = try std.json.parseFromSlice(std.json.Value, allocator, "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}", .{});
+    defer reply.deinit();
+    completion_client.onResolveResponse(s, owner, seq, reply.value); // Direct late reply after real process death.
+    completion_client.onResolveResponse(s, owner, seq, null);
+    try testing.expectEqualStrings(before, h.content());
+    try testing.expectEqual(undo, doc.history.undo_len);
+    if (!pending) {
+        try pressKey(&h.fx, .enter, .{}); // Disconnected Enter must not apply the unresolved item.
+        try testing.expectEqualStrings(before, h.content());
+        try testing.expectEqual(undo, doc.history.undo_len);
+    }
+    owner.retry_at_ms = 0; // Explicit backoff clock seam.
+    const Ctx = struct { s: *AppSession, t: *Term, pid: std.c.pid_t };
+    try testing.expect(pumpLspUntil(&h.fx, 3000, Ctx{ .s = s, .t = h.term, .pid = old_pid }, struct {
+        fn ready(c: Ctx) bool {
+            const current = lsp_client.readyClientFor(c.s, c.t) orelse return false;
+            return current.proc.?.pid != c.pid;
+        }
+    }.ready));
+    try testing.expect(completion_client.triggerManual(s));
+    try testing.expect(pumpLspUntil(&h.fx, 3000, s, struct {
+        fn done(ss: *AppSession) bool {
+            return !ss.editor_completion.waiting;
+        }
+    }.done));
+    try h.frame();
+    try pressKey(&h.fx, .enter, .{});
+    try testing.expect(s.editor_completion.pending_accept and s.editor_completion.resolve_waiting);
+    const next_seq = s.editor_completion.resolve_seq;
+    try testing.expect(next_seq != seq);
+    completion_client.onResolveResponse(s, owner, seq, reply.value);
+    completion_client.onResolveResponse(s, owner, seq, null);
+    try testing.expect(s.editor_completion.pending_accept and s.editor_completion.resolve_waiting);
+    try testing.expectEqualStrings(before, h.content());
+    completion_client.onResolveResponse(s, owner, next_seq, reply.value);
+    try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+    try testing.expectEqual(undo + 1, doc.history.undo_len);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings(before, h.content());
+}
+
+test "CMPRESSTOP1 primary death releases completion prefetch" {
+    try resolvePrimaryDeathForTest(false);
+}
+test "CMPRESSTOP2 primary death cancels pending completion without editing" {
+    try resolvePrimaryDeathForTest(true);
+}
+
+fn resolvePeerStopForTest(auxiliary: bool, pending: bool) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.fx.dir.dir.createDirPath(testing.io, ".git");
+    if (auxiliary) {
+        try h.fx.dir.dir.createDirPath(testing.io, ".venv/bin");
+        try h.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pyproject.toml", .data = "[tool.ruff.lint]\nselect = [\"F\"]\n" });
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fake = (try fakeLspAbs(&buf)) orelse return error.SkipZigTest;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, fake, allocator, .limited(64 << 20));
+        defer allocator.free(bytes);
+        try h.fx.dir.dir.writeFile(testing.io, .{ .sub_path = ".venv/bin/ruff", .data = bytes });
+        try h.fx.dir.dir.setFilePermissions(testing.io, ".venv/bin/ruff", @fromBackingInt(@intCast(0o755)), .{});
+    }
+    try h.initNamed(allocator, pending_doc ++ "// RESOLVESTALL\n", if (auxiliary) "source.py" else "source.c");
+    const s = h.fx.session;
+    var other: *Term = h.term;
+    if (!auxiliary) {
+        try h.fx.dir.dir.createDirPath(testing.io, "nested/.git");
+        try h.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "nested/other.c", .data = "int x;\n" });
+        const path = try std.fs.path.join(allocator, &.{ s.git_repo.?, "nested/other.c" });
+        defer allocator.free(path);
+        other = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+        try testing.expect(pumpLspUntil(&h.fx, 3000, other, struct {
+            fn ready(t: *Term) bool {
+                return t.rt.editor_diagnostics.lsp.items.len > 0;
+            }
+        }.ready));
+        try testing.expect(term_ops.activateSurfaceById(s, h.term.surface.id));
+    } else {
+        const Ctx = struct { s: *AppSession, t: *Term };
+        try testing.expect(pumpLspUntil(&h.fx, 3000, Ctx{ .s = s, .t = h.term }, struct {
+            fn ready(c: Ctx) bool {
+                const aux = clientByExe(c.s, "ruff") orelse return false;
+                return aux.phase == .ready and aux.proc != null and aux.findDoc(c.t) != null;
+            }
+        }.ready));
+    }
+    try prefetchResolveFixtureForTest(&h);
+    if (pending) try pressKey(&h.fx, .enter, .{});
+    const owner = lsp_client.readyClientFor(s, h.term).?;
+    const peer = if (auxiliary) clientByExe(s, "ruff").? else lsp_client.readyClientFor(s, other).?;
+    try testing.expect(owner != peer);
+    const seq = s.editor_completion.resolve_seq;
+    const sent = s.editor_lsp.sent_completion_resolves;
+    const before = try allocator.dupe(u8, h.content());
+    defer allocator.free(before);
+    const undo = h.term.rt.editorDocument().history.undo_len;
+    completion_client.onClientStopped(s, peer, h.term); // Wrong connection with matching surface.
+    if (!auxiliary) completion_client.onClientStopped(s, owner, other); // Own connection, wrong surface.
+    completion_client.onResolveResponse(s, peer, seq, null);
+    try testing.expect(s.editor_completion.resolve_waiting);
+    try testing.expectEqual(pending, s.editor_completion.pending_accept);
+    try testing.expectEqual(@as(c_int, 0), std.c.kill(peer.proc.?.pid, std.c.SIG.KILL));
+    try testing.expect(pumpLspUntil(&h.fx, 3000, peer, struct {
+        fn down(c: *lsp_client.Client) bool {
+            return c.phase == .restarting;
+        }
+    }.down));
+    completion_client.onClientStopped(s, peer, other);
+    try testing.expect(s.editor_completion.resolve_waiting);
+    try testing.expectEqual(pending, s.editor_completion.pending_accept);
+    try testing.expectEqual(seq, s.editor_completion.resolve_seq);
+    try testing.expectEqual(sent, s.editor_lsp.sent_completion_resolves);
+    try testing.expectEqualStrings(before, h.content());
+    try testing.expectEqual(undo, h.term.rt.editorDocument().history.undo_len);
+    if (!pending) try pressKey(&h.fx, .enter, .{});
+    var reply = try std.json.parseFromSlice(std.json.Value, allocator, "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}", .{});
+    defer reply.deinit();
+    completion_client.onResolveResponse(s, owner, seq, reply.value);
+    try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+    try testing.expectEqual(undo + 1, h.term.rt.editorDocument().history.undo_len);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings(before, h.content());
+}
+
+test "CMPRESSTOP3 auxiliary death preserves prefetch and pending resolve" {
+    for ([_]bool{ false, true }) |pending| try resolvePeerStopForTest(true, pending);
+}
+test "CMPRESSTOP4 foreign primary death preserves prefetch and pending resolve" {
+    for ([_]bool{ false, true }) |pending| try resolvePeerStopForTest(false, pending);
+}
+
+test "CMPRESSTOP5 disabling LSP settles resolve before client free and enables a fresh commit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |pending| {
+        var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+        defer h.deinit(allocator);
+        try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n");
+        const s = h.fx.session;
+        try prefetchResolveFixtureForTest(&h);
+        if (pending) try pressKey(&h.fx, .enter, .{});
+        const old_pid = lsp_client.readyClientFor(s, h.term).?.proc.?.pid;
+        const before = try allocator.dupe(u8, h.content());
+        defer allocator.free(before);
+        const selection = h.term.rt.editor_selection.?;
+        const undo = h.term.rt.editorDocument().history.undo_len;
+        s.loaded_config.config.lsp.enabled = false;
+        lsp_client.pump(s); // Client is freed here; never retain or replay that pointer.
+        try testing.expect(!s.editor_completion.pending_accept and !s.editor_completion.resolve_waiting);
+        try testing.expectEqualStrings(before, h.content());
+        try testing.expectEqualDeep(selection, h.term.rt.editor_selection.?);
+        try testing.expectEqual(undo, h.term.rt.editorDocument().history.undo_len);
+        s.loaded_config.config.lsp.enabled = true;
+        const Ctx = struct { s: *AppSession, t: *Term, pid: std.c.pid_t };
+        try testing.expect(pumpLspUntil(&h.fx, 3000, Ctx{ .s = s, .t = h.term, .pid = old_pid }, struct {
+            fn ready(c: Ctx) bool {
+                const current = lsp_client.readyClientFor(c.s, c.t) orelse return false;
+                return current.proc.?.pid != c.pid;
+            }
+        }.ready));
+        // The retained prefetch list can retry directly. A cancelled pending
+        // transaction needs a new list; either path must wait for full resolve.
+        if (pending) {
+            try testing.expect(completion_client.triggerManual(s));
+            try testing.expect(pumpLspUntil(&h.fx, 3000, s, struct {
+                fn ready(ss: *AppSession) bool {
+                    return !ss.editor_completion.waiting;
+                }
+            }.ready));
+            try h.frame();
+        }
+        try pressKey(&h.fx, .enter, .{});
+        try testing.expect(s.editor_completion.pending_accept and s.editor_completion.resolve_waiting);
+        try testing.expectEqualStrings(before, h.content());
+        var reply = try std.json.parseFromSlice(std.json.Value, allocator, "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}", .{});
+        defer reply.deinit();
+        completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term).?, s.editor_completion.resolve_seq, reply.value);
+        try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+        try testing.expectEqual(undo + 1, h.term.rt.editorDocument().history.undo_len);
+        s.dispatchAppAction(.editor_undo);
+        try testing.expectEqualStrings(before, h.content());
+    }
+}
+
 test "CMPATORIGIN resolve from another primary client cannot commit an equal seq" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var h: HelperFx = .{ .fx = try PaneFixture.init(testing.allocator) };

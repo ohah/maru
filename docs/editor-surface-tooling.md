@@ -827,6 +827,11 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 종료 시점에는 proc가 이미 없어 `boundClientFor`로 결합을 확인하며, 새 요청과 응답은
 기존 `readyClientFor` 검사를 유지한다.
 
+같은 원본의 상세 정보 요청(resolve)도 주 서버 종료 시 대기를 해제한다. 미리 읽기 항목은
+미해결 상태를 유지해 다음 Enter에서 재요청하며, 이미 Enter로 확정을 기다리던 항목은
+기존 cancel로 입력·이력을 바꾸지 않고 취소한다. 서버 종료나 재시작은 import 없는 부분
+확정을 허용하지 않는다. auxiliary/다른 root의 종료는 유효한 상세 요청을 유지한다.
+
 semantic·inlay·symbols·fold_lsp·highlight의 문서별 대기도 같은 주 서버 결합을 따른다.
 종료 시 `releaseWaiting`은 primary와 `boundClientFor`의 일치를 확인한 뒤 기존 L2
 `lsp_requests.release`를 호출한다. 다른 root나 auxiliary 종료는 대기를 바꾸지 않는다.

@@ -5,6 +5,11 @@
 4개 모듈 초기화를 강제하며 비동기·공유·IME preedit·편집/Undo·옵션 전환·빈/미지원 문서를 대조한다.
 [입력 지연 계획](plans/editor-input-latency.md)에 재현과 실제 표시 재측정의 범위를 기록한다.
 
+`mise exec -- zig build test-editor-completion-resolve-stop -j2`와 `-Doptimize=ReleaseFast`는
+상세 요청의 미리 읽기/Enter 대기 중 실제 primary/auxiliary/다른 root 종료, 재시작,
+끄기·켜기와 늦은 결과를 검사한다. 9개(행동 5개, 초기화 4개)를 강제한다.
+[상세 요청 종료 계획](plans/lsp-completion-resolve-stop.md)의 실제 프로세스/직접 응답 구분을 따른다.
+
 `mise exec -- zig build test-editor-feature-stop -j2`와 `-Doptimize=ReleaseFast`는
 semantic·inlay·symbols·fold·highlight의 auxiliary/primary 종료, 재시작, disable/enable와
 다른 root 종료를 검사한다. 12개(행동 8개, 초기화 4개)를 강제한다.
@@ -1853,7 +1858,7 @@ Save As를 검사한다. 검색용 `--physical-ime`와 함께 쓰지 않는다. 
 ### 자동완성 확정의 Undo 보존
 
 `mise exec -- zig build test-editor-completion`과 `-Doptimize=ReleaseFast`는
-자동완성 제품 판정자 20개와 import 초기화 검사 4개(총 24개)를 실행한다. CMP3는 가득 찬 Undo와
+자동완성 제품 판정자 25개와 import 초기화 검사 4개(총 29개)를 실행한다. CMP3는 가득 찬 Undo와
 기존 Redo 상태에서 확정 중 할당 실패를 순회해 본문·선택·revision·이력 보존을 검사한다.
 실제 OS 입력기 화면 검증은 포함하지 않는다.
 

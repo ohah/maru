@@ -6752,6 +6752,16 @@ pub fn build(b: *std.Build) void {
         run_feature_stop.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_feature_stop.step);
     }
+    const resolve_stop_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPRESSTOP"} });
+    const run_resolve_stop = b.addRunArtifact(resolve_stop_tests);
+    run_resolve_stop.setCwd(b.path("."));
+    run_resolve_stop.addArg("--maru-expect-tests=9");
+    run_resolve_stop.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-completion-resolve-stop", "Verify completion resolve ownership and input preservation after server stop").dependOn(&run_resolve_stop.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_resolve_stop.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_resolve_stop.step);
+    }
     const completion_stop_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPSTOP"} });
     const run_completion_stop = b.addRunArtifact(completion_stop_tests);
     run_completion_stop.setCwd(b.path("."));
@@ -6777,7 +6787,7 @@ pub fn build(b: *std.Build) void {
     const completion_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CMP", ".test.RLC1 " } });
     const run_completion = b.addRunArtifact(completion_tests);
     run_completion.setCwd(b.path("."));
-    run_completion.addArg("--maru-expect-tests=24");
+    run_completion.addArg("--maru-expect-tests=29");
     run_completion.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-completion", "Run editor completion product regressions").dependOn(&run_completion.step);
     const save_conflict_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.C0a", ".test.C1a-", ".test.C1b-" } });

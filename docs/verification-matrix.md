@@ -1,5 +1,10 @@
 # 검증 매트릭스
 
+표시된 자동완성의 키 원본: `test-editor-completion-focused-source`는 frame 전 활성 원본
+전환에서 명령과 키를 검사한다. 같은 pane/split의 Enter·Tab·이동·단축키를 목록 없는
+제품 동작과 대조한다. [계획](plans/lsp-completion-focused-source.md)의 native controller/frame
+증거이며 실제 AppKit focus·물리 HID·픽셀 검증으로 확대하지 않는다.
+
 자동완성 대기 중 원본 전환: `test-editor-completion-source-switch`는 동일 primary의 두 문서와
 다른 root의 실제 두 primary, 명령/타이핑 트리거와 정상 확정/Undo를 대조한다.
 [계획](plans/lsp-completion-source-switch.md)의 순서 제어용 직접 목록 응답을 SDK/HID/픽셀 증거로 확대하지 않는다.

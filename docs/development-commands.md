@@ -1,5 +1,10 @@
 # 개발 명령
 
+색 표시의 단계 분해와 timer 30/60/120Hz 대조는
+[실행·판정 계약](../tools/editor-input-latency/stage-results.md)을 따른다.
+`stages.py`는 기존 원시 시각을 다시 검증하고, `cadence.py`는 격리 설정으로 실제 입력을 비교한다.
+`review_stages.py`는 실제 자료의 의미 변조 거절과 원본 보존을 재현한다.
+
 `mise exec -- zig build test-editor-bracket-continuation -j2`와 `-Doptimize=ReleaseFast`는
 전체 프레임 게시 뒤 괄호 분석의 작업 지속과 완료 뒤 idle을 검증한다. 14개 제품 행동과
 4개 모듈 초기화를 강제하며 비동기·공유·IME preedit·편집/Undo·옵션 전환·빈/미지원 문서를 대조한다.

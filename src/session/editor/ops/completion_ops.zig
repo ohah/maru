@@ -14,6 +14,15 @@ const Change = delta.Change;
 const Selection = selection.Selection;
 const Span = completion.Span;
 
+pub const RequestDisposition = enum { send, coalesce, replace };
+
+/// A session has one completion wait. Only another trigger from that same view
+/// can share it; a different view must get its own request immediately.
+pub fn requestDisposition(waiting: bool, waiting_surface: u64, current_surface: u64) RequestDisposition {
+    if (!waiting) return .send;
+    return if (waiting_surface == current_surface) .coalesce else .replace;
+}
+
 /// Pending Enter requires every additional edit; ordinary preview-era acceptance
 /// retains its existing conservative additional-edit filtering.
 pub const CommitMode = enum { ordinary, atomic };

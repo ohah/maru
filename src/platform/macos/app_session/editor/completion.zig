@@ -241,10 +241,16 @@ fn ask(self: *AppSession, term: *Term, trigger_char: ?u8) bool {
     if (doc.file.read_only) return false;
     const sel = term.rt.editor_selection orelse return false;
     const caret = @min(sel.focus, doc.file.content.len);
-    if (st.waiting) {
-        st.dirty = true;
-        st.dirty_trigger = trigger_char;
-        return true;
+    switch (completion_ops.requestDisposition(st.waiting, st.waiting_surface, term.surfaceId())) {
+        .send => {},
+        .coalesce => {
+            st.dirty = true;
+            st.dirty_trigger = trigger_char;
+            return true;
+        },
+        // The old source cannot answer a new view's trigger. Cancel its whole
+        // completion transaction before installing the new source's wait.
+        .replace => cancel(self),
     }
     const seq = editor_lsp.requestCompletion(self, term, caret, trigger_char) orelse return false;
     st.waiting = true;

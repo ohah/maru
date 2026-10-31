@@ -75679,6 +75679,119 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
     try testing.expectEqualStrings(before, h.content());
 }
 
+fn completionSourceSwitchForTest(separate_root: bool, typed: bool) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    const second = if (separate_root) try openSecondReadRootForTest(&f, "pr // COMPSTALL\n") else blk: {
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "second.c", .data = "pr // COMPSTALL\n" });
+        const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "second.c" });
+        defer testing.allocator.free(path);
+        const t = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+        try testing.expect(pumpLspUntil(&f.fx, 3000, t, struct {
+            fn ready(term: *Term) bool {
+                return term.rt.editor_diagnostics.lsp.items.len > 0;
+            }
+        }.ready));
+        break :blk t;
+    };
+    try testing.expectEqual(separate_root, lsp_client.readyClientFor(s, f.term).? != lsp_client.readyClientFor(s, second).?);
+    f.term.rt.editor_selection = editor_selection.Selection.at(2);
+    second.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
+    try testing.expect(completion_client.triggerManual(s));
+    const sent = s.editor_lsp.sent_completions;
+    const ca = lsp_client.readyClientFor(s, f.term).?;
+    const cb = lsp_client.readyClientFor(s, second).?;
+    const old_seq = s.editor_completion.waiting_seq;
+    try testing.expect(term_ops.activateSurfaceById(s, second.surface.id));
+    if (typed) try testing.expect(insertText(s, second, ".")) else try testing.expect(completion_client.triggerManual(s));
+    try testing.expectEqual(sent + 1, s.editor_lsp.sent_completions);
+    try testing.expectEqual(second.surface.id, s.editor_completion.waiting_surface);
+    try testing.expect(s.editor_completion.waiting and !s.editor_completion.dirty);
+    const seq = s.editor_completion.waiting_seq;
+    if (typed) try testing.expect(insertText(s, second, "p")); // Keep a real prefix while the dot-triggered request waits.
+    try testing.expectEqual(separate_root, seq == old_seq); // Real connection-local counters collide only across roots.
+    var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[{\"label\":\"print_second\",\"preselect\":true,\"additionalTextEdits\":[]}]", .{});
+    defer result.deinit();
+    completion_client.onResponse(s, ca, old_seq, result.value);
+    try testing.expect(s.editor_completion.waiting and !s.editor_completion.active);
+    completion_client.onResponse(s, ca, old_seq, null);
+    try testing.expect(s.editor_completion.waiting and !s.editor_completion.active);
+    completion_client.onResponse(s, cb, seq + 1, result.value);
+    try testing.expect(s.editor_completion.waiting and !s.editor_completion.active);
+    // Three new triggers on B still make only one followup, never three requests.
+    for (0..3) |_| try testing.expect(completion_client.triggerManual(s));
+    try testing.expectEqual(sent + 1, s.editor_lsp.sent_completions);
+    try testing.expect(s.editor_completion.dirty);
+    completion_client.onResponse(s, cb, seq, result.value);
+    try testing.expect(s.editor_completion.active and s.editor_completion.waiting and !s.editor_completion.dirty);
+    try testing.expectEqual(sent + 2, s.editor_lsp.sent_completions);
+    const next = s.editor_completion.waiting_seq;
+    completion_client.onResponse(s, cb, seq, null); // Older own response cannot settle the coalesced followup.
+    completion_client.onResponse(s, cb, seq, result.value);
+    try testing.expect(s.editor_completion.waiting);
+    completion_client.onResponse(s, cb, next, result.value);
+    try testing.expect(!s.editor_completion.waiting and s.editor_completion.active);
+    try testing.expectEqual(second.surface.id, s.editor_completion.surface_id);
+    const before = try testing.allocator.dupe(u8, second.rt.editorDocument().opened.?.file.content);
+    defer testing.allocator.free(before);
+    var frame = appendPaneFrame(s, f.leaf, second) orelse return error.EditorPaneDidNotDraw;
+    frame.dl.deinit(testing.allocator);
+    try testing.expect(completion_client.refresh(s));
+    const selected = s.editor_completion.order.items[s.chrome_host.suggest_box.selected];
+    try testing.expectEqualStrings("print_second", s.editor_completion.items.items[selected].label);
+    const undo = second.rt.editorDocument().history.undo_len;
+    const accepted = s.editor_completion.accepted;
+    try pressKey(&f.fx, .enter, .{});
+    const Ctx = struct { s: *AppSession, accepted: u64 };
+    try testing.expect(pumpLspUntil(&f.fx, 1500, Ctx{ .s = s, .accepted = accepted }, struct {
+        fn done(c: Ctx) bool {
+            return c.s.editor_completion.accepted > c.accepted;
+        }
+    }.done)); // A resolve-capable server may finish acceptance asynchronously.
+    try testing.expectEqualStrings(if (typed) "pr.print_second // COMPSTALL\n" else "print_second // COMPSTALL\n", second.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(undo + 1, second.rt.editorDocument().history.undo_len);
+    try testing.expectEqualStrings("pr // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings(before, second.rt.editorDocument().opened.?.file.content);
+    completion_client.onResponse(s, ca, old_seq, result.value);
+    try testing.expect(!s.editor_completion.active and !s.editor_completion.waiting);
+}
+
+test "CMPSWITCH1 completion source switch on one primary sends a new request" {
+    for ([_]bool{ false, true }) |typed| try completionSourceSwitchForTest(false, typed);
+}
+test "CMPSWITCH2 completion source switch across primary roots sends a new request" {
+    for ([_]bool{ false, true }) |typed| try completionSourceSwitchForTest(true, typed);
+}
+test "CMPSWITCH3 closing the replacement source cannot revive an older completion" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    const second = try openSecondReadRootForTest(&f, "pr // COMPSTALL\n");
+    f.term.rt.editor_selection = editor_selection.Selection.at(2);
+    second.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
+    try testing.expect(completion_client.triggerManual(s));
+    const ca = lsp_client.readyClientFor(s, f.term).?;
+    const old_seq = s.editor_completion.waiting_seq;
+    try testing.expect(term_ops.activateSurfaceById(s, second.surface.id));
+    try testing.expect(completion_client.triggerManual(s));
+    const cb = lsp_client.readyClientFor(s, second).?;
+    const seq = s.editor_completion.waiting_seq;
+    const pane = pane_ops.activePane(s);
+    term_ops.closeTermAt(s, s.app_window.active_tab, pane, std.mem.indexOfScalar(*Term, pane.terms.items, second).?);
+    completion_client.onResponse(s, ca, old_seq, null);
+    completion_client.onResponse(s, cb, seq, null);
+    try testing.expect(!s.editor_completion.waiting and !s.editor_completion.active);
+    try testing.expectEqualStrings("pr // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+}
+
 test "CMPRESSTOP1 primary death releases completion prefetch" {
     try resolvePrimaryDeathForTest(false);
 }

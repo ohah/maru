@@ -1785,3 +1785,4 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [자동완성 대기와 서버 종료](plans/lsp-completion-stop-origin.md): 같은 문서의 보조 서버 종료가 주 서버 응답 대기를 지우지 않는다.
 - [문서별 LSP 기능의 서버 종료](plans/lsp-feature-stop-origin.md): semantic·inlay·symbols·fold·highlight의 주 서버 대기를 보호한다.
 - [자동완성 상세 요청의 서버 종료](plans/lsp-completion-resolve-stop.md): 미리 읽기 재요청과 Enter 대기의 무편집 취소를 검증한다.
+- [자동완성 대기 중 문서 전환](plans/lsp-completion-source-switch.md): 다른 원본의 트리거는 기존 대기에 합치지 않고 새 요청을 보낸다.

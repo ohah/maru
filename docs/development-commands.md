@@ -1857,8 +1857,13 @@ Save As를 검사한다. 검색용 `--physical-ime`와 함께 쓰지 않는다. 
 
 ### 자동완성 확정의 Undo 보존
 
+`mise exec -- zig build test-editor-completion-source-switch -j2`와 `-Doptimize=ReleaseFast`는
+실제 문서 전환 뒤 새 요청, 동일/다른 primary와 명령/타이핑 트리거, 낡은 결과와 후속 합산,
+원본 닫기 및 정상 확정/Undo를 검사한다. 7개(행동 3개, 초기화 4개)를 강제한다.
+[원본 전환 계획](plans/lsp-completion-source-switch.md)에 직접 응답과 실제 프로세스의 범위를 적는다.
+
 `mise exec -- zig build test-editor-completion`과 `-Doptimize=ReleaseFast`는
-자동완성 제품 판정자 25개와 import 초기화 검사 4개(총 29개)를 실행한다. CMP3는 가득 찬 Undo와
+자동완성 제품 판정자 28개와 import 초기화 검사 4개(총 32개)를 실행한다. CMP3는 가득 찬 Undo와
 기존 Redo 상태에서 확정 중 할당 실패를 순회해 본문·선택·revision·이력 보존을 검사한다.
 실제 OS 입력기 화면 검증은 포함하지 않는다.
 

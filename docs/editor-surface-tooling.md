@@ -827,6 +827,11 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 종료 시점에는 proc가 이미 없어 `boundClientFor`로 결합을 확인하며, 새 요청과 응답은
 기존 `readyClientFor` 검사를 유지한다.
 
+대기 중 트리거는 같은 surface의 것만 후속 요청 하나로 합친다. 다른 문서로 활성화한 뒤
+명령이나 타이핑 트리거가 오면 기존 대기를 cancel하고 새 문서를 요청한다. 순수 선택은
+L2 `completion_ops.requestDisposition`, 취소·전송과 실제 surface 조회는 host가 소유한다.
+예전 원본의 늦은 결과는 기존 seq/클라이언트 검사로 버린다.
+
 같은 원본의 상세 정보 요청(resolve)도 주 서버 종료 시 대기를 해제한다. 미리 읽기 항목은
 미해결 상태를 유지해 다음 Enter에서 재요청하며, 이미 Enter로 확정을 기다리던 항목은
 기존 cancel로 입력·이력을 바꾸지 않고 취소한다. 서버 종료나 재시작은 import 없는 부분

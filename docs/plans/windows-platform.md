@@ -1784,8 +1784,8 @@ check-targets, 키 소유권 8개·탐색기 메뉴 8개·root flow 9개 및 문
 `.zig-cache/windows-main-rebase-commit133-key-fix-gates-20261101.log`이다.
 통합된 ReleaseFast 앱에서도 동일한 native 입력 5개 시나리오가 통과했다.
 근거는 `.zig-cache/windows-modal-main-explorer-input-20261101.json`이다.
-설치본 반영은 아직 완료하지 않았다. 물리 입력이나 실제 IME 조합 문자열·후보창
-검증으로 확대하지 않는다.
+소스 a8663c168a19 기준 설치 미리보기에도 반영했다. 설치 결과는 아래 항목을
+따른다. 물리 입력이나 실제 IME 조합 문자열·후보창 검증으로 확대하지 않는다.
 
 
 ### Windows 모달의 작업영역·패널 패딩 — main 통합 검증
@@ -1819,5 +1819,33 @@ props는 타이틀바·상태바를 제외한 공통 작업영역도 전달하�
 컴파일·모달 8개·키 8개·탐색기 메뉴 8개·root flow 9개 및 문서·형식 검사가
 통과했다. 별도 prefix에서 재빌드한 wasm도 배포/커밋 사본과 동일했다. 근거:
 `.zig-cache/windows-modal-main-validation-20261101.json`.
-설치본 반영은 아직 완료로 계산하지 않는다. 터미널 clipboard 회귀 도구는
-사용자 clipboard에 데이터가 있어 실행하지 않았고 내용을 바꾸지 않았다.
+이 소스의 버전별 설치·실행과 설치된 실행 파일의 별도 프로필 검증도 아래에
+기록했다. 터미널 clipboard 회귀 도구는 사용자 clipboard에 데이터가 있어
+실행하지 않았고 내용을 바꾸지 않았다.
+
+
+### main 통합 미리보기 설치·실행 — a8663c168a19
+
+main 3556d940ffd6 기반 소스 a8663c168a19의 검증된 ReleaseFast 실행 파일을
+버전별 Programs/Maru 경로에 설치했다. 빌드 이후 바뀐 것은 문서 상태이며,
+실행 파일을 검증한 소스 해시와 커밋의 해당 파일 해시가 같음을 확인했다.
+패키지는 실행 자료 63개(폰트 18개·고지 36개·기존 bundled ConPTY 포함)와
+출처 manifest를 담는다. 기존 버전과 바로가기 백업을 보존했다.
+
+바탕화면·시작 메뉴·기존 작업표시줄 바로가기 3개를 새 버전으로 갱신하고
+대상·인자·아이콘 위치·설치 바이트를 대조했다. PE의 큰/작은 아이콘을 실제로
+추출했고 사용자 프로필로 실행한 창의 표시·응답과 native class icon도 확인했다.
+설치된 실행 파일을 별도 테스트 프로필로 다시 실행해 설정창 13항목과 정상
+종료를 확인했다. 사용자용 창에는 합성 입력을 보내지 않았다.
+
+근거: `.zig-cache/installed-main-modal-preview-receipt-20261101.json`,
+`.zig-cache/installed-main-modal-user-launch-20261101.json`,
+`.zig-cache/windows-installed-main-modal-settings-app-20261101.json`.
+설치 프리뷰 소스는 a8663c168a19이며 이 문서 기록은 그 다음 커밋이다.
+
+진행 Draft는 [#4667](https://github.com/ohah/maru/pull/4667)이다. 이전 #4084의
+브랜치와 첨부 14장을 보존했고 새 Draft도 같은 첨부를 유지한다. 새 모달의
+before/after 원본은 로컬에 보존했지만, 연결 도구에 업로드 기능이 없고 설치된
+GitHub CLI가 --attach를 지원하지 않아 새 이미지 첨부는 아직 남아 있다.
+파일·디렉터리 행 및 사이드바·탭 메뉴와 남은 바인딩·reload/reset·플랫폼 작업은
+계속 진행 대상이다. 이 설치 결과를 Windows 전체 완료로 해석하지 않는다.

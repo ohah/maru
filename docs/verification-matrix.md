@@ -5971,7 +5971,8 @@ file, physical input or installed-preview delivery.
   checkpoint fails this probe; the isolated fix passes. The latest-main source
   now passes full boundaries and cross-target compilation, plus the focused
   key/menu/root-flow gates. Actual app revalidation of the integrated tree also
-  passes its native input scenarios. Installed-preview delivery remains pending.
+  passes its native input scenarios. Preview a8663c168a19 is now installed; its
+  separate-profile settings checks and user-window startup are recorded below.
 
 
 ### Windows 모달의 workspace·패널 패딩
@@ -5987,3 +5988,13 @@ file, physical input or installed-preview delivery.
 이어서 main 기반 통합 앱에서도 설정창 13개와 탐색기 5개 실행이 통과했다.
 통합 모델·의존 파일 해시와 정상 종료·wasm 대조를 포함한 근거는
 `.zig-cache/windows-modal-main-validation-20261101.json`이다. 설치본 검증은 별도다.
+
+
+### main 통합 설치 미리보기 a8663c168a19
+
+실행 자료 63개·폰트 18개·고지 36개와 기존 ConPTY의 설치 바이트, 바로가기
+3개·embedded 큰/작은 아이콘과 사용자 창의 가시성·응답을 확인했다.
+설치된 실행 파일의 별도 프로필 설정창 13개도 통과했다. 사용자 창에는 테스트
+입력을 보내지 않았다. 설치/실행 영수증과 남은 Windows 기능은
+[Windows 계획](plans/windows-platform.md)을 따른다. 미검증 clipboard·물리 IME,
+새 UI 이미지 첨부와 남은 메뉴를 이 설치 검증으로 완료 처리하지 않는다.

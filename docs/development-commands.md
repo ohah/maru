@@ -2614,3 +2614,11 @@ Windows 스크롤백·문자 폭 설정 집중 검사는 `zig build test-live-te
   --case input --output <new-receipt.json>` runs five private HWND cases in the
   actual app. Its IME case checks an empty native preedit-clear route, not physical
   IME input or candidate content.
+
+
+### Windows 모달의 작업영역과 패딩
+
+`mise exec -- zig build test-windows-modal-layout -j2`와 `-Doptimize=ReleaseFast`는
+작업영역의 원점·빈 영역·모양 토큰, 패널 패딩과 gradient/clip 보존 등 8개를 검사한다.
+컴파일된 수와 실제 통과 수를 각각 8개로 제한한다. 이 순수 검사는 실제 창의 페인트와
+입력 연결을 대신하지 않는다. 진행 결과는 [Windows 계획](plans/windows-platform.md)을 따른다.

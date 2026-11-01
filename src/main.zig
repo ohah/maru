@@ -5,6 +5,7 @@ const maru = @import("maru");
 const ts = @import("syntax");
 const win_sidebar = @import("platform/windows/chrome/sidebar.zig");
 const explorer_menu = @import("platform/windows/chrome/file_tree_menu.zig");
+const win_modal = @import("platform/windows/chrome/modal.zig");
 const win_dock = @import("platform/windows/chrome/dock.zig");
 const terminal_clipboard_menu = @import("app/terminal_clipboard_menu.zig");
 const windows_root_flow = @import("platform/windows/file_tree_root_flow.zig");
@@ -6471,14 +6472,8 @@ const sessionIndexById = win_session.indexById;
 /// **그리는 쪽과 히트테스트가 같은 값을 받아야 한다** — 중립 `confirm.view` 와 `buttonAtPoint` 가
 /// 둘 다 이것을 보고 상자를 놓는다(그 컴포넌트가 `modal_box` 프리미티브에 위임한다). 한쪽만
 /// 다른 값을 주면 "보이는 버튼 ≠ 눌리는 버튼" 이 된다 — 사이드바에서 이미 그 함정을 봤다(§2m.74).
-fn confirmProps(client_w: u32, client_h: u32, cell_w: u32, cell_h: u32, sidebar_w: u32, tk: *const maru.chrome.Tokens) maru.chrome.props.ChromeProps {
-    return .{ .shape = .fromTokens(tk), .metrics = .{
-        .cell_width_px = cell_w,
-        .cell_height_px = cell_h,
-        .sidebar_width_px = sidebar_w,
-        .backing_width_px = client_w,
-        .backing_height_px = client_h,
-    } };
+fn confirmProps(client_w: u32, client_h: u32, cell_w: u32, cell_h: u32, sidebar_w: u32, workspace: maru.session.split_tree.Rect, tk: *const maru.chrome.Tokens) maru.chrome.props.ChromeProps {
+    return win_modal.props(client_w, client_h, cell_w, cell_h, sidebar_w, workspace, tk);
 }
 
 const CloseSessionResult = win_session.CloseResult;
@@ -13008,7 +13003,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         settings_host.swallow_left_up = false;
                         settings_host.cancelGestures();
                     } else if (m.kind == .wheel or m.kind == .wheel_h) {
-                        settings_host.wheel(m.wheel_delta, wheel_lines_per_notch, m.kind == .wheel_h, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens);
+                        settings_host.wheel(m.wheel_delta, wheel_lines_per_notch, m.kind == .wheel_h, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens);
                     } else settings_host.pointer(.{
                         .phase = switch (m.kind) {
                             .moved => .move,
@@ -13021,7 +13016,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         },
                         .x_px = @floatFromInt(m.x_px),
                         .y_px = @floatFromInt(m.y_px),
-                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens);
+                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens);
                     window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
                     continue;
                 }
@@ -13048,7 +13043,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         },
                         .x_px = @floatFromInt(m.x_px),
                         .y_px = @floatFromInt(m.y_px),
-                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), dock_tree.rootGeneration());
+                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), dock_tree.rootGeneration());
                     if (result.request) |request| {
                         pending_pick = request;
                         root_menu_actions += 1;
@@ -13071,7 +13066,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         },
                         .x_px = @floatFromInt(m.x_px),
                         .y_px = @floatFromInt(m.y_px),
-                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), clipboard_host.current(active_view == .terminal));
+                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), clipboard_host.current(active_view == .terminal));
                     window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up or root_popup.state.open or root_popup.swallow_left_up or pending_pick != null, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
                     if (popup_result.request) |request| terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
                     if (popup_result.consumed) continue;
@@ -13487,7 +13482,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // (적대적 검증 2회차 실측: `caption_alive=false`).
                 if (confirm_state.open) {
                     if (m.kind == .left_up) {
-                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
+                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
                             .confirmed => confirm_pending_click = .confirmed,
                             .cancelled => confirm_pending_click = .cancelled,
                             .alternate, .extra => if ((pending_file_close != null or pending_file_conflict != null) and confirm_pending_click == null) {
@@ -14482,7 +14477,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 break :blk .{ .row = active.core.screen.cursor.row, .col = active.core.screen.cursor.col };
             };
             const settings_caret = settings_host.imeCaret(
-                confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens),
+                confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens),
                 &chrome_tokens,
             );
             const caret: maru.session.mouse_coordinates.ImeCaret = settings_caret orelse .{
@@ -15476,7 +15471,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             file_close_waiting or initial_open.job != null or close_requested or root_close_waiting or root_flow.busy() or file_picker != null);
 
         if (terminal_popup.state.open) {
-            const popup_cells = appendTerminalPopupCells(allocator, &cells, &terminal_popup, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &terminal_popup_frame) catch blk: {
+            const popup_cells = appendTerminalPopupCells(allocator, &cells, &terminal_popup, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &terminal_popup_frame) catch blk: {
                 terminal_menu_draw_failures += 1;
                 terminal_popup.dismiss();
                 break :blk 0;
@@ -15485,7 +15480,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (root_popup.state.open) {
             const labels = explorer_menu.labels();
-            _ = appendContextMenuCells(allocator, &cells, &root_popup.state, &labels, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &root_popup_frame) catch blk: {
+            _ = appendContextMenuCells(allocator, &cells, &root_popup.state, &labels, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &root_popup_frame) catch blk: {
                 root_popup.dismiss();
                 break :blk 0;
             };
@@ -15494,13 +15489,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             var settings_arena = std.heap.ArenaAllocator.init(allocator);
             defer settings_arena.deinit();
             var settings_ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
-            const settings_props = confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens);
+            const settings_props = confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens);
             settings_host.draw(settings_arena.allocator(), settings_props, &chrome_tokens, &settings_ops) catch {};
             _ = appendModalOpsCells(allocator, &cells, settings_ops.items, settings_props, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &settings_frame) catch 0;
         }
         confirm_cells_drawn = 0;
         if (confirm_state.open) {
-            if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
+            if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
                 confirm_cells_drawn = n_drawn;
                 // **그린 셀에서 상자의 가로 중앙을 도로 읽는다** — 내가 넘긴 값을 되읽으면 동어반복이다.
                 var minx: f32 = std.math.floatMax(f32);
@@ -15515,7 +15510,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         file_notice_cells = 0;
         file_notice_glyphs = 0;
         if (file_notice.open and !confirm_state.open) {
-            file_notice_cells = appendNoticeCells(allocator, &cells, &file_notice, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &file_notice_frame) catch 0;
+            file_notice_cells = appendNoticeCells(allocator, &cells, &file_notice, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &file_notice_frame) catch 0;
             for (cells.items[cells.items.len - file_notice_cells ..]) |cell|
                 if (cell.uv[0] >= 0 and cell.rect[2] > 0 and cell.rect[3] > 0) {
                     file_notice_glyphs += 1;
@@ -20317,7 +20312,7 @@ const EditorBuilt = struct {
 /// 확인 모달을 셀로 낮춰 **맨 위에** 얹는다. 그린 셀 수를 돌려준다(0 이면 안 그렸다).
 ///
 /// **편집기와 같은 길을 쓴다** — `confirm.view` 가 내는 op 를 `buildTextDrawList` 로 글자로, 단색
-/// 사각은 `appendConfirmSolids` 로(편집기의 `appendSolidOps` 와 같은 평탄화 + 패널 키우기). 모달은 창
+/// 사각은 `appendModalPaintOps` 로(편집기의 `appendSolidOps` 와 같은 평탄화 + 패널 키우기). 모달은 창
 /// 좌표에 그려지므로 원점이 (0,0)이다.
 fn appendConfirmCells(
     allocator: std.mem.Allocator,
@@ -20437,7 +20432,7 @@ fn appendModalOpsCells(
 
     // Both fill and border are lowered, including declared gradients.
     const before = out.items.len;
-    try appendPaintOps(allocator, ops, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, 0, 0, out);
+    try appendModalPaintOps(allocator, ops, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, out);
     // Backgrounds use exact pixel origins. Preserve those same origins for
     // text: flooring to a terminal row moves dark focus labels above their
     // contrasting button fill, making them disappear against the panel.
@@ -20453,7 +20448,7 @@ fn appendModalOpsCells(
 
 /// 확인 모달 ops 의 단색 몫(패널·버튼 배경). **패널은 패딩만큼 키운다** — 규칙은 중립 `chrome.solid_rects.flattenModal` 이
 /// 갖는다(macOS rich lowering 과 같은 그림: 모서리·테두리·패딩).
-fn appendConfirmSolids(
+fn appendModalPaintOps(
     a: std.mem.Allocator,
     ops: []const maru.chrome.draw.Op,
     tk: *const maru.chrome.Tokens,
@@ -20463,13 +20458,9 @@ fn appendConfirmSolids(
 ) !void {
     // Match flattenModal's first-panel expansion before choosing solid or gradient paint.
     // Applying padding after clipping would move the gradient endpoints and modal hit geometry.
-    var panel_done = false;
+    var modal_paint: win_modal.Paint = .{};
     for (ops) |op| {
-        var painted = op;
-        if (!panel_done and painted == .quad) {
-            panel_done = true;
-            painted.quad.rect = painted.quad.visibleRect(tk.space.modal_padding_px);
-        }
+        const painted = modal_paint.prepare(op, tk);
         try appendPaintOps(a, &.{painted}, tk, client_w, client_h, 0, 0, out);
     }
 }
@@ -20503,7 +20494,7 @@ test "확인 모달(Windows): props 가 제품 토큰의 모양을 싣는다 —
     // `confirmProps` 는 그리기(`confirm.view`)와 판정(`buttonAtPoint`)이 함께 받는 단일 출처다. shape 를 안 실으면 기본값 0 이 돼
     // macOS 확인 모달(rich: 모서리 8·테두리 1·패딩 12)과 다른 기반 모양이 된다 — 컴파일러는 모른다(2026-10-14).
     const tk = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors));
-    const p = confirmProps(1200, 800, 8, 16, 200, &tk);
+    const p = confirmProps(1200, 800, 8, 16, 200, .{ .x = 200, .y = 40, .w = 1000, .h = 730 }, &tk);
     try std.testing.expectEqual(maru.chrome.props.ShapeTokens.fromTokens(&tk), p.shape);
     try std.testing.expect(p.shape.modal_padding_px > 0); // 전제: rich 는 0 이 아니다
 }
@@ -20701,7 +20692,7 @@ test "Windows paint rebase preserves shared solids and gradient geometry" {
     cells.clearRetainingCapacity();
     q.clip = null;
     const panel = q.visibleRect(tk.space.modal_padding_px);
-    try appendConfirmSolids(a, &.{.{ .quad = q }}, &tk, 300, 200, &cells);
+    try appendModalPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, &cells);
     try std.testing.expectEqual(@as(usize, 1), cells.items.len);
     try std.testing.expectEqual([4]f32{ @floatFromInt(panel.x), @floatFromInt(panel.y), @floatFromInt(panel.w), @floatFromInt(panel.h) }, cells.items[0].paint_rect);
 }
@@ -21385,7 +21376,7 @@ fn runEditorCloseModalFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(a);
     var unpainted: usize = 0;
-    const props = confirmProps(host.initial.width_px, host.initial.height_px, host.cell_w, host.cell_h, 0, tokens);
+    const props = confirmProps(host.initial.width_px, host.initial.height_px, host.cell_w, host.cell_h, 0, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, tokens);
     for (fixtures) |fixture| {
         var modal: confirm.State = .{};
         showFileClose(&modal);

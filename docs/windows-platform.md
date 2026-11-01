@@ -13585,3 +13585,18 @@ FIFO/backpressure/close/fence tests (plus twenty-eight aggregation blocks),
 covering legacy producers that do not opt into protocol framing. macOS runtime
 execution remains unavailable on this Windows host; its source boundary and
 cross-target compilation are distinct from an actual macOS app run.
+
+
+### Windows 모달의 작업영역과 패널 페인트
+
+`platform/windows/chrome/modal.zig`는 공통 dock layout이 계산한 `workspace`를
+그리기·포인터·IME caret의 동일한 props로 전달한다. backing 크기로 작업영역을
+추측하지 않으며, 0인 폭·높이도 권위 있는 접힘 상태로 보존한다. 작업영역은
+사이드바와 타이틀바·상태바를 제외하되 도크는 포함한다.
+
+모달의 첫 quad는 공통 `Quad.visibleRect`와 같은 패딩으로 확장한 후 native
+solid/gradient 경로로 전달한다. 문자와 후속 둥근 버튼의 좌표는 확장하지 않는다.
+명시적 패딩 0·clip·alpha·gradient·border를 보존한다. 기존 코드에서는 패딩을
+확인하는 함수가 테스트에서만 호출되고 실제 모달은 일반 페인트를 바로 호출했다.
+그 결과 보이지 않는 띠가 포인터 판정에는 포함됐다. 실제 제품 진입점이 같은
+패딩 어댑터를 사용하도록 연결했으며, 검증과 통합 상태는 Windows 계획이 소유한다.

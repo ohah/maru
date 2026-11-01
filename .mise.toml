@@ -703,6 +703,10 @@ run = "zig build test-file-tree-context-menu"
 description = "Verify shared two-round root validation and reply isolation"
 run = "zig build test-file-tree-root-validation"
 
+[tasks.test-windows-modal-layout]
+description = "Verify Windows modal workspace and paint/input padding"
+run = "zig build test-windows-modal-layout"
+
 [tasks.test-windows-root-flow]
 description = "Verify asynchronous Windows root validation preparation and publication"
 run = "zig build test-windows-root-flow"

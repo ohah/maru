@@ -5970,5 +5970,20 @@ file, physical input or installed-preview delivery.
   release, focus cancellation and empty preedit-clear routing. The unmodified
   checkpoint fails this probe; the isolated fix passes. The latest-main source
   now passes full boundaries and cross-target compilation, plus the focused
-  key/menu/root-flow gates. Actual app revalidation of that integrated tree and
-  installed-preview delivery remain pending.
+  key/menu/root-flow gates. Actual app revalidation of the integrated tree also
+  passes its native input scenarios. Installed-preview delivery remains pending.
+
+
+### Windows 모달의 workspace·패널 패딩
+
+`test-windows-modal-layout` 8개는 명시적 workspace와 0 크기 권위, 모양 토큰,
+첫 패널만의 확장·후속 버튼 불변·gradient/clip 보존을 검사한다. 순수 어댑터
+검사이며 실제 HWND의 페인트·입력 검증을 대신하지 않는다.
+독립 결함 5개 및 정상 Debug/ReleaseFast 대조와 제품 통합 상태는
+[Windows 계획](plans/windows-platform.md)을 따른다.
+
+별도 ReleaseFast 앱의 설정창 13항목 및 패널 패딩의 수정 전후 픽셀 대조는
+`.zig-cache/windows-modal-layout-app-reviewed-20261101.json`에 기록했다.
+이어서 main 기반 통합 앱에서도 설정창 13개와 탐색기 5개 실행이 통과했다.
+통합 모델·의존 파일 해시와 정상 종료·wasm 대조를 포함한 근거는
+`.zig-cache/windows-modal-main-validation-20261101.json`이다. 설치본 검증은 별도다.

@@ -2392,6 +2392,17 @@ pub fn build(b: *std.Build) void {
     run_key_stroke_tests.addArg("--maru-expect-tests=8");
     b.step("test-windows-key-strokes", "Verify native key press identity and consumed gesture completion").dependOn(&run_key_stroke_tests.step);
 
+    const modal_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/chrome/modal.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    }), .filters = &.{"Windows modal"} });
+    const run_modal_tests = b.addRunArtifact(modal_tests);
+    run_modal_tests.addArg("--maru-expect-tests=8");
+    run_modal_tests.addArg("--maru-expect-passed=8");
+    b.step("test-windows-modal-layout", "Verify modal workspace and shared paint/input padding").dependOn(&run_modal_tests.step);
+
     const root_flow_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows root flow"} });
     const run_root_flow_tests = b.addRunArtifact(root_flow_tests);
     run_root_flow_tests.addArg("--maru-expect-tests=9");

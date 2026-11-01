@@ -150,6 +150,7 @@ def read(root):
         require(path.is_relative_to(root), 'run path escape')
         require(sha(path/'record.json') == entry['record_sha256'], 'record drift')
         record = json.loads((path/'record.json').read_text())
+        require(record.get('diagnostic',False) is False, 'diagnostic cohort is not baseline performance')
         require(record['error'] is None and record['count'] == manifest['count'] and record['kind'] == manifest['kind'], 'run failure')
         identity = (record['size'], record['period_ns']//1_000_000, record['flow'], record['repeat'], record['mode'])
         require(identity in expected and identity not in found and record['shared'] is (record['flow']=='shared') and record['period_ns']==identity[1]*1_000_000, 'matrix identity')

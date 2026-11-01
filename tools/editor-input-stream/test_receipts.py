@@ -107,6 +107,13 @@ class Receipts(unittest.TestCase):
         self.dump(self.evidence/'manifest.json', self.manifest)
         with self.assertRaisesRegex(ValueError, 'derived metrics drift'): self.read()
 
+    def test_profiled_run_cannot_enter_baseline(self):
+        self.record['diagnostic']=True
+        self.dump(self.run/'record.json',self.record)
+        self.manifest['runs'][0]['record_sha256']=verify.sha(self.run/'record.json')
+        self.dump(self.evidence/'manifest.json',self.manifest)
+        with self.assertRaisesRegex(ValueError,'diagnostic cohort'): self.read()
+
     def test_path_escape(self):
         self.manifest['runs'][0]['path'] = '../build'
         self.dump(self.evidence/'manifest.json', self.manifest)

@@ -1,0 +1,437 @@
+{
+  "schema": 1,
+  "kind": "input-attribution-diagnostic",
+  "cohort": "input-attribution-cohort-2",
+  "analysis": "input-attribution-analysis-2",
+  "analysis_sha256": "a9e54d3aaaa9ee68875d33b8d14774df3f468a771db4fa437ed50297a51c1dd1",
+  "binary_sha256": "69fa9841740299155411503489c7d42f3f1e21fa20c876ec216031c66d2846e6",
+  "manifest_sha256": "a88b70a10cdb062a08fe34cedb6488eec95d6dd8f77d773cb030e51bd66894f7",
+  "runs": [
+    {
+      "path": "0-sync",
+      "mode": "sync",
+      "counts": {
+        "all_rows": 1654,
+        "main_rows": 1635,
+        "main_weight_ns": 1635000000
+      },
+      "inclusive": {
+        "app_session.editor.mod.promoteFoldRangesToSyntax": {
+          "weight_ns": 0,
+          "percent": 0.0
+        },
+        "app_session.editor.sticky.compute": {
+          "weight_ns": 111000000,
+          "percent": 6.7889908256880735
+        }
+      },
+      "self_top": [
+        [
+          "[external-code]",
+          293000000
+        ],
+        [
+          "ts_subtree_summarize_children",
+          262000000
+        ],
+        [
+          "ts_subtree_get_changed_ranges",
+          186000000
+        ],
+        [
+          "ts_subtree_compress",
+          131000000
+        ],
+        [
+          "iterator_descend",
+          130000000
+        ],
+        [
+          "stack__iter",
+          91000000
+        ],
+        [
+          "ts_parser_parse",
+          87000000
+        ],
+        [
+          "iterator_advance",
+          54000000
+        ],
+        [
+          "ts_subtree_release",
+          43000000
+        ],
+        [
+          "iterator_end_position",
+          42000000
+        ],
+        [
+          "session.editor.bracket_colors.LineFilter.includes",
+          27000000
+        ],
+        [
+          "[unresolved-target]",
+          23000000
+        ]
+      ],
+      "xml_sha256": "7b715f813e51101723281997c1c362090cbfb75b6c8bb30c01268b04ef34560a",
+      "trace_inventory_sha256": "ef34eb127da2525826e6f4cffce40648ffca212068113e896ee2962966f7995c"
+    },
+    {
+      "path": "0-async",
+      "mode": "async",
+      "counts": {
+        "all_rows": 3887,
+        "main_rows": 3339,
+        "main_weight_ns": 3339000000
+      },
+      "inclusive": {
+        "app_session.editor.mod.promoteFoldRangesToSyntax": {
+          "weight_ns": 1484000000,
+          "percent": 44.44444444444444
+        },
+        "app_session.editor.sticky.compute": {
+          "weight_ns": 1400000000,
+          "percent": 41.928721174004195
+        }
+      },
+      "self_top": [
+        [
+          "ts_tree_cursor_child_iterator_next",
+          1141000000
+        ],
+        [
+          "mem.eqlBytes",
+          381000000
+        ],
+        [
+          "ts_tree_cursor_goto_sibling_internal",
+          343000000
+        ],
+        [
+          "ts_tree_cursor_goto_first_child_internal",
+          298000000
+        ],
+        [
+          "[external-code]",
+          167000000
+        ],
+        [
+          "folds.Cache.visit",
+          163000000
+        ],
+        [
+          "ts_node_child_iterator_next",
+          159000000
+        ],
+        [
+          "[unresolved-target]",
+          133000000
+        ],
+        [
+          "ts_tree_cursor_current_node",
+          103000000
+        ],
+        [
+          "ts_node_type",
+          78000000
+        ],
+        [
+          "ts_node_named_child",
+          66000000
+        ],
+        [
+          "tree_sitter.Provider.symbolName",
+          62000000
+        ]
+      ],
+      "xml_sha256": "8809b6bcde19964431bfa743db65b8f2bcc783c8611b01095df552aa118940a8",
+      "trace_inventory_sha256": "ab967b9faab30202c7eab6307460ff88cf69297e32cc60238089e271c62d84e5"
+    },
+    {
+      "path": "1-async",
+      "mode": "async",
+      "counts": {
+        "all_rows": 3772,
+        "main_rows": 3101,
+        "main_weight_ns": 3101000000
+      },
+      "inclusive": {
+        "app_session.editor.mod.promoteFoldRangesToSyntax": {
+          "weight_ns": 1364000000,
+          "percent": 43.98581102870042
+        },
+        "app_session.editor.sticky.compute": {
+          "weight_ns": 1282000000,
+          "percent": 41.34150274105127
+        }
+      },
+      "self_top": [
+        [
+          "ts_tree_cursor_child_iterator_next",
+          1014000000
+        ],
+        [
+          "mem.eqlBytes",
+          365000000
+        ],
+        [
+          "ts_tree_cursor_goto_sibling_internal",
+          330000000
+        ],
+        [
+          "ts_tree_cursor_goto_first_child_internal",
+          274000000
+        ],
+        [
+          "folds.Cache.visit",
+          174000000
+        ],
+        [
+          "[external-code]",
+          155000000
+        ],
+        [
+          "[unresolved-target]",
+          138000000
+        ],
+        [
+          "ts_node_child_iterator_next",
+          136000000
+        ],
+        [
+          "ts_tree_cursor_current_node",
+          89000000
+        ],
+        [
+          "ts_node_type",
+          82000000
+        ],
+        [
+          "tree_sitter.Provider.symbolName",
+          51000000
+        ],
+        [
+          "ts_node_named_child",
+          35000000
+        ]
+      ],
+      "xml_sha256": "e0bc7e64255a7e622870182ba73509a35c6d95e729d0e5e0a40d6ce416155a72",
+      "trace_inventory_sha256": "0d8640a38a9254765daf46e82ba33c44b9db7879d23488ba8303a5d62a8e27fc"
+    },
+    {
+      "path": "1-sync",
+      "mode": "sync",
+      "counts": {
+        "all_rows": 1566,
+        "main_rows": 1542,
+        "main_weight_ns": 1542000000
+      },
+      "inclusive": {
+        "app_session.editor.mod.promoteFoldRangesToSyntax": {
+          "weight_ns": 1000000,
+          "percent": 0.0648508430609598
+        },
+        "app_session.editor.sticky.compute": {
+          "weight_ns": 111000000,
+          "percent": 7.198443579766537
+        }
+      },
+      "self_top": [
+        [
+          "[external-code]",
+          286000000
+        ],
+        [
+          "ts_subtree_summarize_children",
+          267000000
+        ],
+        [
+          "ts_subtree_get_changed_ranges",
+          158000000
+        ],
+        [
+          "iterator_descend",
+          110000000
+        ],
+        [
+          "ts_subtree_compress",
+          107000000
+        ],
+        [
+          "ts_parser_parse",
+          86000000
+        ],
+        [
+          "stack__iter",
+          71000000
+        ],
+        [
+          "iterator_end_position",
+          50000000
+        ],
+        [
+          "iterator_advance",
+          47000000
+        ],
+        [
+          "ts_subtree_release",
+          47000000
+        ],
+        [
+          "session.editor.bracket_colors.LineFilter.includes",
+          29000000
+        ],
+        [
+          "[unresolved-target]",
+          27000000
+        ]
+      ],
+      "xml_sha256": "7347e923d71d60ddf2129032711c1cb12fefbbad24160c486d1604f2b9e89d44",
+      "trace_inventory_sha256": "d8341c5b00666011be22a77f9261962a8ed1a833544132709323051056585d49"
+    },
+    {
+      "path": "2-sync",
+      "mode": "sync",
+      "counts": {
+        "all_rows": 1618,
+        "main_rows": 1601,
+        "main_weight_ns": 1601000000
+      },
+      "inclusive": {
+        "app_session.editor.mod.promoteFoldRangesToSyntax": {
+          "weight_ns": 0,
+          "percent": 0.0
+        },
+        "app_session.editor.sticky.compute": {
+          "weight_ns": 125000000,
+          "percent": 7.807620237351655
+        }
+      },
+      "self_top": [
+        [
+          "[external-code]",
+          299000000
+        ],
+        [
+          "ts_subtree_summarize_children",
+          236000000
+        ],
+        [
+          "ts_subtree_get_changed_ranges",
+          166000000
+        ],
+        [
+          "ts_subtree_compress",
+          121000000
+        ],
+        [
+          "iterator_descend",
+          120000000
+        ],
+        [
+          "ts_parser_parse",
+          92000000
+        ],
+        [
+          "stack__iter",
+          73000000
+        ],
+        [
+          "iterator_end_position",
+          55000000
+        ],
+        [
+          "iterator_advance",
+          53000000
+        ],
+        [
+          "ts_subtree_release",
+          44000000
+        ],
+        [
+          "ts_parser__reduce",
+          39000000
+        ],
+        [
+          "session.editor.bracket_colors.LineFilter.includes",
+          32000000
+        ]
+      ],
+      "xml_sha256": "04d801ef1602001ad99e9bab42d4990e628e7a11fcef51a43e254fbf724f6fb0",
+      "trace_inventory_sha256": "9aa6a2fc5554c216e6f2634c5835112d683dce759e8596a60556c1b5467ee769"
+    },
+    {
+      "path": "2-async",
+      "mode": "async",
+      "counts": {
+        "all_rows": 3611,
+        "main_rows": 3084,
+        "main_weight_ns": 3084000000
+      },
+      "inclusive": {
+        "app_session.editor.mod.promoteFoldRangesToSyntax": {
+          "weight_ns": 1363000000,
+          "percent": 44.1958495460441
+        },
+        "app_session.editor.sticky.compute": {
+          "weight_ns": 1279000000,
+          "percent": 41.472114137483786
+        }
+      },
+      "self_top": [
+        [
+          "ts_tree_cursor_child_iterator_next",
+          997000000
+        ],
+        [
+          "mem.eqlBytes",
+          382000000
+        ],
+        [
+          "ts_tree_cursor_goto_first_child_internal",
+          293000000
+        ],
+        [
+          "ts_tree_cursor_goto_sibling_internal",
+          283000000
+        ],
+        [
+          "[external-code]",
+          161000000
+        ],
+        [
+          "[unresolved-target]",
+          154000000
+        ],
+        [
+          "ts_node_child_iterator_next",
+          143000000
+        ],
+        [
+          "folds.Cache.visit",
+          138000000
+        ],
+        [
+          "ts_tree_cursor_current_node",
+          92000000
+        ],
+        [
+          "ts_node_type",
+          64000000
+        ],
+        [
+          "ts_node_named_child",
+          61000000
+        ],
+        [
+          "tree_sitter.Provider.symbolName",
+          55000000
+        ]
+      ],
+      "xml_sha256": "9697812b1bca3131953b480c9e00edd67098f34a2d853e9ac9b9752332f09ecc",
+      "trace_inventory_sha256": "3c91942aa2e1896a0471f188e216d8e0150b8e8cfe4ea7f4878c2094e9b8ef71"
+    }
+  ]
+}

@@ -35,6 +35,20 @@ def address_fixture(binary):
 
 
 class SymbolTests(unittest.TestCase):
+    def test_explicit_app_name_keeps_image_binding_strict(self):
+        with tempfile.TemporaryDirectory() as raw:
+            binary=Path(raw)/'maru-macos-app';binary.write_bytes(executable())
+            root=address_fixture(binary);root.find('.//binary').set('name',binary.name)
+            text=ET.tostring(root,encoding='unicode')
+            self.assertEqual(len(symbols.plan(text,binary,UUID,binary.name)['pcs']),2)
+            with self.assertRaises(ValueError):symbols.plan(text,binary,UUID)
+
+    def test_atos_app_name_is_exact_and_not_a_regex(self):
+        self.assertEqual(symbols.names_from_output('function (in maru-macos-app) + 20\n',['0x1'],'maru-macos-app'),{'0x1':'function'})
+        for name in ['archived-test','maruXmacosXapp']:
+            with self.assertRaises(ValueError):symbols.names_from_output('function (in '+name+') + 20\n',['0x1'],'maru-macos-app')
+        with self.assertRaises(ValueError):symbols.names_from_output('function (in maruXmacosXapp) + 20\n',['0x1'],'maru.macos.app')
+
     def test_text_region_is_bounded_by_segment_and_file(self):
         self.assertEqual(symbols.text_region(executable()), dict(vmaddr=0x100000000, start=0x100000200, end=0x100000240))
         for offset, value in ((32 + 64, 999), (32 + 60, 1), (32 + 72 + 40, 99999)):

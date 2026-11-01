@@ -24,7 +24,7 @@ def provider_fingerprints():
     return {str(p):verify.sha(p) if p.is_file() else None for p in paths}
 
 
-def trial(build, target, size, mode, flow, period, count, kind, rep):
+def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None):
     target.mkdir(mode=0o700)
     (target/'profile').mkdir();(target/'host').mkdir(mode=0o700)
     data = protocol.fixture(size)
@@ -36,6 +36,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep):
     if verify.sha(app) != state['app_sha256'] or verify.sha(producer) != state['producer_sha256']:
         raise ValueError('build drift')
     env = {k:v for k,v in os.environ.items() if not k.startswith('MARU_')}
+    if observer is not None:env=observer.environment(env)
     profile = str(target/'profile')
     env.update(CFFIXED_USER_HOME=profile,XDG_CONFIG_HOME=profile+'/.config',XDG_CACHE_HOME=profile+'/.cache',XDG_STATE_HOME=profile+'/.state',
         MARU_CONFIG=str(target/'config'),MARU_SESSION_HOST_ROOT=str(target/'host'),MARU_EDITOR_BACKUP_ROOT=str(target/'backups'),
@@ -48,7 +49,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep):
     meta = {'count':count,'mode':mode,'flow':flow,'size':size,'repeat':rep,'shared':flow=='shared','period_ns':period*1_000_000,'lateness_ns':20_000_000,
             'kind':kind,'fixture_bytes':len(data),'fixture_sha256':hashlib.sha256(data).hexdigest(),
             'fixture_tail_sha256':hashlib.sha256(data[3:]).hexdigest(),'load_before':os.getloadavg(),
-            'provider_before':provider_fingerprints()}
+            'provider_before':provider_fingerprints(),'diagnostic':observer is not None}
     child = sender = None
     failure = None
     with (target/'app.log').open('w') as log, (target/'producer.log').open('w') as sender_log:
@@ -63,6 +64,8 @@ def trial(build, target, size, mode, flow, period, count, kind, rep):
             ready = json.loads((target/'ready.json').read_text())
             if ready['pid']!=child.pid or ready['count']!=count or ready['source']!='com.apple.keylayout.ABC' or ready['initial_tail_sha256']!=meta['fixture_tail_sha256']:
                 raise ValueError('ready document identity')
+            # 진단 관측자의 연결 완료 뒤에만 생산자를 시작한다. 생산자의 게시 일정은 여전히 독립적이다.
+            if observer is not None: meta['observer_start']=observer.start(child.pid,target)
             command = [str(producer),'--ready',str(target/'ready.json'),'--output',str(target/'posts.json'),'--stop',str(target/'app.json'),
                        '--period-ns',str(meta['period_ns']),'--lateness-ns',str(meta['lateness_ns'])]
             if kind == 'skip': command += ['--skip-seq','3']
@@ -81,6 +84,9 @@ def trial(build, target, size, mode, flow, period, count, kind, rep):
                 sender.terminate()
                 try: sender.wait(timeout=2)
                 except subprocess.TimeoutExpired: sender.kill();sender.wait()
+            if observer is not None:
+                try: meta['observer_stop']=observer.stop()
+                except Exception as error: failure=failure or 'observer cleanup: '+str(error)
             if child is not None and (target/'source-record.json').exists():
                 try:
                     finished = json.loads((target/'app.json').read_text()) if (target/'app.json').exists() else {}

@@ -179,6 +179,8 @@ jobs:
         run: python3 -m unittest discover -s tools/editor-input-latency -p 'test_*.py'
       - name: Independent input stream evidence contracts
         run: python3 -m unittest discover -s tools/editor-input-stream -p 'test_*.py'
+      - name: Input attribution evidence contracts
+        run: python3 -m unittest discover -s tools/editor-input-attribution -p 'test_*.py'
       - name: Native sampling evidence contracts
         run: python3 -m unittest discover -s tools/editor-native-sampling -p 'test_*.py'
       - name: Parser budget evidence contracts

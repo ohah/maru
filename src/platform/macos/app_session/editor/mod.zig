@@ -75681,7 +75681,9 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 
 // Prepare a genuinely installed list, then change focus without a render tick.
 // Keys can arrive in this interval, including with A still visible in a split.
-fn focusedCompletionFixtureForTest(f: *SmtFixture, split: bool, show: bool, pending: bool) !*Term {
+const FocusedCompletionPhase = enum { resolved, prefetch, pending };
+
+fn focusedCompletionFixtureForTest(f: *SmtFixture, split: bool, show: bool, phase: FocusedCompletionPhase) !*Term {
     const s = f.fx.session;
     if (split) _ = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
     try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "focused.c", .data = "two\nline\n" });
@@ -75699,15 +75701,15 @@ fn focusedCompletionFixtureForTest(f: *SmtFixture, split: bool, show: bool, pend
     f.term.rt.editor_selection = editor_selection.Selection.at(2);
     b.rt.editor_selection = editor_selection.Selection.at(1);
     try testing.expect(completion_client.triggerManual(s));
-    const raw = if (pending)
+    const raw = if (phase != .resolved)
         try std.json.Stringify.valueAlloc(testing.allocator, .{.{ .label = "print_old", .data = .{ .uri = lsp_client.readyClientFor(s, f.term).?.findDoc(f.term).?.uri } }}, .{})
     else
-        try testing.allocator.dupe(u8, "[{\"label\":\"print_old\",\"additionalTextEdits\":[]}]");
+        try testing.allocator.dupe(u8, "[{\"label\":\"print_old\",\"detail\":\"detail\",\"documentation\":\"old documentation\",\"additionalTextEdits\":[]}]");
     defer testing.allocator.free(raw);
     var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
     defer result.deinit();
     completion_client.onResponse(s, lsp_client.readyClientFor(s, f.term).?, s.editor_completion.waiting_seq, result.value);
-    if (!pending) try testing.expect(pumpLspUntil(&f.fx, 1500, s, struct {
+    if (phase == .resolved) try testing.expect(pumpLspUntil(&f.fx, 1500, s, struct {
         fn ready(ss: *AppSession) bool {
             return !ss.editor_completion.resolve_waiting;
         }
@@ -75717,7 +75719,7 @@ fn focusedCompletionFixtureForTest(f: *SmtFixture, split: bool, show: bool, pend
     frame.dl.deinit(testing.allocator);
     try testing.expect(completion_client.refresh(s));
     try testing.expect(s.editor_completion.active and s.chrome_host.suggest_box.open);
-    if (pending) {
+    if (phase == .pending) {
         try pressKey(&f.fx, .enter, .{});
         try testing.expect(s.editor_completion.pending_accept and s.editor_completion.resolve_waiting);
     }
@@ -75726,13 +75728,162 @@ fn focusedCompletionFixtureForTest(f: *SmtFixture, split: bool, show: bool, pend
     return b;
 }
 
+const CompletionPointerProbe = struct {
+    target: *Term,
+    rect: chrome.draw.Rect,
+    docs: ?chrome.draw.Rect,
+    pad: i32,
+    cell_h: i32,
+};
+
+fn completionPointerProbeForTest(f: *SmtFixture, split: bool, phase: FocusedCompletionPhase, docs: bool) !CompletionPointerProbe {
+    const b = try focusedCompletionFixtureForTest(f, split, true, phase);
+    const s = f.fx.session;
+    try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
+    s.chrome_host.suggest_docs.expanded = docs;
+    {
+        var prep = (try s.buildChromeOverlayPrep()) orelse return error.SuggestNotDrawn;
+        prep.deinit(testing.allocator);
+    }
+    const props = s.buildChromeProps();
+    const rect = chrome.components.suggest_box.boxRect(&s.chrome_host.suggest_box, completion_client.rows(s), props) orelse return error.SuggestNotPlaced;
+    const docs_rect = chrome.components.suggest_docs.boxRect(&s.chrome_host.suggest_docs, completion_client.docsLines(s), rect, props);
+    if (docs) try testing.expect(docs_rect != null);
+    try testing.expect(term_ops.activateSurfaceById(s, b.surface.id));
+    try testing.expect(s.editorHelperTakesPointer(.suggest));
+    return .{ .target = b, .rect = rect, .docs = docs_rect, .pad = @intCast(chrome.components.suggest_box.panelPadding(props)), .cell_h = @intCast(props.metrics.cell_height_px) };
+}
+
+test "CMPPOINTER1 explicit row click keeps its visible source across split focus" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |split| for ([_]i32{ 1, 4, 5 }) |kind| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const probe = try completionPointerProbeForTest(&f, split, .resolved, false);
+        const s = f.fx.session;
+        const selection = probe.target.rt.editor_selection.?;
+        const undo = f.term.rt.editorDocument().history.undo_len;
+        s.mouse(kind, @floatFromInt(probe.rect.x + 3), @floatFromInt(probe.rect.y + @divTrunc(probe.cell_h, 2)), 0, 0);
+        try testing.expectEqualStrings(if (split) "print_old // COMPSTALL\n" else "pr // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("two\nline\n", probe.target.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(selection, probe.target.rt.editor_selection.?);
+        try testing.expect(pane_ops.activePane(s).activeTerm() == probe.target);
+        try testing.expectEqual(undo + @as(usize, @intFromBool(split)), f.term.rt.editorDocument().history.undo_len);
+        if (split) {
+            try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
+            s.dispatchAppAction(.editor_undo);
+            try testing.expectEqualStrings("pr // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+        }
+    };
+}
+
+test "CMPPOINTER2 documentation and padding clicks never commit rows" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |split| for ([_]bool{ false, true }) |docs| for ([_]i32{ 1, 4, 5 }) |kind| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const probe = try completionPointerProbeForTest(&f, split, .resolved, docs);
+        const s = f.fx.session;
+        const selection = probe.target.rt.editor_selection.?;
+        const x: f64 = if (docs) @as(f64, @floatFromInt(probe.docs.?.x)) + 1 else @as(f64, @floatFromInt(probe.rect.x - probe.pad)) + 0.25;
+        const y: f64 = if (docs) @as(f64, @floatFromInt(probe.docs.?.y)) + 1 else @floatFromInt(probe.rect.y + @divTrunc(probe.cell_h, 2));
+        s.mouse(kind, x, y, 0, 0);
+        try testing.expectEqualStrings("pr // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("two\nline\n", probe.target.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(selection, probe.target.rt.editor_selection.?);
+        try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted);
+        try testing.expect(s.editor_completion.active);
+    };
+}
+
+test "CMPPOINTER3 outside and invalid pointer coordinates cancel without edits" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |split| for (0..3) |mode| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const probe = try completionPointerProbeForTest(&f, split, .resolved, false);
+        const s = f.fx.session;
+        if (mode == 0) s.mouse(1, @floatFromInt(probe.rect.x - 10000), @floatFromInt(probe.rect.y - 10000), 0, 0) else {
+            // Invalid coordinates exercise the component, not unrelated outer hit tests.
+            try testing.expect(!completion_client.mouseDown(s, if (mode == 1) std.math.nan(f64) else std.math.inf(f64), @floatFromInt(probe.rect.y)));
+        }
+        try testing.expect(!s.editor_completion.active);
+        try testing.expectEqualStrings("pr // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("two\nline\n", probe.target.rt.editorDocument().opened.?.file.content);
+    };
+}
+
+test "CMPPOINTER4 clicking while a previous acceptance waits cancels its late result" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |split| {
+        const source = "pr // COMPSTALL RESOLVESTALL\n";
+        var f = (try SmtFixture.openRepo(testing.allocator, "first.c", source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const probe = try completionPointerProbeForTest(&f, split, .pending, false);
+        const s = f.fx.session;
+        const seq = s.editor_completion.resolve_seq;
+        s.mouse(1, @floatFromInt(probe.rect.x + 3), @floatFromInt(probe.rect.y + @divTrunc(probe.cell_h, 2)), 0, 0);
+        try testing.expect(!s.editor_completion.pending_accept and !s.editor_completion.resolve_waiting);
+        var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"label\":\"print_old\"}", .{});
+        defer result.deinit();
+        completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, f.term).?, seq, result.value);
+        try testing.expectEqualStrings(source, f.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("two\nline\n", probe.target.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted);
+    }
+}
+
+test "CMPPOINTER5 own source pointer accepts and Undo restores" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |split| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const probe = try completionPointerProbeForTest(&f, split, .resolved, false);
+        const s = f.fx.session;
+        try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
+        s.mouse(1, @floatFromInt(probe.rect.x + 3), @floatFromInt(probe.rect.y + @divTrunc(probe.cell_h, 2)), 0, 0);
+        try testing.expectEqualStrings("print_old // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+        s.dispatchAppAction(.editor_undo);
+        try testing.expectEqualStrings("pr // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "CMPPOINTER6 explicit unresolved row waits for its own source resolve" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |split| {
+        const source = "pr // COMPSTALL RESOLVESTALL\n";
+        var f = (try SmtFixture.openRepo(testing.allocator, "first.c", source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const probe = try completionPointerProbeForTest(&f, split, .prefetch, false);
+        const s = f.fx.session;
+        s.mouse(1, @floatFromInt(probe.rect.x + 3), @floatFromInt(probe.rect.y + @divTrunc(probe.cell_h, 2)), 0, 0);
+        try testing.expectEqual(split, s.editor_completion.pending_accept);
+        if (split) {
+            var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"label\":\"print_old\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"imported\\n\"}]}", .{});
+            defer result.deinit();
+            completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, f.term).?, s.editor_completion.resolve_seq, result.value);
+            try testing.expectEqualStrings("imported\nprint_old // COMPSTALL RESOLVESTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+            try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
+            s.dispatchAppAction(.editor_undo);
+        }
+        try testing.expectEqualStrings(source, f.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("two\nline\n", probe.target.rt.editorDocument().opened.?.file.content);
+    }
+}
+
 test "CMPFOCUS1 manual completion belongs to the newly focused document" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     for ([_]bool{ false, true }) |split| {
         var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
         defer f.close(testing.allocator);
         try testing.expect(f.ready());
-        const b = try focusedCompletionFixtureForTest(&f, split, true, false);
+        const b = try focusedCompletionFixtureForTest(&f, split, true, .resolved);
         const s = f.fx.session;
         const sent = s.editor_lsp.sent_completions;
         const toggles = s.editor_completion.docs_toggles;
@@ -75757,7 +75908,7 @@ test "CMPFOCUS2 Enter reaches the focused editor without committing another pane
         var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
         defer f.close(testing.allocator);
         try testing.expect(f.ready());
-        const b = try focusedCompletionFixtureForTest(&f, split, true, false);
+        const b = try focusedCompletionFixtureForTest(&f, split, true, .resolved);
         try pressKey(&f.fx, .enter, .{});
         try testing.expectEqualStrings("pr // COMPSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
         try testing.expectEqualStrings("t\nwo\nline\n", b.rt.editorDocument().opened.?.file.content);
@@ -75781,7 +75932,7 @@ test "CMPFOCUS3 stale list keys match the focused editor without a list" {
             var control = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
             defer control.close(testing.allocator);
             try testing.expect(control.ready());
-            const b = try focusedCompletionFixtureForTest(&control, split, false, false);
+            const b = try focusedCompletionFixtureForTest(&control, split, false, .resolved);
             const sent = control.fx.session.editor_lsp.sent_completions;
             try pressKey(&control.fx, case.key, case.mods);
             expected_text = try testing.allocator.dupe(u8, b.rt.editorDocument().opened.?.file.content);
@@ -75793,7 +75944,7 @@ test "CMPFOCUS3 stale list keys match the focused editor without a list" {
         var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
         defer f.close(testing.allocator);
         try testing.expect(f.ready());
-        const b = try focusedCompletionFixtureForTest(&f, split, true, false);
+        const b = try focusedCompletionFixtureForTest(&f, split, true, .resolved);
         const sent = f.fx.session.editor_lsp.sent_completions;
         try pressKey(&f.fx, case.key, case.mods);
         try testing.expectEqualStrings(expected_text, b.rt.editorDocument().opened.?.file.content);
@@ -75811,7 +75962,7 @@ test "CMPFOCUS4 own source still toggles docs and accepts completion" {
         var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
         defer f.close(testing.allocator);
         try testing.expect(f.ready());
-        const b = try focusedCompletionFixtureForTest(&f, split, true, false);
+        const b = try focusedCompletionFixtureForTest(&f, split, true, .resolved);
         const s = f.fx.session;
         try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
         const sent = s.editor_lsp.sent_completions;
@@ -75842,7 +75993,7 @@ test "CMPFOCUS5 new focused input cancels an old pending resolve without a late 
         var f = (try SmtFixture.openRepo(testing.allocator, "first.c", source)) orelse return error.SkipZigTest;
         defer f.close(testing.allocator);
         try testing.expect(f.ready());
-        const b = try focusedCompletionFixtureForTest(&f, split, true, true);
+        const b = try focusedCompletionFixtureForTest(&f, split, true, .pending);
         const s = f.fx.session;
         const owner = lsp_client.readyClientFor(s, f.term).?;
         const seq = s.editor_completion.resolve_seq;

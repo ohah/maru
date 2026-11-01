@@ -775,51 +775,7 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
             self.metal_dirty = true;
             return true;
         },
-        .enter, .tab => {
-            // **보이지 않는 목록은 확정하지 않는다** — 응답은 왔지만 아직 프레임이 상자를 세우지 않았으면(캡처 실측: 그 사이 들어온 키가 보이지도
-            // 않은 첫 항목을 넣었다) 키를 편집기로 흘린다(Enter 는 줄바꿈이 된다). VS Code 도 위젯이 보일 때만 받는다.
-            if (!self.chrome_host.suggest_box.open or st.order.items.len == 0) {
-                hide(self);
-                return false;
-            }
-            if (st.pending_accept) return true; // 이미 기다리는 중
-            // 고른 것이 보이는 목록의 항목이다 — 나가 있는 재요청(isIncomplete)의 응답은 버린다. 그 응답이 먼저 오면 목록을 갈아 끼우며 기다리던 확정을
-            // 지웠다(Enter 가 사라졌다 — 적대적 5회차). 확정 자신도 대기를 지우지만(`accept`) 확정이 resolve 를 기다리는 동안이 그 틈이다.
-            st.waiting = false;
-            st.dirty = false;
-            // 강조된 항목이 아직 안 풀렸으면 응답을 기다렸다 한 번에 적용한다(§8.2g-b — undo 하나).
-            const pick = @min(self.chrome_host.suggest_box.selected, st.order.items.len - 1);
-            const idx = st.order.items[pick];
-            if (!st.items.items[idx].resolved) {
-                if (!st.resolve_waiting or st.resolve_item != idx) {
-                    st.resolve_waiting = false; // 다른 항목의 것을 기다리던 중 — 버리고(낡은 응답은 seq 로 걸러진다) 이 항목을 새로 묻는다
-                    if (visibleEditorTerm(self, st.surface_id)) |t| resolveHighlighted(self, t);
-                }
-                // 여기서 기다리는 중이면 그것은 이 항목의 것이다(위가 보장 — 적대적 2회차 B21 의 `resolve_item == idx` 는 등가라 뺐다).
-                if (st.resolve_waiting) {
-                    st.pending_accept = true;
-                    st.pending_item = idx; // 고른 **항목**을 쥔다 — 기다리는 동안 치면 다시 좁히며 선택이 preselect 로 돌아갔다(적대적 8회차)
-                    const context = pendingContext(self) orelse {
-                        cancel(self);
-                        return true;
-                    };
-                    const extras = self.allocator.dupe(editor_selection.Selection, context.extras) catch {
-                        cancel(self);
-                        return true;
-                    };
-                    st.pending_extras = extras;
-                    st.pending_since_ms = self.awakeMs();
-                    var snapshot_context = context;
-                    snapshot_context.extras = extras;
-                    st.pending_snapshot = .{ .context = snapshot_context, .started_ms = st.pending_since_ms };
-                    return true;
-                }
-                cancel(self);
-                return true;
-            }
-            accept(self);
-            return true;
-        },
+        .enter, .tab => return acceptSelected(self),
         .escape => {
             cancel(self);
             return true;
@@ -830,6 +786,55 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
         },
         else => return false,
     }
+}
+
+/// Selection commits belong to the list owner. Keyboard focus admission is
+/// handled by handleKey; an explicit pointer row hit must not synthesize a key.
+fn acceptSelected(self: *AppSession) bool {
+    const st = &self.editor_completion;
+    // **보이지 않는 목록은 확정하지 않는다** — 응답은 왔지만 아직 프레임이 상자를 세우지 않았으면(캡처 실측: 그 사이 들어온 키가 보이지도
+    // 않은 첫 항목을 넣었다) 키를 편집기로 흘린다(Enter 는 줄바꿈이 된다). VS Code 도 위젯이 보일 때만 받는다.
+    if (!self.chrome_host.suggest_box.open or st.order.items.len == 0) {
+        hide(self);
+        return false;
+    }
+    if (st.pending_accept) return true; // 이미 기다리는 중
+    // 고른 것이 보이는 목록의 항목이다 — 나가 있는 재요청(isIncomplete)의 응답은 버린다. 그 응답이 먼저 오면 목록을 갈아 끼우며 기다리던 확정을
+    // 지웠다(Enter 가 사라졌다 — 적대적 5회차). 확정 자신도 대기를 지우지만(`accept`) 확정이 resolve 를 기다리는 동안이 그 틈이다.
+    st.waiting = false;
+    st.dirty = false;
+    // 강조된 항목이 아직 안 풀렸으면 응답을 기다렸다 한 번에 적용한다(§8.2g-b — undo 하나).
+    const pick = @min(self.chrome_host.suggest_box.selected, st.order.items.len - 1);
+    const idx = st.order.items[pick];
+    if (!st.items.items[idx].resolved) {
+        if (!st.resolve_waiting or st.resolve_item != idx) {
+            st.resolve_waiting = false; // 다른 항목의 것을 기다리던 중 — 버리고(낡은 응답은 seq 로 걸러진다) 이 항목을 새로 묻는다
+            if (visibleEditorTerm(self, st.surface_id)) |t| resolveHighlighted(self, t);
+        }
+        // 여기서 기다리는 중이면 그것은 이 항목의 것이다(위가 보장 — 적대적 2회차 B21 의 `resolve_item == idx` 는 등가라 뺐다).
+        if (st.resolve_waiting) {
+            st.pending_accept = true;
+            st.pending_item = idx; // 고른 **항목**을 쥔다 — 기다리는 동안 치면 다시 좁히며 선택이 preselect 로 돌아갔다(적대적 8회차)
+            const context = pendingContext(self) orelse {
+                cancel(self);
+                return true;
+            };
+            const extras = self.allocator.dupe(editor_selection.Selection, context.extras) catch {
+                cancel(self);
+                return true;
+            };
+            st.pending_extras = extras;
+            st.pending_since_ms = self.awakeMs();
+            var snapshot_context = context;
+            snapshot_context.extras = extras;
+            st.pending_snapshot = .{ .context = snapshot_context, .started_ms = st.pending_since_ms };
+            return true;
+        }
+        cancel(self);
+        return true;
+    }
+    accept(self);
+    return true;
 }
 
 /// 마우스 down — 상자 안이면 그 행을 골라 확정(삼킨다), 밖이면 닫고 흘린다(그 클릭이 caret 을 옮긴다).
@@ -854,8 +859,12 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
                     cancel(self);
                     return true;
                 }
+                if (visibleEditorTerm(self, st.surface_id) == null) {
+                    cancel(self); // Stale geometry cannot authorize editing a hidden or closed source.
+                    return true;
+                }
                 box.selected = @min(start + row, st.order.items.len - 1);
-                _ = handleKey(self, .enter, .{});
+                _ = acceptSelected(self);
                 return true;
             }
         }

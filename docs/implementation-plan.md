@@ -1787,3 +1787,4 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [자동완성 상세 요청의 서버 종료](plans/lsp-completion-resolve-stop.md): 미리 읽기 재요청과 Enter 대기의 무편집 취소를 검증한다.
 - [자동완성 대기 중 문서 전환](plans/lsp-completion-source-switch.md): 다른 원본의 트리거는 기존 대기에 합치지 않고 새 요청을 보낸다.
 - [표시 중인 자동완성의 키 원본](plans/lsp-completion-focused-source.md): 이전 문서의 목록이 현재 문서의 명령·확정 키를 소비하지 않는다.
+- [자동완성 행 클릭의 원본](plans/lsp-completion-pointer-source.md): 명시적인 행 클릭은 보이는 행의 원본으로 확정하며 키보드 입력 검사와 분리한다.

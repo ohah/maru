@@ -1,5 +1,10 @@
 # 검증 매트릭스
 
+자동완성 행 클릭: `test-editor-completion-pointer-source`는 실제 제품 frame과 overlay draw
+receipt 뒤 native mouse()를 실행한다. [계획](plans/lsp-completion-pointer-source.md)의
+원본/패널/resolve/Undo 범위이며 잘못된 좌표만 component 직접 호출로 검사한다.
+AppKit pointer·물리 HID·PNG/Metal 픽셀 통과를 뜻하지 않는다.
+
 표시된 자동완성의 키 원본: `test-editor-completion-focused-source`는 frame 전 활성 원본
 전환에서 명령과 키를 검사한다. 같은 pane/split의 Enter·Tab·이동·단축키를 목록 없는
 제품 동작과 대조한다. [계획](plans/lsp-completion-focused-source.md)의 native controller/frame

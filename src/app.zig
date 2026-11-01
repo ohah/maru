@@ -1,3 +1,24 @@
+pub const file_tree_root_validation = @import("app/file_tree_root_validation.zig");
+pub const language_config = @import("app/language_config.zig");
+pub const cursor_presentation = @import("app/cursor_presentation.zig");
+pub const appearance_config = @import("app/appearance_config.zig");
+pub const text_config = @import("app/text_config.zig");
+pub const config_write_lock = @import("app/config/write_lock.zig");
+pub const settings_form = @import("app/settings/form.zig");
+pub const settings_edit = @import("app/settings/edit.zig");
+pub const settings_model = @import("app/settings/model.zig");
+pub const chrome_text = @import("app/chrome_text.zig");
+pub const git_backend = @import("app/git/backend.zig");
+pub const chrome_draw_lowering = @import("app/chrome_draw_lowering.zig");
+pub const chrome_text_request = @import("app/chrome_text_request.zig");
+pub const turn_index_cache = @import("app/git/index_cache.zig");
+pub const file_tree_backend = @import("app/file_tree_backend.zig");
+pub const file_tree_context_menu = @import("app/file_tree_context_menu.zig");
+/// Shared archive I/O workers; platform hosts consume the same owner types.
+pub const agent_session_archive_backend = @import("app/agent_session_archive_backend.zig");
+pub const agent_session_archive_detail_backend = @import("app/agent_session_archive_detail_backend.zig");
+/// Detached worker quiescence for shared I/O backends; no native OS dependency.
+pub const detached_worker_wait = @import("app/detached_worker_wait.zig");
 pub const app_runtime = @import("app/app_runtime.zig");
 pub const workspace_checkpoint_product = @import("app/workspace_checkpoint_product.zig");
 pub const artifact_io = @import("app/artifact_io.zig");
@@ -6,6 +27,10 @@ pub const headless_demo = @import("app/headless_demo.zig");
 pub const fixture_script = @import("app/fixture_script.zig");
 pub const frame_loop = @import("app/frame_loop.zig");
 pub const host = @import("app/host.zig");
+pub const frame_snapshot = @import("app/frame_snapshot.zig");
+pub const clipboard_response = @import("app/clipboard_response.zig");
+pub const input_dispatcher = @import("app/input_dispatcher.zig");
+pub const typed_input_queue = @import("app/typed_input_queue.zig");
 /// 키 이벤트 → 크롬 위젯 키 이벤트의 표(호스트 공통 — layering §3.5).
 pub const chrome_key = @import("app/chrome_key.zig");
 pub const label = @import("app/label.zig");

@@ -1835,3 +1835,69 @@ LSP version과 미저장 백업의 dirty·due·on_disk·paused는 뷰가 아닌
 수락한 닫기 범위 밖에 문서 뷰가 남으면 백업을 보존하며, 같은 문서를 모두 닫을 때는 이름을
 한 번 포착해 정산한다. 앱 종료는 기존 flush와 복원 레코드 보존 정책을 유지한다.
 provider의 실제 배선은 [에디터 tooling](editor-surface-tooling.md)의 공유 정본 절을 참조한다.
+
+### 저장 요청 이미지와 완료 수명 (2026-10-04)
+
+`session.editor.save_request.Request`는 main-thread 문서 정책이다. Registry의 request lease로
+열린 문서 수명을 붙들고 경로·BOM/줄바꿈 보존 bytes·본문 해시·raw disk 해시·요청 revision을
+독립 소유한다. 호스트가 지정한 byte 상한은 BOM까지 포함해 할당 전에 확인한다.
+실패한 준비는 요청 clock을 발급하거나 숨은 lease를 남기지 않는다.
+
+`State.persistence`는 열린 lifetime epoch, issued/acknowledged 순서와 persisted revision을 소유한다.
+`clearOpened`는 epoch를 되감지 않고 다음 lifetime으로 진행한다. 상한 clock은 재사용하지 않는다.
+쓰기 직전과 완료 직후에 같은 문서 lifetime·경로·disk 지문·요청 순서를 검증한다.
+완료는 현재 본문이 아닌 요청 시점의 본문을 saved hash로 삼는다. 저장 중 추가 편집은 dirty이고,
+실제 저장된 내용으로 undo하면 더 높은 revision이어도 clean이다. BOM 포함 raw 해시는 disk 축이다.
+
+native 결과가 uncertain이면 그 문서의 새 요청과 기존 요청의 추가 쓰기를 막는다.
+확인된 commit/abort는 자신의 uncertain 순서만 해제한다. 그 사이 새 disk 관측이나 경로 변경으로
+내용 ack가 거절되더라도 확인된 native 결과의 uncertainty를 영구히 남기지 않는다.
+미확정 요청을 해제하는 것은 rollback 증거가 아니므로 쓰기 차단을 자동 해제하지 않는다.
+호스트는 실제 결과 정산을 수행하며, 프로세스 종료 후 복구와 디스크 권위는 이 L2 정책의 범위 밖이다.
+
+Windows의 실험적 transaction이 `writeDocument`로 정확한 요청 이미지를 쓰고
+`acknowledgeDocument`로 native commit/rollback/reconcile 결과를 전달한다.
+grant와 원본 file identity는 여전히 native 호스트 책임이다. 이 공통 경계는 파일 권한을 발급하거나
+일반 GUI 저장을 활성화하지 않는다. 검증과 잔여 범위는 [Windows 계약](windows-platform.md) §2m.146에 기록한다.
+
+Windows owned save requests capture both the opened lifetime and the shared
+`State.save_target_epoch`. Target invalidation rejects old write/ack authority
+without requiring a path or content change; epoch saturation refuses new requests.
+
+Windows의 `document_grant.Grant`는 최초 읽기 핸들의 full file ID와 선택된 루트, Registry/
+DocumentHandle/epoch/경로를 별도 native 수명으로 보관한다. 저장 시 상대 이름을 다시 pin해
+최초 ID에 비교하고, 다른 문서나 native 파일이 같은 바이트라는 이유로 승인하지 않는다.
+원본 객체를 전체 ID로 연 witness는 ID 수명을 유지하면서 편집 중 일반 폴더 rename을 허용한다.
+이 실험적 연결과 save-time 부모 pin, 일반 GUI 미연결 범위는
+[Windows 계약](windows-platform.md) §2m.150을 참조한다.
+
+Windows의 실험적 `save_controller.Controller`가 grant와 pending Request/Attempt를 소유한다.
+불확실한 native 결과는 KTM 조회로 정산하기 전까지 요청 이미지를 버리지 않으며, 종료도
+거절한다. native 결정과 문서 ack 거절을 별도 Receipt로 반환해 stale callback을 실제 rollback으로
+오인하지 않는다. L2의 captured-body dirty/sequence/lifetime 계약은 유지한다.
+실제 native 판정과 GUI/비동기/crash 미연결 범위는 [Windows 계약](windows-platform.md) §2m.151에 기록한다.
+
+Windows 미저장 백업은 동일한 L2 record/이름/본문·지문 정책을 사용하고, native Store가 파일 I/O만
+소유한다([Windows 계약](windows-platform.md) §2m.153). 기본 자리는 LOCALAPPDATA 아래 durable
+`maru/editor-backups`이며 macOS Application Support/cache로 폴백하지 않는다. protected DACL을
+생성 시 적용해 owner SID만 허용하고 broad/reparse/hard-linked 저장소를 거절한다. 로컬 path 복원은
+정상 편집 하나와 옛 disk_hash를 유지하므로 undo는 디스크로 돌아가고 외부 변경은 첫 native save
+CAS에서 막힌다. 두 실제 process crash와 실제 창 복원/undo를 검증했다. §2m.154~155에서 Windows
+입력의 실제 revision 변경을 debounce에 연결하고, native 상위 폴더를 소유하는 기본 root 및 일반
+앱 frame/종료 flush 호출을 연결했다. 종료 flush는 view lease 해제 전에 수행한다. 같은 helper를
+disposable LOCALAPPDATA base로 부르는 실제 창 검증은 만기 전 lazy root, 종료 flush, frame 쓰기와
+clean undo 뒤 삭제를 센다. 일반 dirty 앱 종료·재실행 UI의 종단 검증을 대신하지 않는다.
+복원 알림·accepted-close 삭제·pause 상태바·missing/untitled/remote 복원과 interrupted-stage 정리,
+GUI editable/save/dirty-close/watch·물리 IME 및 실제 UNC share 검증은 여전히 남아 있다.
+
+Windows §2m.156은 결과 미정 저장의 Undo가 기존 saved hash와 같아도 백업을 삭제하지 않는다.
+Native 결과/ack 확정이 dirty 및 disk_hash 축을 바꾸면 본문 revision 변경 없이 유지보수를 예약한다.
+실제 commit 응답 유실과 undetermined→rollback의 native 판정이 현재 본문 보존과 확정 뒤 지문
+갱신 또는 clean 삭제를 센다. 백업이 native 결과를 추측하거나 원본 쓰기 권한을 늘리지는 않는다.
+
+저장 이미지가 살아 있는 동안에는 native commit 전에도 Undo 본문을 삭제하지 않는다.
+`Request.begin`은 모든 할당과 lease 발급 성공 뒤 `persistence.live_save_images`를 증가시키고,
+`deinit`은 같은 epoch의 자기 이미지 하나만 해제한다. 겹치는 요청은 각각 보유하며 문서 reload는
+새 수명의 count를 시작한다. 이전 epoch의 해제는 새 문서에 영향을 주지 않는다. 완료 ack 자체는
+이미지를 해제하지 않는다. Windows 백업의 clean 삭제는 이미지 count와 미정 sequence가 모두
+없는 경우에만 가능하다. Controller는 정산한 이미지 해제 뒤 남은 보호 상태로 유지보수를 예약한다.

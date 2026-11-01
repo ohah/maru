@@ -36,13 +36,6 @@ pub const Group = struct {
     why: []const u8,
 };
 
-fn fieldExists(comptime T: type, comptime wanted: []const u8) bool {
-    inline for (@import("type_info_fields").structFields(T)) |field| {
-        if (std.mem.eql(u8, field.name, wanted)) return true;
-    }
-    return false;
-}
-
 fn occurrences(comptime groups: []const Group, comptime wanted: []const u8) usize {
     var count: usize = 0;
     inline for (groups) |group| {
@@ -67,7 +60,7 @@ pub fn validate(comptime T: type, comptime type_name: []const u8, comptime group
         if (group.fields.len == 0) @compileError(type_name ++ " has an empty handoff inventory group");
         if (group.why.len == 0) @compileError(type_name ++ " handoff inventory group needs a reason");
         inline for (group.fields) |name| {
-            if (!fieldExists(T, name)) @compileError(type_name ++ "." ++ name ++ " no longer exists");
+            if (!@hasField(T, name)) @compileError(type_name ++ "." ++ name ++ " no longer exists");
         }
     }
 }
@@ -514,7 +507,7 @@ pub const pty_write_queue_groups = [_]Group{
     },
     .{
         .disposition = .reconstructed,
-        .fields = &.{ "io", "allocator", "mutex", "not_full", "enqueued_total", "consumed_total" },
+        .fields = &.{ "io", "allocator", "mutex", "not_full", "enqueued_total", "consumed_total", "protocol_begin", "protocol_end" },
         .why = "after the empty/equal fence gate, synchronization and monotonic counters restart together at zero",
     },
     .{
@@ -684,6 +677,11 @@ pub const surface_runtime_groups = [_]Group{
         .disposition = .reconstructed,
         .fields = &.{ "allocator", "links", "debug_input" },
         .why = "the routing table is rebuilt from exhaustive link records and debug policy is re-read",
+    },
+    .{
+        .disposition = .reconstructed,
+        .fields = &.{"input_admission"},
+        .why = "the optional UI admission callback is process-local; session-host runtimes leave it null and native UI hosts install their own stable owner",
     },
 };
 

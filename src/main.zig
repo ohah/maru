@@ -3,18 +3,27 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 /// tree-sitter. **root 모듈이 이미 갖고 있다**(build.zig 의 `-Msyntax`) — 편집기 색칠이 쓴다.
 const ts = @import("syntax");
-/// **중립 파일이 macOS 폴더에 있다**(`file_tree_backend`·`git_backend` 와 같은 부류). 본문에 네이티브
-/// 참조가 0 이고 `home` 경로만 받는다.
-///
-/// **이사는 예약돼 있지 않다** — [layering-and-portability.md](../docs/layering-and-portability.md) §3.4
-/// 가 2026-08-25 에 실제로 옮겨 보고 **"옮기지 않는다"** 로 닫았다(파일 이동이 아니라 빌드 그래프
-/// 변경이다: 모듈 루트·wasm 배럴·자기 의존·셋째 파일). 새 빚은 이 주석 한 줄로 갚는다.
-const agent_archive_backend = @import("platform/macos/agent_session_archive_backend.zig");
-/// 카드를 펼쳤을 때 읽는 **상세**. 스캔 백엔드와 같은 폴더의 OS 중립 파일이고(§3.4 의 결정),
+const win_sidebar = @import("platform/windows/chrome/sidebar.zig");
+const explorer_menu = @import("platform/windows/chrome/file_tree_menu.zig");
+const win_modal = @import("platform/windows/chrome/modal.zig");
+const win_dock = @import("platform/windows/chrome/dock.zig");
+const terminal_clipboard_menu = @import("app/terminal_clipboard_menu.zig");
+const windows_root_flow = @import("platform/windows/file_tree_root_flow.zig");
+const windows_root_commit = @import("platform/windows/file_tree_root_commit.zig");
+const windows_root_prepare = @import("platform/windows/file_tree_root_prepare.zig");
+const windows_tree_roots = @import("platform/windows/file_tree_roots.zig");
+const windows_settings = @import("platform/windows/settings/host.zig");
+const windows_text_resources = @import("platform/windows/terminal/text_resources.zig");
+const windows_renderer_resources = @import("platform/windows/terminal/renderer_resources.zig");
+const win_clipboard_host = @import("platform/windows/terminal/clipboard.zig");
+const archive_reveal = if (builtin.os.tag == .windows) @import("platform/windows/agents/reveal.zig") else struct {};
+/// Shared archive worker; the facade keeps both hosts on one owner type.
+const agent_archive_backend = maru.app.agent_session_archive_backend;
+/// 카드를 펼쳤을 때 읽는 **상세**. 스캔 백엔드와 같은 공통 계층의 파일이고,
 /// **그 안에 지켜야 할 계약이 하나 있다**: 턴 텍스트는 worker 경계를 넘기 전에 민감 내용 가드와
 /// PII 익명화를 지난다(`redactTurns`). 여기서 직접 파일을 읽어 파싱하면 그 계약을 우회한다.
-const agent_detail_backend = @import("platform/macos/agent_session_archive_detail_backend.zig");
-const file_tree_backend = @import("platform/macos/file_tree_backend.zig"); // 파일 트리 스캔 — 이름과 달리 모든 호스트에서 돈다(계약 §2m.3)
+const agent_detail_backend = maru.app.agent_session_archive_detail_backend;
+const file_tree_backend = maru.app.file_tree_backend; // Shared directory worker; the host supplies native remote transport.
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
 // 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).
 const win32_window = maru.win32_window;
@@ -28,9 +37,9 @@ const dwrite_font = maru.dwrite_font;
 const win32_text = maru.win32_text;
 const win32_terminal = maru.win32_terminal;
 const cell_text = maru.cell_text; // 파일 트리 행의 셀 투영 — macOS·Windows 공유 모듈(FT3)
-const chrome_draw_lowering = @import("platform/macos/chrome/chrome_draw_lowering.zig"); // 이름과 달리 ops → DrawList 낮추기는 CoreText 를 안 부른다 — 본문 참조 0 회(§2m.6 과 같은 방식으로 쟀다)
-const system_text = @import("platform/macos/chrome/system_text.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 는 §2m.18 이음매로 간다
-const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 갈래는 캡처 러너로 간다(§2m.9)
+const chrome_draw_lowering = maru.app.chrome_draw_lowering; // 공통 semantic draw → renderer 투영
+const system_text = maru.app.chrome_text; // Shared artifact policy; native shaping uses the platform seam.
+const git_backend_mod = maru.app.git_backend; // 공통 Git 작업자; 실행과 파일 읽기는 플랫폼별 경로를 사용한다
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
 const win32_keys = maru.win32_keys;
 // W7.4b Win32 클립보드(OSC 52 배수 + 붙여넣기).
@@ -50,16 +59,71 @@ const agent_surface = if (@import("builtin").os.tag == .windows) @import("platfo
 // (실측: 추가 직후 `zig build test` 출력에 `win32_scm_surface` 가 0 회). 이 저장소가 §2m.18 에서
 // 같은 것을 밟았다.
 test {
+    _ = windows_tree_roots;
+    _ = windows_root_prepare;
+    _ = windows_root_commit;
+    _ = windows_root_flow;
+    _ = terminal_clipboard_menu;
+    _ = explorer_menu;
+    _ = win_clipboard_host;
+    _ = windows_settings;
+    _ = windows_text_resources;
+    _ = windows_renderer_resources;
+    _ = win_layout_resize;
+    _ = @import("platform/windows/terminal/typography_test.zig");
+    _ = @import("platform/windows/terminal/glyph_sources_test.zig");
+    _ = @import("platform/windows/terminal/raster_origin_test.zig");
+    _ = @import("platform/windows/terminal/run_faces_test.zig");
+    _ = @import("platform/windows/terminal/run_frame_test.zig");
+    _ = @import("platform/windows/terminal/positioned_frame_test.zig");
+    // Cross-target tests must compile the native adapter as well as the common worker.
+    if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
+    _ = editor_document;
+    if (comptime builtin.os.tag == .windows) _ = archive_reveal;
+    _ = maru.win32_relative_file;
+    _ = @import("platform/windows/editor/stage.zig");
+    _ = @import("platform/windows/editor/metadata.zig");
+    _ = @import("platform/windows/editor/security.zig");
+    _ = @import("platform/windows/editor/audit_scope.zig");
+    _ = maru.win32_file_identity;
+    _ = @import("platform/windows/editor/transaction.zig");
+    _ = @import("platform/windows/editor/document_grant.zig");
+    _ = @import("platform/windows/editor/save_controller.zig");
+    _ = @import("platform/windows/editor/file_host.zig");
+    _ = @import("platform/windows/directory_watch.zig");
+    _ = @import("platform/windows/editor/file_read_worker.zig");
+    _ = @import("platform/windows/editor/save_prepare_worker.zig");
+    _ = @import("platform/windows/editor/backup_store.zig");
+    _ = @import("platform/windows/editor/backup_worker.zig");
     _ = scm_surface;
     _ = agent_surface;
 }
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
-const notification_runtime_contract = @import("platform/macos/session_host/release_adapter_notification_runtime_contract.zig");
+// Only macOS parses POSIX session paths and inherited descriptor slots. Other
+// targets dispatch the same wire name without importing that native grammar.
+const session_host_entrypoint = if (builtin.os.tag == .macos)
+    @import("platform/macos/session_host/entrypoint.zig")
+else
+    maru.cli.internal_contract.session_host;
+const notification_runtime_contract = maru.cli.internal_contract.notification_runtime;
 const notification_runtime_child_command = notification_runtime_contract.child_command;
 const session_host_build_options = @import("session_host_build_options");
+test "CLI internal contract preserves existing child command and receipt wire ABI" {
+    // Fixed existing wire values protect compatibility with older launchers and
+    // receipt readers; deriving expectations from the constants would miss drift.
+    try std.testing.expectEqualStrings("__session-host", maru.cli.internal_contract.session_host.subcommand);
+    try std.testing.expectEqualStrings("__notification-release-runtime", notification_runtime_contract.child_command);
+    try std.testing.expectEqualStrings("maru.session-host-notification-runtime-preparation.v1", notification_runtime_contract.receipt_schema);
+}
+test "CLI internal contract keeps native launcher and dispatcher on the same command" {
+    // The native parser is pure POSIX grammar, so its command binding can be
+    // checked on every target without starting or linking a native daemon.
+    const native = @import("platform/macos/session_host/entrypoint.zig");
+    try std.testing.expectEqualStrings(maru.cli.internal_contract.session_host.subcommand, native.subcommand);
+    try std.testing.expectEqualStrings(maru.cli.internal_contract.session_host.subcommand, session_host_entrypoint.subcommand);
+}
 const session_host_admin_cli = if (builtin.os.tag == .macos)
     @import("platform/macos/session_host/admin_cli.zig")
 else
@@ -207,6 +271,10 @@ fn dispatch(
         try runWin32EditorDrawSmoke(io, allocator, stdout, stderr);
         return;
     }
+    if (std.mem.eql(u8, command, "win32-editor-document-smoke")) {
+        try runWin32EditorDocumentSmoke(io, allocator, stdout, stderr);
+        return;
+    }
     if (std.mem.eql(u8, command, "win32-file-tree-smoke")) {
         try runWin32FileTreeSmoke(io, allocator, stdout, stderr);
         return;
@@ -227,15 +295,15 @@ fn dispatch(
             }
             opt_buf[n_opt] = a;
         }
-        const hold_editor_ms = switch (terminalSmokeOpts(opt_buf[0..n_opt])) {
-            .ok => |o| o.hold_editor_ms,
+        const smoke_opts = switch (terminalSmokeOpts(opt_buf[0..n_opt])) {
+            .ok => |o| o,
             .needs_value => |name| {
                 try stderr.print("maru win32-terminal-smoke: {s} needs a value\n", .{name});
                 try stderr.flush();
                 return error.InvalidArgs;
             },
             .bad_value => |v| {
-                try stderr.print("maru win32-terminal-smoke: --hold-editor-ms wants a number, got {s}\n", .{v});
+                try stderr.print("maru win32-terminal-smoke: hold duration wants a number, got {s}\n", .{v});
                 try stderr.flush();
                 return error.InvalidArgs;
             },
@@ -246,14 +314,14 @@ fn dispatch(
             },
         };
         // 스모크는 **상한이 있어야 한다** — 사람이 안 닫아도 끝나야 CI·자동 캡처가 성립한다.
-        try runWin32Terminal(io, allocator, stdout, stderr, smoke_spin_cap, hold_editor_ms);
+        try runWin32Terminal(io, allocator, stdout, stderr, smoke_spin_cap, smoke_opts);
         return;
     }
     if (std.mem.eql(u8, command, "win32-terminal")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
         // **같은 코드 경로다.** 다른 것은 상한 하나뿐이라 "스모크에서는 되는데 앱에서는 안 되는" 자리가
         // 안 생긴다. 창을 닫을 때까지 돈다.
-        try runWin32Terminal(io, allocator, stdout, stderr, null, 0);
+        try runWin32Terminal(io, allocator, stdout, stderr, null, .{});
         return;
     }
 
@@ -487,7 +555,7 @@ fn runWin32WindowSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, std
             .paint => painted += 1,
             .close_requested => close_requested = true,
             // 이 스모크는 창 계약만 본다 — 입력은 W7.4a 의 터미널 스모크가 검증한다.
-            .key => {},
+            .key, .key_released => {},
             .preedit_changed => {},
             // 이 스모크는 마우스를 안 본다 — 선택·스크롤은 W7.4d 의 터미널 스모크가 검증한다.
             .mouse => {},
@@ -564,7 +632,7 @@ fn runD3d11PresentSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, st
             },
             .paint => {},
             .close_requested => close_requested = true,
-            .key => {},
+            .key, .key_released => {},
             .preedit_changed => {},
             // 이 스모크는 마우스를 안 본다 — 선택·스크롤은 W7.4d 의 터미널 스모크가 검증한다.
             .mouse => {},
@@ -694,7 +762,7 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             .resized => |r| try present.resize(r.width_px, r.height_px),
             .paint => {},
             .close_requested => close_requested = true,
-            .key => {},
+            .key, .key_released => {},
             .preedit_changed => {},
             // 이 스모크는 마우스를 안 본다 — 선택·스크롤은 W7.4d 의 터미널 스모크가 검증한다.
             .mouse => {},
@@ -725,6 +793,30 @@ fn runD3d11CellsSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
                 });
             }
         }
+        // Exercise the same chrome-op lowering as editor and modal painting,
+        // including clipping, per-side borders and independent border alpha.
+        var fixture_tokens: maru.chrome.Tokens = .{ .palette = std.EnumArray(maru.chrome.tokens.ColorRole, maru.color.Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+        fixture_tokens.palette.set(.surface_bg, .{ .r = 255, .g = 0, .b = 0 });
+        fixture_tokens.palette.set(.surface_fg, .{ .r = 0, .g = 0, .b = 255 });
+        fixture_tokens.palette.set(.focus_accent, .{ .r = 0, .g = 255, .b = 0 });
+        fixture_tokens.palette.set(.terminal_bg, .{ .r = 32, .g = 32, .b = 32 });
+        const paint_ops = [_]maru.chrome.draw.Op{
+            .{ .quad = .{ .rect = .{ .x = 16, .y = 16, .w = 160, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .vertical } },
+            .{ .quad = .{ .rect = .{ .x = 192, .y = 16, .w = 160, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal } },
+            .{ .quad = .{ .rect = .{ .x = 360, .y = 16, .w = 160, .h = 96 }, .clip = .{ .x = 400, .y = 16, .w = 80, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal } },
+            .{ .fill = .{ .rect = .{ .x = 16, .y = 144, .w = 160, .h = 96 }, .role = .terminal_bg } },
+            .{ .quad = .{ .rect = .{ .x = 16, .y = 144, .w = 160, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .alpha = 0, .border_role = .focus_accent, .border_alpha = 255, .border_widths = .{ 0, 0, 8, 0 } } },
+            .{ .fill = .{ .rect = .{ .x = 192, .y = 144, .w = 160, .h = 96 }, .role = .terminal_bg } },
+            .{ .quad = .{ .rect = .{ .x = 192, .y = 144, .w = 160, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .border_role = .focus_accent, .border_widths = .{ 2, 4, 6, 8 }, .corner_radii = .{ 8, 8, 8, 8 } } },
+            .{ .quad = .{ .rect = .{ .x = 360, .y = 144, .w = 160, .h = 96 }, .clip = .{ .x = 400, .y = 144, .w = 80, .h = 96 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .border_role = .focus_accent, .border_widths = .{ 8, 8, 8, 8 }, .corner_radii = .{ 8, 8, 8, 8 } } },
+            .{ .quad = .{ .rect = .{ .x = 16, .y = 272, .w = 160, .h = 48 }, .fill_role = .surface_bg, .gradient = .horizontal, .border_role = .focus_accent, .border_widths = .{ 0, 0, 4, 0 } } },
+            .{ .quad = .{ .rect = .{ .x = 192, .y = 272, .w = 160, .h = 48 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .border_widths = .{ 8, 8, 8, 8 } } },
+            .{ .fill = .{ .rect = .{ .x = 360, .y = 272, .w = 160, .h = 48 }, .role = .terminal_bg } },
+            .{ .quad = .{ .rect = .{ .x = 360, .y = 272, .w = 160, .h = 48 }, .fill_role = .surface_bg, .fill_role_end = .surface_fg, .gradient = .horizontal, .border_role = .focus_accent, .border_alpha = 128, .border_widths = .{ 0, 0, 8, 0 } } },
+            .{ .fill = .{ .rect = .{ .x = 540, .y = 16, .w = 80, .h = 96 }, .role = .terminal_bg } },
+            .{ .quad = .{ .rect = .{ .x = 540, .y = 16, .w = 80, .h = 96 }, .clip = .{ .x = 540, .y = 16, .w = 0, .h = 96 }, .fill_role = .surface_bg } },
+        };
+        try appendPaintOps(allocator, &paint_ops, &fixture_tokens, present.width_px, present.height_px, 0, 0, &cells);
         last_cell_count = cells.items.len;
 
         try present.beginFrame(clear);
@@ -913,7 +1005,7 @@ fn runDwriteTextSmoke(allocator: std.mem.Allocator, stdout: *std.Io.Writer, stde
             .resized => |r| try present.resize(r.width_px, r.height_px),
             .paint => {},
             .close_requested => close_requested = true,
-            .key => {},
+            .key, .key_released => {},
             .preedit_changed => {},
             // 이 스모크는 마우스를 안 본다 — 선택·스크롤은 W7.4d 의 터미널 스모크가 검증한다.
             .mouse => {},
@@ -1076,69 +1168,8 @@ fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
 }
 
 /// 붙여넣기 한 번의 결과. **갈래별로 센다** — 합치면 "막혔는데 붙은 줄 알았다"를 못 가른다.
-const PasteOutcome = struct {
-    pastes: usize = 0,
-    paste_bytes: usize = 0,
-    bracketed: usize = 0,
-    blocked: usize = 0,
-    errors: usize = 0,
-};
-
-/// 클립보드를 읽어 활성 표면에 붙여넣는다 — W7.4b 의 규칙 그대로다.
-///
-/// **화음(`Ctrl+Shift+V`)과 우클릭이 이 함수를 공유한다.** 두 자리에 같은 규칙을 복사하면 한쪽만 고쳐져
-/// 어긋난다 — 그리고 그 규칙이 하필 **보안 규칙**이다(raw 바이트를 셸에 보내지 않는다: bracketed 래핑·
-/// 개행 정규화·ESC 치환. 클립보드의 `\x1b[201~` 이 래핑을 빠져나오면 명령이 실행된다).
-fn pasteClipboardIntoActive(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    hwnd: ?*anyopaque,
-    app_window: *maru.session.window.AppWindow,
-    runtime: *maru.app.SurfaceRuntime,
-    stderr: *std.Io.Writer,
-    paste_protection: bool,
-    bracketed_paste_is_safe: bool,
-    out: *PasteOutcome,
-) !void {
-    const maybe = win32_clipboard.read(allocator, hwnd) catch |err| {
-        try stderr.print("  warning: clipboard read failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
-        out.errors += 1;
-        return;
-    };
-    const text = maybe orelse return;
-    defer allocator.free(text);
-
-    var needs_confirm = false;
-    var bracketed = false;
-    if (app_window.active()) |active| {
-        // 판정과 bracketed 읽기만 락 안에서 — 인코딩(할당·복사)은 밖에서 한다(macOS `submitPaste` 순서).
-        active.lockCore(io);
-        needs_confirm = active.core.pasteNeedsConfirmation(text, paste_protection, bracketed_paste_is_safe);
-        bracketed = active.core.bracketedPasteEnabled();
-        active.unlockCore(io);
-    }
-    if (needs_confirm) {
-        // **확인 모달이 없으면 붙여넣지 않는다.** 모달이 없다고 보호를 건너뛰면 위험한 붙여넣기가
-        // 조용히 실행된다 — 거절하고 세는 편이 맞다(확인 UI 는 W8).
-        try stderr.writeAll("  paste held: the content is risky (the confirm UI is W8). Nothing was pasted\n");
-        out.blocked += 1;
-        return;
-    }
-    const encoded = maru.terminal.encodePasteWith(bracketed, allocator, text) catch |err| {
-        try stderr.print("  warning: paste encoding failed({s})\n", .{@errorName(err)});
-        out.errors += 1;
-        return;
-    };
-    defer allocator.free(encoded);
-    maru.app.host.sendInputToActiveSurface(app_window, runtime, .{ .bytes = encoded }) catch |err| {
-        try stderr.print("  warning: paste send failed({s})\n", .{@errorName(err)});
-        out.errors += 1;
-        return;
-    };
-    out.pastes += 1;
-    out.paste_bytes += encoded.len;
-    if (bracketed) out.bracketed += 1;
-}
+const PasteOutcome = win_clipboard_host.PasteOutcome;
+const pasteClipboardIntoActive = win_clipboard_host.pasteIntoActive;
 
 /// `maru win32-clipboard-smoke` — W7.4b. **OS 클립보드를 actual로 왕복시킨다.**
 ///
@@ -1906,28 +1937,100 @@ fn applyCoreConfig(
     cell_w: u32,
     cell_h: u32,
 ) void {
+    const text_values = maru.app.text_config.Values.fromConfig(cfg);
     _ = maru.session.core_command.apply(core, .{
         .set_runtime_config = .{
-            .max_scrollback = cfg.scrollback.lines,
-            .ambiguous_wide = cfg.ambiguous_width == .wide,
-            .emoji_wide = cfg.emoji_width == .wide,
+            .max_scrollback = text_values.scrollback,
+            .ambiguous_wide = text_values.ambiguous_wide,
+            .emoji_wide = text_values.emoji_wide,
             .palette = appearance.theme.palette,
             .default_colors = .{ .foreground = appearance.theme.foreground, .background = appearance.theme.background },
             .cell_metrics = .{ .width = cell_w, .height = cell_h },
             // config 의 모양 enum 과 코어의 것은 **다른 타입**이다(같은 세 값이지만 층이 다르다).
             // macOS 도 같은 자리에서 옮긴다(`configCursorShape`).
-            .default_cursor_shape = switch (appearance.cursor.shape) {
-                .block => .block,
-                .bar => .bar,
-                .underline => .underline,
-            },
+            .default_cursor_shape = maru.app.appearance_config.cursorShape(appearance.cursor.shape),
         },
     });
 }
 
+fn shellRefreshOptions() !WinSession.SpawnOptions {
+    const cfg: maru.config.Config = .{};
+    return .{
+        .io = std.testing.io,
+        .command = "old-shell.exe",
+        .args = &.{"old-argument"},
+        .size = .{ .cols = 101, .rows = 37 },
+        .cfg = cfg,
+        .appearance = try maru.config.appearance.resolve(cfg),
+        .cell_w = 9,
+        .cell_h = 19,
+    };
+}
+
+test "Windows shell refresh explicit command wins over tier" {
+    var opts = try shellRefreshOptions();
+    var shell = opts.cfg.shell;
+    shell.command = maru.pty.resolveInteractiveShellFor(.cmd);
+    shell.windows_shell = .powershell;
+    opts.refreshShell(shell);
+    try std.testing.expectEqualStrings(shell.command, opts.command);
+    try std.testing.expectEqualStrings(shell.command, opts.cfg.shell.command);
+}
+
+test "Windows shell refresh removes old arguments" {
+    var opts = try shellRefreshOptions();
+    var shell = opts.cfg.shell;
+    shell.command = "cmd.exe";
+    shell.args = &.{};
+    opts.refreshShell(shell);
+    try std.testing.expectEqual(@as(usize, 0), opts.args.len);
+    try std.testing.expectEqual(@as(usize, 0), opts.cfg.shell.args.len);
+}
+
+test "Windows shell refresh preserves argument boundaries" {
+    var opts = try shellRefreshOptions();
+    var shell = opts.cfg.shell;
+    shell.args = &.{ "/Q", "argument with spaces", "한글", "" };
+    opts.refreshShell(shell);
+    try std.testing.expectEqual(@as(usize, 4), opts.args.len);
+    try std.testing.expectEqualStrings("/Q", opts.args[0]);
+    try std.testing.expectEqualStrings("argument with spaces", opts.args[1]);
+    try std.testing.expectEqualStrings("한글", opts.args[2]);
+    try std.testing.expectEqualStrings("", opts.args[3]);
+}
+
+test "Windows shell refresh clearing override restores tier" {
+    var opts = try shellRefreshOptions();
+    var shell = opts.cfg.shell;
+    shell.command = "old-custom.exe";
+    opts.refreshShell(shell);
+    shell.command = "";
+    shell.windows_shell = .cmd;
+    opts.refreshShell(shell);
+    try std.testing.expect(std.ascii.endsWithIgnoreCase(opts.command, "cmd.exe"));
+    try std.testing.expectEqualStrings("", opts.cfg.shell.command);
+    try std.testing.expectEqual(shell.windows_shell, opts.cfg.shell.windows_shell);
+}
+
+test "Windows shell refresh rollback preserves live session metrics" {
+    var opts = try shellRefreshOptions();
+    const previous = opts;
+    var shell = opts.cfg.shell;
+    shell.command = "preview.exe";
+    shell.args = &.{"preview-argument"};
+    opts.refreshShell(shell);
+    opts.refreshShell(previous.cfg.shell);
+    try std.testing.expect(!std.mem.eql(u8, opts.command, "preview.exe"));
+    try std.testing.expectEqual(@as(usize, 0), opts.args.len);
+    try std.testing.expectEqual(previous.size, opts.size);
+    try std.testing.expectEqual(previous.cell_w, opts.cell_w);
+    try std.testing.expectEqual(previous.cell_h, opts.cell_h);
+    try std.testing.expectEqual(previous.cfg.font.size, opts.cfg.font.size);
+}
+
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 1172;
+const smoke_spin_cap: usize = 1202;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -1970,7 +2073,7 @@ test "도크 divider: Windows 기하가 macOS 와 같은 두께·누르는 띠�
     const dock_layout = maru.session.dock_layout;
     const w: u32 = 1400;
     const h: u32 = 800;
-    const win = dockGeometryFor(w, h, 9, 19, true, 0, .explorer, 0, 0, 0);
+    const win = dockGeometryFor(w, h, 9, 19, true, 0, .explorer, 0, 0, 0, null);
     try std.testing.expect(win.dock.w > 0); // 도크가 서는 폭이다(아니면 아래가 아무것도 안 잰다)
     // macOS 가 같은 창에서 내는 기하 — 설정 기본 두께(1pt)·같은 배율.
     const mac = dock_layout.compute(.{
@@ -2012,7 +2115,7 @@ test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹�
     var saw_no_dock = false;
     var w: u32 = 40;
     while (w <= 1600) : (w += 37) {
-        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0, 0, 0);
+        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0, 0, 0, null);
         // 창을 넘지 않는다.
         try std.testing.expect(g.terminal.x + g.terminal.w <= w);
         try std.testing.expect(g.dock.x + g.dock.w <= w);
@@ -2117,7 +2220,7 @@ fn rebuildDockAll(
     out: *std.ArrayList(d3d11_cells.Cell),
     geom: maru.session.dock_layout.Geometry,
     renderer_state: *maru.renderer.RendererState,
-    builder: win32_terminal.FrameBuilder,
+    raw_builder: win32_terminal.FrameBuilder,
     rows: []const maru.session.file_tree.Row,
     cell_w: u32,
     cell_h: u32,
@@ -2147,6 +2250,9 @@ fn rebuildDockAll(
     /// 에이전트 세션 뷰가 쓰는 것들.
     agent: AgentDockInputs,
 ) !void {
+    const chrome_scope = ChromeTextScope.init(renderer_state, cell_w, cell_h);
+    defer chrome_scope.deinit();
+    const builder = ChromeTextScope.builder(raw_builder);
     try rebuildDockCells(allocator, out, geom, tk);
     if (view != .explorer) {
         if (frame_slot.*) |*old_frame| {
@@ -2346,6 +2452,17 @@ fn appendCaptionButtons(
     }
 }
 
+fn appendDockToggle(a: std.mem.Allocator, cells: *std.ArrayList(d3d11_cells.Cell), r: maru.session.split_tree.Rect, visible: bool, tk: *const maru.chrome.Tokens) !void {
+    if (r.w == 0 or r.h == 0) return;
+    const ink = cellColor(tk, .surface_fg);
+    const x = r.x + r.w / 2 -| 8;
+    const y = r.y + r.h / 2 -| 6;
+    try appendRectOutline(a, cells, x, y, 16, 12, ink);
+    // A right-hand pane pictogram matches the existing dock-toggle meaning.
+    try cells.append(a, d3d11_cells.solidCell(@floatFromInt(x + 10), @floatFromInt(y), 1, 12, ink, .{ 0, 0, 0, 0 }));
+    if (visible) try cells.append(a, d3d11_cells.solidCell(@floatFromInt(x + 12), @floatFromInt(y + 2), 2, 8, ink, .{ 0, 0, 0, 0 }));
+}
+
 fn appendRectOutline(allocator: std.mem.Allocator, out: *std.ArrayList(d3d11_cells.Cell), x: u32, y: u32, w: u32, h: u32, ink: [4]f32) !void {
     try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(x), @floatFromInt(y), @floatFromInt(w), 1, ink, .{ 0, 0, 0, 0 }));
     try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(x), @floatFromInt(y + h - 1), @floatFromInt(w), 1, ink, .{ 0, 0, 0, 0 }));
@@ -2376,7 +2493,7 @@ fn rebuildSidebarCells(
     active_card: usize,
     tk: *const maru.chrome.Tokens,
     renderer_state: *maru.renderer.RendererState,
-    builder: win32_terminal.FrameBuilder,
+    raw_builder: win32_terminal.FrameBuilder,
     pipeline: *d3d11_cells.CellPipeline,
     atlas_w: *u32,
     atlas_h: *u32,
@@ -2436,6 +2553,9 @@ fn rebuildSidebarCells(
     search_query_in: []const u8,
     search_caret_in: bool,
 ) !void {
+    const chrome_scope = ChromeTextScope.init(renderer_state, cell_w, cell_h);
+    defer chrome_scope.deinit();
+    const builder = ChromeTextScope.builder(raw_builder);
     out.clearRetainingCapacity();
     glyphs.* = 0;
     outside.* = 0;
@@ -3014,7 +3134,8 @@ fn resizeAllSessions(
     size: maru.terminal.Size,
     io: std.Io,
 ) void {
-    for (sessions) |s| runtime.resize(s.surface.id, size, io) catch {};
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    for (sessions) |s| s.layout_retry.submit(runtime, &s.surface, size, null, now, io) catch {};
 }
 
 /// 활성 표면의 격자 지문 — **화면이 어느 세션을 보고 있는지**의 증거.
@@ -3152,6 +3273,15 @@ fn refreshSidebarCards(
 /// 받는 일은 루프가 매 프레임 하는 `drainTreeScan` 이 한다.
 ///
 /// **접기는 즉시 반영된다** — 요청이 안 생기므로 기다릴 것도 없다.
+fn pumpTreeScanRequest(tree: *maru.session.file_tree.Tree, backend: *file_tree_backend.Backend) bool {
+    const request = tree.takeScanRequest() orelse return false;
+    if (!backend.submitCoalescedDirectory(request, tree.rootGeneration())) {
+        tree.returnScanRequest(request);
+        return false;
+    }
+    return true;
+}
+
 fn toggleTreeRow(
     allocator: std.mem.Allocator,
     tree: *maru.session.file_tree.Tree,
@@ -3164,11 +3294,7 @@ fn toggleTreeRow(
 ) bool {
     _ = tree.toggleDirectory(path) catch return false;
     if (backend) |b| {
-        while (tree.takeScanRequest()) |req| {
-            if (!b.submit(req, 0)) {
-                allocator.free(req);
-                break;
-            }
+        if (pumpTreeScanRequest(tree, b)) {
             if (submitted_out) |o| o.* = true;
         }
     }
@@ -3176,6 +3302,23 @@ fn toggleTreeRow(
     // **아이콘 종류를 다시 채운다** — 새 행에는 분류가 안 들어 있다(§2m.42 가 그 실패를 겪었다).
     cell_text.classifyFileTreeRows(rows.items);
     return true;
+}
+
+// Convert the entire result before changing the tree: an allocation failure must
+// never turn a complete native listing into an authoritative partial snapshot.
+fn isCurrentLocalTreeScan(tree: *const maru.session.file_tree.Tree, result: *const file_tree_backend.Result) bool {
+    return result.kind == .directory and !result.was_remote and
+        result.expected_root_generation == tree.rootGeneration();
+}
+
+fn applyTreeScan(allocator: std.mem.Allocator, tree: *maru.session.file_tree.Tree, result: *const file_tree_backend.Result) !void {
+    if (!isCurrentLocalTreeScan(tree, result)) return error.StaleTreeScan;
+    var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
+    defer inputs.deinit(allocator);
+    try inputs.ensureTotalCapacity(allocator, result.entries.items.len);
+    for (result.entries.items) |e|
+        inputs.appendAssumeCapacity(.{ .name = e.name, .kind = e.kind, .identity = e.identity });
+    try tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items);
 }
 
 /// 와 있는 스캔 결과를 **전부** 받아 트리에 반영한다. 행이 바뀌었으면 `true`.
@@ -3189,22 +3332,52 @@ fn drainTreeScan(
     backend: ?*file_tree_backend.Backend,
     rows: *std.ArrayList(maru.session.file_tree.Row),
     root_path: []const u8,
+    retry: *bool,
+) bool {
+    return drainTreeScanWithRootFlow(allocator, io, tree, backend, rows, root_path, retry, null);
+}
+
+fn drainTreeScanWithRootFlow(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    tree: *maru.session.file_tree.Tree,
+    backend: ?*file_tree_backend.Backend,
+    rows: *std.ArrayList(maru.session.file_tree.Row),
+    root_path: []const u8,
+    retry: *bool,
+    root_flow: ?*windows_root_flow.Flow,
 ) bool {
     const b = backend orelse return false;
     var applied = false;
     while (b.takeResult()) |taken| {
         var result = taken;
         defer result.deinit(allocator, io);
-        if (!result.ok) continue;
-        var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
-        defer inputs.deinit(allocator);
-        for (result.entries.items) |e|
-            inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity }) catch break;
-        tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items) catch continue;
+        if (result.kind == .root_validation) {
+            if (root_flow) |flow| flow.accept(b, tree, &result);
+            continue;
+        }
+        // Reject stale failures too: they must not clear a new root's loading state.
+        if (!isCurrentLocalTreeScan(tree, &result)) continue;
+        if (!result.ok) {
+            tree.failSnapshot(result.path);
+            retry.* = true;
+            continue;
+        }
+        applyTreeScan(allocator, tree, &result) catch {
+            tree.failSnapshot(result.path);
+            retry.* = true;
+            continue;
+        };
         applied = true;
     }
     if (!applied) return false;
-    tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, rows) catch return false;
+    tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, rows) catch {
+        // Rows borrow node strings. After a successful snapshot the old rows
+        // cannot be reused; discard any incomplete projection and retry.
+        rows.clearRetainingCapacity();
+        retry.* = true;
+        return true;
+    };
     cell_text.classifyFileTreeRows(rows.items);
     return true;
 }
@@ -3370,6 +3543,7 @@ const AgentCard = struct {
     source_path: []const u8,
     inode: std.Io.File.INode,
     device: u64,
+    origin: ?agent_archive_backend.source_identity.Identity = null,
     scan_provider: maru.session.agent_session_archive.Provider,
 };
 
@@ -3385,6 +3559,8 @@ const AgentDetail = struct {
     state: maru.chrome.components.session_dock.types.DetailState = .loading,
     turns: []maru.chrome.components.session_dock.types.Turn = &.{},
     action_records: u32 = 0,
+    proved_origin: ?agent_archive_backend.source_identity.Identity = null,
+    reveal_busy: bool = false,
     arena: ?std.heap.ArenaAllocator = null,
 
     fn clear(self: *AgentDetail) void {
@@ -3392,6 +3568,8 @@ const AgentDetail = struct {
         self.arena = null;
         self.turns = &.{};
         self.action_records = 0;
+        self.proved_origin = null;
+        self.reveal_busy = false;
     }
 };
 
@@ -3455,6 +3633,7 @@ fn requestAgentDetail(
         .source_path = path,
         .inode = card.inode,
         .device = card.device,
+        .origin = card.origin,
     };
     if (!be.submit(source, request_id)) {
         // **거절이면 우리가 돌려준다** — 그 함수 계약이 그렇다(*"Caller owns source on false"*).
@@ -3503,15 +3682,22 @@ fn takeAgentDetail(
                         .assistant => .assistant,
                     },
                     .text = a.dupe(u8, t.text) catch "",
+                    .redacted = t.redacted,
                 };
             }
             det.arena = arena;
             det.turns = turns;
             det.action_records = parsed.action_records;
+            det.proved_origin = res.origin;
             det.state = .ready;
         },
     }
     return true;
+}
+
+fn canRevealAgentLog(card: AgentCard, det: *const AgentDetail) bool {
+    return det.state == .ready and !det.reveal_busy and card.origin != null and
+        agent_archive_backend.source_identity.same(card.origin, det.proved_origin);
 }
 
 fn agentOpenDetail(det: *const AgentDetail, expanded: ?u64) ?*const AgentDetail {
@@ -3593,10 +3779,10 @@ fn projectAgentItems(
                     .state = od.state,
                     .turns = od.turns,
                     .action_record_count = od.action_records,
-                    // **아직 아무 것도 못 한다.** 버튼을 살려 두면 눌리는데 아무 일도 안 나는
-                    // 죽은 컨트롤이 된다 — 그것이 이 슬라이스가 갚는 결함의 모양이다.
+                    // Reveal is available only after full source identity proof. Resume
+                    // and live focus await their own authority and launch contracts.
                     .resume_enabled = false,
-                    .reveal_enabled = false,
+                    .reveal_enabled = canRevealAgentLog(c, od),
                     .focus_live_enabled = false,
                 };
             } else null;
@@ -3831,6 +4017,7 @@ fn drainAgentItemsInner(
             .source_path = try persist.dupe(u8, rec.source_path),
             .inode = rec.inode,
             .device = rec.device,
+            .origin = rec.origin,
             .scan_provider = p.provider,
         };
     }
@@ -3891,7 +4078,7 @@ fn appendStatusBarCells(
     cell_h: u32,
     tk: *const maru.chrome.Tokens,
     renderer_state: *maru.renderer.RendererState,
-    builder: win32_terminal.FrameBuilder,
+    raw_builder: win32_terminal.FrameBuilder,
     pipeline: *d3d11_cells.CellPipeline,
     atlas_w: *u32,
     atlas_h: *u32,
@@ -3903,6 +4090,9 @@ fn appendStatusBarCells(
     outside_out: *usize,
     mismatch_out: *usize,
 ) !void {
+    const chrome_scope = ChromeTextScope.init(renderer_state, cell_w, cell_h);
+    defer chrome_scope.deinit();
+    const builder = ChromeTextScope.builder(raw_builder);
     mismatch_out.* = 0;
     dropped_out.* = 0;
     placed_out.* = 0;
@@ -4048,6 +4238,34 @@ fn appendStatusBarCells(
 ///
 /// **빈 항목은 안 넣는다.** repo 밖이면 브랜치 줄이 없고 cwd 가 없으면 경로 줄이 없다 — 그것이
 /// 계약이고, 빈 문자열을 넣으면 폭 0 짜리 항목이 `dropped` 로 세어져 "폭이 모자랐다" 로 읽힌다.
+fn recoveredStatusItems(buffer: []StatusBarItem, items: []const StatusBarItem, base_count: usize) []const StatusBarItem {
+    if (base_count >= buffer.len) return items;
+    // Recovery must survive a long cwd exhausting the left group's width.
+    // Only the first restore moves base items; subsequent restores update it.
+    if (items.len == base_count)
+        std.mem.copyBackwards(StatusBarItem, buffer[1 .. base_count + 1], buffer[0..base_count]);
+    buffer[0] = .{ .id = .notifications, .text = maru.i18n.t(.editor_backup_restored) };
+    return buffer[0 .. base_count + 1];
+}
+
+test "Windows editor host recovery status keeps priority base items and repeated restore identity" {
+    var buffer: [4]StatusBarItem = undefined;
+    buffer[0] = .{ .id = .git_branch, .text = "branch" };
+    buffer[1] = .{ .id = .cwd, .text = "a very long work directory" };
+    var items: []const StatusBarItem = buffer[0..2];
+    for (0..5) |_| {
+        items = recoveredStatusItems(&buffer, items, 2);
+        try std.testing.expectEqual(@as(usize, 3), items.len);
+        try std.testing.expectEqual(maru.chrome.components.status_bar.ItemId.notifications, items[0].id);
+        try std.testing.expectEqualStrings(maru.i18n.t(.editor_backup_restored), items[0].text);
+        try std.testing.expectEqualStrings("branch", items[1].text);
+        try std.testing.expectEqualStrings("a very long work directory", items[2].text);
+    }
+    const full = recoveredStatusItems(buffer[0..3], items, 3);
+    try std.testing.expectEqual(items.ptr, full.ptr);
+    try std.testing.expectEqual(items.len, full.len);
+}
+
 fn buildStatusBarItems(
     out: []StatusBarItem,
     scm_status: []const u8,
@@ -4257,6 +4475,23 @@ fn sidebarSlotFullyVisible(
 /// `keys_while_file` 판정이 그것을 잡았다). 순수 함수라 값으로 고정할 수 있다.
 const PreeditTarget = enum { sidebar_search, agent_search, terminal };
 
+const WindowsPreeditUi = struct {
+    terminal_visible: bool = false,
+    settings_open: bool = false,
+    settings_picking: bool = false,
+    sidebar_search: bool = false,
+    agent_search: bool = false,
+    dock_view: maru.session.dock_panel.View = .explorer,
+    blocked: bool = false,
+};
+fn windowsAppDrawnPreedit(state: WindowsPreeditUi) bool {
+    if (state.blocked) return true;
+    if (state.settings_open) return !state.settings_picking;
+    // File-editor composition and picker hex input still use native UI until
+    // their app-drawn preview is connected. Hidden agent focus is not a target.
+    return state.terminal_visible or preeditTargetFor(state.sidebar_search, state.agent_search, state.dock_view) != .terminal;
+}
+
 fn preeditTargetFor(sidebar_focused: bool, agent_focused: bool, dock_view: maru.session.dock_panel.View) PreeditTarget {
     if (sidebar_focused) return .sidebar_search;
     // 에이전트 검색은 **그 뷰가 보일 때만** 받는다(글자 입력과 같은 규칙).
@@ -4316,151 +4551,1684 @@ fn sidebarRowsFor(
 /// pane 탭 스트립이 없다. 사용자 결정(2026-08-27)으로 **이미 있는 전환기**(사이드바 카드)를 쓴다 —
 /// 새 모델을 세우지 않고 §2m.51 이 만든 배선을 그대로 탄다.
 const ActiveView = union(enum) { terminal: usize, file: usize };
+const win_session_actions = @import("platform/windows/terminal/session_actions.zig");
 
 /// 연 파일 하나. **텍스트를 우리가 소유한다** — `lines` 의 슬라이스가 그 안을 가리킨다.
-const OpenFile = struct {
-    path: []u8,
-    text: []u8,
-    lines: std.ArrayList([]const u8),
-    line_starts: []usize,
-    /// 뷰포트 맨 위 줄. 파일마다 따로 산다 — 파일을 오갈 때 자리를 잃으면 안 된다.
-    first_line: usize = 0,
-    /// 가로 스크롤 위치(열). **계약은 "가로 스크롤이 기본이고 랩은 토글"** 이다
-    /// (`native-editor-visual-mapping.md` §…: `editor.wrap` 기본 `false`).
-    first_col: u16 = 0,
-    /// 문서에서 **가장 긴 줄**의 표시 폭. 중립이 이 값으로 막대 길이를 정하고, 가로 막대를 세울지도
-    /// 이것으로 판단한다(`showsHorizontalBar`). 여는 순간 한 번 센다 — 읽기 전용이라 안 변한다.
-    max_cols: u32 = 0,
-    /// **오른쪽 끝** — 직전 프레임에서 중립이 세운 가로 막대의 `max_offset_px` 를 열로 바꾼 값이다.
-    /// 여기서 `max_cols - 보이는 열` 로 다시 세지 않는 이유: 본문은 gutter(줄 번호·접기·여백)만큼
-    /// 좁아서 그 산수가 **거터 폭만큼 어긋난다** — 실측으로 끝까지 굴려도 마지막 41 열이 안 왔다.
-    /// 막대가 없으면(넘치지 않으면) 0 이고, 그때는 굴릴 곳도 없다.
-    hmax_col: u16 = 0,
+const editor_document = @import("platform/windows/editor/document.zig");
 
-    /// 이 문서의 구문 파서. **없으면 무색이다** — grammar 가 번들에 없거나 파서를 못 세운 경우이고,
-    /// 그것은 결함이 아니라 계약이다(`native-editor-visual-mapping.md` §5).
-    syntax: ?ts.Provider = null,
-    /// 질의 결과(문서 byte 축)와 그것을 chrome 낱말로 옮긴 재료. 프레임마다 다시 채우되
-    /// **저장소는 재사용한다**.
-    syntax_spans: std.ArrayList(ts.Span) = .empty,
-    color_spans: std.ArrayList(maru.chrome.components.editor_view.syntax_colors.ByteSpan) = .empty,
-    color_lines: std.ArrayList(maru.chrome.components.editor_view.syntax_colors.LineBounds) = .empty,
-    /// 색 계산의 저장소 — **규칙과 함께 중립이 갖는다**(§2m.112).
-    colors: maru.chrome.components.editor_view.syntax_colors.Scratch = .{},
+test "Windows editor input aggregation" {
+    std.testing.refAllDecls(editor_document.input);
+    std.testing.refAllDecls(@import("platform/windows/editor/selection_projection.zig"));
+}
+const OpenFile = editor_document.OpenFile;
+const OpenOutcome = editor_document.OpenOutcome;
+const openFileFor = editor_document.openFileFor;
+const file_host = @import("platform/windows/editor/file_host.zig");
+const FileCloseTarget = union(enum) { file: maru.session.editor.document_registry.Lease, window };
 
-    /// 사이드바 카드에 뜨는 이름. **경로 안을 가리킨다**(따로 복사하지 않는다).
-    fn name(self: *const OpenFile) []const u8 {
-        return std.fs.path.basename(self.path);
-    }
-
-    fn deinit(self: *OpenFile, allocator: std.mem.Allocator) void {
-        if (self.syntax) |*p| p.deinit();
-        self.syntax_spans.deinit(allocator);
-        self.color_spans.deinit(allocator);
-        self.color_lines.deinit(allocator);
-        self.colors.deinit(allocator);
-        self.lines.deinit(allocator);
-        allocator.free(self.line_starts);
-        allocator.free(self.text);
-        allocator.free(self.path);
-    }
-};
-
-/// 파일을 읽어 편집기가 쓸 재료로 만든다. **여는 규칙은 중립이 소유한다**
-/// (`file_panel_bridge.openKindForPath`) — 확장자 표를 여기서 다시 적으면 macOS 와 갈린다.
-///
-/// 지금은 `.text` 만 연다. `.markdown`·`.html` 등의 본문은 계약상 WebView 이고 Windows 에서는
-/// WebView2(W8.6)라 아직 없다 — **조용히 텍스트로 열지 않는다.** 그러면 마크다운이 렌더된 줄
-/// 알았는데 소스가 뜨는 것을 사용자가 겪는다.
-/// 왜 안 열렸는가. **뭉개면 안 된다** — "이 확장자는 아직 못 연다"(계약)와 "읽다가 실패했다"(결함)와
-/// "너무 커서 못 읽는다"(상한)는 서로 다른 사실인데, 하나로 접으면 큰 파일을 못 여는 회귀가
-/// "원래 안 여는 종류" 로 보인다. §2m.57 이 `scan_timeout`·`no_history` 로 같은 교훈을 남겼다.
-const OpenOutcome = union(enum) {
-    opened: OpenFile,
-    /// 이진 파일 등 — 외부 앱의 것이다(중립 `openKindForPath` 가 `null` 을 낸다).
-    unsupported,
-    /// `.md`·`.html`·이미지 … 본문이 WebView 라 Windows 는 W8.6 이 선행이다.
-    needs_web_panel,
-    /// 읽기 실패 — 권한·삭제됨·**4 MiB 상한 초과**.
-    read_failed,
-    out_of_memory,
-
-    fn name(self: std.meta.Tag(OpenOutcome)) []const u8 {
-        return switch (self) {
-            .opened => "opened",
-            .unsupported => "unsupported",
-            .needs_web_panel => "needs_web_panel",
-            .read_failed => "read_failed",
-            .out_of_memory => "out_of_memory",
+fn recoverAppFile(book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, view: *OpenFile, local_override: ?[]const u8) !void {
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    const state = book.registry.get(view.document).?;
+    if (state.opened.?.file.read_only) return;
+    if (owner.* == null) {
+        const environment = if (local_override == null) maru.os_env.allocValue(book.allocator, "LOCALAPPDATA") else null;
+        defer if (environment) |value| book.allocator.free(value);
+        const selected = local_override orelse environment;
+        const existing = backups.LocalData.openExisting(book.allocator, io, selected, 4 << 20) catch |err| {
+            // No existing record means editing can create the private store at
+            // its first deadline. Other failures cannot authorize overwriting
+            // recovery data that we have not read successfully.
+            if (err == error.NotFound or err == error.FileNotFound) return;
+            return err;
         };
+        owner.* = existing;
     }
-};
-
-fn openFileFor(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    path: []const u8,
-) OpenOutcome {
-    const kind = maru.session.file_panel_bridge.openKindForPath(path) orelse return .unsupported;
-    if (kind != .text) return .needs_web_panel;
-
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 << 20)) catch return .read_failed;
-    errdefer allocator.free(text);
-    const owned_path = allocator.dupe(u8, path) catch return .out_of_memory;
-    errdefer allocator.free(owned_path);
-
-    var lines: std.ArrayList([]const u8) = .empty;
-    errdefer lines.deinit(allocator);
-    var it = std.mem.splitScalar(u8, text, 0x0A);
-    // CRLF 를 여기서 벗긴다 — 편집기 뷰는 **표시 텍스트**를 받는다(스모크가 쓰는 그 규칙).
-    while (it.next()) |raw| lines.append(allocator, std.mem.trimEnd(u8, raw, "\r")) catch return .out_of_memory;
-
-    const starts = allocator.alloc(usize, lines.items.len) catch return .out_of_memory;
-    var off: usize = 0;
-    var widest: u32 = 0;
-    for (lines.items, starts) |l, *st| {
-        st.* = off;
-        off += l.len + 1;
-        // **표시 폭이다**(바이트 수가 아니다) — 한글·CJK 는 두 칸이라 바이트로 세면 막대가 거짓말을
-        // 한다. 폭 규약은 중립이 소유한다(`overlay_input.displayCols`).
-        // **여기까지만 센다** — 상한도 중립이 소유한다(`frame.default_max_columns`). 1 MB 짜리 한 줄
-        // 파일이 와도 여는 데 드는 값이 이 상한에 묶인다.
-        //
-        // **설정(`editor.max-columns`)이 아니라 기본 상수를 쓴다** — 이 자리는 편집기 pane 이 아니라
-        // 파일 열기 헬퍼이고, 여기에는 그 값을 든 Term 이 없다. 그 설정은 「편집기에서 가로로 볼 수
-        // 있는 끝」이고 이쪽은 「열 때 폭을 가늠하는 값」이라 뜻도 다르다.
-        const limit = maru.chrome.components.editor_view.frame.default_max_columns;
-        widest = @max(widest, @min(limit, maru.chrome.components.overlay_input.displayCols(l)));
-        if (widest >= limit) break;
-    }
-    // **구문 파서를 여기서 한 번 세운다.** 문서가 안 바뀌므로(읽기 전용) 다시 팔 일이 없다 —
-    // macOS 의 예산·재개 장치(§2.1a)가 필요한 것은 편집이 있을 때다. 문법이 번들에 없으면 `null`
-    // 이고 그때는 무색이다(계약 §5 — 결함이 아니다).
-    //
-    // **문법 표를 여기서 다시 적지 않는다** — `grammarForPath` 가 단일 출처다.
-    const grammar = maru.session.editor.language.grammarForPath(path);
-    const provider = ts.Provider.init(text, syntaxLanguageFor(grammar), 0);
-
-    return .{ .opened = .{
-        .path = owned_path,
-        .text = text,
-        .lines = lines,
-        .line_starts = starts,
-        .max_cols = widest,
-        .syntax = provider,
-    } };
+    var record = (try owner.*.?.store.read(io, backups.identity(state).?)) orelse return;
+    defer record.deinit();
+    const peers = [_]maru.session.editor.edit_commands.Participant{.{ .view = &view.navigation, .id = view.document.id }};
+    try backups.restorePath(book.allocator, state, &record, &peers, 0, 4 << 20);
+    try view.refresh(book.allocator);
+    view.recovered = true;
 }
 
-/// `session` 의 문법 이름을 `syntax` 의 것으로 옮긴다 — 표는 `syntax.languageFor` 하나다(이름으로 대응하고, 없는 이름은
-/// 컴파일 오류 — macOS 도 같은 것을 부른다, layering §3.5).
-fn syntaxLanguageFor(g: maru.session.editor.language.Grammar) ts.Language {
-    return ts.languageFor(g);
+fn openAppFile(book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, path: []const u8, local_override: ?[]const u8) OpenOutcome {
+    var opened = editor_document.openFileForHost(book, io, path);
+    if (opened == .opened) {
+        recoverAppFile(book, io, owner, &opened.opened, local_override) catch |err| {
+            if (err == error.OutOfMemory) {
+                book.release(io, opened.opened.document, true) catch unreachable;
+                opened.opened.deinit(book.allocator);
+                return .out_of_memory;
+            }
+            std.log.warn("editor recovery unavailable; keeping original readonly({s})", .{@errorName(err)});
+            book.registry.get(opened.opened.document).?.opened.?.file.read_only = true;
+        };
+    }
+    return opened;
+}
+
+fn openAppFileInto(a: std.mem.Allocator, book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: *std.ArrayList(OpenFile), path: []const u8, local_override: ?[]const u8) OpenOutcome {
+    // Recovery may make a newly opened document dirty. Reserve its publication
+    // slot first so allocator failure cannot strand that view or invoke dirty
+    // close without a user decision. Durable recovery records stay untouched.
+    views.ensureUnusedCapacity(a, 1) catch return .out_of_memory;
+    const opened = openAppFile(book, io, owner, path, local_override);
+    if (opened == .opened) views.appendAssumeCapacity(opened.opened);
+    return opened;
+}
+
+fn initialOpenFailure(err: anyerror) OpenOutcome {
+    return switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        error.NotUtf8, error.UnsupportedFileKind => .unsupported,
+        error.NeedsWebPanel => .needs_web_panel,
+        else => .read_failed,
+    };
+}
+
+fn recoverInitialResult(book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, view: *OpenFile, result: *@import("platform/windows/editor/open_worker.zig").Result, local_override: ?[]const u8) !void {
+    if (!result.recovery_checked) return recoverAppFile(book, io, owner, view, local_override);
+    if (result.recovery_failure) |err| return err;
+    const record = if (result.recovery) |*value| value else return;
+    if (owner.* == null) if (result.recovery_owner) |value| {
+        owner.* = value;
+        result.recovery_owner = null;
+    };
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    const state = book.registry.get(view.document).?;
+    const peers = [_]maru.session.editor.edit_commands.Participant{.{ .view = &view.navigation, .id = view.document.id }};
+    try backups.restorePath(book.allocator, state, record, &peers, 0, 4 << 20);
+    try view.refresh(book.allocator);
+    view.recovered = true;
+}
+
+fn openAppResultInto(a: std.mem.Allocator, book: *file_host.Book, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: *std.ArrayList(OpenFile), result: *@import("platform/windows/editor/open_worker.zig").Result, local_override: ?[]const u8) OpenOutcome {
+    // Reserve the final view slot before registration/recovery can consume the
+    // result or create a dirty document. A failed admission still owns its image.
+    views.ensureUnusedCapacity(a, 1) catch return .out_of_memory;
+    const lease = book.admitOpen(result) catch |err| return initialOpenFailure(err);
+    defer _ = book.registry.release(lease) catch unreachable;
+    var view = editor_document.attachPrepared(book.registry, lease, &result.view_cache) catch |err| {
+        // Drop borrowed caches before releasing the last document body lease.
+        if (result.view_cache) |*cache| cache.deinit();
+        result.view_cache = null;
+        book.release(io, lease, false) catch unreachable;
+        return initialOpenFailure(err);
+    };
+    recoverInitialResult(book, io, owner, &view, result, local_override) catch |err| {
+        if (err == error.OutOfMemory) {
+            book.release(io, view.document, true) catch unreachable;
+            view.deinit(book.allocator);
+            return .out_of_memory;
+        }
+        std.log.warn("editor recovery unavailable; keeping original readonly({s})", .{@errorName(err)});
+        book.registry.get(view.document).?.opened.?.file.read_only = true;
+    };
+    views.appendAssumeCapacity(view);
+    return .{ .opened = view };
+}
+
+fn drainInitialOpen(worker: *@import("platform/windows/editor/open_worker.zig").Worker, io: std.Io) void {
+    if (worker.job != null) {
+        worker.cancel() catch unreachable;
+        while (true) {
+            if (worker.takeResult() catch unreachable) |value| {
+                var result = value;
+                result.deinit(io);
+                break;
+            }
+            io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+    }
+    worker.deinit() catch unreachable;
+}
+
+fn awaitInitialAppResult(f: *FileCloseFixture, cancel_before_take: bool) !@import("platform/windows/editor/open_worker.zig").Result {
+    return awaitInitialAppResultMode(f, cancel_before_take, false);
+}
+
+fn awaitInitialAppResultMode(f: *FileCloseFixture, cancel_before_take: bool, recover: bool) !@import("platform/windows/editor/open_worker.zig").Result {
+    const io = std.testing.io;
+    const path = try f.tmp.dir.realPathFileAlloc(io, "file.txt", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var worker: @import("platform/windows/editor/open_worker.zig").Worker = .{ .allocator = std.testing.allocator };
+    defer drainInitialOpen(&worker, io);
+    if (recover) {
+        var root: [std.fs.max_path_bytes]u8 = undefined;
+        const len = try f.tmp.dir.realPath(io, &root);
+        try worker.startForAppWithRecovery(path, 128, root[0..len]);
+    } else try worker.startForApp(path, 128);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.OpenTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    if (cancel_before_take) try worker.cancel();
+    return (try worker.takeResult()).?;
+}
+
+fn applyInitialAppResult(f: *FileCloseFixture, a: std.mem.Allocator, result: *@import("platform/windows/editor/open_worker.zig").Result) !OpenOutcome {
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try f.tmp.dir.realPath(std.testing.io, &root);
+    return openAppResultInto(a, &f.book, std.testing.io, &f.backups, &f.views, result, root[0..len]);
+}
+
+fn releaseExtraInitialView(f: *FileCloseFixture, initial_id: u64) void {
+    if (f.views.items.len == 0) return;
+    const view = f.views.items[0].document;
+    if ((f.documents.viewCount(view) orelse 0) > 1) {
+        _ = f.documents.release(.{ .owner = &f.documents, .document = view.document, .id = initial_id, .kind = .view }) catch {};
+    }
+}
+
+test "Windows editor host initial app worker result creates one view and preserves native save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    const initial_id = f.documents.last_reference + 1;
+    const prepared_starts = result.view_cache.?.projection.starts.ptr;
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    const view = outcome.opened.document;
+    const count = f.documents.viewCount(view).?;
+    // Drain a deliberately leaked initial publication lease before assertions.
+    // The tested mutation must fail without leaving Registry teardown busy.
+    if (count > 1) {
+        _ = try f.documents.release(.{ .owner = &f.documents, .document = view.document, .id = initial_id, .kind = .view });
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expect(result.consumed);
+    try std.testing.expect(result.view_cache == null);
+    try std.testing.expect(f.views.items[0].line_starts.ptr == prepared_starts);
+    try std.testing.expectEqual(@as(u32, 4), f.views.items[0].max_cols);
+    result.deinit(std.testing.io);
+    if (try applyFileKey(&f.book, std.testing.io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| std.testing.allocator.free(copied);
+    try f.views.items[0].refresh(std.testing.allocator);
+    try std.testing.expect(f.views.items[0].projection_allocator == null);
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (true) {
+        if (try f.book.pollSave(std.testing.io, view)) |ready| {
+            try std.testing.expect(ready == .receipt and ready.receipt.decision == .committed);
+            break;
+        }
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.SaveTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows editor host initial app cancellation and OOM never publish a view" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    var failed: @import("platform/windows/editor/open_worker.zig").Result = .{ .failure = error.OutOfMemory, .thread_id = std.Thread.getCurrentId() };
+    try std.testing.expect((try applyInitialAppResult(f, std.testing.allocator, &failed)) == .out_of_memory);
+    var result = try awaitInitialAppResult(f, true);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect((try applyInitialAppResult(f, std.testing.allocator, &result)) == .read_failed);
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(usize, 0), f.views.items.len);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+}
+
+test "Windows editor host initial app view admission failure retains result for retry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect((try applyInitialAppResult(f, failing.allocator(), &result)) == .out_of_memory);
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(usize, 0), f.views.items.len);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    try std.testing.expect((try applyInitialAppResult(f, std.testing.allocator, &result)) == .opened);
+    try std.testing.expectEqual(@as(usize, 1), f.views.items.len);
+}
+
+test "Windows editor host initial app readonly result stays readonly through view attachment" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    const path = try f.tmp.dir.realPathFileAlloc(std.testing.io, "file.txt", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+    defer std.testing.allocator.free(wide);
+    const Attributes = struct {
+        extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) std.os.windows.BOOL;
+    };
+    try std.testing.expect(Attributes.SetFileAttributesW(wide, 1).toBool());
+    defer _ = Attributes.SetFileAttributesW(wide, 0x80);
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    try std.testing.expect(f.documents.get(outcome.opened.document).?.opened.?.file.read_only);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host initial app result restores backup before exposing recovered view" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    try f.book.deinit(std.testing.io);
+    for (f.views.items) |*view| view.deinit(std.testing.allocator);
+    f.views.deinit(std.testing.allocator);
+    f.views = .empty;
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "other\r\n" });
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    var result = try awaitInitialAppResultMode(f, false, true);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.recovery_checked and result.recovery != null);
+    const old_hash = result.recovery.?.parsed.doc.path.disk_hash;
+    try std.testing.expect(old_hash != result.snapshot.?.raw_hash);
+    // An invalid main-thread root proves this result never rereads the store.
+    const outcome = openAppResultInto(std.testing.allocator, &f.book, std.testing.io, &f.backups, &f.views, &result, "C:invalid");
+    try std.testing.expect(outcome == .opened);
+    try std.testing.expect(outcome.opened.recovered);
+    const state = f.documents.get(outcome.opened.document).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(old_hash, state.opened.?.disk_hash);
+    try std.testing.expect(f.backups != null and result.recovery_owner == null);
+    try std.testing.expect(try f.book.beginSave(outcome.opened.document, 128));
+    try std.testing.expectError(error.SourceChanged, awaitAppSave(&f.book, outcome.opened.document));
+    try f.expectDisk("other\r\n");
+}
+
+test "Windows editor host worker recovery failure keeps original readonly without rereading" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    var result = try awaitInitialAppResultMode(f, false, true);
+    defer result.deinit(std.testing.io);
+    result.recovery_failure = error.BadHeader;
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    const state = f.documents.get(outcome.opened.document).?;
+    try std.testing.expect(state.opened.?.file.read_only and !outcome.opened.recovered);
+    try std.testing.expect(!try f.book.beginSave(outcome.opened.document, 128));
+    try std.testing.expect(f.backups == null);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host worker recovery transfers its store through first save close" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    try f.book.deinit(std.testing.io);
+    for (f.views.items) |*view| view.deinit(std.testing.allocator);
+    f.views.deinit(std.testing.allocator);
+    f.views = .empty;
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    var result = try awaitInitialAppResultMode(f, false, true);
+    defer result.deinit(std.testing.io);
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened and outcome.opened.recovered);
+    try std.testing.expect(try f.book.beginSave(outcome.opened.document, 128));
+    const ready = try awaitAppSave(&f.book, outcome.opened.document);
+    try std.testing.expect(ready == .receipt and ready.receipt.decision == .committed);
+    // No frame maintenance may lazily create the missing owner before close.
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .window, .confirmed));
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    try std.testing.expect(try f.backups.?.store.read(std.testing.io, backups.identity(f.documents.get(outcome.opened.document).?).?) == null);
+    try std.testing.expect(result.recovery_owner == null);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows editor host stale initial view cache fails without a live document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    var result = try awaitInitialAppResult(f, false);
+    defer result.deinit(std.testing.io);
+    result.view_cache.?.revision += 1;
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .read_failed);
+    try std.testing.expectEqual(@as(usize, 0), f.views.items.len);
+    try std.testing.expect(result.view_cache == null);
+    for (f.documents.slots.items) |slot| try std.testing.expect(slot.document == null);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host prepared syntax and projection survive result disposal and edit" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.initEmpty();
+    defer f.deinit();
+    const code = "const value = 1;\r\n";
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.zig", .data = code });
+    const path = try f.tmp.dir.realPathFileAlloc(std.testing.io, "file.zig", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var worker: @import("platform/windows/editor/open_worker.zig").Worker = .{ .allocator = std.testing.allocator };
+    defer drainInitialOpen(&worker, std.testing.io);
+    try worker.startForApp(path, 128);
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.OpenTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    var result = (try worker.takeResult()).?;
+    defer result.deinit(std.testing.io);
+    const syntax = result.view_cache.?.syntax orelse return error.MissingSyntax;
+    const starts = result.view_cache.?.projection.starts.ptr;
+    const initial_id = f.documents.last_reference + 1;
+    defer releaseExtraInitialView(f, initial_id);
+    const outcome = try applyInitialAppResult(f, std.testing.allocator, &result);
+    try std.testing.expect(outcome == .opened);
+    const moved = f.views.items[0].syntax != null;
+    // Restore deliberately dropped C ownership before a negative assertion.
+    if (!moved) f.views.items[0].syntax = syntax;
+    try std.testing.expect(moved);
+    try std.testing.expect(f.views.items[0].syntax.?.parser == syntax.parser);
+    try std.testing.expect(f.views.items[0].syntax.?.tree == syntax.tree);
+    try std.testing.expect(f.views.items[0].line_starts.ptr == starts);
+    try std.testing.expect(f.views.items[0].projection_allocator != null);
+    result.deinit(std.testing.io);
+    var spans: std.ArrayList(@import("syntax").Span) = .empty;
+    defer spans.deinit(std.testing.allocator);
+    f.views.items[0].syntax.?.spansForRange(std.testing.allocator, f.views.items[0].text, .{ .start = 0, .end = code.len }, &spans);
+    try std.testing.expect(spans.items.len > 0);
+    if (try applyFileKey(&f.book, std.testing.io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| std.testing.allocator.free(copied);
+    try f.views.items[0].refresh(std.testing.allocator);
+    try std.testing.expect(f.views.items[0].projection_allocator == null);
+    try std.testing.expectEqualStrings("Xconst value = 1;\r\n", f.views.items[0].text);
+    try std.testing.expect(f.views.items[0].syntax != null);
+}
+
+fn applyFileKey(book: *file_host.Book, io: std.Io, resolver: maru.config.keybinding.KeyBindingResolver, file: *OpenFile, event: maru.terminal.KeyEvent, context: OpenFile.InputContext) !?[]u8 {
+    if (file_host.saveKey(resolver, event)) {
+        const state = book.registry.get(file.document) orelse return error.StaleDocument;
+        if (state.opened.?.file.read_only) return error.ReadOnly;
+        _ = try book.save(io, file.document, 4 << 20);
+        return null;
+    }
+    return file.applyKey(book.allocator, event, context);
+}
+
+fn fileSaveNotice(err: anyerror) maru.i18n.Key {
+    return switch (err) {
+        error.SourceChanged, error.IdentityChanged, error.DiskFingerprintChanged, error.NamespaceChanged => .app_save_external_conflict,
+        error.FileTooLarge => .app_save_too_large,
+        error.ReadOnly, error.NoSaveGrant => .editor_readonly,
+        else => .app_save_failed,
+    };
+}
+
+fn showFileClose(state: *maru.chrome.components.confirm.State) void {
+    state.showChoices(maru.i18n.t(.fp_unsaved_confirm), .{ .primary = maru.i18n.t(.btn_save), .alternate = maru.i18n.t(.btn_discard_changes), .cancel = maru.i18n.t(.common_cancel) });
+}
+
+fn beginFileClose(state: *maru.chrome.components.confirm.State, queued: *?maru.chrome.components.confirm.Action) void {
+    // A WM_CLOSE may supersede a conflict choice queued earlier in this same
+    // frame. Its alternate meant Overwrite, never Discard in the new modal.
+    queued.* = null;
+    showFileClose(state);
+}
+
+test "Windows editor host close modal supersession revokes every old action and restores close roles" {
+    const confirm = maru.chrome.components.confirm;
+    for ([_]confirm.Action{ .confirmed, .alternate, .extra, .cancelled }) |old| {
+        var state: confirm.State = .{};
+        showFileSaveConflict(&state);
+        state.focused = .extra;
+        var queued: ?confirm.Action = old;
+        beginFileClose(&state, &queued);
+        try std.testing.expect(queued == null);
+        try std.testing.expect(state.open);
+        try std.testing.expectEqualStrings(maru.i18n.t(.btn_save), state.confirm_label);
+        try std.testing.expectEqualStrings(maru.i18n.t(.btn_discard_changes), state.alternate_label);
+        try std.testing.expectEqualStrings(maru.i18n.t(.common_cancel), state.cancel_label);
+        try std.testing.expect(!state.has_extra);
+        try std.testing.expectEqual(confirm.Focus.confirm, state.focused);
+    }
+}
+
+fn showFileSaveConflict(state: *maru.chrome.components.confirm.State) void {
+    state.showChoices(maru.i18n.t(.win_editor_save_conflict), .{
+        .primary = maru.i18n.t(.btn_compare),
+        .alternate = maru.i18n.t(.btn_overwrite),
+        .extra = maru.i18n.t(.btn_reload),
+        .cancel = maru.i18n.t(.common_cancel),
+    });
+}
+
+fn isFileSaveConflict(err: anyerror) bool {
+    return switch (err) {
+        error.SourceChanged, error.IdentityChanged, error.DiskFingerprintChanged, error.NamespaceChanged => true,
+        else => false,
+    };
+}
+
+fn fileIndexForLease(views: []const OpenFile, lease: maru.session.editor.document_registry.Lease) ?usize {
+    for (views, 0..) |view, i| if (view.document.owner == lease.owner and view.document.id == lease.id and std.meta.eql(view.document.document, lease.document)) return i;
+    return null;
+}
+
+/// Approve only after native save/close guards and recovery-record deletion.
+/// An error leaves every view/body alive; already removed records are rearmed.
+fn savedCloseTarget(ready: file_host.Book.SaveReady, target: ?FileCloseTarget) ?FileCloseTarget {
+    if (ready != .receipt or ready.receipt.decision != .committed or ready.receipt.acknowledgment_error != null) return null;
+    return target;
+}
+
+fn beginFileCloseSave(book: *file_host.Book, views: []OpenFile, target: FileCloseTarget) !?maru.session.editor.document_registry.Lease {
+    const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
+    if (one) |i| {
+        try book.requireClose(views[i].document, true);
+        if (book.registry.viewCount(views[i].document).? > 1) return null;
+    } else try book.requireIdle();
+    for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        if (try book.beginSave(view.document, 4 << 20)) return view.document;
+    }
+    return null;
+}
+
+// A confirmed clean close must wait for native backup deletion. Reuse the
+// immutable worker and its latest clean vote; never delete on the UI thread.
+fn requestFileViewClose(allocator: std.mem.Allocator, book: *file_host.Book, lease: maru.session.editor.document_registry.Lease, queue: *std.ArrayList(maru.session.editor.document_registry.Lease), pending: *?FileCloseTarget, conflict: *?maru.session.editor.document_registry.Lease, confirm: *maru.chrome.components.confirm.State, action: *?maru.chrome.components.confirm.Action) !void {
+    book.requireClose(lease, false) catch |failure| {
+        if (failure != error.DirtyDocument) return failure;
+        conflict.* = null;
+        pending.* = .{ .file = lease };
+        beginFileClose(confirm, action);
+        return;
+    };
+    for (queue.items) |previous| if (previous.owner == lease.owner and previous.id == lease.id) return;
+    try queue.append(allocator, lease);
+}
+
+fn prepareFileCloseBackup(io: std.Io, worker: *BackupWorker, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, now_ns: i128, retrying: bool, discard: bool) !bool {
+    if (worker.isBusy()) return false;
+    const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
+    if (one) |i| try book.requireClose(views[i].document, true) else try book.requireIdle();
+    for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        if (one != null and book.registry.viewCount(view.document).? > 1) continue;
+        const state = book.registry.get(view.document) orelse return error.StaleDocument;
+        if (!discard and state.opened.?.isDirty()) return error.DirtyDocument;
+        if (!state.notifications.backup_on_disk) continue;
+        const store = if (owner.*) |*value| &value.store else return error.BackupRootUnavailable;
+        if (retrying and state.notifications.backup_dirty and now_ns < state.notifications.backup_due_ns) return false;
+        state.notifications.backup_dirty = true;
+        if (discard) try worker.startDiscard(io, view.document, store) else try worker.start(io, view.document, store, null, maru.session.editor.backup.pause_bytes);
+        return false;
+    }
+    return true;
+}
+
+fn approveFileClose(io: std.Io, book: *file_host.Book, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, target: FileCloseTarget, action: maru.chrome.components.confirm.Action) !bool {
+    if (action == .cancelled or action == .extra) return false;
+    const one: ?usize = if (target == .file) (fileIndexForLease(views, target.file) orelse return error.StaleDocument) else null;
+    if (one) |i| try book.requireClose(views[i].document, true) else try book.requireIdle();
+    if (one) |i| if (book.registry.viewCount(views[i].document).? > 1) {
+        try book.release(io, views[i].document, true);
+        return true;
+    };
+    if (action == .confirmed) for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        const state = book.registry.get(view.document) orelse return error.StaleDocument;
+        if (!state.opened.?.isDirty()) continue;
+        _ = try book.save(io, view.document, 4 << 20);
+        if (state.opened.?.isDirty()) return error.SaveBusy;
+    };
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    errdefer for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        if (book.registry.get(view.document)) |state| backups.noteDecision(state, 0);
+    };
+    for (views, 0..) |view, i| {
+        if (one != null and one.? != i) continue;
+        if (one != null and book.registry.viewCount(view.document).? > 1) continue;
+        const state = book.registry.get(view.document) orelse return error.StaleDocument;
+        if (state.notifications.backup_on_disk) {
+            const store = if (owner.*) |*value| &value.store else return error.BackupRootUnavailable;
+            try store.drop(io, backups.identity(state) orelse return error.MissingDocument);
+        }
+        state.notifications.backup_on_disk = false;
+        state.notifications.backup_dirty = false;
+    }
+    if (one) |i| try book.release(io, views[i].document, true);
+    return true;
+}
+
+const FileCloseFixture = struct {
+    tmp: std.testing.TmpDir,
+    documents: maru.session.editor.document_registry.Registry,
+    book: file_host.Book,
+    views: std.ArrayList(OpenFile) = .empty,
+    backups: ?@import("platform/windows/editor/backup_store.zig").LocalData = null,
+
+    fn init() !*FileCloseFixture {
+        const self = try initEmpty();
+        errdefer self.deinit();
+        try self.open();
+        return self;
+    }
+    fn initEmpty() !*FileCloseFixture {
+        const a = std.testing.allocator;
+        const self = try a.create(FileCloseFixture);
+        self.* = .{ .tmp = std.testing.tmpDir(.{}), .documents = .{ .allocator = a }, .book = undefined };
+        self.book = .{ .allocator = a, .registry = &self.documents };
+        errdefer self.deinit();
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase\r\n" });
+        return self;
+    }
+    fn open(self: *FileCloseFixture) !void {
+        const path = try self.tmp.dir.realPathFileAlloc(std.testing.io, "file.txt", std.testing.allocator);
+        defer std.testing.allocator.free(path);
+        var root: [std.fs.max_path_bytes]u8 = undefined;
+        const root_len = try self.tmp.dir.realPath(std.testing.io, &root);
+        const view = switch (openAppFileInto(std.testing.allocator, &self.book, std.testing.io, &self.backups, &self.views, path, root[0..root_len])) {
+            .opened => |value| value,
+            else => return error.FixtureOpenFailed,
+        };
+        if (self.documents.get(view.document).?.opened.?.file.read_only) return error.FixtureCapabilityFailed;
+    }
+    fn editAndBackup(self: *FileCloseFixture) !void {
+        const a = std.testing.allocator;
+        if (try applyFileKey(&self.book, std.testing.io, .{}, &self.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = self.views.items })) |copied| a.free(copied);
+        var root: [std.fs.max_path_bytes]u8 = undefined;
+        const root_len = try self.tmp.dir.realPath(std.testing.io, &root);
+        const report = try runFileBackups(a, std.testing.io, &self.backups, self.views.items, 11, true, root[0..root_len]);
+        try std.testing.expectEqual(@as(usize, 0), report.failed);
+        try std.testing.expectEqual(@as(usize, 1), report.attempted);
+    }
+    fn expectDisk(self: *FileCloseFixture, expected: []const u8) !void {
+        const bytes = try self.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectEqualStrings(expected, bytes);
+    }
+    fn deinit(self: *FileCloseFixture) void {
+        for (self.book.controllers.items) |*controller| if (controller.preparing != null) {
+            controller.cancelPreparation() catch unreachable;
+            const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+            while (controller.preparing != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native preparation timeout");
+                _ = controller.pollPreparation(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+        };
+        for (self.book.controllers.items) |*controller| if (controller.pending != null) {
+            const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+            if (controller.committing != null) controller.cancelCommit() catch unreachable;
+            while (controller.committing != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native commit timeout");
+                _ = controller.pollCommit(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+            while (controller.settling != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native settlement timeout");
+                _ = controller.pollSettlement(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+            while (controller.cleaning != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native cleanup timeout");
+                _ = controller.pollCleanup(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+            if (controller.pending == null) continue;
+            _ = controller.abort(std.testing.io) catch unreachable;
+        };
+        self.book.deinit(std.testing.io) catch unreachable;
+        for (self.views.items) |*view| view.deinit(std.testing.allocator);
+        self.views.deinit(std.testing.allocator);
+        if (self.backups) |*owner| owner.deinit(std.testing.io);
+        self.documents.deinit() catch unreachable;
+        self.tmp.cleanup();
+        std.testing.allocator.destroy(self);
+    }
+};
+
+fn awaitAppSave(book: *file_host.Book, view: maru.session.editor.document_registry.Lease) !file_host.Book.SaveReady {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline) {
+        if (try book.pollSave(std.testing.io, view)) |ready| return ready;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.SaveDidNotComplete;
+}
+
+test "Windows editor host async save close releases its view only after the native receipt" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const target: FileCloseTarget = .{ .file = f.views.items[0].document };
+    const selection = try beginFileCloseSave(&f.book, f.views.items, target);
+    try std.testing.expect(selection != null);
+    const selected = selection.?;
+    try std.testing.expect(std.meta.eql(selected, target.file));
+    try std.testing.expectError(error.SaveBusy, approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, target, .confirmed));
+    const ready = try awaitAppSave(&f.book, selected);
+    try std.testing.expect(savedCloseTarget(ready, target) != null);
+    try std.testing.expect((try beginFileCloseSave(&f.book, f.views.items, target)) == null);
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, target, .confirmed));
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows editor host async save close cancellation preserves edits backup and disk" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const selected = (try beginFileCloseSave(&f.book, f.views.items, .window)).?;
+    try f.book.cancelSave(std.testing.io, selected);
+    const ready = try awaitAppSave(&f.book, selected);
+    try std.testing.expect(savedCloseTarget(ready, .window) == null);
+    const state = f.documents.get(selected).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expect(state.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host async close policy refuses aborted unacknowledged and cancelled results" {
+    const receipt: @import("platform/windows/editor/save_controller.zig").Receipt = .{ .decision = .committed, .revision = 1, .sequence = 1 };
+    try std.testing.expect(savedCloseTarget(.{ .receipt = receipt }, .window) != null);
+    try std.testing.expect(savedCloseTarget(.cancelled, .window) == null);
+    var aborted = receipt;
+    aborted.decision = .aborted;
+    try std.testing.expect(savedCloseTarget(.{ .receipt = aborted }, .window) == null);
+    var unacknowledged = receipt;
+    unacknowledged.acknowledgment_error = error.StaleDocument;
+    try std.testing.expect(savedCloseTarget(.{ .receipt = unacknowledged }, .window) == null);
+    try std.testing.expect(savedCloseTarget(.{ .receipt = receipt }, null) == null);
+}
+
+test "Windows editor host external notification worker read and clean edit preserve dirty conflict authority" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const watch = @import("platform/windows/editor/directory_watch.zig");
+    var groups: watch.Groups = .{ .allocator = a };
+    defer groups.deinit() catch unreachable;
+    const lease = try f.book.subscribeWatch(io, &groups, f.views.items[0].document);
+    try f.views.items[0].navigation.items.append(a, maru.session.editor.selection.Selection.at(6));
+    const raw = "\xef\xbb\xbfbaseEXT\r\n";
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = raw });
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    var notified = false;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (groups.poll(std.Io.Clock.awake.now(io).nanoseconds)) |notice| {
+            try std.testing.expect(notice.problem == null and try groups.receives(lease, notice.group));
+            notified = true;
+            break;
+        }
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(notified);
+    const reading = @import("platform/windows/editor/file_read_worker.zig");
+    var reader: reading.Reader = .{ .allocator = a };
+    defer reader.deinit(io) catch unreachable;
+    _ = try f.book.submitRead(&reader, f.views.items[0].document);
+    var result: ?reading.Result = null;
+    defer if (result) |*value| value.deinit();
+    const read_deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (result == null and std.Io.Clock.awake.now(io).nanoseconds < read_deadline) {
+        result = try reader.takeResult();
+        if (result == null) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const image = result orelse return error.ReadDidNotComplete;
+    try std.testing.expect(image == .image);
+    try std.testing.expect(try f.book.acceptsRead(&reader, image, f.views.items[0].document));
+    try std.testing.expect(try f.views.items[0].acceptExternal(a, f.views.items, image.image.bytes, 10));
+    try f.views.items[0].refresh(a);
+    try std.testing.expectEqualStrings("baseEXT\r\n", f.views.items[0].text);
+    try std.testing.expectEqual(@as(usize, 9), f.views.items[0].navigation.items.items[0].focus);
+    try std.testing.expect(!f.documents.get(f.views.items[0].document).?.opened.?.isDirty());
+    try f.expectDisk(raw);
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 11, .views = f.views.items });
+    const state = f.documents.get(f.views.items[0].document).?;
+    const disk_hash = state.opened.?.disk_hash;
+    try std.testing.expect(!try f.book.acceptsRead(&reader, image, f.views.items[0].document));
+    try std.testing.expectError(error.DirtyDocument, f.views.items[0].acceptExternal(a, f.views.items, "other", 12));
+    try std.testing.expectEqual(disk_hash, state.opened.?.disk_hash);
+    try std.testing.expect(state.opened.?.isDirty());
+    try f.expectDisk(raw);
+}
+
+const ExternalChanges = @import("platform/windows/editor/external_changes.zig").Coordinator;
+const ExternalComparison = @import("platform/windows/editor/external_comparison.zig").Comparison;
+
+test "Windows editor host conflict comparison owns aligned images numbers and exact line endings without editing source" {
+    const a = std.testing.allocator;
+    var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    const lease: maru.session.editor.document_registry.Lease = .{ .owner = &registry, .document = .{ .slot = 0, .generation = 1 }, .id = 1, .kind = .view };
+    var body = [_]u8{ 'a', '\n', 'b', '\n' };
+    var comparison = try ExternalComparison.init(a, lease, &body, "\xef\xbb\xbfa\nx\ny\nb\n");
+    defer comparison.deinit();
+    body[0] = 'z';
+    try std.testing.expectEqualStrings("a\nb\n", comparison.local);
+    try std.testing.expectEqualStrings("a\nx\ny\nb\n", comparison.disk);
+    try std.testing.expectEqual(comparison.left.lines.len, comparison.right.lines.len);
+    try std.testing.expectEqual(@as(usize, 2), comparison.left.total_lines);
+    try std.testing.expectEqual(@as(usize, 4), comparison.right.total_lines);
+    try std.testing.expectEqual(@as(?u32, 4), comparison.right.numbers[comparison.right.numbers.len - 1]);
+    var fillers: usize = 0;
+    var additions: usize = 0;
+    for (comparison.left.numbers, comparison.right.bands) |number, band| {
+        if (number == null) fillers += 1;
+        if (band == .added) additions += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), fillers);
+    try std.testing.expectEqual(@as(usize, 2), additions);
+    var eol = try ExternalComparison.init(a, lease, "a\r\n", "a\n");
+    defer eol.deinit();
+    try std.testing.expectEqual(editor_view.frame.RowBand.removed, eol.left.bands[0]);
+    try std.testing.expectEqual(editor_view.frame.RowBand.added, eol.right.bands[0]);
+    try std.testing.expectEqualStrings("a", eol.left.lines[0]);
+    var lone = try ExternalComparison.init(a, lease, "a\r", "a");
+    defer lone.deinit();
+    try std.testing.expectEqualStrings("a\r", lone.left.lines[0]);
+    var identical = try ExternalComparison.init(a, lease, "same", "same");
+    defer identical.deinit();
+    try std.testing.expectEqual(editor_view.frame.RowBand.none, identical.left.bands[0]);
+    try std.testing.expectEqual(@as(?u32, 1), identical.right.numbers[0]);
+    var empty = try ExternalComparison.init(a, lease, "", "");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.left.lines.len);
+    try std.testing.expectError(error.NotUtf8, ExternalComparison.init(a, lease, "local", "\xff"));
+}
+
+test "Windows editor host conflict comparison allocation prefixes release every owned preview" {
+    const Check = struct {
+        fn runCase(a: std.mem.Allocator) !void {
+            var registry: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+            const lease: maru.session.editor.document_registry.Lease = .{ .owner = &registry, .document = .{ .slot = 0, .generation = 1 }, .id = 1, .kind = .view };
+            var comparison = try ExternalComparison.init(a, lease, "a\nb\n", "a\nx\ny\nb\n");
+            defer comparison.deinit();
+            try std.testing.expectEqualStrings("a\nb\n", comparison.local);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.runCase, .{});
+}
+
+fn waitExternalJob(changes: *ExternalChanges) !void {
+    const io = std.testing.io;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!changes.reader.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ReadDidNotComplete;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "Windows editor host conflict choice cancellation is scoped and queued work never publishes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(std.testing.io) catch unreachable;
+    const lease = f.views.items[0].document;
+    try changes.requestChoice(lease, .overwrite);
+    var foreign = lease;
+    foreign.id += 1;
+    try changes.cancelChoice(foreign);
+    try std.testing.expect(try changes.hasChoice(lease));
+    try changes.cancelChoice(lease);
+    try std.testing.expect(!try changes.hasChoice(lease));
+    try std.testing.expect(changes.requested == null);
+    try std.testing.expect(try changes.takeChoice() == null);
+}
+
+test "Windows editor host cancelled active choice drains before replacement and cancels owned completion" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const lease = f.views.items[0].document;
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 1, .views = f.views.items });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "outside" });
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(io) catch unreachable;
+    try changes.requestChoice(lease, .overwrite);
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try changes.cancelChoice(lease);
+    try std.testing.expect(!try changes.hasChoice(lease));
+    try changes.requestChoice(lease, .compare);
+    try waitExternalJob(&changes);
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try std.testing.expect(try changes.takeChoice() == null);
+    try std.testing.expectEqual(ExternalChanges.Choice.compare, changes.active_choice.?.choice);
+    try waitExternalJob(&changes);
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try std.testing.expect(changes.completed != null);
+    try changes.cancelChoice(lease);
+    try std.testing.expect(!try changes.hasChoice(lease));
+    try std.testing.expect(try changes.takeChoice() == null);
+    const state = f.documents.get(lease).?;
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash("\xef\xbb\xbfbase\r\n"), state.opened.?.disk_hash.?);
+    const raw = try f.tmp.dir.readFileAlloc(io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(raw);
+    try std.testing.expectEqualStrings("outside", raw);
+}
+
+test "Windows editor host explicit conflict choice reads fresh image retries stale typing and reloads undoably" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(a);
+    defer changes.deinit(io) catch unreachable;
+    const lease = f.views.items[0].document;
+    const state = f.documents.get(lease).?;
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 1, .views = f.views.items });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "disk\r\n" });
+    try changes.requestChoice(lease, .reload);
+    try std.testing.expectError(error.ReadBusy, changes.requestChoice(lease, .compare));
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try std.testing.expect(changes.active_choice != null);
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'Y' } }, .{ .now_ms = 2, .views = f.views.items });
+    try waitExternalJob(&changes);
+    _ = try changes.tick(&f.book, io, f.views.items, 0);
+    try std.testing.expect(try changes.takeChoice() == null);
+    try std.testing.expect(changes.requested != null);
+    _ = try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns - 1);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbffresh\r\n" });
+    _ = try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns);
+    try waitExternalJob(&changes);
+    _ = try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns);
+    var completion = (try changes.takeChoice()) orelse return error.MissingChoiceImage;
+    defer completion.deinit();
+    try std.testing.expectEqual(ExternalChanges.Choice.reload, completion.request.choice);
+    try std.testing.expect(try f.book.acceptsRead(&changes.reader, completion.result, lease));
+    try std.testing.expectEqualStrings("XYbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqualStrings("\xef\xbb\xbffresh\r\n", completion.result.image.bytes);
+    _ = try f.views.items[0].reloadExternal(a, f.views.items, completion.result.image.bytes, ExternalChanges.retry_ns);
+    try std.testing.expectEqualStrings("fresh\r\n", state.opened.?.file.content);
+    try std.testing.expect(!state.opened.?.isDirty());
+    const participants = [_]maru.session.editor.edit_commands.Participant{.{ .view = &f.views.items[0].navigation, .id = lease.id }};
+    _ = try maru.session.editor.edit_commands.run(a, state, &participants, 0, .undo, .{ .now_ms = 3 });
+    try std.testing.expectEqualStrings("XYbase\r\n", state.opened.?.file.content);
+    try std.testing.expect(state.opened.?.isDirty());
+}
+
+test "Windows editor host automatic external scheduler applies a real hint and folds only equal raw fingerprints" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try std.testing.expectEqual(@as(usize, 0), f.documents.get(f.views.items[0].document).?.history.undo_len);
+    const raw = "\xef\xbb\xbfexternal\r\n";
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = raw });
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    const state = f.documents.get(f.views.items[0].document).?;
+    while (!std.mem.eql(u8, state.opened.?.file.content, "external\r\n")) {
+        try std.testing.expect(try changes.tick(&f.book, io, f.views.items, std.Io.Clock.awake.now(io).nanoseconds) == null);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ExternalUpdateMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(!state.opened.?.isDirty());
+    try std.testing.expectEqual(@as(usize, 1), state.history.undo_len);
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash(raw), state.opened.?.disk_hash.?);
+    var copied = changes;
+    try std.testing.expectError(error.CopiedExternalCoordinator, copied.tick(&f.book, io, f.views.items, 1));
+    try std.testing.expectError(error.CopiedExternalCoordinator, copied.deinit(io));
+}
+
+test "Windows editor host automatic external scheduler reschedules stale reads without publishing a conflict" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "external\r\n" });
+    var changes = ExternalChanges.init(a);
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 1, .views = f.views.items });
+    try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expect(changes.bindings.items[0].pending);
+    try std.testing.expectEqual(@as(i128, ExternalChanges.retry_ns), changes.bindings.items[0].retry_at);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns) == null);
+    try waitExternalJob(&changes);
+    const notice = (try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns)) orelse return error.MissingExternalConflict;
+    try std.testing.expectEqual(error.DirtyDocument, notice.problem);
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash("\xef\xbb\xbfbase\r\n"), state.opened.?.disk_hash.?);
+}
+
+test "Windows editor host automatic external scheduler drains closed views and cancels their directory subscriptions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try f.book.release(io, f.views.items[0].document, false);
+    f.views.items[0].deinit(std.testing.allocator);
+    f.views.clearRetainingCapacity();
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expectEqual(@as(usize, 0), changes.bindings.items.len);
+    try std.testing.expectEqual(@as(usize, 0), changes.groups.entries.items.len);
+    if (changes.reader.job != null) try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expect(changes.active == null and changes.reader.job == null);
+}
+
+test "Windows editor host automatic external scheduler keeps source-busy retry outside its quiet-period deadline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    var changes = ExternalChanges.init(std.testing.allocator);
+    defer changes.deinit(io) catch unreachable;
+    const writer = try f.tmp.dir.openFile(io, "file.txt", .{ .mode = .read_write });
+    var held = true;
+    defer if (held) writer.close(io);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expect(changes.bindings.items[0].pending and !changes.bindings.items[0].paused);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns - 1) == null);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    writer.close(io);
+    held = false;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns) == null);
+    try std.testing.expectEqual(@as(u64, 2), changes.reader.issued);
+    try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns) == null);
+    try std.testing.expect(changes.active == null);
+}
+
+test "Windows editor host automatic external scheduler reports directory capacity without starting paused reads" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.tmp.dir.createDir(io, "second", .default_dir);
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "second/file.txt", .data = "second" });
+    try f.views.ensureUnusedCapacity(a, 1);
+    const extra = try f.book.open(io, f.tmp.dir, "second/file.txt", 128);
+    defer _ = f.documents.release(extra) catch unreachable;
+    f.views.appendAssumeCapacity(try editor_document.attach(&f.documents, extra, a));
+    var changes = ExternalChanges.init(a);
+    changes.groups.limit = 1;
+    changes.hold_notices = true;
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expectEqual(@as(usize, 2), changes.bindings.items.len);
+    changes.hold_notices = false;
+    const notice = (try changes.tick(&f.book, io, f.views.items, 0)) orelse return error.MissingWatchCapacityNotice;
+    try std.testing.expectEqual(error.TooManyDirectoryWatches, notice.problem);
+    try std.testing.expectEqual(f.views.items[1].document.id, notice.document.id);
+    try std.testing.expectEqual(@as(usize, 1), changes.groups.entries.items.len);
+    try std.testing.expect(changes.bindings.items[1].paused and changes.bindings.items[1].watch == null);
+    if (changes.reader.job != null) try waitExternalJob(&changes);
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try std.testing.expectEqual(@as(u64, 1), changes.reader.issued);
+    try std.testing.expect(changes.active == null);
+}
+
+test "Windows editor host automatic external scheduler coalesces identical dirty conflicts and preserves the save base" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    _ = try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 1, .views = f.views.items });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "external" });
+    var changes = ExternalChanges.init(a);
+    defer changes.deinit(io) catch unreachable;
+    try std.testing.expect(try changes.tick(&f.book, io, f.views.items, 0) == null);
+    try waitExternalJob(&changes);
+    const first = (try changes.tick(&f.book, io, f.views.items, 0)) orelse return error.MissingExternalConflict;
+    try std.testing.expectEqual(error.DirtyDocument, first.problem);
+    const issued = changes.reader.issued;
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "external" });
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (changes.reader.issued == issued or changes.active != null) {
+        try std.testing.expect(try changes.tick(&f.book, io, f.views.items, std.Io.Clock.awake.now(io).nanoseconds) == null);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ExternalHintMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(maru.session.editor.document_state.contentHash("\xef\xbb\xbfbase\r\n"), state.opened.?.disk_hash.?);
+    try std.testing.expectEqual(@as(usize, 1), state.history.undo_len);
+}
+
+test "Windows editor host automatic external scheduler allocation failure retries admission without stranding ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        var changes = ExternalChanges.init(failing.allocator());
+        defer changes.deinit(io) catch unreachable;
+        try std.testing.expectError(error.OutOfMemory, changes.tick(&f.book, io, f.views.items, 0));
+        try std.testing.expect(changes.bindings.items.len == 0 and changes.groups.entries.items.len == 0 and changes.reader.job == null);
+        const allocations = failing.alloc_index;
+        failing.fail_index = std.math.maxInt(usize);
+        try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns - 1) == null);
+        try std.testing.expectEqual(allocations, failing.alloc_index);
+        try std.testing.expect(try changes.tick(&f.book, io, f.views.items, ExternalChanges.retry_ns) == null);
+        try std.testing.expect(changes.bindings.items.len == 1 and !changes.bindings.items[0].paused and changes.reader.job != null);
+    }
+    const Check = struct {
+        fn prefix(allocator: std.mem.Allocator, book: *file_host.Book, views: []OpenFile) !void {
+            var changes = ExternalChanges.init(allocator);
+            defer changes.deinit(std.testing.io) catch unreachable;
+            _ = changes.tick(book, std.testing.io, views, 0) catch |err| {
+                try std.testing.expect(changes.bindings.items.len == 0 and changes.groups.entries.items.len == 0 and changes.reader.job == null);
+                try std.testing.expectEqual(@as(i128, ExternalChanges.retry_ns), changes.admission_retry_at);
+                return err;
+            };
+            try std.testing.expect(changes.bindings.items.len == 1 and changes.groups.entries.items.len == 1);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(a, Check.prefix, .{ &f.book, f.views.items });
+}
+
+test "Windows editor host publication allocation failure precedes recovery and preserves retry ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    var doc = backups.identity(f.documents.get(f.views.items[0].document).?).?;
+    // The identity borrows the old document's path; retain it across teardown.
+    const saved_path = try a.dupe(u8, doc.path.path);
+    defer a.free(saved_path);
+    doc.path.path = saved_path;
+    try f.book.deinit(io);
+    for (f.views.items) |*view| view.deinit(a);
+    f.views.deinit(a);
+    f.views = .empty;
+    f.backups.?.deinit(io);
+    f.backups = null;
+    f.book = .{ .allocator = a, .registry = &f.documents };
+    const path = try f.tmp.dir.realPathFileAlloc(io, "file.txt", a);
+    defer a.free(path);
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try f.tmp.dir.realPath(io, &root);
+    var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0 });
+    const rejected = openAppFileInto(failing.allocator(), &f.book, io, &f.backups, &f.views, path, root[0..root_len]);
+    try std.testing.expect(rejected == .out_of_memory);
+    try std.testing.expectEqual(@as(usize, 0), f.views.items.len);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    try std.testing.expect(f.backups == null);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    try f.open();
+    try std.testing.expectEqual(@as(usize, 1), f.views.items.len);
+    try std.testing.expect(f.views.items[0].recovered);
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    var record = (try f.backups.?.store.read(io, doc)) orelse return error.MissingRecoveryRecord;
+    defer record.deinit();
+    try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
+    try std.testing.expectEqual(state.opened.?.disk_hash, record.parsed.doc.path.disk_hash);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows editor host ordinary reopen restores previous backup before allowing native save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try std.testing.expect(f.backups == null);
+    try f.editAndBackup();
+    // Release the old ownership without an accepted discard: durable records
+    // must survive replacement of the application's document context.
+    try f.book.deinit(std.testing.io);
+    for (f.views.items) |*view| view.deinit(std.testing.allocator);
+    f.views.clearRetainingCapacity();
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    try f.open();
+    try std.testing.expect(f.views.items[0].recovered);
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expect(state.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    _ = try f.book.save(std.testing.io, f.views.items[0].document, 4 << 20);
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows editor host ordinary restored backup retains external conflict protection" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    try f.book.deinit(std.testing.io);
+    for (f.views.items) |*view| view.deinit(std.testing.allocator);
+    f.views.clearRetainingCapacity();
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.documents };
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "external\r\n" });
+    try f.open();
+    try std.testing.expect(f.views.items[0].recovered);
+    try std.testing.expectError(error.SourceChanged, f.book.save(std.testing.io, f.views.items[0].document, 4 << 20));
+    try std.testing.expect(f.documents.get(f.views.items[0].document).?.opened.?.isDirty());
+    try f.expectDisk("external\r\n");
+}
+
+test "Windows editor host app close cancel preserves edits and save removes recovery before stable target release" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    const state = f.documents.get(lease).?;
+    const doc = @import("platform/windows/editor/backup_store.zig").identity(state).?;
+    try std.testing.expect(!try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .cancelled));
+    try std.testing.expect(state.opened.?.isDirty() and state.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .confirmed));
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+    try std.testing.expect(!state.opened.?.isDirty());
+    var record = try f.backups.?.store.read(std.testing.io, doc);
+    defer if (record) |*value| value.deinit();
+    try std.testing.expect(record == null);
+    var gone = f.views.orderedRemove(0);
+    gone.deinit(std.testing.allocator);
+    try f.open();
+    try std.testing.expectError(error.StaleDocument, approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .alternate));
+    try std.testing.expectEqual(@as(usize, 1), f.book.controllers.items.len);
+}
+
+test "Windows editor host app peer close never implicitly saves and accepted discard removes only last recovery" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    const state = f.documents.get(lease).?;
+    try f.views.ensureUnusedCapacity(std.testing.allocator, 1);
+    f.views.appendAssumeCapacity(try editor_document.attach(&f.documents, lease, std.testing.allocator));
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .confirmed));
+    try std.testing.expect(state.opened.?.isDirty() and state.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    var gone = f.views.orderedRemove(0);
+    gone.deinit(std.testing.allocator);
+    const survivor = f.views.items[0].document;
+    try std.testing.expect(try approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .{ .file = survivor }, .alternate));
+    try std.testing.expect(!state.notifications.backup_on_disk and !state.notifications.backup_dirty);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+}
+
+test "Windows editor host app save-close external conflict retains every view and disk recovery record" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfexternal\r\n" });
+    try std.testing.expectError(error.SourceChanged, approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .window, .confirmed));
+    const state = f.documents.get(f.views.items[0].document).?;
+    try std.testing.expect(state.opened.?.isDirty() and state.notifications.backup_on_disk);
+    try std.testing.expectEqual(@as(usize, 1), f.book.controllers.items.len);
+    try f.expectDisk("\xef\xbb\xbfexternal\r\n");
+    var record = (try f.backups.?.store.read(std.testing.io, @import("platform/windows/editor/backup_store.zig").identity(state).?)).?;
+    defer record.deinit();
+    try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
+}
+
+test "Windows editor host app window discard refuses an actual undetermined native save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const view = f.views.items[0].document;
+    const controller = &f.book.controllers.items[0];
+    try controller.prepare(std.testing.io, view, 128);
+    controller.pending.?.attempt.transaction.file.close(std.testing.io);
+    controller.pending.?.attempt.transaction.file_open = false;
+    controller.pending.?.attempt.transaction.phase = .uncertain;
+    try std.testing.expectError(error.SaveNotCommitted, controller.pending.?.request.complete(.uncertain));
+    try std.testing.expectError(error.SaveBusy, approveFileClose(std.testing.io, &f.book, &f.backups, f.views.items, .window, .alternate));
+    try std.testing.expect(f.documents.get(view).?.notifications.backup_on_disk);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+const BackupWorker = @import("platform/windows/editor/backup_worker.zig").Worker;
+
+fn tickFileBackupWorker(io: std.Io, worker: *BackupWorker, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, allow_start: bool, local_override: ?[]const u8) !@import("platform/windows/editor/backup_store.zig").Maintenance {
+    if (try worker.finish(owner, now_ns)) |completed| return completed.report;
+    if (worker.isBusy() or !allow_start) return .{};
+    for (views) |view| {
+        const state = view.documents.get(view.document) orelse continue;
+        if (!state.notifications.backup_dirty or now_ns < state.notifications.backup_due_ns) continue;
+        worker.start(io, view.document, if (owner.*) |*value| &value.store else null, local_override, maru.session.editor.backup.pause_bytes) catch |failure| {
+            state.notifications.backup_due_ns = now_ns +| maru.session.editor.backup.debounce_ns;
+            return failure;
+        };
+        break; // one due document, with no synchronous fallback on failure
+    }
+    return .{};
+}
+
+fn drainFileBackupWorker(io: std.Io, worker: *BackupWorker, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, now_ns: i128) !@import("platform/windows/editor/backup_store.zig").Maintenance {
+    try worker.rejectDrop();
+    var report: @import("platform/windows/editor/backup_store.zig").Maintenance = .{};
+    while (worker.isBusy()) {
+        if (try worker.finish(owner, now_ns)) |completed| {
+            report.attempted += completed.report.attempted;
+            report.failed += completed.report.failed;
+            if (report.first_error == null) report.first_error = completed.report.first_error;
+        }
+        if (worker.isBusy()) io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try worker.deinit();
+    return report;
+}
+
+// Shutdown has no further input producer. Capture each pending document once,
+// ignore its debounce deadline, and drain the actual native receipt before the
+// view lease or borrowed private root can be destroyed. Failure is reported;
+// it never falls back to synchronous writes or loops forever retrying one file.
+fn flushFileBackupWorker(io: std.Io, worker: *BackupWorker, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, local_override: ?[]const u8) !@import("platform/windows/editor/backup_store.zig").Maintenance {
+    var report = try drainFileBackupWorker(io, worker, owner, now_ns);
+    defer worker.deinit() catch unreachable;
+    for (views) |view| {
+        const state = view.documents.get(view.document) orelse continue;
+        if (!state.notifications.backup_dirty) continue;
+        worker.start(io, view.document, if (owner.*) |*value| &value.store else null, local_override, maru.session.editor.backup.pause_bytes) catch |failure| {
+            report.failed += 1;
+            if (report.first_error == null) report.first_error = failure;
+            continue;
+        };
+        while (worker.isBusy()) {
+            try worker.voteDrop();
+            if (try worker.finish(owner, now_ns)) |completed| {
+                report.attempted += completed.report.attempted;
+                report.failed += completed.report.failed;
+                if (report.first_error == null) report.first_error = completed.report.first_error;
+            }
+            if (worker.isBusy()) io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+    }
+    return report;
+}
+
+fn holdBackupWindowClose(busy: bool, deferred: *bool, requested: *bool) void {
+    if (requested.* and busy) {
+        deferred.* = true;
+        requested.* = false;
+    }
+    if (deferred.* and !busy) {
+        deferred.* = false;
+        requested.* = true;
+    }
+}
+fn backupAllowsCloseAction(busy: bool, action: maru.chrome.components.confirm.Action) bool {
+    return !busy or action == .cancelled or action == .extra;
+}
+
+fn maintainFileBackups(a: std.mem.Allocator, io: std.Io, owner: *@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, shutdown: bool) @import("platform/windows/editor/backup_store.zig").Maintenance {
+    var states: std.ArrayList(*maru.session.editor.document_state.State) = .empty;
+    defer states.deinit(a);
+    for (views) |*view| {
+        const state = view.documents.get(view.document) orelse continue;
+        if (!state.notifications.backup_dirty) continue;
+        states.append(a, state) catch {
+            for (views) |*pending_view| if (pending_view.documents.get(pending_view.document)) |pending| {
+                if (pending.notifications.backup_dirty) pending.notifications.backup_due_ns = now_ns +| maru.session.editor.backup.debounce_ns;
+            };
+            return .{ .failed = 1, .first_error = error.OutOfMemory };
+        };
+    }
+    return @import("platform/windows/editor/backup_store.zig").maintain(&owner.store, io, states.items, now_ns, shutdown);
+}
+
+fn runFileBackups(a: std.mem.Allocator, io: std.Io, owner: *?@import("platform/windows/editor/backup_store.zig").LocalData, views: []OpenFile, now_ns: i128, shutdown: bool, local_override: ?[]const u8) !@import("platform/windows/editor/backup_store.zig").Maintenance {
+    const backups = @import("platform/windows/editor/backup_store.zig");
+    var due = false;
+    for (views) |*view| {
+        const state = view.documents.get(view.document) orelse continue;
+        if (state.notifications.backup_dirty and (shutdown or now_ns >= state.notifications.backup_due_ns)) due = true;
+    }
+    if (!due) return .{};
+    if (owner.* == null) {
+        const environment = if (local_override == null) maru.os_env.allocValue(a, "LOCALAPPDATA") else null;
+        defer if (environment) |value| a.free(value);
+        owner.* = backups.LocalData.open(a, io, local_override orelse environment, maru.session.editor.backup.pause_bytes) catch |err| {
+            for (views) |*view| if (view.documents.get(view.document)) |state| {
+                if (state.notifications.backup_dirty) state.notifications.backup_due_ns = now_ns +| maru.session.editor.backup.debounce_ns;
+            };
+            return err;
+        };
+    }
+    return maintainFileBackups(a, io, &owner.*.?, views, now_ns, shutdown);
+}
+
+fn reportFileBackups(stderr: *std.Io.Writer, report: @import("platform/windows/editor/backup_store.zig").Maintenance) void {
+    if (report.first_error) |err| stderr.print("  warning: editor backup failed({s}); pending recovery retained\n", .{@errorName(err)}) catch {};
 }
 
 /// 합성 창에서 편집기 한 프레임. **스크래치를 여기서 잡고 곧바로 놓는다** — 스모크는 한 파일을
 /// 오래 들고 있어 미리 잡아 두지만, 여기서는 파일이 오갈 때마다 줄 수가 바뀐다.
 ///
 /// 배경 사각은 **pane 원점에 딱 맞는다**(스모크처럼 음수로 시작하지 않는다 — 그 함수 doc).
+fn buildComparisonSide(
+    a: std.mem.Allocator,
+    host: EditorHost,
+    side: @import("platform/windows/editor/external_comparison.zig").Side,
+    first_line: u32,
+    first_col: u16,
+    rect: maru.session.split_tree.Rect,
+    ops: []maru.chrome.draw.Op,
+    tokens: *const maru.chrome.Tokens,
+    cw: u32,
+    ch: u32,
+) !EditorBuilt {
+    const text = try a.alloc(u8, 256 * 1024);
+    defer a.free(text);
+    const runs = try a.alloc(maru.chrome.draw.Run, 4096);
+    defer a.free(runs);
+    var content: [512]editor_view.content.Row = undefined;
+    var visual: [512]editor_view.visual_map.VisualRow = undefined;
+    var gutter: [512]editor_view.gutter.Row = undefined;
+    var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
+    var carets: [256]u32 = undefined;
+    const counts = try a.alloc(u32, side.lines.len + 1);
+    defer a.free(counts);
+    const inset = editor_view.frame.content_inset_px;
+    const local: maru.chrome.draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
+    return buildEditorFrame(a, host, first_line, side.lines, editor_view.frame.Scratch{
+        .ops = ops,
+        .text_bytes = text,
+        .runs = runs,
+        .content_rows = &content,
+        .visual_rows = &visual,
+        .gutter_rows = &gutter,
+        .row_counts = counts,
+        .count_scratch = &count_scratch,
+        .caret_cols = &carets,
+    }, ops, tokens, .{
+        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+    }, local, .{ .x = 0, .y = 0, .w = rect.w -| inset * 2, .h = rect.h -| inset * 2 }, cw, ch, .{
+        .cols = @intCast(@min(std.math.maxInt(u16), @max(1, rect.w / cw))),
+        .rows = @intCast(@min(std.math.maxInt(u16), @max(1, rect.h / ch))),
+    }, .{ .x = -@as(i32, @intCast(inset)), .y = -@as(i32, @intCast(inset)), .w = rect.w, .h = rect.h }, rect.x, rect.y, first_col, null, null, .{
+        .selection_marks = @as(?[]const []const editor_view.frame.Mark, null),
+        .numbers = side.numbers,
+        .bands = side.bands,
+        .total_lines = side.total_lines,
+    }, &.{});
+}
+
+// Candidate atlas preparation must not borrow mutable caches from the active view.
+// A retained lease shares the document/history while owning its own view caches.
+fn prepareLiveFontEditor(a: std.mem.Allocator, host: EditorHost, file: *OpenFile, comparison: ?ExternalComparison, rect: maru.session.split_tree.Rect, ops: []maru.chrome.draw.Op, tokens: *const maru.chrome.Tokens) !void {
+    if (comparison) |cmp| {
+        const left_w = rect.w / 2;
+        const rects = [_]maru.session.split_tree.Rect{
+            .{ .x = rect.x, .y = rect.y, .w = left_w, .h = rect.h },
+            .{ .x = rect.x + left_w, .y = rect.y, .w = rect.w - left_w, .h = rect.h },
+        };
+        const sides = [_]@import("platform/windows/editor/external_comparison.zig").Side{ cmp.left, cmp.right };
+        const cols = [_]u16{ cmp.left_col, cmp.right_col };
+        const labels = [_][]const u8{ maru.i18n.t(.win_editor_compare_local), maru.i18n.t(.win_editor_compare_disk) };
+        for (rects, sides, cols, labels) |side_rect, side, col, label| {
+            const header_h = @min(side_rect.h, host.cell_h + editor_view.frame.content_inset_px * 2);
+            var lines = [_][]const u8{label};
+            var numbers = [_]?u32{null};
+            var bands = [_]editor_view.frame.RowBand{.none};
+            var header = try buildComparisonSide(a, host, .{ .lines = &lines, .numbers = &numbers, .bands = &bands, .total_lines = 0 }, 0, 0, .{ .x = side_rect.x, .y = side_rect.y, .w = side_rect.w, .h = header_h }, ops, tokens, host.cell_w, host.cell_h);
+            defer header.deinit(a);
+            var body = try buildComparisonSide(a, host, side, cmp.first_line, col, .{ .x = side_rect.x, .y = side_rect.y + header_h, .w = side_rect.w, .h = side_rect.h - header_h }, ops, tokens, host.cell_w, host.cell_h);
+            defer body.deinit(a);
+        }
+    } else {
+        var preview = try editor_document.attach(file.documents, file.document, a);
+        defer preview.deinit(a);
+        // Publishing retires the old scrollbar geometry. Prepare the same
+        // clamped viewport that the first frame with new cell metrics will use.
+        const visible_rows: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, rect.h / host.cell_h)));
+        preview.first_line = editor_view.viewport.clampFirstRow(file.first_line, preview.lines.items.len, visible_rows);
+        preview.first_col = @min(file.first_col, file.hmax_col);
+        try preview.navigation.items.appendSlice(a, file.navigation.items.items);
+        preview.navigation.primary = file.navigation.primary;
+        preview.navigation.visible = file.navigation.visible;
+        var built = try buildComposedEditor(a, host, &preview, rect, ops, tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+    }
+}
+
+// Keep the native fixture hidden: these tests exercise real DirectWrite/D3D
+// preparation without stealing focus from a running user application.
+const LiveFontEditorFixture = struct {
+    window: *win32_window.Window,
+    present: *d3d11_present.Present,
+    text: windows_text_resources.TextResources,
+    render: windows_renderer_resources.RendererResources,
+    documents: *maru.session.editor.document_registry.Registry,
+    lease: maru.session.editor.document_registry.Lease,
+    view: OpenFile,
+    ops: []maru.chrome.draw.Op,
+    aw: u32 = 1024,
+    ah: u32 = 1024,
+    const body = "// fixture\r\nconst value = 1;\r\n// third row\r\n";
+    fn init() !LiveFontEditorFixture {
+        const a = std.testing.allocator;
+        const window = try win32_window.Window.create(a, std.unicode.utf8ToUtf16LeStringLiteral("maru live font editor fixture"), 600, 400);
+        errdefer window.destroy();
+        const present = try d3d11_present.Present.create(a, window.hwnd, 600, 400);
+        errdefer present.destroy();
+        var text = try windows_text_resources.TextResources.init(a, "Consolas", "", 22);
+        errdefer text.deinit();
+        var render = try windows_renderer_resources.RendererResources.init(a, present.device, present.context, 22, .{
+            .advance_width_px = text.raster.metrics.width_px,
+            .glyph_width_px = text.raster.metrics.width_px,
+            .height_px = text.raster.metrics.height_px,
+        }, .{});
+        errdefer render.deinit();
+        const documents = try a.create(maru.session.editor.document_registry.Registry);
+        errdefer a.destroy(documents);
+        documents.* = .{ .allocator = a };
+        errdefer documents.deinit() catch unreachable;
+        var prepared: maru.session.editor.document_state.State = .{};
+        defer prepared.clear(a);
+        const file = try maru.session.editor.edit_doc.EditableFile.init(a, body, false);
+        prepared.opened = .{ .file = file, .saved_hash = maru.session.editor.document_state.contentHash(file.content) };
+        prepared.path = try a.dupe(u8, "font-fixture.zig");
+        const lease = try documents.create(&prepared, a);
+        errdefer _ = documents.release(lease) catch unreachable;
+        var view = try editor_document.attach(documents, lease, a);
+        errdefer view.deinit(a);
+        view.first_line = 1;
+        view.first_col = 2;
+        view.navigation_rows = 41;
+        try view.navigation.items.append(a, maru.session.editor.selection.Selection.fromPoints(15, 19));
+        view.navigation.visible = true;
+        const ops = try a.alloc(maru.chrome.draw.Op, 4096);
+        return .{ .window = window, .present = present, .text = text, .render = render, .documents = documents, .lease = lease, .view = view, .ops = ops, .aw = render.state.atlas.config.atlas_width_px, .ah = render.state.atlas.config.atlas_height_px };
+    }
+    fn deinit(self: *LiveFontEditorFixture) void {
+        const a = std.testing.allocator;
+        a.free(self.ops);
+        self.view.deinit(a);
+        std.debug.assert(self.documents.release(self.lease) catch unreachable);
+        self.documents.deinit() catch unreachable;
+        a.destroy(self.documents);
+        self.render.deinit();
+        self.text.deinit();
+        self.present.destroy();
+        self.window.destroy();
+    }
+    fn host(self: *LiveFontEditorFixture) EditorHost {
+        var builder = self.text.builder();
+        builder.rasterizer.font_size_pt = 22;
+        return .{ .renderer_state = &self.render.state, .shaper = builder.shaper, .rasterizer = builder.rasterizer, .pipeline = self.render.pipeline, .atlas_w = &self.aw, .atlas_h = &self.ah, .cell_w = self.text.raster.metrics.width_px, .cell_h = self.text.raster.metrics.height_px };
+    }
+    fn prepare(self: *LiveFontEditorFixture, a: std.mem.Allocator, comparison: ?ExternalComparison) !void {
+        const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+        try prepareLiveFontEditor(a, self.host(), &self.view, comparison, .{ .x = 0, .y = 0, .w = 600, .h = 400 }, self.ops, &tokens);
+    }
+    fn expectView(self: *LiveFontEditorFixture, before: OpenFile) !void {
+        try std.testing.expectEqual(before.first_line, self.view.first_line);
+        try std.testing.expectEqual(before.first_col, self.view.first_col);
+        try std.testing.expectEqual(before.navigation_rows, self.view.navigation_rows);
+        try std.testing.expectEqual(before.cached_revision, self.view.cached_revision);
+        try std.testing.expect(before.line_starts.ptr == self.view.line_starts.ptr);
+        try std.testing.expect(before.navigation.items.items.ptr == self.view.navigation.items.items.ptr);
+        try std.testing.expectEqual(@as(usize, 1), self.view.navigation.items.items.len);
+        try std.testing.expectEqual(maru.session.editor.selection.Selection.fromPoints(15, 19), self.view.navigation.items.items[0]);
+        try std.testing.expect(self.view.navigation.visible);
+        try std.testing.expectEqual(@as(usize, 2), self.documents.slots.items[self.lease.document.slot].document.?.refs.items.len);
+    }
+    fn containsGlyph(self: *LiveFontEditorFixture, cp: u32) !bool {
+        const choice = self.text.raster.glyphFor(cp) orelse return error.MissingNativeGlyph;
+        for (self.render.state.atlas.entries.keys()) |key| if (key.glyph_id == choice.glyph_id) return true;
+        return false;
+    }
+};
+
+test "Windows live font editor preparation preserves viewport selection and document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try LiveFontEditorFixture.init();
+    defer f.deinit();
+    const before = f.view;
+    try f.prepare(std.testing.allocator, null);
+    try f.expectView(before);
+    const state = f.documents.get(f.lease).?;
+    try std.testing.expectEqualStrings(LiveFontEditorFixture.body, state.opened.?.file.content);
+    try std.testing.expectEqual(@as(u64, 0), state.opened.?.file.revision);
+    try std.testing.expect(f.render.state.atlas.entryCount() > 0);
+    // More rows become visible after zoom-out. The first row's unique glyph
+    // must be ready even though the active view still starts at the next row.
+    try std.testing.expect(try f.containsGlyph('f'));
+    const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+    var drawn = try buildComposedEditor(std.testing.allocator, f.host(), &f.view, .{ .x = 0, .y = 0, .w = 600, .h = 400 }, f.ops, &tokens, f.host().cell_w, f.host().cell_h);
+    defer drawn.deinit(std.testing.allocator);
+    // A thin caret is foreground paint. Text glyphs must not cover its stem.
+    const last = drawn.cells.items[drawn.cells.items.len - 1];
+    try std.testing.expectEqual(@as(f32, 2), last.rect[2]);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(f.host().cell_h)), last.rect[3]);
+}
+
+test "Windows live font editor preparation leaves stale active caches untouched" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try LiveFontEditorFixture.init();
+    defer f.deinit();
+    const before = f.view;
+    var selections_storage = [_]maru.session.editor.selection.Selection{maru.session.editor.selection.Selection.at(0)};
+    var selections = maru.session.editor.selection.Selections.init(&selections_storage, 0);
+    var inverse = try f.documents.get(f.lease).?.opened.?.file.apply(.{ .changes = &.{.{ .start = 0, .end = 0, .text = "// changed\r\n" }} }, &selections);
+    defer inverse.deinit();
+    try f.prepare(std.testing.allocator, null);
+    try f.expectView(before);
+    try std.testing.expectEqual(@as(u64, 1), f.documents.get(f.lease).?.opened.?.file.revision);
+}
+
+// Syntax coloring may deliberately fall back to plain text on OOM. Exercise
+// every cold-cache allocation prefix, accepting that fallback while requiring
+// exact temporary-allocation cleanup and unchanged active document/view state.
+fn checkFontPreparationAllocationPrefixes(comptime run: fn (std.mem.Allocator) anyerror!void) !void {
+    // Native shaping can warm process-wide caches between runs. Find the first
+    // completed prefix directly instead of assuming a previous run's count.
+    for (0..512) |index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+        run(failing.allocator()) catch |err| if (err != error.OutOfMemory) return err;
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (!failing.has_induced_failure) {
+            try std.testing.expect(index >= 32);
+            std.debug.print(" allocation_prefixes={d} ", .{index});
+            return;
+        }
+    }
+    return error.FontPreparationAllocationSweepDidNotFinish;
+}
+
+test "Windows live font editor allocation failures preserve active view and leases" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Probe = struct {
+        fn run(a: std.mem.Allocator) !void {
+            var owned = try LiveFontEditorFixture.init();
+            defer owned.deinit();
+            const fixture = &owned;
+            const before = fixture.view;
+            defer fixture.expectView(before) catch @panic("font preparation changed active view");
+            try fixture.prepare(a, null);
+        }
+    };
+    try checkFontPreparationAllocationPrefixes(Probe.run);
+}
+
+test "Windows live font comparison prepares both native sides without changing images" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var f = try LiveFontEditorFixture.init();
+    defer f.deinit();
+    var cmp = try ExternalComparison.init(std.testing.allocator, f.lease, "QQQ\r\n", "ZZZ\r\n");
+    defer cmp.deinit();
+    const before = f.view;
+    try std.testing.expect(!try f.containsGlyph('Q'));
+    try std.testing.expect(!try f.containsGlyph('Z'));
+    try f.prepare(std.testing.allocator, cmp);
+    try std.testing.expect(try f.containsGlyph('Q'));
+    try std.testing.expect(try f.containsGlyph('Z'));
+    try f.expectView(before);
+    try std.testing.expectEqualStrings("QQQ\r\n", cmp.local);
+    try std.testing.expectEqualStrings("ZZZ\r\n", cmp.disk);
+}
+
+test "Windows live font comparison allocation failures preserve source and scroll" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Probe = struct {
+        fn run(a: std.mem.Allocator) !void {
+            var f = try LiveFontEditorFixture.init();
+            defer f.deinit();
+            var cmp = try ExternalComparison.init(std.testing.allocator, f.lease, "QQQ\r\n", "ZZZ\r\n");
+            defer cmp.deinit();
+            cmp.left_col = 1;
+            cmp.right_col = 2;
+            const fixture = &f;
+            const comparison = &cmp;
+            const before = fixture.view;
+            defer fixture.expectView(before) catch @panic("comparison changed active view");
+            defer std.debug.assert(comparison.left_col == 1 and comparison.right_col == 2);
+            defer std.debug.assert(std.mem.eql(u8, comparison.local, "QQQ\r\n") and std.mem.eql(u8, comparison.disk, "ZZZ\r\n"));
+            try fixture.prepare(a, comparison.*);
+        }
+    };
+    try checkFontPreparationAllocationPrefixes(Probe.run);
+}
+
 fn buildComposedEditor(
     allocator: std.mem.Allocator,
     host: EditorHost,
@@ -4472,6 +6240,7 @@ fn buildComposedEditor(
     cell_w: u32,
     cell_h: u32,
 ) !EditorBuilt {
+    try file.refresh(allocator);
     const n_lines = file.lines.items.len;
     const text_bytes = try allocator.alloc(u8, 256 * 1024);
     defer allocator.free(text_bytes);
@@ -4521,8 +6290,11 @@ fn buildComposedEditor(
     };
     // **구문 색을 여기서 만든다.** 보이는 창만 계산한다 — 문서가 커도 프레임마다 드는 값이 창에 묶인다.
     const line_colors = editorLineColors(allocator, file, file.first_line, @as(usize, grid.rows) + 1);
+    const state = file.documents.get(file.document) orelse return error.StaleDocument;
+    const opened = &(state.opened orelse return error.NoDocument);
+    try file.selection_paint.build(allocator, &opened.file, &file.navigation, file.first_line, @as(usize, grid.rows) + 1);
 
-    return buildEditorFrame(
+    const built = try buildEditorFrame(
         allocator,
         host,
         file.first_line,
@@ -4554,18 +6326,25 @@ fn buildComposedEditor(
         // **0 이면 안 준 것과 같다** — 중립은 `null` 을 "아직 안 셌다" 로 읽어 막대를 안 세운다.
         if (file.max_cols == 0) null else file.max_cols,
         null,
-        .{ .line_starts = file.line_starts, .rows = sel_rows, .buf = sel_buf, .spans = sel_spans },
+        .{
+            .line_starts = file.line_starts,
+            .rows = sel_rows,
+            .buf = sel_buf,
+            .spans = sel_spans,
+            .selection_marks = file.selection_paint.mark_rows.items,
+            .carets = file.selection_paint.caret_rows.items,
+        },
         line_colors,
     );
+    file.navigation_rows = @max(1, built.navigation_rows);
+    return built;
 }
 
 /// 줄 슬라이스가 **문서 어디에 앉아 있는가**. 그 슬라이스는 `text` 안을 가리키므로 포인터 차이가
 /// 곧 진짜 오프셋이다.
 ///
-/// **`OpenFile.line_starts` 를 쓰면 안 된다.** 그것은 CR 을 벗긴 뒤 `off += len + 1` 로 만든 **가상**
-/// 축이라(선택 영역이 그 축을 쓴다) CRLF 문서에서 줄마다 1 씩 어긋난다 — tree-sitter 의 스팬은
-/// `text` 의 바이트 축이므로 그대로 쓰면 **색이 밀린다.** LF 문서에서는 두 축이 같아 증상이 안
-/// 보이므로, 이 자리를 «단순화» 하면 조용히 깨진다(그래서 아래 판정이 CRLF 로 잰다).
+/// L2 now supplies exact CRLF line_starts as well. This helper also serves
+/// standalone draw fixtures, so it derives bounds from the actual text slices.
 fn lineBoundsIn(text: []const u8, line: []const u8) maru.chrome.components.editor_view.syntax_colors.LineBounds {
     const st: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
     return .{ .start = st, .end = st + @as(u32, @intCast(line.len)) };
@@ -4593,16 +6372,15 @@ test "줄 경계는 CRLF 에서도 진짜 문서 오프셋이다" {
 /// 보이는 창의 줄별 구문 색. **규칙은 중립이 갖는다**(`editor_view.syntax_colors`) — 여기서 하는
 /// 일은 재료를 그 층의 낱말로 옮기는 것뿐이다.
 ///
-/// **줄 경계는 진짜 문서 오프셋이어야 한다.** `OpenFile.line_starts` 는 CR 을 벗긴 뒤 만든 **가상**
-/// 오프셋이라(선택 영역이 그 축을 쓴다) CRLF 파일에서 tree-sitter 의 바이트 축과 어긋난다 — 그대로
-/// 쓰면 색이 줄마다 밀린다(적대적 검증이 만들기 전에 잡았다). 줄 슬라이스가 `text` 안을 가리키므로
-/// **포인터 차이**로 진짜 오프셋을 얻는다.
+/// Line bounds use actual document bytes, including CRLF. Refresh first because
+/// editing frees the previous flattened text that these slices borrowed.
 fn editorLineColors(
     allocator: std.mem.Allocator,
     file: *OpenFile,
     first_line: usize,
     count: usize,
 ) []const []const editor_view.content.ColorSpan {
+    file.refresh(allocator) catch return &.{};
     const p = &(file.syntax orelse return &.{});
     const ls = file.lines.items;
     if (first_line >= ls.len or count == 0) return &.{};
@@ -4642,9 +6420,19 @@ test "스크롤한 창의 색은 문서 줄 자리에 붙는다" {
     // **스모크가 못 재는 축이다.** 편집기가 스크롤된 채로 그려지는 프레임이 스모크에 없어서
     // `leading_empty` 를 0 으로 바꿔도 판정이 전부 초록이었다(적대적 검증 7 회차). 여기서 문다.
     const a = std.testing.allocator;
-    const text = try a.dupe(u8, "\n\n\nconst x = 1;\n");
-    const path = try a.dupe(u8, "t.zig");
+    var documents: maru.session.editor.document_registry.Registry = .{ .allocator = a };
+    defer documents.deinit() catch unreachable;
+    var prepared: maru.session.editor.document_state.State = .{};
+    defer prepared.clear(a);
+    const editable = try maru.session.editor.edit_doc.EditableFile.init(a, "\n\n\nconst x = 1;\n", true);
+    prepared.opened = .{ .file = editable, .saved_hash = maru.session.editor.document_state.contentHash(editable.content) };
+    prepared.path = try a.dupe(u8, "t.zig");
+    const text = prepared.opened.?.file.content;
+    const path = prepared.path.?;
+    const lease = try documents.create(&prepared, a);
     var of: OpenFile = .{
+        .documents = &documents,
+        .document = lease,
         .path = path,
         .text = text,
         .lines = .empty,
@@ -4669,184 +6457,27 @@ test "스크롤한 창의 색은 문서 줄 자리에 붙는다" {
     try std.testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_keyword, got[3][0].role);
 }
 
-const WinSession = struct {
-    surface: maru.session.surface.Surface,
-    live: maru.app.LivePtySession,
-    pump: maru.app.RuntimeEventPump,
-    /// 사이드바 카드에 뜨는 이름. 세션이 소유한다(목록이 커져도 슬라이스가 살아 있어야 한다).
-    name: [24]u8,
-    name_len: usize,
+const win_session = @import("platform/windows/terminal/session.zig");
+const win_layout_resize = @import("platform/windows/terminal/layout_resize.zig");
+const WinSession = win_session.Session;
 
-    const SpawnOptions = struct {
-        io: std.Io,
-        command: []const u8,
-        args: []const []const u8,
-        size: maru.terminal.Size,
-        cfg: maru.config.theme.Config,
-        appearance: maru.config.appearance.ResolvedAppearance,
-        cell_w: u32,
-        cell_h: u32,
-    };
-
-    fn label(self: *const WinSession) []const u8 {
-        return self.name[0..self.name_len];
-    }
-
-    fn destroy(self: *WinSession, allocator: std.mem.Allocator) void {
-        // **PTY 를 먼저 내린다** — 리더 스레드가 표면 코어를 잡고 있다.
-        self.live.deinit();
-        self.surface.deinit();
-        allocator.destroy(self);
-    }
-};
-
-/// 세션 하나를 띄워 목록·탭에 붙인다.
-///
-/// **탭 슬라이스를 다시 건다**(`app_window.tabs = tab_ptrs.items`) — `ArrayList` 가 realloc 되면 옛
-/// 슬라이스가 죽은 메모리를 가리킨다. 포인터가 가리키는 표면 본체는 힙에 고정이라 안전하다.
-fn spawnWinSession(
-    allocator: std.mem.Allocator,
-    sessions: *std.ArrayList(*WinSession),
-    tab_ptrs: *std.ArrayList(*maru.session.surface.Surface),
-    app_window: *maru.session.window.AppWindow,
-    runtime: *maru.app.SurfaceRuntime,
-    /// **단조 증가 세션 번호.** 목록 길이가 아니다 — 닫으면 길이가 줄어 번호가 되살아난다.
-    next_session_id: *usize,
-    opts: WinSession.SpawnOptions,
-) !void {
-    const s = try allocator.create(WinSession);
-    errdefer allocator.destroy(s);
-
-    // **PTY id 는 겹치면 안 된다** — 라우팅이 그 값으로 세션을 가른다.
-    //
-    // **길이에서 뽑으면 안 된다.** 닫기가 생기기 전에는 길이가 단조 증가라 우연히 맞았는데(W8.16),
-    // 하나를 닫으면 그 번호가 되살아나 **살아 있는 세션과 겹친다.** 런타임이 그것을 잡아
-    // `SurfaceAlreadyAttached` 로 거절하므로 오배선은 없지만, **닫은 뒤에는 ＋ 가 아무 일도 안 하게
-    // 된다**(적대적 검증 2회차 실측). 그래서 **단조 증가 계수기**에서 뽑는다.
-    next_session_id.* += 1;
-    const seq = next_session_id.*;
-    const pty_id: u32 = @intCast(10 + seq);
-    s.surface = try maru.session.surface.Surface.init(allocator, @intCast(1 + seq), opts.size);
-    errdefer s.surface.deinit();
-    s.surface.command = opts.command;
-
-    // **폴백도 버퍼에 쓴다.** 예전 판은 실패 시 리터럴을 `written` 에 담고 `buf` 는 손도 안 댔는데,
-    // 그러면 초기화 안 된 스택을 복사해 길이만 7 인 **쓰레기 이름**이 된다. 지금 폭(24)과 상한(16)
-    // 에서는 `bufPrint` 가 실패하지 않지만, 형식이나 상한을 바꾸는 날 조용히 밟는 자리다.
-    s.name = std.mem.zeroes([24]u8);
-    const written = std.fmt.bufPrint(&s.name, "session {d}", .{seq}) catch blk: {
-        const fallback = "session";
-        @memcpy(s.name[0..fallback.len], fallback);
-        break :blk s.name[0..fallback.len];
-    };
-    s.name_len = written.len;
-    s.surface.title = s.label();
-
-    // **앱 수준 config 를 코어에 한 번에 건다** — 리더가 뜨기 전에. 값마다 명령을 따로 보내면 자식의
-    // 첫 출력이 그 사이에 끼어 옛 설정으로 파싱되는 자리가 생긴다.
-    applyCoreConfig(&s.surface.core, opts.cfg, opts.appearance, opts.cell_w, opts.cell_h);
-
-    try s.live.init(opts.io, allocator, pty_id, .{ .command = opts.command, .args = opts.args, .size = opts.size }, 16);
-    errdefer s.live.deinit();
-    _ = try s.live.attachSurface(runtime, &s.surface, true);
-    // **붙였으면 실패 경로에서 떼야 한다.** `deinit()` 이 부르는 `close()` 는 **라우팅을 안 끊는다**
-    // (그건 `closeAndDetach`/`detachSurface` 의 일이다). 아래 `append` 가 실패하면 표면은 해제되는데
-    // runtime 은 그 포인터를 계속 들고 있어 **dangling** 이 된다 — `attachSurface` 자신도 실패
-    // 경로에서 같은 detach 를 한다(그 함수가 세운 규칙을 그대로 따른다).
-    errdefer s.live.detachSurface(runtime);
-    s.pump = s.live.pump(runtime);
-
-    try sessions.append(allocator, s);
-    errdefer _ = sessions.pop();
-    try tab_ptrs.append(allocator, &s.surface);
-    app_window.tabs = tab_ptrs.items;
+fn spawnWinSession(allocator: std.mem.Allocator, sessions: *std.ArrayList(*WinSession), tabs: *std.ArrayList(*maru.session.surface.Surface), window: *maru.session.window.AppWindow, runtime: *maru.app.SurfaceRuntime, next_id: *usize, options: WinSession.SpawnOptions) !void {
+    return win_session.spawn(allocator, sessions, tabs, window, runtime, next_id, options, applyCoreConfig);
 }
 
-/// id 로 세션 번호를 다시 푼다. **보류한 대상은 번호가 아니라 id 다** — 모달이 떠 있는 동안 목록이
-/// 밀리면 같은 번호가 다른 세션을 가리킨다(적대적 검증 3회차 실측). 사라졌으면 `null`.
-fn sessionIndexById(sessions: []const *WinSession, id: ?u64) ?usize {
-    const want = id orelse return null;
-    for (sessions, 0..) |s, i| {
-        if (s.surface.id == want) return i;
-    }
-    return null;
-}
+const sessionIndexById = win_session.indexById;
 
 /// 확인 모달이 자기 자리를 잡는 데 필요한 chrome props.
 ///
 /// **그리는 쪽과 히트테스트가 같은 값을 받아야 한다** — 중립 `confirm.view` 와 `buttonAtPoint` 가
 /// 둘 다 이것을 보고 상자를 놓는다(그 컴포넌트가 `modal_box` 프리미티브에 위임한다). 한쪽만
 /// 다른 값을 주면 "보이는 버튼 ≠ 눌리는 버튼" 이 된다 — 사이드바에서 이미 그 함정을 봤다(§2m.74).
-fn confirmProps(client_w: u32, client_h: u32, cell_w: u32, cell_h: u32, sidebar_w: u32, tk: *const maru.chrome.Tokens) maru.chrome.props.ChromeProps {
-    return .{ .shape = .fromTokens(tk), .metrics = .{
-        .cell_width_px = cell_w,
-        .cell_height_px = cell_h,
-        .sidebar_width_px = sidebar_w,
-        .backing_width_px = client_w,
-        .backing_height_px = client_h,
-    } };
+fn confirmProps(client_w: u32, client_h: u32, cell_w: u32, cell_h: u32, sidebar_w: u32, workspace: maru.session.split_tree.Rect, tk: *const maru.chrome.Tokens) maru.chrome.props.ChromeProps {
+    return win_modal.props(client_w, client_h, cell_w, cell_h, sidebar_w, workspace, tk);
 }
 
-/// 세션 하나를 닫아 목록·탭에서 뺀다. **왜 안 닫혔는지**를 돌려준다.
-///
-/// **계약은 이미 있다**(`macos-app-host-boundary.md`): 사이드바 ✕ 는 `requestClose` 게이트를 타고,
-/// *"실행 중 명령이 있으면 확인 모달을 띄우고 닫기를 보류, 없으면 즉시"* 다. 판정 술어도 중립이
-/// 소유한다(`TerminalCore.cursorIsAtPrompt` — OSC 133 의미 상태로 단위 테스트가 고정한다).
-///
-/// **Windows 에는 확인 모달이 없다.** 그래서 실행 중이면 **안 닫고 이유를 낸다** — 조용히 죽이면
-/// 사용자가 돌려받을 수 없는 것을 잃는다. 모달이 생기는 날 이 자리에 이어 붙인다.
-const CloseSessionResult = enum {
-    closed,
-    /// 실행 중인 명령이 있다 — 모달이 선행이다.
-    busy_needs_confirm,
-    /// 마지막 하나다. macOS 는 이때 **창이 닫히고 앱이 종료**된다 — Windows 에서 그 결정을 여기서
-    /// 대신 내리지 않는다.
-    last_session,
-    out_of_range,
-};
-
-fn closeWinSession(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    sessions: *std.ArrayList(*WinSession),
-    tab_ptrs: *std.ArrayList(*maru.session.surface.Surface),
-    app_window: *maru.session.window.AppWindow,
-    runtime: *maru.app.SurfaceRuntime,
-    index: usize,
-    /// 확인을 이미 받았나. **`true` 는 "사용자가 예를 눌렀다" 는 뜻이지 "검사를 건너뛴다" 가 아니다**
-    /// — 마지막 하나 보호는 그대로다(그것은 앱 종료 결정이라 확인의 대상이 다르다).
-    confirmed: bool,
-) CloseSessionResult {
-    if (index >= sessions.items.len) return .out_of_range;
-    if (sessions.items.len <= 1) return .last_session;
-    const s = sessions.items[index];
-    // **락 아래에서 묻는다** — 리더 스레드가 같은 코어를 쓴다.
-    const at_prompt = blk: {
-        s.surface.lockCore(io);
-        defer s.surface.unlockCore(io);
-        break :blk s.surface.core.cursorIsAtPrompt();
-    };
-    if (!at_prompt and !confirmed) return .busy_needs_confirm;
-
-    // **라우팅을 먼저 끊는다.** `destroy` 가 부르는 `deinit` 은 라우팅을 안 끊으므로(그 함수 주석),
-    // 여기서 안 떼면 runtime 이 해제된 표면을 계속 든다.
-    s.live.closeAndDetach(runtime);
-    _ = sessions.orderedRemove(index);
-    _ = tab_ptrs.orderedRemove(index);
-    app_window.tabs = tab_ptrs.items;
-    // **활성 탭을 removal 에 맞춰 당긴다.** 번호만 clamp 하면 앞쪽을 닫았을 때 **보고 있던 세션이
-    // 조용히 바뀐다** — 뒤 색인이 하나씩 앞으로 당겨지기 때문이다. 화면은 멀쩡해 보이고 개수 판정도
-    // 초록이라, 이름을 견주는 판정을 넣기 전까지 안 보였다(적대적 검증 1회차: `want=session 5
-    // got=session 6`). 파일 목록에서 이미 같은 함정을 밟았다(W8.14).
-    if (index < app_window.active_tab) {
-        app_window.active_tab -= 1;
-    } else if (app_window.active_tab >= sessions.items.len) {
-        // 닫은 것이 활성이었고 그것이 마지막이면 앞으로 당긴다(그 외에는 같은 번호가 곧 승계자다).
-        app_window.active_tab = sessions.items.len - 1;
-    }
-    s.destroy(allocator);
-    return .closed;
-}
+const CloseSessionResult = win_session.CloseResult;
+const closeWinSession = win_session.close;
 
 /// 사이드바 카드 한 장이 싣는 것. 빈 문자열이면 그 줄을 안 그린다(`buildSidebarDrawList` 의 계약).
 const SidebarCard = struct {
@@ -5051,7 +6682,7 @@ fn appendAgentDockCells(
     opts.scroll_content_height_px = proj.content_height_px;
     opts.content_first_item_origin_y_px = -@as(i32, @intCast(proj.offset_y_px));
 
-    const built = agent_surface.build(allocator, .{
+    const built = try agent_surface.build(allocator, .{
         .renderer_state = renderer_state,
         .rasterizer = rasterizer,
         .pipeline = pipeline,
@@ -5061,7 +6692,7 @@ fn appendAgentDockCells(
         .cell_h = cell_h,
         .viewport_w = area.w,
         .viewport_h = area.h,
-    }, agent.state, opts) catch return;
+    }, agent.state, opts);
     // **다음 프레임의 투영이 쓸 높이.** 여기서 재지 않고 중립 헬퍼가 답한다 — 그 파일 doc:
     // *"host마다 다시 계산하지 않는다. 제품 host와 Lab이 갈리면 골든이 제품과 다른 그림을 증명한다."*
     if (maru.chrome.components.session_dock.build.scrollTextViewport(built.frame.tree)) |vp| {
@@ -5157,7 +6788,7 @@ fn appendScmDockCells(
     if (scm.opts.status_text.len == 0 or area.w == 0 or area.h == 0) return;
     var rasterizer = builder.rasterizer;
     rasterizer.registry = &renderer_state.font_registry;
-    const built = scm_surface.build(allocator, .{
+    const built = try scm_surface.build(allocator, .{
         .renderer_state = renderer_state,
         .rasterizer = rasterizer,
         .pipeline = pipeline,
@@ -5172,7 +6803,7 @@ fn appendScmDockCells(
         o.scroll_offset_px = scm.scroll.offset_y_px;
         o.list_viewport_h = scm.viewport_h.*;
         break :blk o;
-    }) catch return;
+    });
     // **상한이 줄면 지금 자리도 줄여야 한다** — 파일이 스테이지되어 목록이 짧아졌는데 offset 이 그대로면
     // 빈 바닥이 보인다(중립 `scroll_area.State.clamp` 가 그 규칙을 갖고 있다).
     scm.scroll.clamp(built.scroll_max_offset_px);
@@ -5265,9 +6896,10 @@ fn dockGeometryFor(
     /// 하단 상태표시줄 높이(px). **창 전폭**이라 작업영역 밖에 살고, `compute` 가 창 높이에서 **먼저**
     /// 깎는다 — 그래서 이 값 하나로 터미널 행·도크·사이드바 뷰포트가 전부 함께 줄어든다(W8.9).
     status_bar_px: u32,
+    tk: ?*const maru.chrome.Tokens,
 ) maru.session.dock_layout.Geometry {
     const dock_layout = maru.session.dock_layout;
-    return dock_layout.compute(.{
+    var result = dock_layout.compute(.{
         .backing_width_px = width_px,
         .backing_height_px = height_px,
         .sidebar_width_px = sidebar_width_px,
@@ -5283,16 +6915,29 @@ fn dockGeometryFor(
         .size_pt = size_pt,
         .visible = visible,
         .view = view,
-        .view_bar_px = cell_h * 2,
+        .view_bar_px = if (titlebar_px == 0) cell_h * 2 else 0,
         .status_bar_px = status_bar_px,
     });
+    if (titlebar_px != 0 and visible) {
+        const grid = winDockViewBarGrid(tk.?, cell_w);
+        const width: u32 = grid.slot_cols * cell_w * @as(u32, maru.chrome.components.dock_view_bar.slot_count);
+        const captions = @max(cell_w * 5, 46) * 3;
+        const launcher = win_dock.buttonRect(width_px, sidebar_width_px, titlebar_px, @max(cell_w * 5, 46));
+        const right = width_px -| (captions + launcher.w);
+        // Hide the complete switcher when a narrow window cannot fit it.
+        result.view_bar = if (right >= sidebar_width_px + width)
+            .{ .x = right - width, .y = 0, .w = width, .h = titlebar_px }
+        else
+            .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    }
+    return result;
 }
 
 /// `win32-terminal-smoke` 의 선택지. **디스패치에서 떼어 낸다** — 저 안에서는 인자 반복자와 stderr 가
 /// 얽혀 있어 판정을 걸 수 없고, 실제로 이 계약은 한동안 **손으로 세 번 돌려 본 것**이 전부였다
 /// (적대적 검증 7 회차). 오류를 던지지 않고 **무엇이 잘못됐는지 값으로** 돌려주는 이유는 안내문에
 /// 그 토큰이 들어가야 하기 때문이다.
-const TerminalSmokeOpts = struct { hold_editor_ms: u32 = 0 };
+const TerminalSmokeOpts = struct { hold_editor_ms: u32 = 0, hold_notice_ms: u32 = 0 };
 const TerminalSmokeOptsResult = union(enum) {
     ok: TerminalSmokeOpts,
     /// 값을 받아야 하는 이름인데 뒤가 비었다.
@@ -5306,10 +6951,12 @@ fn terminalSmokeOpts(args: []const []const u8) TerminalSmokeOptsResult {
     var out: TerminalSmokeOpts = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--hold-editor-ms")) {
+        if (std.mem.eql(u8, args[i], "--hold-editor-ms") or std.mem.eql(u8, args[i], "--hold-notice-ms")) {
+            const notice = std.mem.eql(u8, args[i], "--hold-notice-ms");
             if (i + 1 >= args.len) return .{ .needs_value = args[i] };
             i += 1;
-            out.hold_editor_ms = std.fmt.parseInt(u32, args[i], 10) catch return .{ .bad_value = args[i] };
+            const value = std.fmt.parseInt(u32, args[i], 10) catch return .{ .bad_value = args[i] };
+            if (notice) out.hold_notice_ms = value else out.hold_editor_ms = value;
         } else return .{ .unknown = args[i] };
     }
     return .{ .ok = out };
@@ -5318,6 +6965,8 @@ fn terminalSmokeOpts(args: []const []const u8) TerminalSmokeOptsResult {
 test "win32-terminal-smoke 선택지" {
     // 기본은 **0 이다** — 게이트가 이 플래그를 안 주므로 그때 시간이 안 변해야 한다.
     try std.testing.expectEqual(@as(u32, 0), terminalSmokeOpts(&.{}).ok.hold_editor_ms);
+    try std.testing.expectEqual(@as(u32, 0), terminalSmokeOpts(&.{}).ok.hold_notice_ms);
+    try std.testing.expectEqual(@as(u32, 500), terminalSmokeOpts(&.{ "--hold-notice-ms", "500" }).ok.hold_notice_ms);
     try std.testing.expectEqual(@as(u32, 250), terminalSmokeOpts(&.{ "--hold-editor-ms", "250" }).ok.hold_editor_ms);
 
     // **잘못된 인자는 조용히 무시되면 안 된다.** 무시하면 증거를 만들려던 사람이 «찍었는데 편집기가
@@ -5524,7 +7173,174 @@ test "구문 색 세기는 셀마다 한 번, 행마다 한 번, 그리고 구�
     try std.testing.expectEqual(@as(usize, 4), got.total_rows);
 }
 
-fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, hold_editor_ms: u32) !void {
+const chrome_font_px = maru.chrome.ui.typography.token(.list_row).point_size;
+const ChromeTextScope = struct {
+    state: *maru.renderer.RendererState,
+    previous: maru.renderer.glyph_layout.TextLayoutConfig,
+    fn init(state: *maru.renderer.RendererState, cw: u32, ch: u32) ChromeTextScope {
+        const previous = state.text_config;
+        state.text_config.font_size_px = maru.renderer.textConfigFromFontSize(chrome_font_px, 1).font_size_px;
+        state.text_config.cell_width_px = @intCast(cw);
+        state.text_config.glyph_cell_width_px = @intCast(cw);
+        state.text_config.cell_height_px = @intCast(ch);
+        return .{ .state = state, .previous = previous };
+    }
+    fn deinit(self: ChromeTextScope) void {
+        self.state.text_config = self.previous;
+    }
+    fn builder(raw: win32_terminal.FrameBuilder) win32_terminal.FrameBuilder {
+        var result = raw;
+        result.rasterizer.font_size_pt = chrome_font_px;
+        return result;
+    }
+};
+
+// A disposable candidate owns every retained frame and its matching hit-test
+// metadata. Active caches are swapped only after complete preparation succeeds.
+const LiveFontUi = struct {
+    agent_built: ?agent_surface.Built = null,
+    agent_clip: ListClip = .{},
+    agent_scroll: maru.chrome.ui.scroll_area.State = .{},
+    agent_scroll_max: u32 = 0,
+    agent_scroll_view_h: u32 = 0,
+    agent_state: agent_surface.State = .{},
+    dock_bottom_spill: usize = 0,
+    dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty,
+    dock_cells_outside: usize = 0,
+    dock_draw_start: usize = 0,
+    dock_region_uploads: usize = 0,
+    dock_rows_drawn: u16 = 0,
+    dock_scroll_shift: u32 = 0,
+    dock_top_spill: usize = 0,
+    dock_tree_frame: ?maru.renderer.RenderFrame = null,
+    dock_tree_top_px: ?f32 = null,
+    scm_built: ?scm_surface.Built = null,
+    scm_clip: ListClip = .{},
+    scm_scroll: maru.chrome.ui.scroll_area.State = .{},
+    scm_scroll_max: u32 = 0,
+    scm_scroll_view_h: u32 = 0,
+    scm_state: scm_surface.State = .{},
+    sidebar_active_band_y: ?u32 = null,
+    sidebar_card_cols: u16 = 0,
+    sidebar_card_columns: ?maru.chrome.components.sidebar.Columns = null,
+    sidebar_card_over_header: usize = 0,
+    sidebar_cards_visible: usize = 0,
+    sidebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty,
+    sidebar_cells_clipped: usize = 0,
+    sidebar_first_band_y: u32 = 0,
+    sidebar_first_visible: usize = 0,
+    sidebar_frame: ?maru.renderer.RenderFrame = null,
+    sidebar_glyphs: usize = 0,
+    sidebar_header_drawn: DrawnHeaderIcons = .{},
+    sidebar_header_frame: ?maru.renderer.RenderFrame = null,
+    sidebar_header_h: u32 = 0,
+    sidebar_header_icon_band: u32 = 0,
+    sidebar_header_icon_glyphs: usize = 0,
+    sidebar_header_outside: usize = 0,
+    sidebar_header_search_glyphs: usize = 0,
+    sidebar_outside: usize = 0,
+    sidebar_partial: u32 = 0,
+    sidebar_uploads: usize = 0,
+    status_cells: std.ArrayList(d3d11_cells.Cell) = .empty,
+    status_dropped: usize = 0,
+    status_frames: [max_status_bar_items]?maru.renderer.RenderFrame = @splat(null),
+    status_mismatch: usize = 0,
+    status_outside: usize = 0,
+    status_placed: usize = 0,
+    status_uploads: usize = 0,
+    titlebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty,
+    view_bar_frame: ?maru.renderer.RenderFrame = null,
+    view_bar_glyph_top: ?f32 = null,
+    fn deinit(self: *LiveFontUi, a: std.mem.Allocator) void {
+        if (self.agent_built) |*b| b.deinit();
+        self.dock_cells.deinit(a);
+        if (self.dock_tree_frame) |*f| f.deinit(a);
+        if (self.scm_built) |*b| b.deinit();
+        self.sidebar_cells.deinit(a);
+        if (self.sidebar_frame) |*f| f.deinit(a);
+        if (self.sidebar_header_frame) |*f| f.deinit(a);
+        self.status_cells.deinit(a);
+        for (&self.status_frames) |*slot| if (slot.*) |*f| f.deinit(a);
+        self.titlebar_cells.deinit(a);
+        if (self.view_bar_frame) |*f| f.deinit(a);
+    }
+    fn swapInto(self: *LiveFontUi, targets: anytype) void {
+        // Explicit members keep main outside the external-reflection surface.
+        // The compiler checks each cache's owner and matching pointer type.
+        std.mem.swap(@TypeOf(self.agent_built), targets.agent_built, &self.agent_built);
+        std.mem.swap(@TypeOf(self.agent_clip), targets.agent_clip, &self.agent_clip);
+        std.mem.swap(@TypeOf(self.agent_scroll), targets.agent_scroll, &self.agent_scroll);
+        std.mem.swap(@TypeOf(self.agent_scroll_max), targets.agent_scroll_max, &self.agent_scroll_max);
+        std.mem.swap(@TypeOf(self.agent_scroll_view_h), targets.agent_scroll_view_h, &self.agent_scroll_view_h);
+        std.mem.swap(@TypeOf(self.agent_state), targets.agent_state, &self.agent_state);
+        std.mem.swap(@TypeOf(self.dock_bottom_spill), targets.dock_bottom_spill, &self.dock_bottom_spill);
+        std.mem.swap(@TypeOf(self.dock_cells), targets.dock_cells, &self.dock_cells);
+        std.mem.swap(@TypeOf(self.dock_cells_outside), targets.dock_cells_outside, &self.dock_cells_outside);
+        std.mem.swap(@TypeOf(self.dock_draw_start), targets.dock_draw_start, &self.dock_draw_start);
+        std.mem.swap(@TypeOf(self.dock_region_uploads), targets.dock_region_uploads, &self.dock_region_uploads);
+        std.mem.swap(@TypeOf(self.dock_rows_drawn), targets.dock_rows_drawn, &self.dock_rows_drawn);
+        std.mem.swap(@TypeOf(self.dock_scroll_shift), targets.dock_scroll_shift, &self.dock_scroll_shift);
+        std.mem.swap(@TypeOf(self.dock_top_spill), targets.dock_top_spill, &self.dock_top_spill);
+        std.mem.swap(@TypeOf(self.dock_tree_frame), targets.dock_tree_frame, &self.dock_tree_frame);
+        std.mem.swap(@TypeOf(self.dock_tree_top_px), targets.dock_tree_top_px, &self.dock_tree_top_px);
+        std.mem.swap(@TypeOf(self.scm_built), targets.scm_built, &self.scm_built);
+        std.mem.swap(@TypeOf(self.scm_clip), targets.scm_clip, &self.scm_clip);
+        std.mem.swap(@TypeOf(self.scm_scroll), targets.scm_scroll, &self.scm_scroll);
+        std.mem.swap(@TypeOf(self.scm_scroll_max), targets.scm_scroll_max, &self.scm_scroll_max);
+        std.mem.swap(@TypeOf(self.scm_scroll_view_h), targets.scm_scroll_view_h, &self.scm_scroll_view_h);
+        std.mem.swap(@TypeOf(self.scm_state), targets.scm_state, &self.scm_state);
+        std.mem.swap(@TypeOf(self.sidebar_active_band_y), targets.sidebar_active_band_y, &self.sidebar_active_band_y);
+        std.mem.swap(@TypeOf(self.sidebar_card_cols), targets.sidebar_card_cols, &self.sidebar_card_cols);
+        std.mem.swap(@TypeOf(self.sidebar_card_columns), targets.sidebar_card_columns, &self.sidebar_card_columns);
+        std.mem.swap(@TypeOf(self.sidebar_card_over_header), targets.sidebar_card_over_header, &self.sidebar_card_over_header);
+        std.mem.swap(@TypeOf(self.sidebar_cards_visible), targets.sidebar_cards_visible, &self.sidebar_cards_visible);
+        std.mem.swap(@TypeOf(self.sidebar_cells), targets.sidebar_cells, &self.sidebar_cells);
+        std.mem.swap(@TypeOf(self.sidebar_cells_clipped), targets.sidebar_cells_clipped, &self.sidebar_cells_clipped);
+        std.mem.swap(@TypeOf(self.sidebar_first_band_y), targets.sidebar_first_band_y, &self.sidebar_first_band_y);
+        std.mem.swap(@TypeOf(self.sidebar_first_visible), targets.sidebar_first_visible, &self.sidebar_first_visible);
+        std.mem.swap(@TypeOf(self.sidebar_frame), targets.sidebar_frame, &self.sidebar_frame);
+        std.mem.swap(@TypeOf(self.sidebar_glyphs), targets.sidebar_glyphs, &self.sidebar_glyphs);
+        std.mem.swap(@TypeOf(self.sidebar_header_drawn), targets.sidebar_header_drawn, &self.sidebar_header_drawn);
+        std.mem.swap(@TypeOf(self.sidebar_header_frame), targets.sidebar_header_frame, &self.sidebar_header_frame);
+        std.mem.swap(@TypeOf(self.sidebar_header_h), targets.sidebar_header_h, &self.sidebar_header_h);
+        std.mem.swap(@TypeOf(self.sidebar_header_icon_band), targets.sidebar_header_icon_band, &self.sidebar_header_icon_band);
+        std.mem.swap(@TypeOf(self.sidebar_header_icon_glyphs), targets.sidebar_header_icon_glyphs, &self.sidebar_header_icon_glyphs);
+        std.mem.swap(@TypeOf(self.sidebar_header_outside), targets.sidebar_header_outside, &self.sidebar_header_outside);
+        std.mem.swap(@TypeOf(self.sidebar_header_search_glyphs), targets.sidebar_header_search_glyphs, &self.sidebar_header_search_glyphs);
+        std.mem.swap(@TypeOf(self.sidebar_outside), targets.sidebar_outside, &self.sidebar_outside);
+        std.mem.swap(@TypeOf(self.sidebar_partial), targets.sidebar_partial, &self.sidebar_partial);
+        std.mem.swap(@TypeOf(self.sidebar_uploads), targets.sidebar_uploads, &self.sidebar_uploads);
+        std.mem.swap(@TypeOf(self.status_cells), targets.status_cells, &self.status_cells);
+        std.mem.swap(@TypeOf(self.status_dropped), targets.status_dropped, &self.status_dropped);
+        std.mem.swap(@TypeOf(self.status_frames), targets.status_frames, &self.status_frames);
+        std.mem.swap(@TypeOf(self.status_mismatch), targets.status_mismatch, &self.status_mismatch);
+        std.mem.swap(@TypeOf(self.status_outside), targets.status_outside, &self.status_outside);
+        std.mem.swap(@TypeOf(self.status_placed), targets.status_placed, &self.status_placed);
+        std.mem.swap(@TypeOf(self.status_uploads), targets.status_uploads, &self.status_uploads);
+        std.mem.swap(@TypeOf(self.titlebar_cells), targets.titlebar_cells, &self.titlebar_cells);
+        std.mem.swap(@TypeOf(self.view_bar_frame), targets.view_bar_frame, &self.view_bar_frame);
+        std.mem.swap(@TypeOf(self.view_bar_glyph_top), targets.view_bar_glyph_top, &self.view_bar_glyph_top);
+    }
+};
+
+fn sameLiveFont(a: maru.config.theme.FontConfig, b: maru.config.theme.FontConfig) bool {
+    return a.size == b.size and a.line_height == b.line_height and a.letter_spacing == b.letter_spacing and
+        a.ligatures == b.ligatures and
+        std.mem.eql(u8, a.family, b.family) and std.mem.eql(u8, a.fallback, b.fallback) and
+        std.mem.eql(u8, a.family_bold, b.family_bold) and std.mem.eql(u8, a.family_italic, b.family_italic);
+}
+
+test "Windows run frame live font comparison includes ligature changes" {
+    var first: maru.config.theme.FontConfig = .{};
+    var second = first;
+    second.ligatures = !first.ligatures;
+    try std.testing.expect(!sameLiveFont(first, second));
+    first.ligatures = second.ligatures;
+    try std.testing.expect(sameLiveFont(first, second));
+}
+
+fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, smoke_opts: TerminalSmokeOpts) !void {
+    const hold_editor_ms = smoke_opts.hold_editor_ms;
     if (@import("builtin").os.tag != .windows) {
         try stderr.writeAll("maru win32-terminal-smoke: Windows only\n");
         try stderr.flush();
@@ -5540,11 +7356,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 코어가 문자열 값을 arena 에서 **빌린다**. 먼저 해제하면 dangling 이다.
     var loaded = try maru.config.loader.loadDefault(io, allocator);
     defer loaded.deinit();
-    const cfg = loaded.config;
+    var cfg = loaded.config;
+    var locale_buffer: [255]u8 = undefined;
+    maru.i18n.setOsLocale(maru.win32_locale.read(&locale_buffer) orelse "");
+    _ = maru.app.language_config.apply(cfg.ui_language);
+    var settings_host = try windows_settings.Host.init(allocator, loaded.arena.allocator(), io, &cfg);
+    defer settings_host.deinit();
     // **hex 문자열을 여기서 파싱하지 않는다.** `appearance.resolve` 가 색 해석·대비 보정·기본값 폴백을
     // 소유한다(macOS 도 같은 함수를 쓴다). 실패하면 값이 잘못된 것이므로 **조용히 기본값으로 접지 않고**
     // 알린 뒤 빌트인으로 간다 — 키바인딩 검증과 같은 규율이다.
-    const appearance = maru.config.appearance.resolve(cfg) catch |err| blk: {
+    var appearance = maru.config.appearance.resolve(cfg) catch |err| blk: {
         try stderr.print("  warning: theme colors are invalid({s}) — falling back to built-ins\n", .{@errorName(err)});
         break :blk try maru.config.appearance.resolve(.{});
     };
@@ -5558,21 +7379,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // config 파일이 없어도 JetBrains Mono 를 먼저 찾고 없을 때 Cascadia Mono 로 내려간다. 이 기계에서
     // `font_family=Cascadia Mono` 로 보이는 것은 그 폰트가 없어서지 "빈 값이라 티어가 골라서" 가 아니다.
     // `Jetendard` 는 macOS 번들 한글 폰트라 Windows 에서는 열리지 않고 폴백 사슬 앞에 무해하게 남는다.
-    var raster = dwrite_font.Rasterizer.create(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
+    var text_resources = windows_text_resources.TextResources.initConfigured(allocator, cfg.font) catch |err| {
         try stderr.print("maru win32-terminal-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
     };
-    defer raster.destroy();
-    const cell_w = raster.metrics.width_px;
-    const cell_h = raster.metrics.height_px;
+    defer text_resources.deinit();
+    var raster = text_resources.raster;
+    const initial_spacing = maru.renderer.font_spacing.apply(raster.metrics.width_px, raster.metrics.height_px, cfg.font.line_height, cfg.font.letter_spacing, 1000);
+    var cell_w = initial_spacing.advance_width_px;
+    var cell_h = initial_spacing.height_px;
+    const initial_chrome = text_resources.chromeMetrics();
+    var chrome_cell_w = initial_chrome.width_px;
+    var chrome_cell_h = initial_chrome.height_px;
 
-    const scratch = try allocator.alloc(u8, win32_text.NeutralRasterizer.scratchSizeFor(cell_w * 2, cell_h));
-    defer allocator.free(scratch);
-    const builder = win32_terminal.FrameBuilder{
-        .shaper = .{ .raster = raster },
-        .rasterizer = .{ .raster = raster, .scratch = scratch },
-    };
+    var builder = text_resources.builder();
+    builder.rasterizer.font_size_pt = cfg.font.size;
 
     // ── 창·표시 경로 ───────────────────────────────────────────────────────────────────────
     const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.2c terminal)");
@@ -5600,7 +7422,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **기하는 중립이 정한다**(`session/dock_layout.compute`) — macOS 가 쓰는 그 함수다. Windows 가
     // 자기 산수로 다시 나누면 두 플랫폼의 도크 폭·디바이더 두께가 조용히 갈린다.
     // 도크 상태. **⒞ 슬라이스가 이 둘을 움직인다**(디바이더 드래그·숨기기) — 지금은 고정이다.
-    const dock_visible = true;
+    var dock_visible = true;
+    var dock_layout_pending = false;
+    var layout_probe = false;
+    var dock_toggle_gesture: win_dock.Gesture = .{};
+    var dock_toggle_clicks: usize = 0;
     // **⒞ 가 이것을 움직인다** — 디바이더를 끌면 폭이 바뀐다. 0 은 "뷰가 정한 기본 폭" 센티널이다.
     var dock_size_pt: u32 = 0;
     // 도크가 지금 무엇을 보이는가. 뷰 바의 칸을 누르면 바뀐다(W8.7c2).
@@ -5619,7 +7445,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_keys_consumed: usize = 0;
     // **사이드바 폭은 config 가 정한다**(`sidebar.width`, pt). 배율이 1 이라 pt 가 곧 px 다 —
     // 포트 전체에 DPI 인지가 없다(§2m.35 의 한계와 같은 축).
-    const sidebar_w: u32 = cfg.sidebar.width_pt;
+    var sidebar_w: u32 = cfg.sidebar.width_pt;
     // **지금 클라이언트 크기.** 디바이더 드래그가 기하를 다시 계산할 때 이 값이 필요하다 —
     // `initial` 은 시작 값이라 창을 키운 뒤 쓰면 도크가 옛 창 기준으로 선다.
     // ── 프레임리스 창 (W8.8⒝) ───────────────────────────────────────────────────────────────
@@ -5641,11 +7467,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     //
     // **끄는 판정만 여기 있다** — `status-bar.show` 는 config 이고 중립 잎은 config 를 모른다.
     // 게이트가 이 한 자리라 끄면 작업영역·도크·사이드바가 전부 자동으로 되돌아온다(계약 §2).
-    const status_bar_px: u32 = if (cfg.status_bar.show) maru.status_bar_metrics.heightPx(cell_h, 1000) else 0;
+    const status_bar_px: u32 = if (cfg.status_bar.show) maru.status_bar_metrics.heightPx(chrome_cell_h, 1000) else 0;
 
     var client_w = initial.width_px;
     var client_h = initial.height_px;
-    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
+    var chrome_tokens = chromeTokensFor(cfg);
+    var geom = dockGeometryFor(client_w, client_h, chrome_cell_w, chrome_cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
 
     // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
     // 긴 줄이 도크 아래로 흘러 들어간다(그리는 자리는 잘려도 셸의 줄바꿈이 어긋난다).
@@ -5708,12 +7535,39 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var search_focused = false;
     var search_focus_changes: usize = 0;
     var search_chars: usize = 0;
+    var editor_documents: maru.session.editor.document_registry.Registry = .{ .allocator = allocator };
+    defer editor_documents.deinit() catch unreachable;
+    var editor_files: file_host.Book = .{ .allocator = allocator, .registry = &editor_documents };
+    defer editor_files.deinit(io) catch |err| {
+        stderr.print("  warning: editor native ownership unresolved at exit({s})\n", .{@errorName(err)}) catch {};
+    };
     var open_files: std.ArrayList(OpenFile) = .empty;
     defer {
         for (open_files.items) |*f| f.deinit(allocator);
         open_files.deinit(allocator);
     }
+    // Register after the view cleanup so shutdown flush runs while document
+    // leases are alive. No pending edits means no user backup directory access.
+    var file_backups: ?@import("platform/windows/editor/backup_store.zig").LocalData = null;
+    var file_backup_worker = BackupWorker.init(allocator, &editor_documents);
+    var backup_window_close_requested = false;
+    var backup_clean_closes: std.ArrayList(maru.session.editor.document_registry.Lease) = .empty;
+    defer backup_clean_closes.deinit(allocator);
+    defer {
+        if (flushFileBackupWorker(io, &file_backup_worker, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, null)) |report| {
+            reportFileBackups(stderr, report);
+        } else |err| stderr.print("  warning: editor backup shutdown failed({s})\n", .{@errorName(err)}) catch {};
+        if (file_backups) |*owner| {
+            if (owner.deinitOnWorker(io)) |_| {} else |err| {
+                stderr.print("  warning: editor backup root cleanup failed({s})\n", .{@errorName(err)}) catch {};
+            }
+        }
+    }
     var active_view: ActiveView = .{ .terminal = 0 };
+    var file_changes = @import("platform/windows/editor/external_changes.zig").Coordinator.init(allocator);
+    defer file_changes.deinit(io) catch |err| {
+        stderr.print("  warning: editor watcher ownership unresolved at exit({s})\n", .{@errorName(err)}) catch {};
+    };
     var file_opens: usize = 0;
     var file_reopens: usize = 0;
     var file_rejects: usize = 0;
@@ -5848,6 +7702,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 받은 그 지적). 수명·흡수·중복 억제 규율은 중립이 소유한다(`scrollbar.HorizontalDrag`).
     var hbar_drag: maru.chrome.components.editor_view.scrollbar.HorizontalDrag = .{};
     var hbar_drag_release = false;
+    // Both axes consume the geometry actually painted by the shared editor frame.
+    var vbar_drag: maru.chrome.ui.scroll_area.Drag = .{};
+    var vbar_drag_release = false;
+    var editor_last_vbar: ?maru.chrome.ui.scroll_area.ScrollbarGeometry = null;
+    var editor_bar_file: ?usize = null;
+    var editor_vdrags: usize = 0;
+    var vbar_probe_file: ?usize = null;
+    var vbar_probe_saved_line: usize = 0;
+    var vbar_probe_before: usize = 0;
+    var vbar_probe_digest: u64 = 0;
+    var vbar_probe_checks: [5]bool = @splat(false);
+    var vbar_probe_was_active = false;
     var editor_atlas_growths: usize = 0;
     var editor_cells_outside_last: usize = 0;
     var editor_cells_outside_max: usize = 0;
@@ -5903,9 +7769,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var reveal_path_len: usize = 0;
     var reveal_digest_before: u64 = 0;
     var reveal_digest_after: u64 = 0;
-    var dclamp_row: usize = 0;
     var dclamp_expanded = false;
     var dclamp_judgeable = false;
+    var dclamp_captured = false;
+    var dclamp_saved_scroll: u32 = 0;
+    var dclamp_path: [std.fs.max_path_bytes]u8 = undefined;
+    var dclamp_path_len: usize = 0;
     var dclamp_off_before: u32 = 0;
     var dclamp_off_after: u32 = 0;
     var dclamp_rows_before: usize = 0;
@@ -5976,6 +7845,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var open_sidebar_digest_before: u64 = 0;
     var open_sidebar_digest_after: u64 = 0;
     var md_judgeable = false;
+    var md_notice_open = false;
+    var md_notice_message = false;
+    var md_notice_drawn: usize = 0;
+    var md_notice_glyphs: usize = 0;
+    var md_notice_pointer_blocked = false;
+    var md_notice_pointer_sent = false;
+    var md_notice_pointer_clicks_before: usize = 0;
+    var md_notice_saved_view: ActiveView = .{ .terminal = 0 };
+    var md_notice_saved_focus = false;
+    var md_notice_keys_before: usize = 0;
+    var md_notice_bytes_before: usize = 0;
+    var file_notice_held = false;
     var md_files_before: usize = 0;
     var md_files_after: usize = 0;
     var md_rejects_before: usize = 0;
@@ -5992,6 +7873,35 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     //
     // Windows 에 없던 것은 셋이다: 그리는 배선, 모달이 떠 있는 동안의 **입력 주인**, 그리고 보류 상태.
     var confirm_state: maru.chrome.components.confirm.State = .{};
+    var terminal_popup: terminal_clipboard_menu.Popup = .{};
+    var root_popup: explorer_menu.Popup = .{};
+    var root_popup_release: win32_window.KeyReleaseFence = .{};
+    var pending_pick: ?explorer_menu.Request = null;
+    var file_picker_purpose: explorer_menu.Purpose = .file;
+    var file_picker_generation: u64 = 0;
+    var root_menus_opened: usize = 0;
+    var root_menu_actions: usize = 0;
+    var root_changes: usize = 0;
+    var root_popup_frame: ?maru.renderer.RenderFrame = null;
+    defer if (root_popup_frame) |*frame| frame.deinit(allocator);
+    // Native Show owns a detached STA; the app only polls owned results.
+    var file_picker: ?maru.win32_file_dialog.Picker = null;
+    defer if (file_picker) |*picker| picker.deinit();
+
+    var terminal_popup_focus_serial: u64 = 0;
+    var settings_gear_pressed = false;
+    var settings_frame: ?maru.renderer.RenderFrame = null;
+    defer if (settings_frame) |*frame| frame.deinit(allocator);
+    var terminal_popup_frame: ?maru.renderer.RenderFrame = null;
+    defer if (terminal_popup_frame) |*frame| frame.deinit(allocator);
+    var terminal_menu_actions: usize = 0;
+    var terminal_menu_cells_peak: usize = 0;
+    var terminal_menu_draw_failures: usize = 0;
+    var file_notice: maru.chrome.components.notice.State = .{};
+    var file_notice_frame: ?maru.renderer.RenderFrame = null;
+    defer if (file_notice_frame) |*f| f.deinit(allocator);
+    var file_notice_cells: usize = 0;
+    var file_notice_glyphs: usize = 0;
     // 확인을 기다리는 닫기 대상. **번호가 아니라 id 다.**
     //
     // 처음에는 목록 번호를 들었다 — 모달이 입력을 삼키므로 그동안 목록이 안 바뀐다고 봤기 때문이다.
@@ -6002,6 +7912,25 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // id 는 단조 증가라 재사용되지 않는다(§2m.78 ⑵ 가 그것을 고쳤다). 승낙할 때 **그 id 를 다시
     // 찾아** 번호를 푼다 — macOS `confirm_accept` 가 범위를 다시 푸는 것과 같은 규율이다.
     var pending_close_id: ?u64 = null;
+    // Resolve the stable target after this input batch; repeated gestures coalesce.
+    var queued_session_close_id: ?u64 = null;
+    var queued_new_terms: usize = 0;
+    var pending_file_close: ?FileCloseTarget = null;
+    var file_close_waiting = false;
+    var pending_file_conflict: ?maru.session.editor.document_registry.Lease = null;
+    var pending_conflict_save = false;
+    var pending_conflict_close: ?FileCloseTarget = null;
+    var choice_close: ?struct { document: maru.session.editor.document_registry.Lease, target: FileCloseTarget } = null;
+    var choice_notice: ?maru.session.editor.document_registry.Lease = null;
+    var pending_save: ?maru.session.editor.document_registry.Lease = null;
+    var initial_open: @import("platform/windows/editor/open_worker.zig").Worker = .{ .allocator = allocator };
+    defer drainInitialOpen(&initial_open, io);
+    var initial_open_close_requested = false;
+    var save_close_requested = false;
+    var save_close_target: ?FileCloseTarget = null;
+    var file_comparison: ?ExternalComparison = null;
+    defer if (file_comparison) |*comparison| comparison.deinit();
+    var file_exit_accepted = false;
     var confirm_shows: usize = 0;
     var confirm_accepts: usize = 0;
     var confirm_cancels: usize = 0;
@@ -6056,6 +7985,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 
     var runtime = maru.app.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
+    var input_dispatcher: maru.app.input_dispatcher.Dispatcher = .{ .allocator = allocator, .target = &runtime };
+    try input_dispatcher.install();
+    defer input_dispatcher.deinit();
 
     // **`size` 는 spawn 시점에 덮어쓴다** — 여기 박아 두면 창을 키운 뒤 만든 세션이 **옛 격자**를
     // 받는다(실측: `sessions_wrong_size=1`).
@@ -6079,33 +8011,43 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **폰트가 정한 셀 크기를 렌더러에 알려 준다.** 기본값(0)으로 두면 아틀라스가 슬롯 크기를 다른 값으로
     // 추정해 글리프가 아래에서 잘린다 — 실측으로 겪었다(베이스라인 17인데 슬롯이 그보다 낮았다).
     // `glyph_cell_width_px`는 자간과 무관한 자연폭이다. 지금은 자간이 0이라 grid advance와 같다.
-    var renderer_state = maru.renderer.RendererState.init(allocator, .{
-        .text = .{
-            // **래스터라이저와 같은 크기를 쓴다.** 여기만 18 로 박혀 있어 config 를 바꾸면(또는 기본
-            // 14 로만 와도) 글리프는 그 크기로 그려지는데 캐시 키·아틀라스 슬롯은 18 로 잡혔다 —
-            // `GlyphCacheKey` 가 실제 크기를 구분 못 하고, 메트릭 없는 폴백 슬롯이 엉뚱한 변으로 선다.
-            // f32→u16 변환(NaN·범위 보정)은 `textConfigFromFontSize` 가 단일 출처다.
-            .font_size_px = maru.renderer.textConfigFromFontSize(cfg.font.size, 1).font_size_px,
-            .device_scale = 1,
-            .cell_width_px = @intCast(cell_w),
-            .glyph_cell_width_px = @intCast(cell_w),
-            .cell_height_px = @intCast(cell_h),
-        },
-    });
-    defer renderer_state.deinit();
-    var loop = maru.app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, io);
-
-    // ── 셀 파이프라인 — 아틀라스는 **비워 두고** 프레임마다 부분 업로드한다 ────────────────
-    var atlas_w = renderer_state.atlas.config.atlas_width_px;
-    var atlas_h = renderer_state.atlas.config.atlas_height_px;
-    var pipeline = d3d11_cells.CellPipeline.createEmptyAtlas(allocator, present.device, present.context, atlas_w, atlas_h) catch |err| {
-        try stderr.print("maru win32-terminal-smoke: could not set up the cell pipeline({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
-        if (d3d11_cells.shaderError().len > 0)
-            try stderr.print("  shader compiler: {s}\n", .{d3d11_cells.shaderError()});
+    var applied_font = cfg.font;
+    var font_applies: usize = 0;
+    var font_apply_errors: usize = 0;
+    var font_resize_errors: usize = 0;
+    var font_recovery_notice: win_layout_resize.RecoveryNotice = .{};
+    var appearance_apply_errors: usize = 0;
+    var appearance_ui_errors: usize = 0;
+    var appearance_ui_pending = false;
+    var chrome_strips_pending = false;
+    var cursor_phase: maru.app.cursor_presentation.Phase = .{};
+    var cursor_surface: ?maru.app.SurfaceId = null;
+    var cursor_focus_generation: u64 = 0;
+    var text_apply_errors: usize = 0;
+    var text_apply_pending_peak: usize = 0;
+    var text_spawn_while_changed: usize = 0;
+    var text_notice_owned = false;
+    var renderer_resources = windows_renderer_resources.RendererResources.init(
+        allocator,
+        present.device,
+        present.context,
+        cfg.font.size,
+        .{ .advance_width_px = cell_w, .glyph_width_px = raster.metrics.width_px, .height_px = cell_h },
+        .{},
+    ) catch |err| {
+        try stderr.print("maru win32-terminal-smoke: could not prepare renderer resources({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(d3d11_cells.last_hresult)) });
+        if (d3d11_cells.shaderError().len > 0) try stderr.print("  shader compiler: {s}\n", .{d3d11_cells.shaderError()});
         try stderr.flush();
         return error.UnknownCommand;
     };
-    defer pipeline.destroy();
+    defer renderer_resources.deinit();
+    // Keep the frame loop's state pointer at the stable owner field. Future
+    // generation publication must also replace every cached atlas-dependent view.
+    const renderer_state = &renderer_resources.state;
+    var loop = maru.app.AppFrameLoop.init(allocator, &app_window, &runtime, &pump, renderer_state, io);
+    var atlas_w = renderer_state.atlas.config.atlas_width_px;
+    var atlas_h = renderer_state.atlas.config.atlas_height_px;
+    var pipeline = renderer_resources.pipeline;
 
     // ── 도크 내용: 파일 트리 (W8.7a2) ───────────────────────────────────────────────────────
     //
@@ -6124,6 +8066,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 스캔만 되고 **런타임에 폴더를 펼칠 수가 없다**(트리가 lazy 라 펼칠 때 그때 읽는다).
     var tree_backend: ?file_tree_backend.Backend = file_tree_backend.Backend.init(allocator, io) catch null;
     defer if (tree_backend) |*b| b.deinit();
+    const tree_watch_native = @import("platform/windows/directory_watch.zig");
+    var root_manager = windows_root_commit.Manager.init(allocator);
+    defer root_manager.shutdownBlocking() catch |err| {
+        stderr.print("  warning: root watch shutdown failed({s})\n", .{@errorName(err)}) catch {};
+    };
+    var root_retire_error: ?anyerror = null;
+    var root_flow_error: ?anyerror = null;
+    var root_flow = windows_root_flow.Flow.init(allocator, io);
+    defer if (tree_backend) |*backend| {
+        root_flow.shutdownBlocking(&root_manager, &dock_tree, &dock_rows, &dock_root, backend) catch |err| {
+            stderr.print("  warning: root flow shutdown failed({s})\n", .{@errorName(err)}) catch {};
+        };
+    };
+    var root_close_waiting = false;
+    var tree_watch_dirty = false;
+    var tree_watch_due: i128 = 0;
     scan: {
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         const root_native = root_buf[0..(std.Io.Dir.cwd().realPath(io, &root_buf) catch break :scan)];
@@ -6136,6 +8094,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         var validated_owned = true;
         defer if (validated_owned) validated.deinit(allocator, io);
         const validated_dir = validated.dir orelse break :scan;
+        // Register before the first enumeration, against the validated object.
+        // Notifications only request fresh backend snapshots, never add rows.
+        _ = dock_tree.pinRootIdentity(root_path, validated.identity);
+        if (tree_watch_native.Watcher.createRecursive(allocator, validated_dir)) |watch| {
+            root_manager.adopt(io, root_path, watch, .{ .value = validated.identity }, dock_tree.rootGeneration()) catch |err| {
+                watch.destroy() catch {};
+                stderr.print("  warning: root watch adoption failed({s})\n", .{@errorName(err)}) catch {};
+            };
+        } else |_| {}
         validated.dir = null;
         const owned = allocator.dupe(u8, root_path) catch break :scan;
         if (!backend.submitValidatedRootScan(owned, 0, validated_dir)) {
@@ -6261,6 +8228,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_click_judgeable = false;
     var dock_click_target_row: usize = 0;
     var divider_drag: ?f64 = null;
+    var sidebar_resize_drag: ?i32 = null;
+    var reveal_owner: archive_reveal.Owner = .{ .io = io };
+    defer reveal_owner.deinit();
+    var sidebar_writer = try win_sidebar.Writer.init(io);
+    defer sidebar_writer.deinit();
     var divider_grabs: usize = 0;
     var divider_moves: usize = 0;
     var view_switches: usize = 0;
@@ -6560,6 +8532,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var aretry_expand_index: usize = 0;
     var aretry_card_h: f32 = -1;
     var asnap_judgeable = false;
+    var asnap_captured = false;
     var asnap_expanded_before: ?u64 = null;
     var asnap_req_before: u64 = 0;
     var asnap_expanded_after: ?u64 = null;
@@ -6665,7 +8638,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var agent_opts = agent_surface.Options{
         .font_family = cfg.font.family,
         .font_fallback = cfg.font.fallback,
-        .font_size_pt = cfg.font.size,
+        .font_size_pt = chrome_font_px,
         .tokens = &scm_tokens,
         .items = agent_items.items,
     };
@@ -6673,12 +8646,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         .status_text = scm_status,
         .font_family = cfg.font.family,
         .font_fallback = cfg.font.fallback,
-        .font_size_pt = cfg.font.size,
+        .font_size_pt = chrome_font_px,
         .tokens = &scm_tokens,
     };
 
     // **크롬 색은 테마에서 온다**(§2m.33 이 적어 둔 부채를 갚는다). macOS 와 같은 함수를 지난다.
-    const chrome_tokens = chromeTokensFor(cfg);
 
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
     // 상단 띠(배경 + 캡션 버튼). 호버가 바뀌면 다시 만든다.
@@ -6700,6 +8672,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var status_cwd_buf: [512]u8 = undefined;
     var caption_hover: ?usize = null;
     var caption_clicks: usize = 0;
+    var caption_save_clicks: usize = 0;
     // 캡션 버튼 **동작** 판정(W8.8⒝). `caption_clicks` 만으로는 속 빈다 — 스모크가 그 자리를 아예
     // 안 눌러서 0 이었고, 0 은 "버튼이 죽었다" 와 구별이 안 된다.
     var caption_judgeable = false;
@@ -6798,11 +8771,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 바뀐다** — 창을 키우면 바가 아래로 가고 폭이 넓어진다. 시작에 한 번만 지었더니 창이 커진 뒤
     // 옛 자리(실측 y=574, w=984)에 남아 **화면에서 통째로 사라졌다**. 스모크는 자기 창 크기가
     // 안 변해서 그 상태에서도 초록이었다 — 실기 캡처가 잡았다(2026-08-26).
-    const status_items = buildStatusBarItems(&status_items_buf, scm_status, dock_root, home_dir, &status_cwd_buf);
+    var status_items = buildStatusBarItems(&status_items_buf, scm_status, dock_root, home_dir, &status_cwd_buf);
+    const base_status_items = status_items.len;
     var status_rebuilds: usize = 0;
-    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+    rebuildStatusBar(allocator, &status_cells, geom.status_bar, chrome_cell_w, chrome_cell_h, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -6811,7 +8785,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var view_bar_glyph_top: ?f32 = null;
     defer if (view_bar_frame) |*f| f.deinit(allocator);
     defer if (dock_tree_frame) |*f| f.deinit(allocator);
-    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+    rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -6841,7 +8815,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     };
     // **지우는 색도 테마 배경이다.** 이 값이 셀 배경과 다르면 창 가장자리(격자에 안 맞는 나머지 픽셀)만
     // 다른 색으로 남아 테두리처럼 보인다 — 리터럴이던 동안은 테마를 바꿔도 그 띠가 안 따라왔다.
-    const clear = d3d11_present.clearColorFromArgb(0xFF000000 |
+    var clear = d3d11_present.clearColorFromArgb(0xFF000000 |
         (@as(u32, appearance.theme.background.r) << 16) |
         (@as(u32, appearance.theme.background.g) << 8) |
         @as(u32, appearance.theme.background.b));
@@ -6871,11 +8845,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var preedit_max_bytes: usize = 0;
     var paste_out: PasteOutcome = .{};
     // 붙여넣기 보호 설정 — **사용자 config 에서 온다**(W7.5).
-    const paste_protection = cfg.input.paste_protection;
-    const bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
+    var paste_protection = cfg.input.paste_protection;
+    var bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
     var osc52_writes: usize = 0;
     var osc52_reads: usize = 0;
-    var osc52_reads_denied_unimplemented: usize = 0;
+    var osc52_read_responses_queued: usize = 0;
+    var osc52_read_failures: usize = 0;
     // W7.4d 마우스. **갈래별로 센다** — 합치면 "선택이 안 되는데 이벤트는 왔다"를 못 가른다.
     var mouse_events: usize = 0;
     var mouse_reports: usize = 0;
@@ -6897,7 +8872,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var copies: usize = 0;
     var copy_bytes: usize = 0;
     var right_click_pastes: usize = 0;
-    var right_click_menus_unimplemented: usize = 0;
+    var terminal_menus_opened: usize = 0;
     var capture_losses: usize = 0;
     var dock_pointer_events: usize = 0;
     var dock_row_clicks: usize = 0;
@@ -6914,9 +8889,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var selections_before_term_click: usize = 0;
     var dock_clicks_before_term_click: usize = 0;
     // Alt 를 meta 로 쓸지 — **사용자 config 에서 온다**. 기본 `true` 다(Alt+B/F 가 readline 단어 이동).
-    const option_as_meta = cfg.input.option_as_meta;
+    var option_as_meta = cfg.input.option_as_meta;
     // 우클릭 동작 — **사용자 config 에서 온다**(W7.5). 기본값은 `paste` 다(PuTTY/X11 식, 사용자 결정).
-    const right_click_action: maru.config.theme.RightClick = cfg.input.right_click;
+    var right_click_action: maru.config.theme.RightClick = cfg.input.right_click;
     var dragging = false;
     var last_motion_cell: ?win32_mouse.Cell = null;
     var wheel_acc: win32_mouse.WheelAccumulator = .{};
@@ -6930,7 +8905,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var wheel_acc_sidebar: win32_mouse.WheelAccumulator = .{};
     var wheel_acc_dock: win32_mouse.WheelAccumulator = .{};
     var wheel_acc_editor: win32_mouse.WheelAccumulator = .{};
-    var last_ime_caret: ?win32_mouse.Cell = null;
+    var last_ime_caret: ?maru.session.mouse_coordinates.ImeCaret = null;
     // 마지막으로 계산한 마우스 셀. **휠 좌표가 화면 기준으로 오는 것을 놓치면 창 위치만큼 어긋나는데**,
     // 카운터만으로는 그것이 안 보인다 — 이 줄이 그 자리를 지킨다.
     var last_mouse_cell: ?win32_mouse.Cell = null;
@@ -6938,6 +8913,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 공용 칸으로는 "휠 좌표가 화면 기준이라 어긋났는지" 를 볼 수 없다.
     var last_wheel_cell: ?win32_mouse.Cell = null;
     var ime_caret_updates: usize = 0;
+    var ime_settings_caret_updates: usize = 0;
+    var ime_settings_edit_caret_updates: usize = 0;
     var click_tracker: win32_mouse.ClickTracker = .{};
     // **사용자 설정을 OS 에 묻는다.** 값을 코드에 박으면 접근성 설정(느린 더블클릭·스크롤 줄 수)을
     // 무시하게 된다. 규칙은 순수 함수가 갖고 이 값들은 그 인자다(§2k, OS-as-parameter).
@@ -6947,11 +8924,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const wheel_lines_per_notch = win32_mouse.systemWheelScrollLines();
     // 단어 구분자 — **사용자 config 에서 온다**(W7.5). 기본값은 빈 값이라 공백만 경계다(비공백 run
     // 전체를 선택한다). 문자열을 arena 에서 빌리므로 `loaded` 가 살아 있어야 한다.
-    const default_word_separators: []const u8 = cfg.input.word_separators;
+    var default_word_separators: []const u8 = cfg.input.word_separators;
     // OSC 52 읽기 정책 — **사용자 config 에서 온다**(W7.5). 기본값은 `deny` 다(원격 프로그램의 로컬
     // 클립보드 탈취를 막는 사용자 결정 — `config/theme.zig` `Osc52Config`).
-    const osc52_read_policy: maru.config.theme.Osc52Read = cfg.osc52.read;
+    var osc52_read_policy: maru.config.theme.Osc52Read = cfg.osc52.read;
     var clipboard_errors: usize = 0;
+    var clipboard_host: win_clipboard_host.Host = .{ .allocator = allocator, .io = io, .hwnd = window.hwnd, .app_window = &app_window, .runtime = &runtime, .stderr = stderr, .paste_protection = paste_protection, .bracketed_paste_is_safe = bracketed_paste_is_safe, .paste_out = &paste_out, .copies = &copies, .copy_bytes = &copy_bytes, .errors = &clipboard_errors };
 
     var counts: win32_terminal.FrameCounts = .{};
     var frames: usize = 0;
@@ -6993,6 +8971,119 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         frames_total += 1;
         if (agent_settling) settle_frames += 1 else spins += 1;
     }) {
+        if (tickFileBackupWorker(io, &file_backup_worker, &file_backups, open_files.items, std.Io.Clock.awake.now(io).nanoseconds, !confirm_state.open and pending_file_close == null and !close_requested and !backup_window_close_requested and backup_clean_closes.items.len == 0 and save_close_target == null and !save_close_requested, null)) |report| {
+            reportFileBackups(stderr, report);
+            if (file_close_waiting and report.failed != 0) {
+                // Failed native deletion never approves a close. Preserve the
+                // view and protection, then require a fresh user close intent.
+                file_close_waiting = false;
+                pending_file_close = null;
+                confirm_pending_click = null;
+                confirm_state.dismiss();
+                file_notice.show(maru.i18n.t(fileSaveNotice(report.first_error orelse error.BackupRootUnavailable)));
+            }
+        } else |err| stderr.print("  warning: editor backup maintenance failed({s})\n", .{@errorName(err)}) catch {};
+        file_changes.hold_notices = file_close_waiting or file_notice.open or confirm_state.open;
+        if (choice_notice) |lease| if (fileIndexForLease(open_files.items, lease) == null) {
+            try file_changes.cancelChoice(lease);
+            choice_notice = null;
+            choice_close = null;
+            file_notice.dismiss();
+        };
+        if (file_changes.tick(&editor_files, io, open_files.items, std.Io.Clock.awake.now(io).nanoseconds)) |event| {
+            if (event) |notice| {
+                stderr.print("  editor external change: {s}\n", .{@errorName(notice.problem)}) catch {};
+                if (notice.problem == error.DirtyDocument) {
+                    pending_file_conflict = notice.document;
+                    pending_conflict_save = false;
+                    pending_conflict_close = null;
+                    confirm_state.showChoices(maru.i18n.t(.win_editor_external_changed), .{
+                        .primary = maru.i18n.t(.btn_compare),
+                        .alternate = maru.i18n.t(.btn_keep_editing),
+                        .extra = maru.i18n.t(.btn_reload),
+                        .cancel = maru.i18n.t(.common_cancel),
+                    });
+                } else file_notice.show(maru.i18n.t(switch (notice.problem) {
+                    error.DirtyDocument => .win_editor_external_changed,
+                    error.TooManyDirectoryWatches => .win_editor_watch_limit,
+                    error.OutOfMemory => .dbg_editor_oom,
+                    error.SaveBusy => .fp_root_busy_retry,
+                    else => .win_editor_watch_paused,
+                }));
+            }
+        } else |err| {
+            stderr.print("  warning: editor external maintenance failed({s})\n", .{@errorName(err)}) catch {};
+            if (!file_notice.open and !confirm_state.open) file_notice.show(maru.i18n.t(if (err == error.OutOfMemory) .dbg_editor_oom else .win_editor_watch_paused));
+        }
+        if (try file_changes.takeChoice()) |value| {
+            if (choice_notice != null) {
+                file_notice.dismiss();
+                choice_notice = null;
+            }
+            var completion = value;
+            defer completion.deinit();
+            const lease = completion.request.document;
+            if (fileIndexForLease(open_files.items, lease)) |fi| {
+                if (editor_files.acceptsRead(&file_changes.reader, completion.result, lease) catch false) {
+                    var succeeded = false;
+                    switch (completion.result) {
+                        .failure => |failure| file_notice.show(maru.i18n.t(fileSaveNotice(failure.problem))),
+                        .image => |image| switch (completion.request.choice) {
+                            .reload => {
+                                if (open_files.items[fi].reloadExternal(allocator, open_files.items, image.bytes, std.Io.Clock.awake.now(io).nanoseconds)) |_| {
+                                    succeeded = true;
+                                } else |err| {
+                                    file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                                }
+                            },
+                            .overwrite => {
+                                if (editor_files.beginOverwrite(&file_changes.reader, completion.result, lease, 4 << 20)) |started| {
+                                    if (started) {
+                                        pending_save = lease;
+                                        save_close_target = if (choice_close) |closing| if (std.meta.eql(closing.document, lease)) closing.target else null else null;
+                                        save_close_requested = false;
+                                        file_notice.show(maru.i18n.t(.win_editor_saving));
+                                    } else succeeded = true;
+                                } else |err| {
+                                    if (isFileSaveConflict(err)) {
+                                        pending_file_conflict = lease;
+                                        pending_conflict_save = true;
+                                        pending_conflict_close = if (choice_close) |closing| closing.target else null;
+                                        showFileSaveConflict(&confirm_state);
+                                    } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                                }
+                            },
+                            .compare => {
+                                const state = editor_files.registry.get(lease).?;
+                                if (ExternalComparison.init(allocator, lease, state.opened.?.file.content, image.bytes)) |comparison| {
+                                    if (file_comparison) |*old| old.deinit();
+                                    file_comparison = comparison;
+                                    active_view = .{ .file = fi };
+                                } else |_| file_notice.show(maru.i18n.t(.editor_compare_failed));
+                            },
+                        },
+                    }
+                    if (choice_close) |closing| if (std.meta.eql(closing.document, lease)) {
+                        if (succeeded) {
+                            pending_file_close = closing.target;
+                            confirm_pending_click = .confirmed;
+                        }
+                        choice_close = null;
+                    };
+                } else if (file_changes.requestChoice(lease, completion.request.choice)) |_| {
+                    choice_notice = lease;
+                    file_notice.show(maru.i18n.t(.win_editor_choice_reading));
+                } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+            }
+        }
+        if (file_comparison) |*comparison| {
+            if (fileIndexForLease(open_files.items, comparison.document) == null or active_view != .file or active_view.file >= open_files.items.len or
+                !std.meta.eql(open_files.items[active_view.file].document, comparison.document))
+            {
+                comparison.deinit();
+                file_comparison = null;
+            }
+        }
         // ── 훑는 중임을 화면에 말한다 ────────────────────────────────────────────────────
         //
         // **중립이 이미 다 갖고 있다** — `loading` 이면 개수 대신 "분석 중" 을 쓰고 해골 줄을 깔며,
@@ -7042,7 +9133,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 세면 "전환했다" 가 헛일이어도 초록이라, **셀 지문**을 견준다.
         if (smoke and spins == 150 and geom.view_bar.w != 0) {
             const bar = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar, winDockViewBarGrid(&chrome_tokens, cell_w), 1)) |r| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 1)) |r| {
                 view_judgeable = true;
                 dock_digest_before_switch = d3d11_cells.cellsDigest(dock_cells.items);
                 dock_cells_before_switch = dock_cells.items.len;
@@ -7059,7 +9150,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 깨졌다" 는 다른 사실이다.
         if (smoke and spins == 260 and geom.view_bar.w != 0) {
             const bar3 = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar3, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |r3| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar3, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 2)) |r3| {
                 agent_judgeable = true;
                 agent_slot_x = r3.x + r3.w / 2;
                 agent_slot_y = r3.y + r3.h / 2;
@@ -7102,7 +9193,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 scm_status = owned;
                 scm_opts.status_text = scm_status;
                 scm_state.invalidateTree();
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
         // **누른 직후에 답을 챙긴다.** 인쇄는 훨씬 뒤인데 그 사이 목록이 바뀌면 `invalidateTree` 가
@@ -7116,7 +9207,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             scm_status_real = &.{};
             scm_opts.status_text = scm_status;
             scm_state.invalidateTree();
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
         }
         // 전환 뒤 **소스 컨트롤 행을 눌러 본다** — 뷰가 바뀌었는데 안 눌리면 죽은 컨트롤이다.
         if (smoke and spins == 200 and dock_view == .source_control) {
@@ -7217,7 +9308,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 뷰에서만 뜬다(SCM·에이전트는 자기 컴포넌트가 스크롤을 소유한다).
         if (smoke and spins == 655) {
             const bar3 = geom.view_bar;
-            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar3.x, .y = bar3.y, .w = bar3.w, .h = bar3.h }, winDockViewBarGrid(&chrome_tokens, cell_w), 0)) |r0| {
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar3.x, .y = bar3.y, .w = bar3.w, .h = bar3.h }, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 0)) |r0| {
                 const vx: i32 = @intCast(r0.x + r0.w / 2);
                 const vy: i32 = @intCast(r0.y + r0.h / 2);
                 window.postSyntheticMouse(.left_down, vx, vy);
@@ -7311,7 +9402,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 새로 시작해**, 다음 다시 짓기가 무엇을 잘랐는지 읽는다.
         if (smoke and spins == 1059 and geom.view_bar.w != 0) {
             const bar_c = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar_c, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |rc| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_c, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 2)) |rc| {
                 const cx2: i32 = @intCast(rc.x + rc.w / 2);
                 const cy2: i32 = @intCast(rc.y + rc.h / 2);
                 window.postSyntheticMouse(.left_down, cx2, cy2);
@@ -7323,7 +9414,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 1061 and dock_view == .agent_sessions) agent_clip.reset();
         // 한 번 더 짓게 만든다(창을 건드리지 않고 목록만 다시 그린다).
         if (smoke and spins == 1062 and dock_view == .agent_sessions) {
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             agent_clip_judgeable = true;
             agent_clip_overflow = agent_scroll_max;
             agent_clip_cut = agent_clip.cut;
@@ -7607,11 +9698,6 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 _ = submitAgentScan(agent_counting.allocator(), b, home);
             };
         }
-        if (smoke and spins == 1103 and asnap_judgeable) {
-            asnap_expanded_after = agent_state.expanded_identity;
-            asnap_req_after = agent_detail.request_id;
-            asnap_det_identity_after = agent_detail.identity;
-        }
         // ── 펼친 카드가 있어도 투영이 맞는가 (적대적 검증 6회차) ─────────────────────
         //
         // 항목 높이 규칙(`session_dock/scroll.zig`)이 `card.expanded` 로 갈래를 탄다. **Windows 가
@@ -7756,7 +9842,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             akey_off_blurred = agent_scroll.offset_y_px;
             akey_focus_blurred = dock_key_focus;
             const bar_a = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |ra| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 2)) |ra| {
                 window.postSyntheticMouse(.left_down, @intCast(ra.x + ra.w / 2), @intCast(ra.y + ra.h / 2));
                 window.postSyntheticMouse(.left_up, @intCast(ra.x + ra.w / 2), @intCast(ra.y + ra.h / 2));
             }
@@ -7786,7 +9872,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 입력이 그 문자열 하나다). 디스크는 안 만진다.
         if (smoke and spins == 1130 and geom.view_bar.w != 0) {
             const bar_s = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar_s, winDockViewBarGrid(&chrome_tokens, cell_w), 1)) |rs| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_s, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 1)) |rs| {
                 window.postSyntheticMouse(.left_down, @intCast(rs.x + rs.w / 2), @intCast(rs.y + rs.h / 2));
                 window.postSyntheticMouse(.left_up, @intCast(rs.x + rs.w / 2), @intCast(rs.y + rs.h / 2));
             }
@@ -7800,7 +9886,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     scm_status = owned;
                     scm_opts.status_text = scm_status;
                     scm_state.invalidateTree();
-                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                    rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                 }
             }
         }
@@ -7970,7 +10056,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 scm_status = owned2;
                 scm_opts.status_text = scm_status;
                 scm_state.invalidateTree();
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
         if (smoke and spins == 1157 and sshrink_judgeable) {
@@ -8006,7 +10092,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             var r: usize = 0;
             while (r < 3) : (r += 1) {
                 scm_state.invalidateTree();
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                 fb_redraws += 1;
             }
             fb_shapes_after = maru.dwrite_shape.shape_calls;
@@ -8017,6 +10103,79 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **처음 보는 face 이름**을 쓴다 — 제품 face 는 이미 캐시에 있어 첫 번째도 적중이라 아무것도
         // 안 재게 된다. `Consolas` 는 한글이 없으므로 폴백이 **실제로 갈리는** 글자를 고른다: 폴백
         // 목록이 틀리면 face 이름이나 글리프 id 가 달라진다.
+        // Exercise five hostile vertical-scroll gestures through the real Win32 event queue.
+        // Pick the longest document already opened by the existing file-open scenarios.
+        if (smoke and spins == 1170) {
+            var longest: usize = 0;
+            for (open_files.items, 0..) |file, fi| {
+                if (file.lines.items.len > longest) {
+                    longest = file.lines.items.len;
+                    vbar_probe_file = fi;
+                }
+            }
+            if (vbar_probe_file) |fi| {
+                vbar_probe_saved_line = open_files.items[fi].first_line;
+                open_files.items[fi].first_line = 0;
+                active_view = .{ .file = fi };
+            }
+        }
+        if (smoke and vbar_probe_file != null and active_view == .file and
+            active_view.file == vbar_probe_file.?)
+        {
+            const fi = vbar_probe_file.?;
+            if (editor_last_vbar) |bar| {
+                const bx: i32 = @intCast(geom.terminal.x + @as(u32, @intFromFloat(bar.track_x + bar.track_w / 2)));
+                const by: i32 = @intCast(geom.terminal.y + @as(u32, @intFromFloat(bar.thumb_y + bar.thumb_h / 2)));
+                if (smoke and spins == 1176) {
+                    vbar_probe_digest = editor_last_digest;
+                    window.postSyntheticMouse(.left_down, bx, by);
+                    window.postSyntheticMouse(.moved, bx, by + @as(i32, @intFromFloat(bar.track_h / 3)));
+                    window.postSyntheticMouse(.left_up, -20, by + @as(i32, @intFromFloat(bar.track_h / 3)));
+                }
+                if (smoke and spins == 1178) {
+                    vbar_probe_checks[0] = open_files.items[fi].first_line > 0 and !vbar_drag.active and
+                        editor_last_digest != vbar_probe_digest;
+                    open_files.items[fi].first_line = 0;
+                }
+                if (smoke and spins == 1180) {
+                    const bottom: i32 = @intCast(geom.terminal.y + @as(u32, @intFromFloat(bar.track_y + bar.track_h - 1)));
+                    window.postSyntheticMouse(.left_down, bx, bottom);
+                    window.postSyntheticMouse(.left_up, bx, bottom);
+                }
+                if (smoke and spins == 1182) {
+                    vbar_probe_checks[1] = open_files.items[fi].vmax_line > 0 and
+                        open_files.items[fi].first_line == open_files.items[fi].vmax_line and !vbar_drag.active;
+                    open_files.items[fi].first_line = 0;
+                }
+                if (smoke and spins == 1184) {
+                    vbar_probe_before = open_files.items[fi].first_line;
+                    // No move message: the release point must still reach the frame tick.
+                    window.postSyntheticMouse(.left_down, bx, by);
+                    window.postSyntheticMouse(.left_up, bx, by + 25);
+                }
+                if (smoke and spins == 1186) {
+                    vbar_probe_checks[2] = open_files.items[fi].first_line > vbar_probe_before and !vbar_drag.active;
+                }
+                if (smoke and spins == 1188) {
+                    window.postSyntheticMouse(.left_down, bx, by);
+                    window.postSyntheticMouse(.moved, -20, 0);
+                    window.postSyntheticMouse(.left_up, -20, 0);
+                }
+                if (smoke and spins == 1190) {
+                    vbar_probe_checks[3] = open_files.items[fi].first_line == 0 and !vbar_drag.active;
+                }
+                if (smoke and spins == 1192) window.postSyntheticMouse(.left_down, bx, by);
+                if (smoke and spins == 1194) {
+                    vbar_probe_was_active = vbar_drag.active;
+                    active_view = .{ .terminal = app_window.active_tab };
+                    window.postSyntheticMouse(.moved, -20, 0);
+                }
+            }
+        }
+        if (smoke and spins == 1196) {
+            vbar_probe_checks[4] = vbar_probe_was_active and !vbar_drag.active and !hbar_drag.active;
+            if (vbar_probe_file) |fi| open_files.items[fi].first_line = vbar_probe_saved_line;
+        }
         if (smoke and spins == 1162) {
             const probe_family = "Consolas";
             // **표시 문자열이 아니라 폰트 fixture 다** — `Consolas` 에 없는 코드포인트여야 폴백이
@@ -8122,7 +10281,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 470 and sidebar_w != 0 and sidebar_header_h != 0) {
             sidebar_judgeable = true;
-            const m_sb = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const m_sb = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const card_top = geom.sidebar.y + sidebar_header_h + m_sb.content_pad_v;
             const card_mid: i32 = @intCast(card_top + maru.chrome.components.sidebar.cardHeight(sidebar_cards.items[0].lines, m_sb) / 2);
             const cx: i32 = @intCast(sidebar_w / 2);
@@ -8208,7 +10367,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 712 and agent_built != null) {
             // 에이전트 뷰로 되돌린다(앞 판정들이 탐색기로 바꿔 놨다).
             const bar4 = geom.view_bar;
-            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar4.x, .y = bar4.y, .w = bar4.w, .h = bar4.h }, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |r2| {
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar4.x, .y = bar4.y, .w = bar4.w, .h = bar4.h }, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 2)) |r2| {
                 const vx: i32 = @intCast(r2.x + r2.w / 2);
                 const vy: i32 = @intCast(r2.y + r2.h / 2);
                 window.postSyntheticMouse(.left_down, vx, vy);
@@ -8249,7 +10408,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 줄이 화면에 없어 이 판정이 영영 `unjudgeable` 이다(실측으로 그렇게 한 번 비었다).
         if (smoke and spins == 768 and geom.view_bar.w != 0) {
             const bar0 = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar0, winDockViewBarGrid(&chrome_tokens, cell_w), 0)) |r0| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar0, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 0)) |r0| {
                 const ex: i32 = @intCast(r0.x + r0.w / 2);
                 const ey: i32 = @intCast(r0.y + r0.h / 2);
                 window.postSyntheticMouse(.left_down, ex, ey);
@@ -8326,6 +10485,51 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             md_files_after = open_files.items.len;
             md_rejects_after = file_rejects;
             md_reason = last_reject;
+            md_notice_open = file_notice.open;
+            md_notice_message = std.mem.eql(u8, file_notice.message, maru.i18n.t(.win_file_open_web));
+            md_notice_drawn = file_notice_cells;
+            md_notice_glyphs = file_notice_glyphs;
+            md_notice_saved_view = active_view;
+            md_notice_saved_focus = dock_key_focus;
+            md_notice_pointer_clicks_before = sidebar_card_clicks;
+            if (md_judgeable) {
+                const notice_rows = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
+                const notice_metrics = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
+                for (notice_rows, 0..) |row, ri| {
+                    if (row != .card or row.card.tab >= sidebar_cards.items.len or sidebar_cards.items[row.card.tab].source != .session) continue;
+                    if (sidebar_cards.items[row.card.tab].source.session == app_window.active_tab) continue;
+                    const top = maru.chrome.components.sidebar.rowTop(notice_rows, ri, sidebar_header_h, notice_metrics, sidebar_scroll_px);
+                    const mid = top + @as(i64, @intCast(cell_h / 2));
+                    if (mid < sidebar_header_h or mid >= geom.sidebar.h) continue;
+                    const nx: i32 = @intCast(geom.sidebar.x + sidebar_w / 4);
+                    const ny: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + mid);
+                    md_notice_pointer_sent = true;
+                    window.postSyntheticMouse(.left_down, nx, ny);
+                    window.postSyntheticMouse(.left_up, nx, ny);
+                    break;
+                }
+            }
+        }
+        if (smoke and spins == 786 and md_judgeable) {
+            md_notice_pointer_blocked = md_notice_pointer_sent and sidebar_card_clicks == md_notice_pointer_clicks_before and std.meta.eql(active_view, md_notice_saved_view) and file_notice.open;
+            // Exercise the dismissal over a live terminal, not a read-only editor
+            // that would mask a broken modal route by swallowing the leaked key.
+            active_view = .{ .terminal = app_window.active_tab };
+            dock_key_focus = false;
+            md_notice_keys_before = keys_to_shell;
+            md_notice_bytes_before = bytes_to_shell;
+            window.postSyntheticChar('N');
+        }
+        if (smoke and spins == 787 and md_judgeable) {
+            const notice_dismissed = !file_notice.open;
+            const notice_key_consumed = keys_to_shell == md_notice_keys_before and bytes_to_shell == md_notice_bytes_before;
+            active_view = md_notice_saved_view;
+            dock_key_focus = md_notice_saved_focus;
+            const notice_ok = md_notice_open and md_notice_message and md_notice_drawn > 0 and md_notice_glyphs > 0 and
+                md_notice_pointer_blocked and notice_dismissed and notice_key_consumed;
+            try stdout.print("file_open_notice: opened={} message={} cells={d} glyphs={d} pointer_blocked={} dismissed={} key_consumed={} notice_ok={}\n", .{ md_notice_open, md_notice_message, md_notice_drawn, md_notice_glyphs, md_notice_pointer_blocked, notice_dismissed, notice_key_consumed, notice_ok });
+            try stdout.flush();
+            if (!notice_ok) return error.FileOpenNoticeVerificationFailed;
         }
         // **곧바로 잰다.** 뒤로 미루면 그 사이의 호버·두 번째 클릭이 지문을 바꿔, 이 판정이
         // "무언가가 사이드바를 건드렸다" 로 흐려진다.
@@ -8333,7 +10537,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // **그린 셀의 지문을 견준다.** `first_line` 이 움직인 것만 보면 내가 넣은 값을 되읽는
         // 동어반복이다 — 화면이 실제로 그 줄들을 그렸는지가 물어야 할 것이다.
-        if (smoke and spins == 790) if (active_view == .file) {
+        if (smoke and spins == 1172) if (active_view == .file) {
             scroll_judgeable = true;
             scroll_first_before = open_files.items[active_view.file].first_line;
             scroll_digest_before = editor_last_digest;
@@ -8344,9 +10548,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **792 로 당겼다**(예전엔 794). 휠은 **던진 그 스핀에** 적용되므로 네 스핀을 끌 이유가
         // 없고, 끌면 그 사이에 낀 가로 스크롤 판정의 이동까지 이 지문 차이에 섞인다 — 세로가 죽어도
         // 가로 덕에 초록이 된다.
-        if (smoke and spins == 792) if (active_view == .file) {
+        if (smoke and spins == 1174) if (active_view == .file) {
             scroll_first_after = open_files.items[active_view.file].first_line;
             scroll_digest_after = editor_last_digest;
+            open_files.items[active_view.file].first_line = 0;
         };
         // **자기 순간을 챙긴다.** 예전에는 이 둘을 맨 뒤(796)에서 읽었는데 그 사이 790 의 스크롤이
         // 화면을 바꿔 놓는다 — "연 직후에 그렸나" 를 묻는 값이 "굴린 뒤에 그렸나" 를 답하고 있었다.
@@ -8400,7 +10605,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 가리켜 판정이 통과한다 — 실측으로 그렇게 한 번 초록이었다.
         if (smoke and spins == 863 and sessions.items.len >= 6) {
             const rr5 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm5 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm5 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const top5 = maru.chrome.components.sidebar.rowTop(rr5, 4, sidebar_header_h, mm5, sidebar_scroll_px);
             const cy5: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top5) + @as(i64, @intCast(cell_h / 2)));
             const cx5: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 3);
@@ -8425,7 +10630,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             @memcpy(sclose_active_want[0..sclose_active_want_len], sessions.items[app_window.active_tab].label()[0..sclose_active_want_len]);
             @memcpy(sclose_second_name[0..sclose_second_name_len], sessions.items[1].label()[0..sclose_second_name_len]);
             const rr4 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm4 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm4 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const top4 = maru.chrome.components.sidebar.rowTop(rr4, 0, sidebar_header_h, mm4, sidebar_scroll_px);
             const cy4: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top4) + @as(i64, @intCast(cell_h / 2)));
             const rng4 = sidebar_card_columns.?.closeXRange(cell_w);
@@ -8527,7 +10732,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 그래서 여기서 ⑴ 탐색기로 되돌리고 ⑵ 그 파일을 다시 열고 ⑶ 막대를 끈다.
         if (smoke and spins == 972) {
             const vbar = geom.view_bar;
-            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = vbar.x, .y = vbar.y, .w = vbar.w, .h = vbar.h }, winDockViewBarGrid(&chrome_tokens, cell_w), 0)) |r0| {
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = vbar.x, .y = vbar.y, .w = vbar.w, .h = vbar.h }, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 0)) |r0| {
                 const vx: i32 = @intCast(r0.x + r0.w / 2);
                 const vy: i32 = @intCast(r0.y + r0.h / 2);
                 window.postSyntheticMouse(.left_down, vx, vy);
@@ -8571,13 +10776,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **한 눈금은 카드 높이의 배수가 아니다**(190px vs 57px) — 그래서 첫 카드가 반쯤 잘리고,
         // 그때가 이 판정이 물을 것이 있는 순간이다.
         // **휠로는 이 순간을 못 만든다** — 한 눈금(10 줄 × 19px = 190px)이 카드 높이(38px)의 **정확히
-        // 다섯 배**라 늘 경계에 떨어진다(실측 `partial=0`). 픽셀로 움직이는 **막대 트랙 클릭**을 쓴다.
-        if (smoke and spins == 1052) if (sidebar_bar) |b| {
-            const tx3: i32 = @intFromFloat(b.hit_x + b.hit_w / 2);
-            const ty3: i32 = @intFromFloat(b.track_y + b.track_h * 0.37);
-            window.postSyntheticMouse(.left_down, tx3, ty3);
-            window.postSyntheticMouse(.left_up, tx3, ty3);
-        };
+        // 다섯 배**라 늘 경계에 떨어진다(실측 `partial=0`). 실제 글리프 위치로 픽셀 offset을 정한다.
+        if (smoke and spins == 1052) {
+            const list_top: f32 = @floatFromInt(geom.sidebar.y + sidebar_header_h);
+            for (sidebar_cells.items) |cell| {
+                if (cell.uv[0] < 0 or cell.rect[1] < list_top or cell.rect[3] <= 0) continue;
+                const shift: u32 = @intFromFloat(cell.rect[1] - list_top + cell.rect[3] / 2);
+                sidebar_scroll_px +|= shift;
+                // Force an actual glyph halfway through the clip boundary. A partial card
+                // alone may contain only padding and would exercise no pixel clipping.
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                break;
+            }
+        }
         if (smoke and spins == 1055) {
             clip_partial = sidebar_partial;
             clip_over = sidebar_card_over_header;
@@ -8671,7 +10882,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             const rws_cap = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             cap_rows = rws_cap.len;
             if (rws_cap.len > 0) {
-                const m_cap = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+                const m_cap = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
                 const last = rws_cap.len - 1;
                 const top_cap = maru.chrome.components.sidebar.rowTop(rws_cap, last, sidebar_header_h, m_cap, sidebar_scroll_px);
                 const bot_cap = top_cap + @as(i64, maru.chrome.components.sidebar.rowHeight(rws_cap[last], m_cap));
@@ -8692,10 +10903,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             for (dock_rows.items, 0..) |r, ri| {
                 if (r != .directory) continue;
                 if (r.directory.expanded) continue;
-                if (ri * cell_h < 220) continue;
+                // The dock may already be scrolled. Reserve the upcoming wheel step
+                // relative to its current viewport instead of assuming offset zero.
+                const upcoming_scroll = @as(u64, dock_scroll_px) + @as(u64, wheel_lines_per_notch) * cell_h;
+                if (@as(u64, ri) * cell_h < upcoming_scroll + cell_h) continue;
                 const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
                 if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
-                dclamp_row = ri;
+                if (r.directory.path.len > dclamp_path.len) continue;
+                @memcpy(dclamp_path[0..r.directory.path.len], r.directory.path);
+                dclamp_path_len = r.directory.path.len;
                 dclamp_expanded = true;
                 const ex: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
                 const ey: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
@@ -8725,30 +10941,29 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 더 굴리면 되접을 줄이 화면 밖으로 나간다.
             window.postSyntheticMouseWheel(.wheel, dsx, dsy, -1);
         }
-        if (smoke and spins == 1024 and dclamp_expanded and dclamp_row < dock_rows.items.len) {
-            dclamp_judgeable = true;
-            dclamp_off_before = dock_scroll_px;
-            dclamp_rows_before = dock_rows.items.len;
-            // **같은 폴더 줄을 다시 누른다** — 그 사이 굴렸으므로 화면 자리는 다시 잰다.
-            const local = @as(i64, @intCast(dclamp_row * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
-            if (local >= 0 and local < @as(i64, @intCast(geom.tree_content.h))) {
-                const cx2: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
-                const cy2: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
-                window.postSyntheticMouse(.left_down, cx2, cy2);
-                window.postSyntheticMouse(.left_up, cx2, cy2);
-            } else {
-                // 접을 줄이 화면 밖이면 이 판정은 아무것도 안 묻는다 — 그렇게 말한다.
-                dclamp_judgeable = false;
+        if (smoke and spins == 1024 and dclamp_expanded) {
+            // Exercise shrink from the true end, independently of directory size and wheel settings.
+            // The product toggle accepts a path; collapsing an ancestor need not require its row
+            // to remain visible while viewing its last child.
+            const path = dclamp_path[0..dclamp_path_len];
+            var is_expanded = false;
+            for (dock_rows.items) |row| {
+                if (row == .directory and std.mem.eql(u8, row.directory.path, path)) {
+                    is_expanded = row.directory.expanded;
+                    break;
+                }
+            }
+            if (is_expanded) {
+                dclamp_saved_scroll = dock_scroll_px;
+                dock_scroll_px = @intCast((@as(u64, dock_rows.items.len) * cell_h) -| geom.tree_content.h);
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                dclamp_off_before = dock_scroll_px;
+                dclamp_rows_before = dock_rows.items.len;
+                dclamp_judgeable = toggleTreeRow(allocator, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".", path, null);
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
-        if (smoke and spins == 1030 and dclamp_judgeable) {
-            dclamp_off_after = dock_scroll_px;
-            dclamp_rows_after = dock_rows.items.len;
-            dclamp_drawn_after = dock_rows_drawn;
-            // **빌더가 실제로 쓴 첫 행**이다(여기서 다시 계산하지 않는다) — 값만 되돌리고 셀을 다시
-            // 안 지으면 이 값이 옛 offset 그대로다.
-            dclamp_draw_start_after = dock_draw_start;
-        }
+
         // ── 눈이 따라간다 (W8.18a) ───────────────────────────────────────────────────
         //
         // **먼저 목록을 맨 위로 굴린다** — 세션이 열셋이라 파일 카드는 바닥에 있고, 위에서 보면
@@ -8794,7 +11009,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
                 reveal_judgeable = true;
                 reveal_slot = sidebarActiveSlot(sidebar_cards.items, active_view);
-                reveal_visible_before = sidebarSlotFullyVisible(allocator, &sidebar_rows_scratch, sidebar_cards.items, active_view, sidebar_header_h, cell_h, geom.sidebar.h, sidebar_scroll_px);
+                reveal_visible_before = sidebarSlotFullyVisible(allocator, &sidebar_rows_scratch, sidebar_cards.items, active_view, sidebar_header_h, chrome_cell_h, geom.sidebar.h, sidebar_scroll_px);
                 reveal_off_before = sidebar_scroll_px;
                 reveal_digest_before = d3d11_cells.cellsDigest(sidebar_cells.items);
                 const fx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
@@ -8806,7 +11021,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 1003 and reveal_judgeable) {
             reveal_slot_after = sidebarActiveSlot(sidebar_cards.items, active_view);
-            reveal_visible_after = sidebarSlotFullyVisible(allocator, &sidebar_rows_scratch, sidebar_cards.items, active_view, sidebar_header_h, cell_h, geom.sidebar.h, sidebar_scroll_px);
+            reveal_visible_after = sidebarSlotFullyVisible(allocator, &sidebar_rows_scratch, sidebar_cards.items, active_view, sidebar_header_h, chrome_cell_h, geom.sidebar.h, sidebar_scroll_px);
             reveal_off_after = sidebar_scroll_px;
             reveal_digest_after = d3d11_cells.cellsDigest(sidebar_cells.items);
             reveal_count = sidebar_reveals;
@@ -8864,7 +11079,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             modal_judgeable = true;
             modal_sessions_before = sessions.items.len;
             const rr6 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm6 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm6 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const top6 = maru.chrome.components.sidebar.rowTop(rr6, 1, sidebar_header_h, mm6, sidebar_scroll_px);
             const cy6: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top6) + @as(i64, @intCast(cell_h / 2)));
             const rng6 = sidebar_card_columns.?.closeXRange(cell_w);
@@ -8878,7 +11093,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // `confirm_modal_ok` 를 한 번 빨갛게 만들었다).
         if (smoke and spins == 936 and sessions.items.len >= 3 and sidebar_card_columns != null) {
             const rr8 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm8 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm8 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const top8 = maru.chrome.components.sidebar.rowTop(rr8, 1, sidebar_header_h, mm8, sidebar_scroll_px);
             const cy8: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top8) + @as(i64, @intCast(cell_h / 2)));
             const rng8 = sidebar_card_columns.?.closeXRange(cell_w);
@@ -8894,7 +11109,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 그 짝이 어긋나면 열 때마다 샌다. 누수 보고와 함께 **여는 데 드는 셀 수가 일정한지**도 본다.
         if (smoke and spins >= 952 and spins <= 968 and @mod(spins, 4) == 0 and sessions.items.len >= 3 and sidebar_card_columns != null and !confirm_state.open) {
             const rr9 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm9 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm9 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const top9 = maru.chrome.components.sidebar.rowTop(rr9, 1, sidebar_header_h, mm9, sidebar_scroll_px);
             const cy9: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top9) + @as(i64, @intCast(cell_h / 2)));
             const rng9 = sidebar_card_columns.?.closeXRange(cell_w);
@@ -9011,7 +11226,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             cancel_judgeable = true;
             cancel_sessions_before = sessions.items.len;
             const rr7 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm7 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm7 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const top7 = maru.chrome.components.sidebar.rowTop(rr7, 1, sidebar_header_h, mm7, sidebar_scroll_px);
             const cy7: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top7) + @as(i64, @intCast(cell_h / 2)));
             const rng7 = sidebar_card_columns.?.closeXRange(cell_w);
@@ -9132,6 +11347,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **판정을 먼저 켠다.** 실패했을 때 판정이 사라지면(`unjudgeable`) 빨간 줄이 안 나오고,
             // 없는 줄은 눈에 안 띈다 — 실측으로 옛 동작 뮤턴트가 그렇게 조용히 지나갔다.
             idcheck_judgeable = true;
+            spawn_opts.refreshText(cfg);
             if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts)) {
                 idcheck_spawned = true;
                 // **제품의 ＋ 경로가 하는 것을 그대로 한다** — 목록을 안 새로 지으면 카드 수가
@@ -9176,7 +11392,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **탐색기가 아니라 에이전트 뷰여야 한다** — 그 검색 줄은 그 뷰에만 있다.
         if (smoke and spins == 836 and geom.view_bar.w != 0) {
             const bar_a = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |ra| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), 2)) |ra| {
                 const ax2: i32 = @intCast(ra.x + ra.w / 2);
                 const ay2: i32 = @intCast(ra.y + ra.h / 2);
                 window.postSyntheticMouse(.left_down, ax2, ay2);
@@ -9246,7 +11462,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 그리기가 다 밟힌다. 모델에 직접 넣으면 라우팅 한 줄에 판정이 없어, 조합을 버리는
             // 뮤턴트가 그대로 지나간다(적대적 검증 5회차 실측).
             window.setSyntheticPreedit("\u{3134}" ++ "\u{3161}");
-            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
         }
         // ── 에이전트 검색도 조합을 그리는가 (적대적 검증 1회차) ──────────────────────
         //
@@ -9265,7 +11481,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             aime_items_before = b.items.len;
             agent_search.setPreedit(allocator, "\u{3134}" ++ "\u{3161}") catch {};
             agent_opts.search_preedit = agent_search.preedit.items;
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
         };
         if (smoke and spins == 760 and aime_judgeable) {
             if (agent_built) |*b| {
@@ -9351,7 +11567,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             close_want_len = @min(wn.len, close_want_buf.len);
             @memcpy(close_want_buf[0..close_want_len], wn[0..close_want_len]);
             const rr3 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm3 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const slot = sessions.items.len; // 첫 파일 카드
             const top = maru.chrome.components.sidebar.rowTop(rr3, slot, sidebar_header_h, mm3, sidebar_scroll_px);
             const cy: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top) + @as(i64, @intCast(cell_h / 2)));
@@ -9599,7 +11815,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 bottom_gap = (b.track_y + b.track_h) - (b.thumb_y + b.thumb_h);
                 bar_max = b.max_offset_px;
                 const rr3 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-                const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+                const mm3 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
                 // **휠이 쓰는 그 식 그대로**(그 자리의 주석: "상한은 콘텐츠가 정한다").
                 wheel_max = maru.chrome.components.sidebar.contentHeight(rr3, mm3) -| (geom.sidebar.h -| sidebar_header_h);
                 max_judgeable = true;
@@ -9619,7 +11835,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 638 이후에 목록이 안 바뀌던 동안만 우연히 맞았고, W8.13 이 그 뒤에 파일 카드를 붙이자
             // 곧바로 어긋났다(실측 `active_ok=false`). 판정은 **자기 순간**을 챙겨야 한다.
             const rr0 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm0 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm0 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             snap_content_h = maru.chrome.components.sidebar.contentHeight(rr0, mm0);
             snap_view_h = geom.sidebar.h -| sidebar_header_h;
             snap_want_band_y = @as(i64, geom.sidebar.y) +
@@ -9708,7 +11924,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         };
         if (smoke and spins == 590 and sidebar_header_h != 0) {
             const rr = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             // **넘치는가로 가른다** — 카드 수가 아니라(도크에서 그 가드를 틀렸다).
             if (maru.chrome.components.sidebar.contentHeight(rr, mm) > geom.sidebar.h -| sidebar_header_h) {
                 sidebar_scroll_judgeable = true;
@@ -9740,7 +11956,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 635 and sidebar_scroll_judgeable and sidebar_cards_visible > 1) {
             const sx2: i32 = @intCast(sidebar_w / 2);
             const rr3 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm3 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const second_top: i64 = @as(i64, geom.sidebar.y) +
                 maru.chrome.components.sidebar.rowTop(rr3, sidebar_first_visible + 1, sidebar_header_h, mm3, sidebar_scroll_px);
             if (second_top > 0) {
@@ -9755,7 +11971,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             grid_digest_before_switch = activeGridDigest(io, &app_window);
             active_before_switch = app_window.active_tab;
             const rws = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const m_sw = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const m_sw = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             const y0 = maru.chrome.components.sidebar.rowTop(rws, 0, sidebar_header_h, m_sw, 0);
             const cy: i32 = @intCast(geom.sidebar.y + @as(u32, @intCast(@max(0, y0))) + cell_h);
             const cx: i32 = @intCast(sidebar_w / 2);
@@ -9805,7 +12021,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 묻는다. 실제로 그려진 아이콘 하나(＋)의 col 을 쓴다 — 손으로 고른 좌표면 아이콘이
             // 옮겨가도 판정이 안 움직인다.
             if (sidebar_w != 0 and cell_w != 0) {
-                const icol = maru.chrome.components.sidebar.headerIconCol(.new_workspace, sidebar_w / cell_w);
+                const icol = maru.chrome.components.sidebar.headerIconCol(.new_workspace, sidebar_w / chrome_cell_w);
                 nchittest_sidebar_icon = window.probeHitTest(wr.left + @as(i32, @intCast(icol *| cell_w + cell_w / 2)), wr.top + border + 4);
             }
         }
@@ -9843,7 +12059,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 agent_detail_requests += 1;
                 agent_detail.request_id = agent_detail_requests;
                 agent_detail_pending = false;
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                // Observe the requested snapshot at its actual publication boundary. A fixed
+                // spin can run before the worker finishes and combine old state with a later ack.
+                if (smoke and asnap_judgeable and !asnap_captured and agent_applies > asnap_applies_before) {
+                    asnap_expanded_after = agent_state.expanded_identity;
+                    asnap_req_after = agent_detail.request_id;
+                    asnap_det_identity_after = agent_detail.identity;
+                    asnap_captured = true;
+                }
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
         // ── 펼친 카드의 상세 받기 (W8.22) ──────────────────────────────────────────────
@@ -9871,6 +12095,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 agent_detail_pending = false;
             }
         }
+        if (reveal_owner.take()) |receipt| {
+            if (receipt.request_id == agent_detail.request_id and receipt.identity == agent_detail.identity) {
+                agent_detail.reveal_busy = false;
+                if (receipt.failure) |err| {
+                    agent_detail.clear();
+                    agent_detail.state = if (err == error.StaleArchiveSource) .stale else .unavailable;
+                    std.log.warn("archive log reveal failed({s})", .{@errorName(err)});
+                }
+                var pa = std.heap.ArenaAllocator.init(allocator);
+                defer pa.deinit();
+                projectAgentItems(pa.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
+                agent_opts.items = agent_items.items;
+                agent_state.invalidateTree();
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            }
+        }
         if (takeAgentDetail(agent_counting.allocator(), allocator, &agent_detail_be, &agent_detail)) {
             agent_detail_results += 1;
             agent_archive.query = agent_search.query.items;
@@ -9879,7 +12119,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             projectAgentItems(da.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
             agent_opts.items = agent_items.items;
             agent_state.invalidateTree();
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             agent_redraws += 1;
         }
         // 이력이 아직 안 왔고 올 가능성이 있으면 단계 번호를 멈춰 세운다 — 상한을 둔다(이력이
@@ -9889,19 +12129,431 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const waiting_first = agent_apply_spin == null;
         const waiting_refresh = agent_refresh_submits > 0 and agent_applies <= ag_refresh_applies_before;
         agent_settling = smoke and agent_backend != null and settle_frames < 6000 and (waiting_first or waiting_refresh);
-        if (drainTreeScan(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".")) {
+        const watch_now = std.Io.Clock.awake.now(io).nanoseconds;
+        if (root_manager.pollRetired()) |_| {
+            root_retire_error = null;
+        } else |err| {
+            if (root_retire_error == null or root_retire_error.? != err)
+                stderr.print("  warning: root watch retirement failed({s})\n", .{@errorName(err)}) catch {};
+            root_retire_error = err;
+        }
+        const root_watch_changed = root_manager.pollChanges() catch !tree_watch_dirty;
+        if (root_watch_changed) {
+            tree_watch_dirty = true;
+            tree_watch_due = watch_now + 200 * std.time.ns_per_ms;
+        }
+        if (tree_watch_dirty and watch_now >= tree_watch_due) {
+            if (dock_tree.invalidateExpanded()) |_| {
+                tree_watch_dirty = false;
+            } else |_| {
+                // Keep the hint on allocation failure; retry without losing
+                // already queued paths or declaring this snapshot current.
+                tree_watch_due = watch_now + 200 * std.time.ns_per_ms;
+            }
+        }
+        if (tree_backend) |*backend| _ = pumpTreeScanRequest(&dock_tree, backend);
+        var tree_scan_retry = false;
+        if (drainTreeScanWithRootFlow(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".", &tree_scan_retry, &root_flow)) {
             tree_scan_applied += 1;
             if (tree_expand_submit_spin != null and tree_expand_apply_spin == null) tree_expand_apply_spin = spins;
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
         }
-        for (window.poll()) |ev| switch (ev) {
+        if (tree_scan_retry) {
+            tree_watch_dirty = true;
+            tree_watch_due = std.Io.Clock.awake.now(io).nanoseconds + 200 * std.time.ns_per_ms;
+        }
+        sidebar_writer.tick() catch |err| std.log.warn("sidebar config save failed({s})", .{@errorName(err)});
+        terminal_popup.reconcile(clipboard_host.current(active_view == .terminal), confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or file_close_waiting or initial_open.job != null or close_requested);
+        root_popup.reconcile(dock_tree.rootGeneration(), !dock_visible or dock_view != .explorer or settings_host.ownsInput() or
+            terminal_popup.state.open or confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or
+            file_close_waiting or initial_open.job != null or close_requested or root_close_waiting or root_flow.busy() or file_picker != null);
+
+        if (root_popup.state.open or root_close_waiting or terminal_popup.state.open or confirm_state.open or file_notice.open or pending_save != null or file_close_waiting or initial_open.job != null) {
+            sidebar_resize_drag = null;
+            divider_drag = null;
+        }
+        // Use the same divider geometry that routes pointer gestures.
+        window.horizontal_resize_rect = if (dock_visible and !root_popup.state.open and !terminal_popup.state.open and !confirm_state.open and !file_notice.open and
+            pending_save == null and !file_close_waiting and initial_open.job == null)
+            .{ .left = @intCast(geom.divider.x), .top = @intCast(geom.divider.y), .right = @intCast(geom.divider.x + geom.divider.w), .bottom = @intCast(geom.divider.y + geom.divider.h) }
+        else
+            null;
+        window.sidebar_resize_rect = if (sidebar_w != 0 and !root_popup.state.open and !terminal_popup.state.open and !confirm_state.open and !file_notice.open and
+            pending_save == null and !file_close_waiting and initial_open.job == null)
+            .{ .left = @as(i32, @intCast(sidebar_w)) - 5, .top = @intCast(titlebar_px), .right = @as(i32, @intCast(sidebar_w)) + 5, .bottom = @intCast(client_h -| status_bar_px) }
+        else
+            null;
+        const dock_toggle_rect = win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w);
+        window.caption_buttons_px = caption_buttons_px + dock_toggle_rect.w + geom.view_bar.w;
+        // Apply layout changes through the same path as a real window resize.
+        // Queue before poll, never while iterating its borrowed event slice.
+        if (dock_layout_pending) {
+            window.events.push(allocator, .{ .resized = .{ .width_px = client_w, .height_px = client_h } });
+            dock_layout_pending = false;
+        }
+        if (confirm_state.open or file_notice.open or choice_notice != null or file_close_waiting or initial_open.job != null) settings_host.cancelGestures();
+        settings_host.tick();
+        if (!sameLiveFont(applied_font, cfg.font) and settings_host.changed) font_apply: {
+            font_recovery_notice.begin();
+            var next_text = windows_text_resources.TextResources.initConfigured(allocator, cfg.font) catch |err| {
+                font_apply_errors += 1;
+                settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                stderr.print("  warning: font preparation failed({s})\n", .{@errorName(err)}) catch {};
+                break :font_apply;
+            };
+            defer next_text.deinit();
+            const next_spacing = maru.renderer.font_spacing.apply(next_text.raster.metrics.width_px, next_text.raster.metrics.height_px, cfg.font.line_height, cfg.font.letter_spacing, 1000);
+            const next_chrome = next_text.chromeMetrics();
+            const next_w = next_spacing.advance_width_px;
+            const next_h = next_spacing.height_px;
+            const next_geom = dockGeometryFor(client_w, client_h, next_chrome.width_px, next_chrome.height_px, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
+            const next_size = win32_window.cellsForClient(next_geom.terminal.w, next_geom.terminal.h, next_w, next_h) orelse {
+                font_apply_errors += 1;
+                settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                break :font_apply;
+            };
+            var next_render = windows_renderer_resources.RendererResources.init(allocator, present.device, present.context, cfg.font.size, .{ .advance_width_px = next_w, .glyph_width_px = next_spacing.glyph_width_px, .height_px = next_h }, .{}) catch |err| {
+                font_apply_errors += 1;
+                settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                stderr.print("  warning: font renderer preparation failed({s})\n", .{@errorName(err)}) catch {};
+                break :font_apply;
+            };
+            defer next_render.deinit();
+            const next_state = &next_render.state;
+            var next_builder = next_text.builder();
+            next_builder.rasterizer.font_size_pt = cfg.font.size;
+            var next_aw = next_state.atlas.config.atlas_width_px;
+            var next_ah = next_state.atlas.config.atlas_height_px;
+            var next_ui: LiveFontUi = .{};
+            defer next_ui.deinit(allocator);
+            next_ui.scm_state = scm_state;
+            next_ui.agent_state = agent_state;
+            next_ui.scm_state.interaction = .{};
+            next_ui.agent_state.interaction = .{};
+            next_ui.scm_state.generation +%= 1;
+            next_ui.agent_state.generation +%= 1;
+            next_ui.scm_scroll = scm_scroll;
+            next_ui.agent_scroll = agent_scroll;
+            var next_scm_opts = scm_opts;
+            next_scm_opts.font_family = cfg.font.family;
+            next_scm_opts.font_fallback = cfg.font.fallback;
+            next_scm_opts.font_size_pt = chrome_font_px;
+            var next_agent_opts = agent_opts;
+            next_agent_opts.font_family = cfg.font.family;
+            next_agent_opts.font_fallback = cfg.font.fallback;
+            next_agent_opts.font_size_pt = chrome_font_px;
+            var stable = false;
+            for (0..8) |_| {
+                const before = next_state.atlas.generation;
+                const old_scm_height = next_ui.scm_scroll_view_h;
+                const old_agent_height = next_ui.agent_scroll_view_h;
+                next_ui.status_cells.clearRetainingCapacity();
+                rebuildSidebarCells(allocator, &next_ui.sidebar_cells, next_geom, titlebar_px, sidebar_w, next_chrome.width_px, next_chrome.height_px, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, next_state, next_builder, next_render.pipeline, &next_aw, &next_ah, &next_ui.sidebar_uploads, &next_ui.sidebar_glyphs, &next_ui.sidebar_outside, &next_ui.sidebar_frame, &next_ui.sidebar_header_frame, &next_ui.sidebar_header_h, &next_ui.sidebar_header_icon_band, &next_ui.sidebar_header_icon_glyphs, &next_ui.sidebar_header_search_glyphs, &next_ui.sidebar_header_outside, &next_ui.sidebar_card_over_header, &next_ui.sidebar_cells_clipped, &next_ui.sidebar_cards_visible, &next_ui.sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &next_ui.sidebar_first_visible, &next_ui.sidebar_first_band_y, &next_ui.sidebar_partial, &next_ui.sidebar_active_band_y, &next_ui.sidebar_card_cols, &next_ui.sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch |err| {
+                    font_apply_errors += 1;
+                    settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                    stderr.print("  warning: font UI preparation failed({s})\n", .{@errorName(err)}) catch {};
+                    break :font_apply;
+                };
+                rebuildDockAll(allocator, &next_ui.dock_cells, next_geom, next_state, next_builder, dock_rows.items, next_chrome.width_px, next_chrome.height_px, next_render.pipeline, &next_aw, &next_ah, &next_ui.dock_region_uploads, &next_ui.dock_cells_outside, dock_scroll_px, &next_ui.dock_scroll_shift, &next_ui.dock_draw_start, &next_ui.dock_tree_top_px, &next_ui.dock_top_spill, &next_ui.dock_bottom_spill, &next_ui.dock_rows_drawn, &next_ui.dock_tree_frame, dock_view, &chrome_tokens, &next_ui.view_bar_frame, &next_ui.view_bar_glyph_top, .{ .state = &next_ui.scm_state, .opts = next_scm_opts, .built = &next_ui.scm_built, .clip = &next_ui.scm_clip, .scroll = &next_ui.scm_scroll, .viewport_h = &next_ui.scm_scroll_view_h, .max_offset = &next_ui.scm_scroll_max }, .{ .state = &next_ui.agent_state, .opts = next_agent_opts, .built = &next_ui.agent_built, .clip = &next_ui.agent_clip, .scroll = &next_ui.agent_scroll, .viewport_h = &next_ui.agent_scroll_view_h, .max_offset = &next_ui.agent_scroll_max }) catch |err| {
+                    font_apply_errors += 1;
+                    settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                    stderr.print("  warning: font UI preparation failed({s})\n", .{@errorName(err)}) catch {};
+                    break :font_apply;
+                };
+                appendStatusBarCells(allocator, &next_ui.status_cells, next_geom.status_bar, next_chrome.width_px, next_chrome.height_px, &chrome_tokens, next_state, next_builder, next_render.pipeline, &next_aw, &next_ah, &next_ui.status_uploads, status_items, &next_ui.status_frames, &next_ui.status_dropped, &next_ui.status_placed, &next_ui.status_outside, &next_ui.status_mismatch) catch |err| {
+                    font_apply_errors += 1;
+                    settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                    stderr.print("  warning: font UI preparation failed({s})\n", .{@errorName(err)}) catch {};
+                    break :font_apply;
+                };
+                rebuildTitlebarCells(allocator, &next_ui.titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch |err| {
+                    font_apply_errors += 1;
+                    settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                    stderr.print("  warning: font UI preparation failed({s})\n", .{@errorName(err)}) catch {};
+                    break :font_apply;
+                };
+                // Build through an independent document view: preparation may allocate
+                // syntax/selection caches, but must never alter the active viewport.
+                if (active_view == .file and active_view.file < open_files.items.len) {
+                    prepareLiveFontEditor(allocator, .{
+                        .renderer_state = next_state,
+                        .shaper = next_builder.shaper,
+                        .rasterizer = next_builder.rasterizer,
+                        .pipeline = next_render.pipeline,
+                        .atlas_w = &next_aw,
+                        .atlas_h = &next_ah,
+                        .cell_w = next_w,
+                        .cell_h = next_h,
+                    }, &open_files.items[active_view.file], file_comparison, next_geom.terminal, ops_buf, &chrome_tokens) catch |err| {
+                        font_apply_errors += 1;
+                        settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                        stderr.print("  warning: font editor preparation failed({s})\n", .{@errorName(err)}) catch {};
+                        break :font_apply;
+                    };
+                }
+                if (before == next_state.atlas.generation and old_scm_height == next_ui.scm_scroll_view_h and old_agent_height == next_ui.agent_scroll_view_h) {
+                    stable = true;
+                    break;
+                }
+            }
+            if (!stable) {
+                font_apply_errors += 1;
+                settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                break :font_apply;
+            }
+            // All retained UI now refers to the candidate namespace. No active
+            // cache has been touched during preparation, including hit tables.
+            std.mem.swap(windows_text_resources.TextResources, &text_resources, &next_text);
+            std.mem.swap(windows_renderer_resources.RendererResources, &renderer_resources, &next_render);
+            next_ui.swapInto(.{
+                .agent_built = &agent_built,
+                .agent_clip = &agent_clip,
+                .agent_scroll = &agent_scroll,
+                .agent_scroll_max = &agent_scroll_max,
+                .agent_scroll_view_h = &agent_scroll_view_h,
+                .agent_state = &agent_state,
+                .dock_bottom_spill = &dock_bottom_spill,
+                .dock_cells = &dock_cells,
+                .dock_cells_outside = &dock_cells_outside,
+                .dock_draw_start = &dock_draw_start,
+                .dock_region_uploads = &dock_region_uploads,
+                .dock_rows_drawn = &dock_rows_drawn,
+                .dock_scroll_shift = &dock_scroll_shift,
+                .dock_top_spill = &dock_top_spill,
+                .dock_tree_frame = &dock_tree_frame,
+                .dock_tree_top_px = &dock_tree_top_px,
+                .scm_built = &scm_built,
+                .scm_clip = &scm_clip,
+                .scm_scroll = &scm_scroll,
+                .scm_scroll_max = &scm_scroll_max,
+                .scm_scroll_view_h = &scm_scroll_view_h,
+                .scm_state = &scm_state,
+                .sidebar_active_band_y = &sidebar_active_band_y,
+                .sidebar_card_cols = &sidebar_card_cols,
+                .sidebar_card_columns = &sidebar_card_columns,
+                .sidebar_card_over_header = &sidebar_card_over_header,
+                .sidebar_cards_visible = &sidebar_cards_visible,
+                .sidebar_cells = &sidebar_cells,
+                .sidebar_cells_clipped = &sidebar_cells_clipped,
+                .sidebar_first_band_y = &sidebar_first_band_y,
+                .sidebar_first_visible = &sidebar_first_visible,
+                .sidebar_frame = &sidebar_frame,
+                .sidebar_glyphs = &sidebar_glyphs,
+                .sidebar_header_drawn = &sidebar_header_drawn,
+                .sidebar_header_frame = &sidebar_header_frame,
+                .sidebar_header_h = &sidebar_header_h,
+                .sidebar_header_icon_band = &sidebar_header_icon_band,
+                .sidebar_header_icon_glyphs = &sidebar_header_icon_glyphs,
+                .sidebar_header_outside = &sidebar_header_outside,
+                .sidebar_header_search_glyphs = &sidebar_header_search_glyphs,
+                .sidebar_outside = &sidebar_outside,
+                .sidebar_partial = &sidebar_partial,
+                .sidebar_uploads = &sidebar_uploads,
+                .status_cells = &status_cells,
+                .status_dropped = &status_dropped,
+                .status_frames = &status_frames,
+                .status_mismatch = &status_mismatch,
+                .status_outside = &status_outside,
+                .status_placed = &status_placed,
+                .status_uploads = &status_uploads,
+                .titlebar_cells = &titlebar_cells,
+                .view_bar_frame = &view_bar_frame,
+                .view_bar_glyph_top = &view_bar_glyph_top,
+            });
+            raster = text_resources.raster;
+            builder = text_resources.builder();
+            builder.rasterizer.font_size_pt = cfg.font.size;
+            pipeline = renderer_resources.pipeline;
+            chrome_cell_w = next_chrome.width_px;
+            chrome_cell_h = next_chrome.height_px;
+            cell_w = next_w;
+            cell_h = next_h;
+            geom = next_geom;
+            atlas_w = next_aw;
+            atlas_h = next_ah;
+            loop.renderer_state = renderer_state;
+            scm_opts = next_scm_opts;
+            agent_opts = next_agent_opts;
+            spawn_opts.cfg = cfg;
+            spawn_opts.cell_w = cell_w;
+            spawn_opts.cell_h = cell_h;
+            spawn_opts.appearance = maru.config.appearance.resolve(cfg) catch spawn_opts.appearance;
+            for (sessions.items) |session| {
+                session.layout_retry.submit(&runtime, &session.surface, next_size, .{ .width = cell_w, .height = cell_h }, std.Io.Clock.awake.now(io).nanoseconds, io) catch |err| {
+                    font_resize_errors += 1;
+                    font_recovery_notice.failed(session.layout_retry.pending != null);
+                    settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
+                    stderr.print("  warning: font terminal resize failed({s})\n", .{@errorName(err)}) catch {};
+                };
+            }
+            sidebar_resize_drag = null;
+            divider_drag = null;
+            scm_bar_drag = null;
+            agent_bar_drag = null;
+            bar_drag = null;
+            dragging = false;
+            editor_bar_file = null;
+            editor_last_hbar = null;
+            editor_last_vbar = null;
+            hbar_drag_release = false;
+            vbar_drag_release = false;
+            hbar_drag.end();
+            vbar_drag.end();
+            settings_host.cancelGestures();
+            applied_font = cfg.font;
+            font_applies += 1;
+            if (app_window.active()) |surface| {
+                surface.lockCore(io);
+                const actual = surface.core.size;
+                const actual_cw = surface.core.cell_width_px;
+                const actual_ch = surface.core.cell_height_px;
+                const actual_process = surface.process_state;
+                surface.unlockCore(io);
+                stdout.print("font_applied={d} cell={d}x{d} terminal_px={d}x{d} core={d}x{d} core_cell={d}x{d} process={s}\n", .{ font_applies, cell_w, cell_h, geom.terminal.w, geom.terminal.h, actual.cols, actual.rows, actual_cw, actual_ch, @tagName(actual_process) }) catch {};
+                stdout.flush() catch {};
+            }
+        }
+        if (settings_host.changed) {
+            if (maru.app.language_config.apply(cfg.ui_language)) |change| {
+                if (change.ownedMessage(text_notice_owned, settings_host.form.state.message(), .app_config_apply_pending)) |message| settings_host.form.state.setMessage(message);
+                if (change.ownedMessage(font_recovery_notice.owned, settings_host.form.state.message(), .app_font_apply_failed)) |message| settings_host.form.state.setMessage(message);
+                for (status_items_buf[0..status_items.len]) |*item| {
+                    if (item.id == .notifications) if (change.ownedMessage(true, item.text, .editor_backup_restored)) |message| {
+                        item.text = message;
+                    };
+                }
+                appearance_ui_pending = true;
+                chrome_strips_pending = true;
+            }
+            // Resolve once per accepted edit or rollback; the same value owns
+            // core query defaults, terminal paint and cached chrome colors.
+            cursor_phase.reset();
+            const next_appearance = try maru.config.appearance.resolve(cfg);
+            const visual_changed = !std.meta.eql(maru.app.appearance_config.Values.fromAppearance(appearance), maru.app.appearance_config.Values.fromAppearance(next_appearance)) or
+                !std.meta.eql(appearance.theme, next_appearance.theme) or !std.meta.eql(appearance.cursor, next_appearance.cursor);
+            appearance = next_appearance;
+            spawn_opts.appearance = appearance;
+            const appearance_values = maru.app.appearance_config.Values.fromAppearance(appearance);
+            for (sessions.items) |session| session.appearance_config.request(appearance_values);
+            if (visual_changed) {
+                appearance_ui_pending = true;
+                chrome_strips_pending = true;
+                colors.default_fg = appearance.theme.foreground;
+                colors.default_bg = appearance.theme.background;
+                colors.cursor = .{ .block = appearance.cursor.color orelse appearance.theme.cursor, .text = appearance.cursor.text orelse appearance.theme.background };
+                colors.selection_bg = appearance.theme.selection;
+                colors.search_match_bg = appearance.theme.search_match;
+                colors.current_match_bg = appearance.theme.search_match_current;
+                clear = d3d11_present.clearColorFromArgb(0xFF000000 | (@as(u32, appearance.theme.background.r) << 16) | (@as(u32, appearance.theme.background.g) << 8) | @as(u32, appearance.theme.background.b));
+                chrome_tokens = maru.chrome_theme.tokensFor(appearance);
+            }
+            spawn_opts.refreshShell(cfg.shell);
+            spawn_opts.refreshText(cfg);
+            const shrink = settings_host.takeScrollbackShrink();
+            const values = maru.app.text_config.Values.fromConfig(cfg);
+            for (sessions.items) |session| session.text_config.request(values, shrink == values.scrollback);
+            paste_protection = cfg.input.paste_protection;
+            bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
+            option_as_meta = cfg.input.option_as_meta;
+            right_click_action = cfg.input.right_click;
+            default_word_separators = cfg.input.word_separators;
+            osc52_read_policy = cfg.osc52.read;
+            clipboard_host.paste_protection = paste_protection;
+            clipboard_host.bracketed_paste_is_safe = bracketed_paste_is_safe;
+            settings_host.changed = false;
+        }
+        // A paint allocation/upload failure must retain invalidation. Otherwise
+        // an unchanged next frame would keep old chrome colors indefinitely.
+        if (appearance_ui_pending) {
+            var complete = true;
+            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                complete = false;
+                appearance_ui_errors += 1;
+            };
+            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {
+                complete = false;
+                appearance_ui_errors += 1;
+            };
+            if (chrome_strips_pending) {
+                rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {
+                    complete = false;
+                    appearance_ui_errors += 1;
+                };
+                status_cells.clearRetainingCapacity();
+                appendStatusBarCells(allocator, &status_cells, geom.status_bar, chrome_cell_w, chrome_cell_h, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch) catch {
+                    complete = false;
+                    appearance_ui_errors += 1;
+                };
+                status_rebuilds += 1;
+            }
+            if (complete) chrome_strips_pending = false;
+            appearance_ui_pending = !complete;
+        }
+        var text_pending: usize = @intFromBool(appearance_ui_pending);
+        for (sessions.items) |session| {
+            session.appearance_config.pump(&runtime, session.surface.id, io) catch {
+                appearance_apply_errors += 1;
+            };
+            text_pending += @intFromBool(session.appearance_config.pending());
+            session.text_config.pump(&runtime, session.surface.id, io) catch {
+                text_apply_errors += 1;
+            };
+            text_pending += @intFromBool(session.text_config.pending());
+        }
+        text_apply_pending_peak = @max(text_apply_pending_peak, text_pending);
+        const text_message = maru.i18n.t(.app_config_apply_pending);
+        if (text_pending != 0 and settings_host.form.state.message().len == 0) {
+            settings_host.form.state.setMessage(text_message);
+            text_notice_owned = true;
+        } else if (text_pending == 0 and text_notice_owned) {
+            if (std.mem.eql(u8, settings_host.form.state.message(), text_message)) settings_host.form.state.clearMessage();
+            text_notice_owned = false;
+        }
+        // Each session owns its latest request; closing it also removes its retry.
+        const layout_retry_now = std.Io.Clock.awake.now(io).nanoseconds;
+        var layout_pending = false;
+        var layout_permanent_error = false;
+        for (sessions.items) |session| {
+            _ = session.layout_retry.pump(&runtime, &session.surface, layout_retry_now, io) catch false;
+            layout_pending = layout_pending or session.layout_retry.pending != null;
+            layout_permanent_error = layout_permanent_error or (session.layout_retry.last_error != null and session.layout_retry.pending == null);
+        }
+        if (font_recovery_notice.recovered(layout_pending, layout_permanent_error, sameLiveFont(applied_font, cfg.font), std.mem.eql(u8, settings_host.form.state.message(), maru.i18n.t(.app_font_apply_failed)))) {
+            settings_host.form.state.clearMessage();
+        }
+        window.horizontal_resize_active = divider_drag != null or sidebar_resize_drag != null;
+        window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up or root_popup.state.open or root_popup.swallow_left_up or pending_pick != null, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
+        window.setAppDrawnPreedit(windowsAppDrawnPreedit(.{
+            .terminal_visible = active_view == .terminal,
+            .settings_open = settings_host.form.state.open,
+            .settings_picking = settings_host.form.state.picking,
+            .sidebar_search = search_focused,
+            .agent_search = agent_search_focused,
+            .dock_view = dock_view,
+            .blocked = terminal_popup.state.open or confirm_state.open or file_notice.open or choice_notice != null or file_close_waiting or initial_open.job != null,
+        }));
+        const window_events = window.poll();
+        if (window.focus_loss_serial != terminal_popup_focus_serial) {
+            terminal_popup.cancelCapture();
+            root_popup.cancelCapture();
+            root_popup_release.clear();
+            settings_host.swallow_left_up = false;
+            settings_host.cancelGestures();
+            window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
+            terminal_popup_focus_serial = window.focus_loss_serial;
+        }
+        for (window_events) |ev| switch (ev) {
             .resized => |r| {
+                terminal_popup.dismiss();
+                root_popup.dismiss();
+                settings_host.cancelGestures();
+                layout_probe = true;
                 try present.resize(r.width_px, r.height_px);
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
                 client_w = r.width_px;
                 client_h = r.height_px;
-                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
-                rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                geom = dockGeometryFor(client_w, client_h, chrome_cell_w, chrome_cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
+                rebuildStatusBar(allocator, &status_cells, geom.status_bar, chrome_cell_w, chrome_cell_h, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
                     resizeAllSessions(&runtime, sessions.items, size, io);
@@ -9920,17 +12572,74 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch |err| {
+                    std.log.warn("Windows sidebar layout rebuild failed({s})", .{@errorName(err)});
+                };
                 rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
             .close_requested => close_requested = true,
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
-            .key => |key_ev| {
+            .key_released => |ingress| {
+                _ = root_popup_release.consume(ingress.stroke, true);
+            },
+            .key => |ingress| {
+                const key_ev = ingress.value;
+                if (root_popup_release.consume(ingress.stroke, false)) continue;
+                if (pending_pick != null) {
+                    if (key_ev.key == .escape and key_ev.event_type != .release) pending_pick = null;
+                    continue;
+                }
+                cursor_phase.reset();
+                if (root_close_waiting) {
+                    if (key_ev.key == .escape and key_ev.event_type != .release) {
+                        root_close_waiting = false;
+                        close_requested = false;
+                        root_flow.cancel();
+                    }
+                    continue;
+                }
+                if (file_close_waiting) {
+                    if (key_ev.key == .escape) {
+                        confirm_pending_click = .cancelled;
+                        backup_window_close_requested = false;
+                        close_requested = false;
+                    }
+                    continue;
+                }
+                if (file_picker) |*picker| {
+                    if (key_ev.key == .escape and key_ev.event_type != .release) picker.cancel();
+                    continue;
+                }
+                if (initial_open.job != null) {
+                    if (key_ev.key == .escape) {
+                        initial_open.cancel() catch {};
+                        initial_open_close_requested = false;
+                        file_notice.dismiss();
+                    }
+                    continue;
+                }
+                if (pending_save) |lease| {
+                    if (key_ev.key == .escape) {
+                        editor_files.cancelSave(io, lease) catch {};
+                        save_close_target = null;
+                        save_close_requested = false;
+                    }
+                    continue;
+                }
+                if (choice_notice) |lease| {
+                    if (key_ev.key == .escape) {
+                        try file_changes.cancelChoice(lease);
+                        choice_close = null;
+                        choice_notice = null;
+                        file_notice.dismiss();
+                    }
+                    continue;
+                }
                 // ── 파일을 보는 중에는 키가 셸로 안 간다 (적대적 검증 2회차) ──────────────
                 //
                 // **화면에 문서가 떠 있는데 친 글자가 안 보이는 셸로 들어가면 안 된다.** 사용자는
@@ -9945,35 +12654,81 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 보이지 않는 곳을 조작하게 된다. 판정은 중립이 소유한다(`confirm.handle`:
                 // Enter/Esc·Y/N·←/→).
                 if (confirm_state.open) {
-                    if (maru.chrome.components.confirm.handle(win32_keys.chromeKeyEvent(key_ev), &confirm_state)) |action| switch (action) {
-                        .confirmed => {
-                            confirm_accepts += 1;
-                            confirm_state.dismiss();
-                            // **지금 다시 푼다** — 담아 둔 번호가 그 사이 밀렸을 수 있다.
-                            if (sessionIndexById(sessions.items, pending_close_id)) |ci| {
-                                switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, true)) {
-                                    .closed => {
-                                        session_closes += 1;
-                                        pump = sessions.items[0].pump;
-                                        if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
-                                        refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
-                                        sidebar_redraws += 1;
-                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
-                                    },
-                                    else => {},
+                    if (maru.chrome.components.confirm.handle(win32_keys.chromeKeyEvent(key_ev), &confirm_state)) |action| {
+                        if (pending_file_close != null or pending_file_conflict != null) {
+                            if (confirm_pending_click == null) confirm_pending_click = action;
+                            continue;
+                        }
+                        switch (action) {
+                            .confirmed => {
+                                confirm_accepts += 1;
+                                confirm_state.dismiss();
+                                // **지금 다시 푼다** — 담아 둔 번호가 그 사이 밀렸을 수 있다.
+                                if (sessionIndexById(sessions.items, pending_close_id)) |ci| {
+                                    switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, true)) {
+                                        .closed => {
+                                            session_closes += 1;
+                                            pump = sessions.items[0].pump;
+                                            if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
+                                            refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                                            sidebar_redraws += 1;
+                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                        },
+                                        else => {},
+                                    }
                                 }
-                            }
-                            pending_close_id = null;
-                        },
-                        .cancelled => {
-                            confirm_cancels += 1;
-                            confirm_state.dismiss();
-                            pending_close_id = null;
-                        },
-                        // **네 번째 자리는 이 경로에 아직 없다**(저장 충돌은 macOS 편집기의 것이다).
-                        // `alternate` 와 같이 무동작으로 둔다 — 새 행동이 생기면 여기도 함께 정한다.
-                        .alternate, .extra => {},
-                    };
+                                pending_close_id = null;
+                            },
+                            .cancelled => {
+                                confirm_cancels += 1;
+                                confirm_state.dismiss();
+                                pending_close_id = null;
+                            },
+                            // **네 번째 자리는 이 경로에 아직 없다**(저장 충돌은 macOS 편집기의 것이다).
+                            // `alternate` 와 같이 무동작으로 둔다 — 새 행동이 생기면 여기도 함께 정한다.
+                            .alternate, .extra => {},
+                        }
+                    }
+                    continue;
+                }
+                // Confirm retains its higher priority. A dismissal gesture belongs
+                // to Notice and must not also type into an underlying terminal.
+                if (choice_notice != null) continue;
+                if (file_notice.open) {
+                    _ = maru.chrome.components.notice.handle(win32_keys.chromeKeyEvent(key_ev), &file_notice);
+                    continue;
+                }
+                const settings_binding = resolver.resolveEditorDetailed(key_ev, false);
+                if (key_ev.event_type != .release and settings_binding == .app_action and settings_binding.app_action == .toggle_settings) {
+                    terminal_popup.dismiss();
+                    root_popup.dismiss();
+                    settings_host.toggle();
+                    window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
+                    continue;
+                }
+                if (settings_host.form.state.open) {
+                    settings_host.key(key_ev);
+                    window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
+                    continue;
+                }
+                if (root_popup.state.open) {
+                    if (root_popup.key(win32_keys.chromeKeyEvent(key_ev), key_ev.event_type == .release, dock_tree.rootGeneration())) |request| {
+                        pending_pick = request;
+                        root_menu_actions += 1;
+                    }
+                    if (!root_popup.state.open and key_ev.event_type != .release) root_popup_release.arm(ingress.stroke);
+                    continue;
+                }
+                if (terminal_popup.state.open) {
+                    const popup_request = terminal_popup.key(win32_keys.chromeKeyEvent(key_ev), key_ev.event_type == .release, clipboard_host.current(active_view == .terminal));
+                    window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up or root_popup.state.open or root_popup.swallow_left_up or pending_pick != null, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
+                    if (popup_request) |request| {
+                        terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
+                    }
+                    continue;
+                }
+                if (key_ev.event_type != .release and settings_binding == .app_action and settings_binding.app_action == .open_file_panel) {
+                    if (file_picker == null) pending_pick = .{ .generation = dock_tree.rootGeneration(), .purpose = .file };
                     continue;
                 }
                 // ── 검색이 포커스면 키는 검색 것이다 (W8.15) ─────────────────────────
@@ -10005,7 +12760,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     if (changed_q) {
                         refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                     }
                     continue;
                 }
@@ -10015,6 +12770,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     switch (key_ev.key) {
                         .escape => {
                             agent_search_focused = false;
+                            agent_opts.search_focused = false;
                             agent_search_focus_changes += 1;
                             changed_a = true;
                         },
@@ -10041,7 +12797,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         agent_opts.search_preedit = agent_search.preedit.items;
                         agent_opts.search_focused = agent_search_focused;
                         agent_state.invalidateTree();
-                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                        rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                         agent_redraws += 1;
                     }
                     continue;
@@ -10091,39 +12847,78 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     dock_keys_consumed += 1;
                     if (moved) {
                         dock_key_scrolls += 1;
-                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                        rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                             dock_rebuild_failures += 1;
                         };
                     }
                     continue;
                 }
+                if (file_comparison != null and active_view == .file) {
+                    if (key_ev.key == .escape) {
+                        file_comparison.?.deinit();
+                        file_comparison = null;
+                    }
+                    continue;
+                }
                 if (active_view == .file) {
                     keys_while_file += 1;
+                    const file_view = &open_files.items[active_view.file];
+                    if (try file_changes.hasChoice(file_view.document)) {
+                        if (key_ev.key == .escape) {
+                            try file_changes.cancelChoice(file_view.document);
+                            choice_close = null;
+                        }
+                        continue;
+                    }
+                    if (file_host.newTermKey(resolver, key_ev)) {
+                        queued_new_terms += 1;
+                        app_actions += 1;
+                        continue;
+                    }
+                    if (file_host.closeKey(resolver, key_ev)) {
+                        requestFileViewClose(allocator, &editor_files, file_view.document, &backup_clean_closes, &pending_file_close, &pending_file_conflict, &confirm_state, &confirm_pending_click) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                        pending_close_id = null;
+                        app_actions += 1;
+                        continue;
+                    }
+                    if (file_host.saveKey(resolver, key_ev)) {
+                        const started = editor_files.beginSave(file_view.document, 4 << 20) catch |err| {
+                            file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                            continue;
+                        };
+                        if (started) {
+                            pending_save = file_view.document;
+                            file_notice.show(maru.i18n.t(.win_editor_saving));
+                        }
+                        continue;
+                    }
+                    const maybe_copy = applyFileKey(&editor_files, io, resolver, file_view, key_ev, .{ .now_ms = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms)), .views = open_files.items }) catch |err| {
+                        try stderr.print("  warning: editor input failed({s})\n", .{@errorName(err)});
+                        if (isFileSaveConflict(err) and file_host.saveKey(resolver, key_ev)) {
+                            pending_file_conflict = file_view.document;
+                            pending_conflict_save = true;
+                            pending_conflict_close = null;
+                            showFileSaveConflict(&confirm_state);
+                        } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                        continue;
+                    };
+                    if (maybe_copy) |text| {
+                        defer allocator.free(text);
+                        win32_clipboard.write(allocator, window.hwnd, text) catch |err| {
+                            try stderr.print("  warning: editor clipboard failed({s})\n", .{@errorName(err)});
+                            clipboard_errors += 1;
+                            continue;
+                        };
+                        copies += 1;
+                        copy_bytes += text.len;
+                    }
                     continue;
                 }
                 // **복사가 여기서 붙는다.** §2j 가 `isCopyChord` 를 만들어 두고 호출자를 못 붙인 것은
                 // "무엇을 복사할지"가 선택 영역이고 그것이 마우스와 같은 계층이었기 때문이다(§2k).
                 // 경계는 그대로다 — 선택은 중립 코어가, 클립보드는 플랫폼이 안다.
                 if (win32_keys.isCopyChord(key_ev)) {
-                    const active = app_window.active() orelse continue;
-                    // 추출은 **락 아래**(코어 읽기), OS 호출은 락 밖 — §2j 의 규율 그대로다.
-                    const maybe_text: ?[]u8 = blk: {
-                        active.lockCore(io);
-                        defer active.unlockCore(io);
-                        break :blk active.core.extractSelection(allocator) catch null;
-                    };
-                    if (maybe_text) |text| {
-                        defer allocator.free(text);
-                        if (text.len > 0) {
-                            if (win32_clipboard.write(allocator, window.hwnd, text)) |_| {
-                                copies += 1;
-                                copy_bytes += text.len;
-                            } else |err| {
-                                try stderr.print("  warning: copy failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
-                                clipboard_errors += 1;
-                            }
-                        }
-                    }
+                    try clipboard_host.copy();
                     continue;
                 }
                 // **붙여넣기는 플랫폼이 가로챈다.** 클립보드는 OS 소유이고 중립 레이어에 `Action`이 없다
@@ -10148,14 +12943,25 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         bytes_to_shell += ti.bytes_len;
                         if (active_view == .file) keys_to_terminal_while_file += 1;
                     },
-                    // 앱 동작은 아직 할 일이 없다(Windows 엔 탭·pane 이 없다 — W8). 센다.
-                    .app_action => app_actions += 1,
+                    .app_action => |action| {
+                        app_actions += 1;
+                        if (action == .close_focused) {
+                            if (app_window.active()) |surface| queued_session_close_id = surface.id;
+                        } else if (action == .new_term) {
+                            queued_new_terms += 1;
+                        }
+                    },
                     .ignored => keys_ignored += 1,
                 }
             },
             // IME 조합 미리보기. **중립 계약에 그대로 넣는다** — `renderSnapshot()`이 합성해 주므로
             // Windows 가 미리보기 렌더를 따로 만들지 않는다(§2i).
             .preedit_changed => {
+                if (settings_host.form.state.open) {
+                    settings_host.preedit(window.preeditText());
+                    continue;
+                }
+                if (root_popup.state.open or pending_pick != null or file_picker != null or root_close_waiting or terminal_popup.state.open or file_close_waiting or initial_open.job != null or file_notice.open or confirm_state.open) continue;
                 const text = window.preeditText();
                 // **조합은 포커스를 따라간다**(W8.15 잔여). 검색 줄에 치는 동안 미리보기가 터미널로
                 // 가면 사용자는 자기가 친 것을 못 보는데 셸은 그것을 받는다 — 키 입력이 이미 겪은
@@ -10165,13 +12971,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         search.setPreedit(allocator, text) catch {};
                         preedit_to_search += 1;
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                     },
                     .agent_search => {
                         agent_search.setPreedit(allocator, text) catch {};
                         preedit_to_search += 1;
                         agent_opts.search_preedit = agent_search.preedit.items;
-                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                        rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                     },
                     .terminal => {
                         if (app_window.active()) |active| {
@@ -10189,9 +12995,203 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
             // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
             .mouse => |m| {
+                if (file_picker != null or root_close_waiting) continue;
+                const settings_gear_release = m.kind == .left_up and settings_gear_pressed;
+                if (m.kind == .left_down or m.kind == .left_up or m.kind == .capture_lost) settings_gear_pressed = false;
+                if (settings_host.ownsInput() and !confirm_state.open and !file_notice.open and choice_notice == null) {
+                    if (m.kind == .capture_lost) {
+                        settings_host.swallow_left_up = false;
+                        settings_host.cancelGestures();
+                    } else if (m.kind == .wheel or m.kind == .wheel_h) {
+                        settings_host.wheel(m.wheel_delta, wheel_lines_per_notch, m.kind == .wheel_h, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens);
+                    } else settings_host.pointer(.{
+                        .phase = switch (m.kind) {
+                            .moved => .move,
+                            .left_down, .right_down, .middle_down => .down,
+                            else => .up,
+                        },
+                        .button = switch (m.kind) {
+                            .left_down, .left_up, .moved => .left,
+                            else => .other,
+                        },
+                        .x_px = @floatFromInt(m.x_px),
+                        .y_px = @floatFromInt(m.y_px),
+                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens);
+                    window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
+                    continue;
+                }
+                terminal_popup.reconcile(clipboard_host.current(active_view == .terminal), confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or file_close_waiting or initial_open.job != null or close_requested);
+                root_popup.reconcile(dock_tree.rootGeneration(), !dock_visible or dock_view != .explorer or settings_host.ownsInput() or
+                    terminal_popup.state.open or confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or
+                    file_close_waiting or initial_open.job != null or close_requested or root_close_waiting or root_flow.busy() or file_picker != null);
+
+                if (m.kind == .capture_lost) terminal_popup.cancelCapture();
+                if (m.kind == .capture_lost) root_popup.cancelCapture();
+                if (root_popup.state.open or root_popup.swallow_left_up) {
+                    if (m.kind == .wheel or m.kind == .wheel_h) continue;
+                    const result = root_popup.pointer(.{
+                        .phase = switch (m.kind) {
+                            .moved => .move,
+                            .left_down, .right_down, .middle_down => .down,
+                            .left_up, .right_up, .middle_up => .up,
+                            .wheel, .wheel_h, .capture_lost => unreachable,
+                        },
+                        .button = switch (m.kind) {
+                            .right_down, .right_up => .right,
+                            .middle_down, .middle_up => .other,
+                            else => .left,
+                        },
+                        .x_px = @floatFromInt(m.x_px),
+                        .y_px = @floatFromInt(m.y_px),
+                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), dock_tree.rootGeneration());
+                    if (result.request) |request| {
+                        pending_pick = request;
+                        root_menu_actions += 1;
+                    }
+                    if (result.consumed) continue;
+                }
+                if (terminal_popup.state.open or terminal_popup.swallow_left_up) {
+                    if (m.kind == .wheel or m.kind == .wheel_h) continue;
+                    const popup_result = terminal_popup.pointer(.{
+                        .phase = switch (m.kind) {
+                            .moved => .move,
+                            .left_down, .right_down, .middle_down => .down,
+                            .left_up, .right_up, .middle_up => .up,
+                            .wheel, .wheel_h, .capture_lost => unreachable,
+                        },
+                        .button = switch (m.kind) {
+                            .right_down, .right_up => .right,
+                            .middle_down, .middle_up => .other,
+                            else => .left,
+                        },
+                        .x_px = @floatFromInt(m.x_px),
+                        .y_px = @floatFromInt(m.y_px),
+                    }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), clipboard_host.current(active_view == .terminal));
+                    window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up or root_popup.state.open or root_popup.swallow_left_up or pending_pick != null, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
+                    if (popup_result.request) |request| terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
+                    if (popup_result.consumed) continue;
+                }
+
+                const pointer_toggle_rect = win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w);
+                if (m.kind == .capture_lost) dock_toggle_gesture.cancel();
+                // Busy work ends an old editor capture before caption routing.
+                // Otherwise a swallowed release can keep the scrollbar grabbed.
+                if (pending_save != null or file_close_waiting or initial_open.job != null) {
+                    dock_toggle_gesture.cancel();
+                    hbar_drag.end();
+                    vbar_drag.end();
+                    hbar_drag_release = false;
+                    vbar_drag_release = false;
+                    editor_bar_file = null;
+                    sidebar_resize_drag = null;
+                    divider_drag = null;
+                }
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
 
+                if (sidebar_resize_drag) |offset| {
+                    if (m.kind == .capture_lost) {
+                        sidebar_resize_drag = null;
+                    } else if (m.kind == .moved or m.kind == .left_up) {
+                        // The release carries the final pointer position even when Windows
+                        // coalesces or omits the last move. Paint and persist that same width.
+                        const next = win_sidebar.widthForPointer(m.x_px, offset, chrome_cell_w);
+                        if (next != sidebar_w) {
+                            sidebar_w = next;
+                            window.setFrameless(titlebar_px, caption_buttons_px, sidebar_w);
+                            geom = dockGeometryFor(client_w, client_h, chrome_cell_w, chrome_cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
+                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, chrome_cell_w, chrome_cell_h, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                            // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
+                            if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
+                                resizeAllSessions(&runtime, sessions.items, size, io);
+                                // **리사이즈도 판정한다.** 여기가 없으면 불변식이 **첫 프레임에서만** 지켜진다 —
+                                // `resizeActiveSurface` 가 실패하면(위 `catch {}`) 기하는 바뀌었는데 코어는 옛
+                                // 격자로 남고, 화면은 그럴듯한 채로 셸의 줄바꿈만 어긋난다.
+                                resizes += 1;
+                                // **방금 넘긴 값과 견주면 안 된다** — 그건 언제나 같아서 아무것도 안 잰다
+                                // (실측: 리사이즈 격자를 창에서 유도하는 뮤턴트가 `grid_mismatches=0` 으로
+                                // 통과했다. 화면 숫자는 153x34 로 틀렸는데도). **사각형에서 독립으로** 다시
+                                // 뽑아 견준다.
+                                if (app_window.active()) |a| {
+                                    const want_now = win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h) orelse
+                                        maru.terminal.Size{ .cols = 0, .rows = 0 };
+                                    if (a.core.size.cols != want_now.cols or a.core.size.rows != want_now.rows) grid_mismatches += 1;
+                                }
+                            }
+                            // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
+                            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                                dock_rebuild_failures += 1;
+                            };
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                            rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
+                        }
+                        if (m.kind == .left_up) {
+                            sidebar_writer.schedule(sidebar_w);
+                            sidebar_resize_drag = null;
+                        }
+                    }
+                    continue;
+                }
+                if (divider_drag) |off| {
+                    if (m.kind == .left_up or m.kind == .capture_lost) {
+                        divider_drag = null;
+                    } else if (m.kind == .moved) {
+                        const cand = maru.session.dock_layout.sizePtForPointer(
+                            geom,
+                            .right,
+                            @as(f64, @floatFromInt(m.x_px)) + off,
+                            @floatFromInt(m.y_px),
+                            1000,
+                        );
+                        if (cand) |pt| if (pt != dock_size_pt) {
+                            dock_size_pt = pt;
+                            geom = dockGeometryFor(client_w, client_h, chrome_cell_w, chrome_cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
+                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, chrome_cell_w, chrome_cell_h, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                            // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
+                            // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
+                            // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
+                            // 1254px, 터미널이 35 열로 쪼그라들었다). macOS 가 같은 자리에서
+                            // `sizePtForEffectiveWidth` 로 되쓰는 이유다.
+                            dock_size_pt = maru.session.dock_layout.sizePtForEffectiveWidth(geom.dock_size_px, 0, 1000);
+                            // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
+                            if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
+                                resizeAllSessions(&runtime, sessions.items, size, io);
+                            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                                dock_rebuild_failures += 1;
+                            };
+                            divider_moves += 1;
+                        };
+                    }
+                    continue;
+                }
+
+                // A captured editor drag must precede every region handler, including titlebar
+                // and dock: releasing outside the pane must not leave a scrollbar captured.
+                if (hbar_drag.active or vbar_drag.active) {
+                    const same_file = active_view == .file and editor_bar_file != null and
+                        editor_bar_file.? == active_view.file and active_view.file < open_files.items.len;
+                    if (!same_file) {
+                        hbar_drag.end();
+                        vbar_drag.end();
+                        hbar_drag_release = false;
+                        vbar_drag_release = false;
+                    } else if (m.kind == .moved or m.kind == .left_up or m.kind == .capture_lost) {
+                        const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.terminal.x));
+                        const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.terminal.y));
+                        if (m.kind != .capture_lost) {
+                            hbar_drag.absorb(lx, ly);
+                            vbar_drag.absorb(lx, ly);
+                        }
+                        if (m.kind != .moved) {
+                            hbar_drag_release = true;
+                            vbar_drag_release = true;
+                        }
+                        continue;
+                    }
+                }
+
+                // A launcher press owns its release even over a native caption.
+                // Otherwise dropping that drag on minimize activates another control.
                 // ── 캡션 버튼 (W8.8⒝) ──────────────────────────────────────────────────
                 //
                 // **띠 위는 영역 판정보다 먼저 본다.** 여기서 안 가로채면 캡션 버튼 클릭이
@@ -10203,7 +13203,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 그려지는데 **안 눌린다**: 이 분기가 `continue` 로 삼켜 `regionAt` 까지 못 간다
                 // (실측 2026-08-25: 띠를 합치자마자 `header_clicks` 가 4 → 0 이 됐다).
                 if (titlebar_px != 0 and m.y_px >= 0 and m.y_px < @as(i32, @intCast(titlebar_px)) and
-                    m.x_px >= @as(i32, @intCast(sidebar_w)))
+                    m.x_px >= @as(i32, @intCast(sidebar_w)) and
+                    !win_dock.contains(pointer_toggle_rect, m.x_px, m.y_px) and
+                    !(dock_toggle_gesture.pressed and m.kind != .left_down) and
+                    !(geom.view_bar.w != 0 and m.x_px >= @as(i32, @intCast(geom.view_bar.x)) and
+                        m.x_px < @as(i32, @intCast(geom.view_bar.x + geom.view_bar.w))))
                 {
                     const rects = captionButtonRects(client_w, titlebar_px, caption_btn_w);
                     var hit: ?usize = null;
@@ -10214,8 +13218,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         caption_hover = hit;
                         rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
                     }
+                    if (m.kind == .left_up or m.kind == .left_down) dock_toggle_gesture.cancel();
                     if (m.kind == .left_up) if (hit) |i| {
                         caption_clicks += 1;
+                        if (pending_save != null) caption_save_clicks += 1;
                         switch (i) {
                             0 => window.minimize(),
                             1 => window.toggleMaximize(),
@@ -10228,11 +13234,59 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
                 }
 
+                // Keep native caption controls available, but block covered app actions.
+                if (pending_save != null or file_close_waiting or initial_open.job != null) continue;
+                if (file_notice.open and !confirm_state.open) {
+                    dock_toggle_gesture.cancel();
+                    continue;
+                }
+
+                // The launcher owns a complete press/release, including leaving
+                // its rectangle. A modal or stolen capture cancels that ownership.
+                const toggle_hit = win_dock.contains(pointer_toggle_rect, m.x_px, m.y_px);
+                if (confirm_state.open or m.kind == .capture_lost) dock_toggle_gesture.cancel();
+                if (!confirm_state.open and (toggle_hit or dock_toggle_gesture.pressed)) {
+                    switch (m.kind) {
+                        .left_down => dock_toggle_gesture.down(toggle_hit),
+                        .left_up => if (dock_toggle_gesture.up(toggle_hit)) {
+                            // Keep view and explicit width; only visibility changes.
+                            if (dock_visible and dock_size_pt == 0) dock_size_pt = geom.dock_size_px;
+                            dock_visible = !dock_visible;
+                            dock_key_focus = false;
+                            agent_search_focused = false;
+                            divider_drag = null;
+                            agent_bar_drag = null;
+                            dock_toggle_clicks += 1;
+                            dock_layout_pending = true;
+                            if (!dock_visible) {
+                                if (agent_backend) |*b| _ = b.cancel();
+                            } else if (dock_view == .agent_sessions) {
+                                if (agent_backend) |*b| if (home_dir) |home| {
+                                    if (submitAgentScan(agent_counting.allocator(), b, home).len == 0)
+                                        agent_scan_finished = false;
+                                };
+                            }
+                        },
+                        else => {},
+                    }
+                    continue;
+                }
+
                 // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────
                 //
                 // **영역 판정보다 먼저 본다.** 거터는 도크/사이드바 사각형 **안**이라, 나중에 보면
                 // 목록 행 클릭이 막대를 가져간다(중립 doc 이 "탐색기는 스크롤바를 행보다 먼저
                 // 판정한다" 로 그 순서를 정해 뒀다).
+                if (!dragging and bar_drag == null and scm_bar_drag == null and agent_bar_drag == null and m.kind == .left_down and sidebar_w != 0 and
+                    m.y_px >= @as(i32, @intCast(titlebar_px)) and
+                    m.y_px < @as(i32, @intCast(client_h -| status_bar_px)) and
+                    m.x_px >= @as(i32, @intCast(sidebar_w)) - 5 and
+                    m.x_px < @as(i32, @intCast(sidebar_w)) + 5)
+                {
+                    sidebar_resize_drag = @as(i32, @intCast(sidebar_w)) - m.x_px;
+                    continue;
+                }
+
                 if (bar_drag) |drag| {
                     if (m.kind == .moved) {
                         const bar = if (drag.which == .dock) dock_bar else sidebar_bar;
@@ -10243,14 +13297,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     dock_scroll_px = next;
                                     dock_scrolls += 1;
                                     bar_drag_moves += 1;
-                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                    rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                 }
                             } else if (next != sidebar_scroll_px) {
                                 sidebar_scroll_px = next;
                                 sidebar_scrolls += 1;
                                 sidebar_redraws += 1;
                                 bar_drag_moves += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                             }
                         }
                         continue;
@@ -10280,7 +13334,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         const next = drag.geom.offsetForPointer(u.y_px, drag.grab_dy);
                                         if (scm_scroll.setOffsetPx(@intCast(next), scm_scroll_max)) {
                                             scm_scrolls += 1;
-                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                         }
                                     }
                                 },
@@ -10315,7 +13369,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         const next = drag.geom.offsetForPointer(u.y_px, drag.grab_dy);
                                         if (agent_scroll.setOffsetPx(@intCast(next), agent_scroll_max)) {
                                             agent_scrolls += 1;
-                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                             agent_redraws += 1;
                                         }
                                     }
@@ -10350,11 +13404,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             bar_track_clicks += 1;
                             if (on_dock) {
                                 dock_scroll_px = next;
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                             } else {
                                 sidebar_scroll_px = next;
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                             }
                             bar_drag = .{ .which = if (on_dock) .dock else .sidebar, .grab_dy = b.thumb_h / 2 };
                         }
@@ -10374,43 +13428,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 //
                 // **영역 판정보다 먼저다.** 끌다 보면 포인터가 잡기 띠를 벗어나는데, 그때 영역으로
                 // 다시 가르면 막대를 놓치고 터미널에 선택이 생긴다 — 제스처는 시작한 곳이 소유한다.
-                if (divider_drag) |off| {
-                    if (m.kind == .left_up or m.kind == .capture_lost) {
-                        divider_drag = null;
-                    } else if (m.kind == .moved) {
-                        const cand = maru.session.dock_layout.sizePtForPointer(
-                            geom,
-                            .right,
-                            @as(f64, @floatFromInt(m.x_px)) + off,
-                            @floatFromInt(m.y_px),
-                            1000,
-                        );
-                        if (cand) |pt| if (pt != dock_size_pt) {
-                            dock_size_pt = pt;
-                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
-                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
-                            // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
-                            // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
-                            // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
-                            // 1254px, 터미널이 35 열로 쪼그라들었다). macOS 가 같은 자리에서
-                            // `sizePtForEffectiveWidth` 로 되쓰는 이유다.
-                            dock_size_pt = maru.session.dock_layout.sizePtForEffectiveWidth(geom.dock_size_px, 0, 1000);
-                            // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
-                            if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
-                                resizeAllSessions(&runtime, sessions.items, size, io);
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
-                                dock_rebuild_failures += 1;
-                            };
-                            divider_moves += 1;
-                        };
-                    }
-                    continue;
-                }
-
+                // The sidebar gesture owns moves outside its narrow starting band.
+                // Windows has no traffic lights, so its header minimum uses icon cells only.
                 const region = if (dragging)
                     maru.session.dock_layout.Region.terminal
                 else
                     maru.session.dock_layout.regionAt(geom, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
+                if (region == .dock_content and dock_view == .explorer and m.kind == .right_up and !settings_host.ownsInput() and
+                    !confirm_state.open and !file_notice.open and choice_notice == null and pending_save == null and !file_close_waiting and
+                    initial_open.job == null and !root_flow.busy() and !close_requested)
+                {
+                    const local_y: f64 = @floatFromInt(m.y_px - @as(i32, @intCast(geom.tree_content.y)));
+                    const row = maru.session.file_tree_layout.rowAtLocalY(chrome_cell_h, dock_scroll_px, local_y, dock_rows.items.len);
+                    const background = if (row) |index| dock_rows.items[index] == .empty else local_y >= 0;
+                    if (background) {
+                        terminal_popup.dismiss();
+                        root_popup.show(dock_tree.rootGeneration(), m.x_px, m.y_px);
+                        root_menus_opened += 1;
+                        continue;
+                    }
+                }
                 // ── 누른 곳이 키보드의 주인을 정한다 (W8.22) ──────────────────────────
                 //
                 // **여기가 유일한 자리다.** 아래 분기들이 각자 `continue` 로 빠져나가므로 그 안에
@@ -10445,10 +13482,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // (적대적 검증 2회차 실측: `caption_alive=false`).
                 if (confirm_state.open) {
                     if (m.kind == .left_up) {
-                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
+                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
                             .confirmed => confirm_pending_click = .confirmed,
                             .cancelled => confirm_pending_click = .cancelled,
-                            .alternate, .extra => {},
+                            .alternate, .extra => if ((pending_file_close != null or pending_file_conflict != null) and confirm_pending_click == null) {
+                                confirm_pending_click = action;
+                            },
                         };
                     }
                     continue;
@@ -10459,7 +13498,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     if (notches != 0 and sidebar_header_h != 0) {
                         const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
                         const rws2 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-                        const m2 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+                        const m2 = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
                         // **상한은 콘텐츠가 정한다** — 중립이 그 높이를 소유한다(`contentHeight`).
                         const content_h = maru.chrome.components.sidebar.contentHeight(rws2, m2);
                         const view_h = geom.sidebar.h -| sidebar_header_h;
@@ -10471,7 +13510,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             sidebar_scroll_px = clamped;
                             sidebar_scrolls += 1;
                             sidebar_redraws += 1;
-                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                         }
                     }
                     continue;
@@ -10498,15 +13537,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         local_y,
                         sidebar_header_h,
                         sb_rows,
-                        maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h),
+                        maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h),
                         sidebar_scroll_px,
                     );
                     if (next_header != sidebar_hover_header or next_slot != sidebar_hover_slot) {
                         sidebar_hover_header = next_header;
                         sidebar_hover_slot = next_slot;
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                     }
+                    if (m.kind == .left_down and next_header == .view_options) settings_gear_pressed = true;
                     if (m.kind == .left_up) {
                         if (next_header) |r| {
                             sidebar_header_clicks += 1;
@@ -10533,30 +13573,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         agent_search_focus_changes += 1;
                                     }
                                     sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                                 }
                                 continue;
                             }
-                            if (r == .new_workspace and sessions.items.len < max_win_sessions) {
-                                // **지금 크기로 만든다.** 활성 표면의 격자가 창이 아는 최신 값이다.
-                                if (app_window.active()) |a| spawn_opts.size = a.core.size;
-                                if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts)) {
-                                    session_spawns += 1;
-                                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
-                                    // 새 세션을 **바로 활성으로** 만든다 — 만들고 안 보여 주면
-                                    // 눌린 것이 화면에 안 나타난다.
-                                    //
-                                    // **보는 것도 터미널로 돌린다.** `selectTab` 만 하면 파일을 보는
-                                    // 중에 ＋ 를 눌렀을 때 세션은 생기는데 화면은 파일 그대로다 —
-                                    // 위 규칙이 말하는 바로 그 실패다(적대적 검증 1회차 실측).
-                                    _ = app_window.selectTab(sessions.items.len - 1);
-                                    active_view = .{ .terminal = sessions.items.len - 1 };
-                                    sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
-                                } else |_| {
-                                    session_spawn_failures += 1;
-                                }
+                            if (r == .view_options and settings_gear_release) {
+                                terminal_popup.dismiss();
+                                settings_host.toggle();
+                                window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
+                                continue;
                             }
+                            if (r == .new_workspace) queued_new_terms += 1;
                         } else if (next_slot) |s| {
                             sidebar_card_clicks += 1;
                             sidebar_last_slot = s;
@@ -10569,7 +13596,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             // **선택보다 먼저 본다.** 뒤에 두면 ✕ 를 눌러도 카드가 선택될 뿐이다.
                             close_blk: {
                                 const cc = sidebar_card_columns orelse break :close_blk;
-                                if (maru.chrome.components.sidebar.closeButton(@floatFromInt(m.x_px), cc, cell_w)) {
+                                if (maru.chrome.components.sidebar.closeButton(@floatFromInt(m.x_px), cc, chrome_cell_w)) {
                                     close_clicks += 1;
                                     // **카드가 자기 정체를 든다.** 슬롯 번호에서 산수로 되돌리면
                                     // 검색이 목록을 거르는 순간 번호와 실물이 갈린다(W8.15).
@@ -10577,60 +13604,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     if (src == .file) {
                                         const fi = src.file;
                                         if (fi < open_files.items.len) {
-                                            var gone = open_files.orderedRemove(fi);
-                                            gone.deinit(allocator);
-                                            file_closes += 1;
-                                            // **뒤쪽 색인이 하나씩 앞으로 당겨진다.** 보고 있던 것이
-                                            // 그 뒤였다면 따라 당겨야 하고, 닫은 것 자체였다면
-                                            // 터미널로 돌아간다 — 안 그러면 없는 파일을 가리킨다.
-                                            active_view = switch (active_view) {
-                                                .file => |a| if (a == fi)
-                                                    ActiveView{ .terminal = app_window.active_tab }
-                                                else if (a > fi)
-                                                    ActiveView{ .file = a - 1 }
-                                                else
-                                                    ActiveView{ .file = a },
-                                                .terminal => |t| ActiveView{ .terminal = t },
-                                            };
-                                            refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
-                                            sidebar_redraws += 1;
-                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                            requestFileViewClose(allocator, &editor_files, open_files.items[fi].document, &backup_clean_closes, &pending_file_close, &pending_file_conflict, &confirm_state, &confirm_pending_click) catch |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                                            pending_close_id = null;
+                                            break :close_blk;
                                         }
                                     } else {
                                         // ── 세션을 닫는다 (W8.16) ───────────────────────────
                                         //
-                                        // 계약이 정한 그대로다 — 프롬프트면 즉시, 실행 중이면 보류.
-                                        // Windows 에 모달이 없어 **보류 = 안 닫음**이고, 그 사실을
-                                        // 수치로 남긴다(조용히 죽이지 않는다).
-                                        switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, src.session, false)) {
-                                            .closed => {
-                                                session_closes += 1;
-                                                // **pump 를 다시 건다.** 루프는 첫 세션 것을 보는데
-                                                // 그것이 닫혔을 수 있다(포인터로 보므로 값만 바꾸면 된다).
-                                                pump = sessions.items[0].pump;
-                                                // **보고 있던 것이 파일이면 그대로 둔다.** 배경
-                                                // 세션 하나를 닫았다고 문서에서 튕겨 나오면 안 된다
-                                                // (적대적 검증 1회차). 터미널을 보고 있었을 때만
-                                                // 번호를 다시 맞춘다 — 그 번호는 방금 당겨졌다.
-                                                if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
-                                                refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
-                                                sidebar_redraws += 1;
-                                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
-                                            },
-                                            .busy_needs_confirm => {
-                                                // **조용히 죽이지 않고 묻는다.** 여기가 §2m.77 이
-                                                // "모달이 선행" 이라 적어 둔 자리다.
-                                                session_close_busy += 1;
-                                                pending_close_id = if (src.session < sessions.items.len) sessions.items[src.session].surface.id else null;
-                                                confirm_state.show(maru.i18n.t(.app_close_running), .{
-                                                    .confirm = maru.i18n.t(.btn_close),
-                                                    .cancel = maru.i18n.t(.common_cancel),
-                                                });
-                                                confirm_shows += 1;
-                                            },
-                                            .last_session => session_close_last += 1,
-                                            .out_of_range => {},
-                                        }
+                                        // Both mouse and keyboard enqueue a stable surface ID.
+                                        // The shared consumer checks running-session approval.
+                                        if (src.session < sessions.items.len) queued_session_close_id = sessions.items[src.session].surface.id;
                                     }
                                     continue;
                                 }
@@ -10644,18 +13627,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     active_view = .{ .file = fi };
                                     file_view_switches += 1;
                                     sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                                 }
                                 continue;
                             }
                             // **카드를 누르면 그 세션으로 간다.** 판정은 중립이 소유한다
                             // (`AppWindow.selectTab` — 범위 밖이면 false).
                             const ti = sel_src.session;
-                            if (ti != app_window.active_tab and app_window.selectTab(ti)) {
+                            if ((active_view != .terminal or ti != app_window.active_tab) and app_window.selectTab(ti)) {
                                 active_view = .{ .terminal = ti };
                                 tab_switches += 1;
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                             }
                         }
                     }
@@ -10676,7 +13659,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     const unit_px: f64 = @as(f64, @floatFromInt(wheel_lines_per_notch *| cell_h)) / 120.0;
                     if (agent_scroll.scrollByWheel(@floatFromInt(m.wheel_delta), unit_px, agent_scroll_max)) {
                         agent_scrolls += 1;
-                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                        rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                     }
                 }
                 // ── 소스 컨트롤 목록 스크롤 (W8.22) ────────────────────────────────
@@ -10687,7 +13670,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     const unit_px: f64 = @as(f64, @floatFromInt(wheel_lines_per_notch *| cell_h)) / 120.0;
                     if (scm_scroll.scrollByWheel(@floatFromInt(m.wheel_delta), unit_px, scm_scroll_max)) {
                         scm_scrolls += 1;
-                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                        rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                     }
                 }
                 if (region == .dock_content and m.kind == .wheel and dock_view == .explorer) {
@@ -10704,7 +13687,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (clamped != dock_scroll_px) {
                             dock_scroll_px = clamped;
                             dock_scrolls += 1;
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                         }
                     }
                     continue;
@@ -10723,7 +13706,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             .h = geom.view_bar.h,
                         };
                         if (m.x_px >= 0 and m.y_px >= 0) {
-                            if (maru.chrome.components.dock_view_bar.slotAtPoint(bar, winDockViewBarGrid(&chrome_tokens, cell_w), @intCast(m.x_px), @intCast(m.y_px))) |slot| {
+                            if (maru.chrome.components.dock_view_bar.slotAtPoint(bar, winDockViewBarGrid(&chrome_tokens, chrome_cell_w), @intCast(m.x_px), @intCast(m.y_px))) |slot| {
                                 if (maru.session.dock_panel.View.forSlot(slot)) |next_view| if (next_view != dock_view) {
                                     dock_view = next_view;
                                     view_switches += 1;
@@ -10738,11 +13721,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // 돌아왔을 때 지나가기만 해도 목록이 튄다(적대적 검증 4회차).
                                     agent_bar_drag = null;
                                     // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
-                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
-                                    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                                    geom = dockGeometryFor(client_w, client_h, chrome_cell_w, chrome_cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px, &chrome_tokens);
+                                    rebuildStatusBar(allocator, &status_cells, geom.status_bar, chrome_cell_w, chrome_cell_h, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         resizeAllSessions(&runtime, sessions.items, size, io);
-                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                                    rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                                         dock_rebuild_failures += 1;
                                     };
                                 };
@@ -10823,6 +13806,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 // 인텐트도 렌더도 **중립이 이미 갖고 있었다**(`focus_search`,
                                 // `props.search`·`search_focused`·`search_cursor_visible`) — 없던 것은
                                 // 키의 주인뿐이다.
+                                if (intent == .reveal_log) {
+                                    if (agent_state.expanded_identity) |id| if (id < agent_archive.cards.len and agent_detail.identity == id) {
+                                        const card = agent_archive.cards[id];
+                                        if (canRevealAgentLog(card, &agent_detail)) {
+                                            const source: agent_detail_backend.Source = .{ .provider = card.scan_provider, .source_path = @constCast(card.source_path), .inode = card.inode, .device = card.device, .origin = card.origin };
+                                            const started = reveal_owner.start(source, agent_detail.request_id, id) catch |err| {
+                                                std.log.warn("archive log reveal failed({s})", .{@errorName(err)});
+                                                continue;
+                                            };
+                                            if (started) {
+                                                agent_detail.reveal_busy = true;
+                                                var pa = std.heap.ArenaAllocator.init(allocator);
+                                                defer pa.deinit();
+                                                projectAgentItems(pa.allocator(), agent_arena.allocator(), &agent_archive, &agent_items, agentOpenDetail(&agent_detail, agent_state.expanded_identity)) catch {};
+                                                agent_opts.items = agent_items.items;
+                                                agent_state.invalidateTree();
+                                                changed = true;
+                                            }
+                                        }
+                                    };
+                                }
                                 if (intent == .focus_search) {
                                     if (!agent_search_focused) {
                                         agent_search_focused = true;
@@ -10837,12 +13841,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         agent_opts.search_preedit = agent_search.preedit.items;
                                         agent_opts.search_focused = true;
                                         agent_state.invalidateTree();
-                                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                        rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                         agent_redraws += 1;
                                         if (search_focused) {
                                             search_focused = false;
                                             search_focus_changes += 1;
-                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                                         }
                                     }
                                 }
@@ -10910,7 +13914,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             }
                             if (changed) {
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                 agent_redraws += 1;
                             }
                         }
@@ -10959,7 +13963,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             }
                             if (changed) {
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+                                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                                     dock_rebuild_failures += 1;
                                 };
                                 scm_dock_redraws += 1;
@@ -10973,7 +13977,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (region == .dock_content and local_y >= 0) {
                             // **그린 행 수를 쓴다** — `dock_rows.items.len` 을 쓰면 안 그린 행이 눌린다(적대적 검증
                             // 실측: 110 행짜리 디렉터리에서 도크 맨 아래가 그리지 않은 29 행을 냈다).
-                            if (maru.session.file_tree_layout.rowAtLocalY(cell_h, dock_scroll_px, local_y, dock_rows.items.len)) |row| {
+                            if (maru.session.file_tree_layout.rowAtLocalY(chrome_cell_h, dock_scroll_px, local_y, dock_rows.items.len)) |row| {
                                 dock_row_clicks += 1;
                                 dock_last_row = row;
                                 // ── 폴더를 누르면 펼쳐진다 ──────────────────────────────
@@ -10996,7 +14000,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         else => null,
                                     };
                                     if (clicked_file_path) |fp| {
-                                        const owned = allocator.dupe(u8, fp) catch continue;
+                                        const owned = allocator.dupe(u8, fp) catch {
+                                            file_rejects += 1;
+                                            last_reject = .out_of_memory;
+                                            file_notice.show(maru.i18n.t(.win_file_open_memory));
+                                            continue;
+                                        };
                                         // `openFileFor` 가 자기 몫을 따로 복사하므로 이것은 항상 놓는다.
                                         defer allocator.free(owned);
                                         // **이미 열려 있으면 그것으로 간다**(창당 경로 유일성).
@@ -11012,31 +14021,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (found) |fi| {
                                             file_reopens += 1;
                                             active_view = .{ .file = fi };
-                                        } else switch (openFileFor(allocator, io, owned)) {
-                                            .opened => |of| {
-                                                open_files.append(allocator, of) catch {
-                                                    var tmp = of;
-                                                    tmp.deinit(allocator);
-                                                    continue;
-                                                };
-                                                file_opens += 1;
-                                                active_view = .{ .file = open_files.items.len - 1 };
-                                            },
-                                            // **못 여는 것을 조용히 넘기지 않고, 이유도 안 뭉갠다.**
-                                            // `.md` 는 계약상 WebView 본문이라 W8.6 이 선행이고,
-                                            // 읽기 실패는 결함이거나 4 MiB 상한이다 — 다른 사실이다.
-                                            else => |why| {
+                                        } else {
+                                            initial_open.startForAppWithRecovery(owned, 4 << 20, null) catch |err| {
+                                                const why = initialOpenFailure(err);
                                                 file_rejects += 1;
                                                 last_reject = std.meta.activeTag(why);
+                                                file_notice.show(maru.i18n.t(OpenOutcome.noticeKey(last_reject).?));
                                                 continue;
-                                            },
+                                            };
+                                            hbar_drag.end();
+                                            vbar_drag.end();
+                                            hbar_drag_release = false;
+                                            vbar_drag_release = false;
+                                            file_notice.show(maru.i18n.t(.scm_loading));
+                                            continue;
                                         }
                                         refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                         // **목록만 고치면 화면은 그대로다.** 실측 캡처에서 편집기는
                                         // 떴는데 사이드바에 그 파일 카드가 없었다 — 카드 **수**를
                                         // 보는 판정은 그것을 못 본다(모델은 맞았으니까).
                                         sidebar_redraws += 1;
-                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                                         continue;
                                     }
                                     const toggle_path: ?[]const u8 = switch (dock_rows.items[row]) {
@@ -11053,7 +14058,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (toggleTreeRow(allocator, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, rp, owned_path, &submitted)) {
                                             if (submitted and tree_expand_submit_spin == null) tree_expand_submit_spin = spins;
                                             dock_row_toggles += 1;
-                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                                            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                                         }
                                     };
                                 }
@@ -11107,6 +14112,24 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **가로 스크롤이 기본이고 랩은 토글이다**(`native-editor-visual-mapping.md`) — 그
                 // 기본 축에 입력이 없으면 창보다 긴 줄은 **잘린 채 끝이다**. 둘로 받는다:
                 // 기울임 휠·터치패드의 `wheel_h`, 그리고 평범한 휠에 **Shift**(터미널이 이미 쓰는 관례).
+                if (file_comparison) |*comparison| {
+                    if (m.kind == .wheel or m.kind == .wheel_h) {
+                        const horizontal = m.kind == .wheel_h or (m.mods & win32_mouse.mod_shift) != 0;
+                        const notches = if (horizontal) wheel_acc_h.feed(m.wheel_delta) else wheel_acc_editor.feed(m.wheel_delta);
+                        const amount = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
+                        if (horizontal) {
+                            const col = if (m.x_px < geom.terminal.x + geom.terminal.w / 2) &comparison.left_col else &comparison.right_col;
+                            const signed = if (m.kind == .wheel_h) amount else -amount;
+                            col.* = @intCast(std.math.clamp(@as(i64, col.*) + signed, 0, std.math.maxInt(u16)));
+                        } else {
+                            const visible: u16 = @intCast(@min(std.math.maxInt(u16), @max(1, geom.terminal.h / cell_h)));
+                            const wanted: u32 = @intCast(std.math.clamp(@as(i64, comparison.first_line) - amount, 0, std.math.maxInt(u32)));
+                            comparison.first_line = @intCast(editor_view.viewport.clampFirstRow(wanted, comparison.left.lines.len, visible));
+                        }
+                    }
+                    continue;
+                }
+                if (active_view == .file and active_view.file < open_files.items.len and try file_changes.hasChoice(open_files.items[active_view.file].document)) continue;
                 if ((m.kind == .wheel or m.kind == .wheel_h) and active_view == .file and active_view.file < open_files.items.len) {
                     const horizontal = m.kind == .wheel_h or (m.mods & win32_mouse.mod_shift) != 0;
                     const notches = if (horizontal) wheel_acc_h.feed(m.wheel_delta) else wheel_acc_editor.feed(m.wheel_delta);
@@ -11132,9 +14155,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         continue;
                     }
                     const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
-                    const vis: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, geom.terminal.h / cell_h)));
                     const next: i64 = @as(i64, @intCast(of.first_line)) - @as(i64, lines);
-                    const max_top = editor_view.viewport.clampFirstRow(std.math.maxInt(usize), of.lines.items.len, vis);
+                    const max_top = of.vmax_line;
                     const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_top))));
                     if (clamped != of.first_line) {
                         of.first_line = clamped;
@@ -11159,11 +14181,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.terminal.x));
                     const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.terminal.y));
                     switch (m.kind) {
-                        .left_down => if (editor_last_hbar) |bar| {
-                            // thumb 밖을 누르면 **그 자리로 뛴 뒤** 잡은 것으로 친다(중립 규칙).
-                            if (hbar_drag.begin(bar, lx, ly)) |jumped| {
-                                of.first_col = @intCast(@min(@as(u32, of.hmax_col), jumped / @max(1, cell_w)));
-                                editor_hdrags += 1;
+                        .left_down => {
+                            // A preceding file switch invalidates the old frame's hit targets.
+                            if (editor_bar_file != active_view.file) continue;
+                            if (editor_last_vbar) |bar| {
+                                if (vbar_drag.begin(bar, lx, ly)) |jumped| {
+                                    of.first_line = @min(of.vmax_line, jumped / @max(1, cell_h));
+                                    editor_vdrags += 1;
+                                }
+                                if (vbar_drag.active) continue;
+                            }
+                            if (editor_last_hbar) |bar| {
+                                // thumb 밖을 누르면 **그 자리로 뛴 뒤** 잡은 것으로 친다(중립 규칙).
+                                if (hbar_drag.begin(bar, lx, ly)) |jumped| {
+                                    of.first_col = @intCast(@min(@as(u32, of.hmax_col), jumped / @max(1, cell_w)));
+                                    editor_hdrags += 1;
+                                }
                             }
                         },
                         .moved => hbar_drag.absorb(lx, ly),
@@ -11179,6 +14212,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     mouse_over_file += 1;
                     continue;
                 }
+                const terminal_point = win32_mouse.pointRelativeTo(.{ .x = m.x_px, .y = m.y_px }, geom.terminal.x, geom.terminal.y);
                 // **가로 축을 가진 표면이 아직 편집기뿐이다.** 여기까지 오면 버린다 — 안 버리면
                 // 아래 리포트 변환의 `unreachable` 에 걸린다(터미널에는 가로 휠 리포트가 없다).
                 if (m.kind == .wheel_h) continue;
@@ -11193,7 +14227,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         // **휠 리포트에도 셀 좌표를 싣는다.** 앱이 그것으로 어느 pane 을 굴릴지 정한다
                         // (less·vim 분할) — (0,0)을 실으면 늘 좌상단이라고 말하는 셈이다. 창이 화면
                         // 기준 좌표를 주는 것은 창 쪽에서 이미 클라이언트 기준으로 바꿔 올린다.
-                        const wcell = win32_mouse.cellFromPixel(m.x_px, m.y_px, cell_w, cell_h, cols, rows) orelse continue;
+                        const wcell = win32_mouse.cellFromPixel(terminal_point.x, terminal_point.y, cell_w, cell_h, cols, rows) orelse continue;
                         last_mouse_cell = wcell;
                         last_wheel_cell = wcell;
                         // **눈금당 한 번**이다(줄 수만큼이 아니다).
@@ -11204,8 +14238,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 .button = button,
                                 .col = wcell.col,
                                 .row = wcell.row,
-                                .x_px = @intCast(@max(m.x_px, 0)),
-                                .y_px = @intCast(@max(m.y_px, 0)),
+                                .x_px = @intCast(@max(terminal_point.x, 0)),
+                                .y_px = @intCast(@max(terminal_point.y, 0)),
                                 .pressed = true,
                                 .motion = false,
                                 .mods = win32_mouse.reportModifiers(m.mods),
@@ -11261,7 +14295,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     continue;
                 }
 
-                const cell = win32_mouse.cellFromPixel(m.x_px, m.y_px, cell_w, cell_h, cols, rows) orelse continue;
+                const cell = win32_mouse.cellFromPixel(terminal_point.x, terminal_point.y, cell_w, cell_h, cols, rows) orelse continue;
                 last_mouse_cell = cell;
 
                 if (to_shell) {
@@ -11298,8 +14332,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         .button = button,
                         .col = cell.col,
                         .row = cell.row,
-                        .x_px = @intCast(@max(m.x_px, 0)),
-                        .y_px = @intCast(@max(m.y_px, 0)),
+                        .x_px = @intCast(@max(terminal_point.x, 0)),
+                        .y_px = @intCast(@max(terminal_point.y, 0)),
                         .pressed = pressed,
                         .motion = is_motion,
                         .mods = win32_mouse.reportModifiers(m.mods),
@@ -11321,9 +14355,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             try pasteClipboardIntoActive(allocator, io, window.hwnd, &app_window, &runtime, stderr, paste_protection, bracketed_paste_is_safe, &paste_out);
                             right_click_pastes += 1;
                         },
-                        // context 메뉴는 chrome 이 있어야 한다(W8). 지금은 아무것도 하지 않고 센다 —
-                        // 조용히 무시하면 "우클릭이 안 먹는다"의 원인을 못 찾는다.
-                        .menu => right_click_menus_unimplemented += 1,
+                        .menu => {
+                            terminal_popup.show(active.id, m.x_px, m.y_px);
+                            window.setInputOverlay(true, .dismiss_on_blur);
+                            dragging = false;
+                            terminal_menus_opened += 1;
+                        },
                         // 트래킹이 아닌데 `reporting` 으로 뒀으면 보낼 곳이 없다. 무동작이 맞다.
                         .reporting => {},
                     }
@@ -11419,6 +14456,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // **요약은 활성 세션 것을 넘긴다.** 프레임을 만드는 것은 활성 표면 하나이고, 종료 판정도
         // 그 세션의 것이어야 한다(다른 탭이 끝났다고 창을 닫으면 안 된다).
+        input_dispatcher.flush();
         var active_drain: maru.app.RuntimePumpDrainSummary = .{};
         for (sessions.items, 0..) |s, i| {
             const ds = s.pump.drainAvailable() catch continue;
@@ -11438,21 +14476,43 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 defer active.unlockCore(io);
                 break :blk .{ .row = active.core.screen.cursor.row, .col = active.core.screen.cursor.col };
             };
-            const changed = last_ime_caret == null or
-                last_ime_caret.?.row != cur.row or last_ime_caret.?.col != cur.col;
+            const settings_caret = settings_host.imeCaret(
+                confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens),
+                &chrome_tokens,
+            );
+            const caret: maru.session.mouse_coordinates.ImeCaret = settings_caret orelse .{
+                .row = cur.row,
+                .col = cur.col,
+                .cell_w = cell_w,
+                .cell_h = cell_h,
+                .origin_x = geom.terminal.x,
+                .origin_y = geom.terminal.y,
+            };
+            const changed = last_ime_caret == null or !std.meta.eql(last_ime_caret.?, caret);
             if (changed) {
-                window.setImeCaret(cur.row, cur.col, cell_w, cell_h);
-                last_ime_caret = .{ .row = cur.row, .col = cur.col };
+                window.setImeCaret(caret);
+                last_ime_caret = caret;
                 ime_caret_updates += 1;
+                if (settings_caret != null) ime_settings_caret_updates += 1;
+                if (settings_caret != null and settings_host.form.state.editing) ime_settings_edit_caret_updates += 1;
             }
         }
 
         // **OSC 52 를 배수한다.** 셸이 클립보드 읽기·쓰기를 요청하면 코어가 pending 으로 들고 있고
         // 플랫폼이 정책을 확인한 뒤 OS 를 만진다 — 코어가 OS 를 직접 만지지 않는 것이 그 설계다.
-        if (app_window.active()) |active| {
+        // Background shells retain their own request/response target too.
+        for (sessions.items) |session| {
+            const active = &session.surface;
             active.lockCore(io);
             const pending = active.core.pendingClipboardWrite();
             const want_read = active.core.clipboardReadPending();
+            const read_target_id = active.id;
+            // Snapshot Pc before clearing the core-owned storage. Denied reads
+            // never allocate a target or touch the OS clipboard.
+            const read_target: ?[]u8 = if (want_read and osc52_read_policy == .allow)
+                allocator.dupe(u8, active.core.clipboardReadTarget()) catch null
+            else
+                null;
             // **락 안에서 OS 를 부르지 않는다** — 클립보드 호출은 다른 프로세스를 기다릴 수 있어(소유자가
             // 지연 렌더링하면 블록된다) 그 사이 PTY 리더가 코어 락에 막힌다. 복사해 두고 락 밖에서 쓴다.
             var write_copy: ?[]u8 = null;
@@ -11460,7 +14520,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 복사에 실패했는데도 pending 을 비우면 요청이 **아무 흔적 없이** 사라진다. 세어서 알린다.
             if (pending.len > 0 and write_copy == null) clipboard_errors += 1;
             if (pending.len > 0) active.core.clearClipboardWrite();
-            if (want_read) active.core.clearClipboardRead();
+            if (want_read and (osc52_read_policy != .allow or read_target != null)) active.core.clearClipboardRead();
             active.unlockCore(io);
 
             if (write_copy) |bytes| {
@@ -11474,19 +14534,38 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     clipboard_errors += 1;
                 }
             }
-            if (want_read) {
+            if (read_target) |target| {
+                defer allocator.free(target);
                 osc52_reads += 1;
-                // **읽기는 정책이 막는다.** `osc52.read` 기본값이 `deny` 다 — 원격/내부 프로그램이 로컬
-                // 클립보드를 탈취하는 것을 막는 사용자 결정이고(`config/theme.zig`), macOS 도 같은 판정을
-                // 한다. pending 은 정책과 무관하게 위에서 이미 소비했다(안 그러면 매 tick 재트리거된다).
-                //
-                // `allow` 일 때 보낼 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)을 여기서 만들지 않는다. 그
-                // 인코더(`formatOsc52ReadResponse`)가 **중립이 아니라 macOS `app_session.zig` 안에** 있어,
-                // Windows 가 쓰려면 중립으로 들어올려야 한다 — 그것은 이 슬라이스 밖의 설계 결정이라
-                // 사용자에게 보고하고 정한다(AGENTS.md 핵심 원칙).
-                if (osc52_read_policy == .allow) osc52_reads_denied_unimplemented += 1;
+                read_response: {
+                    const clipboard = win32_clipboard.readRaw(allocator, window.hwnd) catch {
+                        clipboard_errors += 1;
+                        osc52_read_failures += 1;
+                        break :read_response;
+                    };
+                    defer if (clipboard) |bytes| allocator.free(bytes);
+                    // No text is an empty reply. Native read errors are failures;
+                    // no diagnostic includes clipboard payload bytes.
+                    const response = maru.app.clipboard_response.format(allocator, target, clipboard orelse "") catch {
+                        clipboard_errors += 1;
+                        osc52_read_failures += 1;
+                        break :read_response;
+                    };
+                    defer allocator.free(response);
+                    const accepted = runtime.writeProtocolResponseNonBlocking(read_target_id, response) catch {
+                        clipboard_errors += 1;
+                        osc52_read_failures += 1;
+                        break :read_response;
+                    };
+                    if (accepted == response.len) osc52_read_responses_queued += 1 else osc52_read_failures += 1;
+                }
+            } else if (want_read) {
+                if (osc52_read_policy == .allow) {
+                    clipboard_errors += 1; // Target allocation failed; core retries next tick.
+                } else osc52_reads += 1;
             }
         }
+        input_dispatcher.flush();
 
         // ⑴ 아틀라스가 커졌으면 텍스처를 다시 만든다(중립 쪽이 전체를 무효화하고 재배치했으므로 안전하다).
         const now_w = renderer_state.atlas.config.atlas_width_px;
@@ -11498,7 +14577,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_resizes += 1;
             // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
             // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
+            rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {
                 dock_rebuild_failures += 1;
             };
         }
@@ -11534,14 +14613,58 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         colors.selection = if (app_window.active()) |a| a.core.selectionViewportSpan() else null;
         if (colors.selection != null) selection_frames += 1;
 
+        // Presentation changes only owned frame overlays, never the core's
+        // canonical cursor. Application DECSCUSR and user blink=false both
+        // participate in the same policy as macOS.
+        const terminal_colors = colors;
+        var cursor_fade_milli: u32 = 1000;
+        if (app_window.active()) |active| {
+            active.lockCore(io);
+            const app_blink = active.core.cursor_blink;
+            const app_visible = active.core.cursor_visible;
+            active.unlockCore(io);
+            if (cursor_surface != active.id or cursor_focus_generation != window.focus_generation or active_drain.output_events > 0) cursor_phase.reset();
+            cursor_surface = active.id;
+            cursor_focus_generation = window.focus_generation;
+            const modal = window.input_overlay_open or confirm_state.open or file_notice.open or choice_notice != null;
+            const mode = maru.app.cursor_presentation.unfocusedMode(window.keyboard_focused, modal, appearance.cursor.unfocused);
+            const blink = maru.app.cursor_presentation.shouldBlink(appearance.cursor.blink, app_blink, app_visible, window.preeditText().len != 0, modal);
+            cursor_fade_milli = cursor_phase.sample(std.Io.Clock.awake.now(io).nanoseconds, appearance.cursor.blink_interval_ms, appearance.cursor.blink_fade_ms, blink);
+            const visible = cursor_fade_milli != 0;
+            for (tick.frame.render_frame.glyph_quad_frame.overlays) |*overlay| switch (overlay.*) {
+                .cursor => |*cursor| {
+                    cursor.hollow = mode == .hollow;
+                    cursor.visible = cursor.visible and visible and mode != .hidden;
+                },
+                else => {},
+            };
+        }
+
         // ⑶ 중립 투영 → D3D11 셀.
-        const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
+        var positioned_terminal: ?maru.renderer.metal_frame.PositionedTerminalFrame = null;
+        for (tick.frame.render_frame.glyph_quad_frame.glyphs) |glyph| {
+            if (glyph.run.placement == null) continue;
+            positioned_terminal = try maru.renderer.metal_frame.buildPositionedTerminalFrame(
+                allocator,
+                tick.frame.render_frame.glyph_quad_frame,
+                tick.frame.render_frame.draw_list.cells,
+                terminal_colors,
+                cell_w,
+                cell_h,
+                geom.terminal.x,
+                geom.terminal.y,
+            );
+            break;
+        }
+        defer if (positioned_terminal) |*positioned| positioned.deinit(allocator);
+        const legacy_cells = if (positioned_terminal == null) try maru.renderer.metal_frame.buildNativeCellsSplit(
             allocator,
             tick.frame.render_frame.glyph_quad_frame,
             tick.frame.render_frame.draw_list.cells,
-            colors,
-        );
-        defer allocator.free(native);
+            terminal_colors,
+        ) else null;
+        const native = if (positioned_terminal) |positioned| positioned.base else legacy_cells.?.cells;
+        defer if (positioned_terminal == null) allocator.free(native);
         // **터미널을 자기 사각형에 놓는다**(§2m.31). 원점을 안 찍으면 도크가 있어도 터미널이 창
         // 왼쪽 위에서 시작해 도크 밑으로 깔린다.
         maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.terminal.x, geom.terminal.y);
@@ -11561,7 +14684,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (dock_scroll_px > dock_max) {
                 dock_scroll_px = dock_max;
                 dock_clamps += 1;
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
             }
         }
         // ── 눈이 따라간다 (W8.18a) ──────────────────────────────────────────────────────
@@ -11581,7 +14704,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             sidebar_reveal_request = false;
             if (want_reveal and sidebar_header_h != 0 and geom.sidebar.h > sidebar_header_h) {
                 const rws_rv = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, active_slot_now);
-                const mm_rv = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+                const mm_rv = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
                 const next_off = maru.chrome.components.sidebar.scrollToSlot(
                     rws_rv,
                     active_slot_now,
@@ -11593,15 +14716,39 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     sidebar_scroll_px = next_off;
                     sidebar_reveals += 1;
                     // **셀을 다시 짓는다** — 사이드바 셀은 클릭 때 지어져 옛 offset 을 들고 있다.
-                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                 }
             }
         }
+        if (smoke and dclamp_judgeable and !dclamp_captured and dock_view == .explorer and
+            dock_rows.items.len > 0 and dock_rows.items.len < dclamp_rows_before)
+        {
+            dclamp_off_after = dock_scroll_px;
+            dclamp_rows_after = dock_rows.items.len;
+            dclamp_drawn_after = dock_rows_drawn;
+            dclamp_draw_start_after = dock_draw_start;
+            dclamp_captured = true;
+            // Restore the preceding scenario's viewport after recording the hostile shrink.
+            const restored = @min(dclamp_saved_scroll, dock_scroll_px);
+            if (restored != dock_scroll_px) {
+                dock_scroll_px = restored;
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            }
+        }
         cells.clearRetainingCapacity();
-        try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len + sidebar_cells.items.len + titlebar_cells.items.len);
+        // The positioned packet adds ink and cursor streams after its base.
+        // Reserve them before subsequent chrome appendAssumeCapacity calls too.
+        const terminal_cell_capacity = if (positioned_terminal) |positioned|
+            positioned.base.len + positioned.ink.len + positioned.overlays.len + positioned.cursor_ink.len
+        else
+            native.len;
+        try cells.ensureTotalCapacity(allocator, terminal_cell_capacity + dock_cells.items.len + sidebar_cells.items.len + titlebar_cells.items.len);
         // **사이드바·도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 그 배경에 덮이면 안 된다.
         cells.appendSliceAssumeCapacity(sidebar_cells.items);
-        cells.appendSliceAssumeCapacity(dock_cells.items);
+        // Titlebar switcher cells are composited after the titlebar background below.
+        for (dock_cells.items) |cell| {
+            if (cell.rect[1] >= @as(f32, @floatFromInt(titlebar_px))) cells.appendAssumeCapacity(cell);
+        }
         // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────────────
         //
         // **내용 위에 얹는다** — 그리는 순서가 z 순서다. 거터는 상시 비워 둔 자리라 겹칠 것이
@@ -11610,14 +14757,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **매 프레임 다시 잰다.** 상태(offset·행 수)가 바뀌면 thumb 이 따라와야 하는데, 캐시하면
         // "굴렸는데 막대가 안 움직인다" 가 된다 — 쿼드 넷이라 값이 싸다.
         dock_bar = if (dock_view == .explorer)
-            dockScrollbarGeometry(geom, dock_rows.items.len, cell_h, dock_scroll_px)
+            dockScrollbarGeometry(geom, dock_rows.items.len, chrome_cell_h, dock_scroll_px)
         else
             null;
         if (dock_bar) |bar| appendScrollbarCells(allocator, &cells, bar, &chrome_tokens) catch {};
         sidebar_bar = blk: {
             if (sidebar_header_h == 0) break :blk null;
             const rws = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
-            const mm = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const mm = maru.chrome.components.sidebar.Metrics.init(chrome_cell_h, chrome_cell_h);
             break :blk sidebarScrollbarGeometry(geom, sidebar_header_h, maru.chrome.components.sidebar.contentHeight(rws, mm), sidebar_scroll_px);
         };
         if (sidebar_bar) |bar| appendScrollbarCells(allocator, &cells, bar, &chrome_tokens) catch {};
@@ -11637,6 +14784,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const atlas_before_h = atlas_h;
         const showing_file = active_view == .file and active_view.file < open_files.items.len;
         const term_first = cells.items.len;
+        var terminal_cursor_cells: usize = 0;
         if (showing_file) {
             const of = &open_files.items[active_view.file];
             // **그리기 직전에 상한을 다시 잡는다.** 휠은 그때의 뷰포트로 clamp 하는데, 창이 **커지면**
@@ -11644,7 +14792,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 그려진다(실측: `first=1000000` 에서 `rows=0 cells=2`). 상한은 중립이 정한다.
             {
                 const vis_now: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, geom.terminal.h / cell_h)));
-                const capped = editor_view.viewport.clampFirstRow(of.first_line, of.lines.items.len, vis_now);
+                const capped = if (editor_bar_file == active_view.file) @min(of.first_line, of.vmax_line) else editor_view.viewport.clampFirstRow(of.first_line, of.lines.items.len, vis_now);
                 if (capped != of.first_line) {
                     of.first_line = capped;
                     editor_clamps += 1;
@@ -11653,6 +14801,25 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 잡으면 그때까지 문서 오른쪽에 **빈 자리**가 남는다(세로가 겪은 그 실패의 짝).
                 // **끌던 막대를 여기서 적용한다**(중립이 말하는 tick) — move 마다 적용하면 한
                 // 프레임에 수십 번 다시 그린다. `takeOffset` 은 결과가 같으면 `null` 을 준다.
+                if (editor_bar_file != active_view.file) {
+                    hbar_drag.end();
+                    vbar_drag.end();
+                    hbar_drag_release = false;
+                    vbar_drag_release = false;
+                    editor_last_hbar = null;
+                    editor_last_vbar = null;
+                }
+                if (vbar_drag.takeOffset()) |off| {
+                    const want = @min(of.vmax_line, off / @max(1, cell_h));
+                    if (want != of.first_line) {
+                        of.first_line = want;
+                        editor_vdrags += 1;
+                    }
+                }
+                if (vbar_drag_release) {
+                    vbar_drag.end();
+                    vbar_drag_release = false;
+                }
                 if (hbar_drag.takeOffset()) |off| {
                     const want: u32 = @min(@as(u32, of.hmax_col), off / @max(1, cell_w));
                     if (want != of.first_col) {
@@ -11672,7 +14839,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
             }
             const ed_host = EditorHost{
-                .renderer_state = &renderer_state,
+                .renderer_state = renderer_state,
                 .shaper = builder.shaper,
                 .rasterizer = builder.rasterizer,
                 .pipeline = pipeline,
@@ -11681,7 +14848,35 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 .cell_w = cell_w,
                 .cell_h = cell_h,
             };
-            if (buildComposedEditor(allocator, ed_host, of, geom.terminal, ops_buf, &chrome_tokens, cell_w, cell_h)) |built_ed| {
+            if (file_comparison) |comparison| {
+                const left_w = geom.terminal.w / 2;
+                const rects = [_]maru.session.split_tree.Rect{
+                    .{ .x = geom.terminal.x, .y = geom.terminal.y, .w = left_w, .h = geom.terminal.h },
+                    .{ .x = geom.terminal.x + left_w, .y = geom.terminal.y, .w = geom.terminal.w - left_w, .h = geom.terminal.h },
+                };
+                const sides = [_]@import("platform/windows/editor/external_comparison.zig").Side{ comparison.left, comparison.right };
+                const cols = [_]u16{ comparison.left_col, comparison.right_col };
+                const labels = [_][]const u8{ maru.i18n.t(.win_editor_compare_local), maru.i18n.t(.win_editor_compare_disk) };
+                for (rects, sides, cols, labels) |rect, side, col, label| {
+                    const header_h = @min(rect.h, cell_h + editor_view.frame.content_inset_px * 2);
+                    var header_lines = [_][]const u8{label};
+                    var header_numbers = [_]?u32{null};
+                    var header_bands = [_]editor_view.frame.RowBand{.none};
+                    if (buildComparisonSide(allocator, ed_host, .{ .lines = &header_lines, .numbers = &header_numbers, .bands = &header_bands, .total_lines = 0 }, 0, 0, .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = header_h }, ops_buf, &chrome_tokens, cell_w, cell_h)) |value| {
+                        var header = value;
+                        defer header.deinit(allocator);
+                        try cells.appendSlice(allocator, header.cells.items);
+                    } else |_| file_notice.show(maru.i18n.t(.editor_compare_failed));
+                    if (buildComparisonSide(allocator, ed_host, side, comparison.first_line, col, .{ .x = rect.x, .y = rect.y + header_h, .w = rect.w, .h = rect.h - header_h }, ops_buf, &chrome_tokens, cell_w, cell_h)) |value| {
+                        var built = value;
+                        defer built.deinit(allocator);
+                        try cells.appendSlice(allocator, built.cells.items);
+                    } else |_| file_notice.show(maru.i18n.t(.editor_compare_failed));
+                }
+                editor_last_vbar = null;
+                editor_last_hbar = null;
+                editor_bar_file = null;
+            } else if (buildComposedEditor(allocator, ed_host, of, geom.terminal, ops_buf, &chrome_tokens, cell_w, cell_h)) |built_ed| {
                 var be = built_ed;
                 defer be.deinit(allocator);
                 cells.ensureUnusedCapacity(allocator, be.cells.items.len) catch {};
@@ -11766,6 +14961,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **중립이 세운 가로 막대를 그대로 들고 있는다** — 여기서 자리를 다시 계산하면
                 // 그린 것과 판정이 갈린다(막대 자리의 주인은 하나다).
                 editor_last_hbar = be.written.horizontal_scrollbar;
+                editor_last_vbar = be.written.scrollbar;
+                of.vmax_line = if (be.written.scrollbar) |bar| bar.max_offset_px / @max(1, cell_h) else 0;
+                editor_bar_file = active_view.file;
                 // **갈 수 있는 오른쪽 끝은 그린 막대가 안다.** `max_offset_px` 는 중립이 thumb 을
                 // 세운 그 값이라(`scroll_area.thumbSpan`), 여기서 `max_cols - 보이는 열` 을 다시
                 // 세면 **거터 폭만큼 어긋난다** — 실측으로 끝까지 굴려도 마지막 41 열이 안 왔고
@@ -11794,25 +14992,449 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             } else |_| editor_build_failures += 1;
             if (atlas_w != atlas_before_w or atlas_h != atlas_before_h) {
                 editor_atlas_growths += 1;
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
             }
-        } else for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+        } else if (positioned_terminal) |positioned| {
+            terminal_cursor_cells = try win32_terminal.appendPositionedFrameSplit(allocator, &cells, positioned, cell_w, cell_h, atlas_w, atlas_h, .{
+                @floatFromInt(geom.terminal.x), @floatFromInt(geom.terminal.y),
+                @floatFromInt(geom.terminal.w), @floatFromInt(geom.terminal.h),
+            });
+        } else {
+            for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+            terminal_cursor_cells = legacy_cells.?.cursor_cells;
+        }
         // **여기까지가 터미널이다.** 아래 침범 판정이 이 구간만 봐야 한다 — 띠를 함께 세면 띠가 창
         // 폭을 가로지르고 `y=0` 에서 시작하므로 **두 판정이 영원히 0 이 아니게 되어 죽는다**
         // (실측: 둘 다 15600 = 띠 26 셀 × 600 프레임).
         const term_last = cells.items.len;
         // **띠는 맨 위다** — 터미널·도크 위에 얹혀야 캡션 버튼이 안 가려진다.
         cells.appendSlice(allocator, titlebar_cells.items) catch {};
+        appendDockToggle(allocator, &cells, win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w), dock_visible, &chrome_tokens) catch {};
+        for (dock_cells.items) |cell| {
+            if (cell.rect[1] < @as(f32, @floatFromInt(titlebar_px))) cells.append(allocator, cell) catch {};
+        }
         // **상태바도 맨 위다** — 창 전폭이라 터미널·도크 위에 얹힌다(그 아래가 이미 비워져 있다:
         // `compute` 가 창 높이에서 먼저 깎았다).
         cells.appendSlice(allocator, status_cells.items) catch {};
         // **마우스로 고른 것을 여기서 실행한다.** 이벤트 루프 안에서 세션을 지우면 그 프레임의
         // 나머지가 사라진 것을 만진다 — 키 갈래는 곧바로 실행해도 되지만(그 뒤에 `continue` 로
         // 프레임을 빠져나간다) 마우스는 다른 처리가 뒤따를 수 있어 한 박자 미룬다.
-        if (confirm_pending_click) |act| {
+        // Dispatch after event handling so close/cancel wins over queued menu actions.
+        if (pending_pick) |request| {
+            pending_pick = null;
+            root_popup.dismiss();
+            if (!close_requested and !root_close_waiting and file_picker == null and
+                request.generation == dock_tree.rootGeneration())
+            {
+                if (request.purpose != .file and root_flow.busy()) {
+                    file_notice.show(maru.i18n.t(.fp_root_busy_retry));
+                } else {
+                    file_picker = maru.win32_file_dialog.Picker.start(std.heap.smp_allocator, .{
+                        .kind = if (request.purpose == .file) .file else .directory,
+                        .owner = window.hwnd,
+                        .initial_directory = dock_root,
+                        .title = maru.i18n.t(if (request.purpose == .file) .ctx_open_file else .ctx_open_folder),
+                        .token = request.generation,
+                    }) catch |err| blk: {
+                        stderr.print("  warning: native picker start failed({s})\n", .{@errorName(err)}) catch {};
+                        file_notice.show(maru.i18n.t(.win_file_picker_failed));
+                        break :blk null;
+                    };
+                    if (file_picker != null) {
+                        file_picker_purpose = request.purpose;
+                        file_picker_generation = request.generation;
+                    }
+                }
+            }
+        }
+        if (tree_backend) |*backend| {
+            if (close_requested and root_flow.busy()) {
+                sidebar_resize_drag = null;
+                divider_drag = null;
+                hbar_drag.end();
+                vbar_drag.end();
+                root_close_waiting = true;
+                root_flow.cancel();
+                close_requested = false;
+            }
+            var roots_changed = false;
+            if (root_flow.tick(&root_manager, &dock_tree, &dock_rows, &dock_root, backend, &.{}, !root_close_waiting and !close_requested)) |changed| {
+                roots_changed = changed;
+                root_flow_error = null;
+            } else |err| {
+                if (root_flow_error == null or root_flow_error.? != err)
+                    stderr.print("  warning: root publication failed({s})\n", .{@errorName(err)}) catch {};
+                root_flow_error = err;
+            }
+            if (roots_changed) {
+                root_changes += 1;
+                root_popup.dismiss();
+                dock_scroll_px = 0;
+                rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
+            }
+            if (root_flow.takeNotice()) |key| file_notice.show(maru.i18n.t(key));
+            if (root_close_waiting and !root_flow.busy()) {
+                root_close_waiting = false;
+                close_requested = true;
+            }
+        }
+        // A picker result never outlives its request, and closing wins over selection.
+        if (file_picker) |*picker| {
+            if (close_requested) picker.cancel();
+            if (picker.poll()) |taken| {
+                var result = taken;
+                defer result.deinit();
+                picker.deinit();
+                file_picker = null;
+                if (!close_requested) switch (result.value) {
+                    .selected => |native_path| selected: {
+                        const path = maru.path_shape.normalizeSeparators(allocator, native_path) catch {
+                            file_notice.show(maru.i18n.t(.win_file_open_memory));
+                            break :selected;
+                        };
+                        defer allocator.free(path);
+                        if (result.token != file_picker_generation) break :selected;
+                        if (file_picker_purpose != .file) {
+                            if (file_picker_generation != dock_tree.rootGeneration()) {
+                                file_notice.show(maru.i18n.t(.fp_root_stale_generation));
+                                break :selected;
+                            }
+                            if (tree_backend) |*backend| {
+                                root_flow.start(backend, &dock_tree, path, if (file_picker_purpose == .replace_root) .replace else .add) catch |err| {
+                                    stderr.print("  warning: root validation start failed({s})\n", .{@errorName(err)}) catch {};
+                                    file_notice.show(maru.i18n.t(switch (err) {
+                                        error.InvalidPath => .fp_root_invalid_path,
+                                        error.RequestIdExhausted => .fp_root_request_id_exhausted,
+                                        error.OutOfMemory => .fp_root_picker_alloc_failed,
+                                        else => .fp_root_busy_retry,
+                                    }));
+                                };
+                            } else file_notice.show(maru.i18n.t(.fp_root_validate_busy));
+                            break :selected;
+                        }
+                        for (open_files.items, 0..) |of, fi| {
+                            if (std.mem.eql(u8, of.path, path)) {
+                                file_reopens += 1;
+                                active_view = .{ .file = fi };
+                                sidebar_reveal_request = true;
+                                break :selected;
+                            }
+                        }
+                        initial_open.startForAppWithRecovery(path, 4 << 20, null) catch |err| {
+                            const why = initialOpenFailure(err);
+                            file_rejects += 1;
+                            last_reject = std.meta.activeTag(why);
+                            file_notice.show(maru.i18n.t(OpenOutcome.noticeKey(last_reject).?));
+                            break :selected;
+                        };
+                        sidebar_reveal_request = true;
+                        file_notice.show(maru.i18n.t(.scm_loading));
+                    },
+                    .canceled => {},
+                    .failed => |failure| {
+                        try stderr.print("  warning: native file picker failure({s})\n", .{@tagName(failure)});
+                        file_notice.show(maru.i18n.t(.win_file_picker_failed));
+                    },
+                };
+            }
+        }
+        // Process queued close/Esc before registering a completed initial read.
+        // Caption controls and resize remain live while the independent job drains.
+        if (initial_open.job != null) {
+            if (close_requested) {
+                initial_open.cancel() catch {};
+                initial_open_close_requested = true;
+                close_requested = false;
+            }
+            if (try initial_open.takeResult()) |value| {
+                var result = value;
+                defer result.deinit(io);
+                file_notice.dismiss();
+                if (!result.cancelled) {
+                    switch (openAppResultInto(allocator, &editor_files, io, &file_backups, &open_files, &result, null)) {
+                        .opened => |of| {
+                            file_opens += 1;
+                            active_view = .{ .file = open_files.items.len - 1 };
+                            if (editor_documents.get(of.document).?.opened.?.file.read_only)
+                                file_notice.show(maru.i18n.t(.editor_readonly));
+                            if (of.recovered and base_status_items < status_items_buf.len) {
+                                status_items = recoveredStatusItems(&status_items_buf, status_items, base_status_items);
+                                rebuildStatusBar(allocator, &status_cells, geom.status_bar, chrome_cell_w, chrome_cell_h, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
+                            }
+                        },
+                        else => |why| {
+                            file_rejects += 1;
+                            last_reject = std.meta.activeTag(why);
+                            file_notice.show(maru.i18n.t(OpenOutcome.noticeKey(last_reject).?));
+                        },
+                    }
+                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                    // **목록만 고치면 화면은 그대로다.** 실측 캡처에서 편집기는
+                    // 떴는데 사이드바에 그 파일 카드가 없었다 — 카드 **수**를
+                    // 보는 판정은 그것을 못 본다(모델은 맞았으니까).
+                    sidebar_redraws += 1;
+                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                    sidebar_reveal_request = true;
+                }
+                if (initial_open_close_requested) close_requested = true;
+                initial_open_close_requested = false;
+            }
+        }
+        // Consume queued cancellation/close before voting to commit a ready
+        // image. The view and close intent remain alive through native drain.
+        if (pending_save) |lease| {
+            if (close_requested) {
+                editor_files.cancelSave(io, lease) catch {};
+                save_close_requested = true;
+                save_close_target = null;
+                close_requested = false;
+            }
+            const outcome = editor_files.pollSave(io, lease) catch |err| blk: {
+                const idle = (editor_files.saveStatus(lease) catch .closed) == .idle;
+                if (idle) {
+                    pending_save = null;
+                    file_notice.dismiss();
+                    if (isFileSaveConflict(err)) {
+                        pending_file_conflict = lease;
+                        pending_conflict_save = true;
+                        pending_conflict_close = if (save_close_requested) .window else save_close_target;
+                        showFileSaveConflict(&confirm_state);
+                    } else file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                    save_close_requested = false;
+                    save_close_target = null;
+                }
+                break :blk null;
+            };
+            if (outcome) |ready| {
+                pending_save = null;
+                file_notice.dismiss();
+                if (ready == .receipt) {
+                    if (ready.receipt.acknowledgment_error) |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                    if (ready.receipt.cleanup_error) |err| stderr.print("  warning: editor save cleanup failed({s})\n", .{@errorName(err)}) catch {};
+                }
+                if (savedCloseTarget(ready, save_close_target)) |target| {
+                    pending_file_close = target;
+                    confirm_pending_click = .confirmed;
+                }
+                if (save_close_requested) close_requested = true;
+                save_close_requested = false;
+                save_close_target = null;
+            }
+        }
+        if (queued_new_terms > 0) {
+            const requests = queued_new_terms;
+            queued_new_terms = 0;
+            if (!confirm_state.open and pending_file_close == null and pending_file_conflict == null) {
+                var spawned = false;
+                for (0..requests) |_| {
+                    text_spawn_while_changed += @intFromBool(settings_host.changed);
+                    // A rollback and new-tab action can share one input batch.
+                    // Read current text policy at admission, not only at frame start.
+                    spawn_opts.refreshText(cfg);
+                    spawn_opts.appearance = try maru.config.appearance.resolve(cfg);
+                    const admitted = win_session_actions.spawnFocused(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts, &active_view, max_win_sessions, spawnWinSession) catch |err| {
+                        session_spawn_failures += 1;
+                        stderr.print("  warning: new terminal failed({s})\n", .{@errorName(err)}) catch {};
+                        continue;
+                    };
+                    if (!admitted) break;
+                    session_spawns += 1;
+                    spawned = true;
+                }
+                if (spawned) {
+                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                    sidebar_redraws += 1;
+                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                }
+            }
+        }
+        if (queued_session_close_id) |id| {
+            queued_session_close_id = null;
+            // A queued index can name a different surface after a prior close.
+            if (!confirm_state.open and pending_file_close == null and pending_file_conflict == null) {
+                if (sessionIndexById(sessions.items, id)) |ci| {
+                    switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, false)) {
+                        .closed => {
+                            session_closes += 1;
+                            // **pump 를 다시 건다.** 루프는 첫 세션 것을 보는데
+                            // 그것이 닫혔을 수 있다(포인터로 보므로 값만 바꾸면 된다).
+                            pump = sessions.items[0].pump;
+                            // **보고 있던 것이 파일이면 그대로 둔다.** 배경
+                            // 세션 하나를 닫았다고 문서에서 튕겨 나오면 안 된다
+                            // (적대적 검증 1회차). 터미널을 보고 있었을 때만
+                            // 번호를 다시 맞춘다 — 그 번호는 방금 당겨졌다.
+                            if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
+                            refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                            sidebar_redraws += 1;
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                        },
+                        .busy_needs_confirm => {
+                            // **조용히 죽이지 않고 묻는다.** 여기가 §2m.77 이
+                            // "모달이 선행" 이라 적어 둔 자리다.
+                            session_close_busy += 1;
+                            pending_close_id = if (ci < sessions.items.len) sessions.items[ci].surface.id else null;
+                            confirm_state.show(maru.i18n.t(.app_close_running), .{
+                                .confirm = maru.i18n.t(.btn_close),
+                                .cancel = maru.i18n.t(.common_cancel),
+                            });
+                            confirm_shows += 1;
+                        },
+                        .last_session => {
+                            session_close_last += 1;
+                            close_requested = true; // same dirty-file window-close gate as caption
+                        },
+                        .out_of_range => {},
+                    }
+                }
+            }
+        }
+        // Votes follow queued input and real save outcomes. A close cannot
+        // race an older backup write and recreate a deliberately dropped record.
+        try file_backup_worker.voteDrop();
+        try file_backup_worker.voteDiscard(file_close_waiting and pending_file_close != null and confirm_pending_click == .alternate);
+        holdBackupWindowClose(file_backup_worker.isBusy(), &backup_window_close_requested, &close_requested);
+        if (close_requested and !file_exit_accepted) {
+            file_close_waiting = false; // window intent supersedes a file wait
+            if (choice_notice) |lease| {
+                try file_changes.cancelChoice(lease);
+                choice_close = null;
+                choice_notice = null;
+                file_notice.dismiss();
+            }
+            close_requested = false;
+            if (editor_files.requireIdle()) |_| {
+                var dirty_file = false;
+                for (open_files.items) |view| {
+                    const state = editor_documents.get(view.document).?;
+                    dirty_file = dirty_file or state.opened.?.isDirty();
+                }
+                if (dirty_file) {
+                    pending_file_conflict = null;
+                    pending_file_close = .window;
+                    pending_close_id = null;
+                    beginFileClose(&confirm_state, &confirm_pending_click);
+                } else {
+                    pending_file_close = .window;
+                    pending_file_conflict = null;
+                    confirm_pending_click = .confirmed;
+                }
+            } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+        }
+        if (!file_backup_worker.isBusy() and backup_clean_closes.items.len != 0 and pending_file_close == null and !confirm_state.open and !close_requested) {
+            const lease = backup_clean_closes.orderedRemove(0);
+            if (fileIndexForLease(open_files.items, lease)) |fi| {
+                pending_file_close = .{ .file = lease };
+                pending_file_conflict = null;
+                confirm_pending_click = null;
+                // A formerly clean close is not consent to save later edits.
+                if (editor_documents.get(open_files.items[fi].document).?.opened.?.isDirty()) {
+                    beginFileClose(&confirm_state, &confirm_pending_click);
+                } else confirm_pending_click = .confirmed;
+            }
+        }
+        if (confirm_pending_click != null and backupAllowsCloseAction(file_backup_worker.isBusy(), confirm_pending_click.?)) {
+            const act = confirm_pending_click.?;
             confirm_pending_click = null;
-            switch (act) {
+            if (pending_file_conflict) |target| {
+                confirm_state.dismiss();
+                pending_file_conflict = null;
+                const choice: ?ExternalChanges.Choice = switch (act) {
+                    .confirmed => .compare,
+                    .extra => .reload,
+                    .alternate => if (pending_conflict_save) .overwrite else null,
+                    .cancelled => null,
+                };
+                if (fileIndexForLease(open_files.items, target) != null) if (choice) |selected| {
+                    if (file_changes.requestChoice(target, selected)) |_| {
+                        choice_notice = target;
+                        file_notice.show(maru.i18n.t(.win_editor_choice_reading));
+                        if (selected != .compare) if (pending_conflict_close) |closing| {
+                            choice_close = .{ .document = target, .target = closing };
+                        };
+                    } else |err| file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                };
+                pending_conflict_close = null;
+            } else if (pending_file_close) |target| close_file: {
+                if (act == .confirmed) {
+                    const saving_file = beginFileCloseSave(&editor_files, open_files.items, target) catch |err| {
+                        file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                        confirm_state.dismiss();
+                        pending_file_close = null;
+                        file_close_waiting = false;
+                        continue;
+                    };
+                    if (saving_file) |lease| {
+                        pending_save = lease;
+                        save_close_target = target;
+                        file_notice.show(maru.i18n.t(.win_editor_saving));
+                        confirm_state.dismiss();
+                        pending_file_close = null;
+                        file_close_waiting = false;
+                        continue;
+                    }
+                }
+                if (act == .confirmed or act == .alternate) {
+                    const ready = prepareFileCloseBackup(io, &file_backup_worker, &editor_files, &file_backups, open_files.items, target, std.Io.Clock.awake.now(io).nanoseconds, file_close_waiting, act == .alternate) catch |err| {
+                        file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                        file_close_waiting = false;
+                        confirm_state.dismiss();
+                        pending_file_close = null;
+                        break :close_file;
+                    };
+                    if (!ready) {
+                        file_close_waiting = true;
+                        confirm_state.dismiss();
+                        confirm_pending_click = act;
+                        break :close_file;
+                    }
+                }
+                file_close_waiting = false;
+                var conflict_lease: ?maru.session.editor.document_registry.Lease = null;
+                const approved = approveFileClose(io, &editor_files, &file_backups, open_files.items, target, act) catch |err| blk: {
+                    stderr.print("  warning: editor close failed({s})\n", .{@errorName(err)}) catch {};
+                    if (isFileSaveConflict(err)) {
+                        switch (target) {
+                            .file => |lease| conflict_lease = lease,
+                            .window => for (open_files.items) |view| {
+                                if (editor_documents.get(view.document).?.opened.?.isDirty()) {
+                                    conflict_lease = view.document;
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                    if (conflict_lease == null) file_notice.show(maru.i18n.t(fileSaveNotice(err)));
+                    break :blk false;
+                };
+                confirm_state.dismiss();
+                pending_file_close = null;
+                if (conflict_lease) |lease| {
+                    pending_file_conflict = lease;
+                    pending_conflict_save = true;
+                    pending_conflict_close = target;
+                    showFileSaveConflict(&confirm_state);
+                }
+                if (approved) switch (target) {
+                    .window => {
+                        file_exit_accepted = true;
+                        close_requested = true;
+                    },
+                    .file => |lease| if (fileIndexForLease(open_files.items, lease)) |fi| {
+                        var gone = open_files.orderedRemove(fi);
+                        gone.deinit(allocator);
+                        file_closes += 1;
+                        active_view = switch (active_view) {
+                            .file => |current| if (current == fi) ActiveView{ .terminal = app_window.active_tab } else if (current > fi) ActiveView{ .file = current - 1 } else ActiveView{ .file = current },
+                            .terminal => |current| ActiveView{ .terminal = current },
+                        };
+                        refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                        sidebar_reveal_request = true;
+                        sidebar_redraws += 1;
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                    },
+                };
+            } else switch (act) {
                 .confirmed => {
                     confirm_accepts += 1;
                     confirm_state.dismiss();
@@ -11824,7 +15446,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
                                 refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                             },
                             else => {},
                         }
@@ -11843,9 +15465,37 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // 그리는 순서가 z 순서다 — 띠·상태바보다도 뒤에 얹어야 그 위를 덮는다. 모달이 무엇을 덮는지가
         // 곧 "무엇을 못 누르는가" 라, 입력 삼킴과 같은 자리에 있어야 한다.
+        terminal_popup.reconcile(clipboard_host.current(active_view == .terminal), confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or file_close_waiting or initial_open.job != null or close_requested);
+        root_popup.reconcile(dock_tree.rootGeneration(), !dock_visible or dock_view != .explorer or settings_host.ownsInput() or
+            terminal_popup.state.open or confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or
+            file_close_waiting or initial_open.job != null or close_requested or root_close_waiting or root_flow.busy() or file_picker != null);
+
+        if (terminal_popup.state.open) {
+            const popup_cells = appendTerminalPopupCells(allocator, &cells, &terminal_popup, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &terminal_popup_frame) catch blk: {
+                terminal_menu_draw_failures += 1;
+                terminal_popup.dismiss();
+                break :blk 0;
+            };
+            terminal_menu_cells_peak = @max(terminal_menu_cells_peak, popup_cells);
+        }
+        if (root_popup.state.open) {
+            const labels = explorer_menu.labels();
+            _ = appendContextMenuCells(allocator, &cells, &root_popup.state, &labels, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &root_popup_frame) catch blk: {
+                root_popup.dismiss();
+                break :blk 0;
+            };
+        }
+        if (settings_host.form.state.open) {
+            var settings_arena = std.heap.ArenaAllocator.init(allocator);
+            defer settings_arena.deinit();
+            var settings_ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+            const settings_props = confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens);
+            settings_host.draw(settings_arena.allocator(), settings_props, &chrome_tokens, &settings_ops) catch {};
+            _ = appendModalOpsCells(allocator, &cells, settings_ops.items, settings_props, &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &settings_frame) catch 0;
+        }
         confirm_cells_drawn = 0;
         if (confirm_state.open) {
-            if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
+            if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
                 confirm_cells_drawn = n_drawn;
                 // **그린 셀에서 상자의 가로 중앙을 도로 읽는다** — 내가 넘긴 값을 되읽으면 동어반복이다.
                 var minx: f32 = std.math.floatMax(f32);
@@ -11856,6 +15506,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
                 confirm_center_x = @intFromFloat((minx + maxx) / 2);
             } else |_| confirm_draw_failures += 1;
+        }
+        file_notice_cells = 0;
+        file_notice_glyphs = 0;
+        if (file_notice.open and !confirm_state.open) {
+            file_notice_cells = appendNoticeCells(allocator, &cells, &file_notice, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, geom.workspace, &chrome_tokens), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &file_notice_frame) catch 0;
+            for (cells.items[cells.items.len - file_notice_cells ..]) |cell|
+                if (cell.uv[0] >= 0 and cell.rect[2] > 0 and cell.rect[3] > 0) {
+                    file_notice_glyphs += 1;
+                };
         }
         last_cells = cells.items.len;
 
@@ -11873,8 +15532,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
 
+        if (layout_probe) {
+            std.log.debug("Windows layout frame native={d} sidebar={d} dock={d} status={d} total={d}", .{ native.len, sidebar_cells.items.len, dock_cells.items.len, status_cells.items.len, cells.items.len });
+            layout_probe = false;
+        }
         try present.beginFrame(clear);
-        try pipeline.draw(cells.items, present.width_px, present.height_px);
+        // Draw terminal cursor coverage over its opaque base, then restore
+        // opacity for chrome and overlays that follow the terminal packet.
+        const cursor_first = term_last - terminal_cursor_cells;
+        try pipeline.draw(cells.items[0..cursor_first], present.width_px, present.height_px);
+        try pipeline.drawOpacity(cells.items[cursor_first..term_last], present.width_px, present.height_px, cursor_fade_milli);
+        try pipeline.draw(cells.items[term_last..], present.width_px, present.height_px);
         try present.present(false);
         // **증거를 만들 때만 한 프레임에 머문다**(`--hold-editor-ms`). 스모크는 편집기를 수백 프레임
         // 그리지만 프레임마다 16 ms 라 창을 찍는 하네스가 그 위에 못 앉는다 — 구문 색 슬라이스가
@@ -11887,6 +15555,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **`esyn*_judgeable` 만 보고 멈추면 안 된다.** 그 값은 **색칠 수와 무관하게** 서므로 색이
         // 하나도 없는 프레임에서 멈춰 **거짓 증거**를 만든다(§2m.113 의 적대적 검증 2 회차). 그래서
         // 각 판정이 초록이라고 말하는 그 문턱을 그대로 쓴다.
+        if (smoke and smoke_opts.hold_notice_ms != 0 and file_notice.open and file_notice_glyphs > 0 and !file_notice_held) {
+            file_notice_held = true;
+            try stdout.print("file_notice_hold: ms={d} glyphs={d}\n", .{ smoke_opts.hold_notice_ms, file_notice_glyphs });
+            try stdout.flush();
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(smoke_opts.hold_notice_ms), .awake);
+        }
         if (hold_editor_ms != 0 and showing_file) {
             const first_ready = esyn_judgeable and esyn_rows * 2 >= esyn_total_rows and esyn_distinct >= 2;
             const scrolled_ready = esyn2_judgeable and esyn2_first_line > 0 and
@@ -11942,7 +15616,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **사이드바 판정**(W8.8⒜1). `term_cells_before_rect` 가 사이드바 침범을 잡는다 — 터미널
     // 사각형이 이제 `x=180` 에서 시작하므로, 원점을 안 찍으면 그 수가 0 이 아니다(§2m.31 이
     // "검증 안 됐다" 고 적어 둔 배선이 여기서 처음 발동한다).
+    try stdout.print("dock_toggle_clicks={d} dock_toggle_visible={}\n", .{ dock_toggle_clicks, win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w).w != 0 });
     try stdout.print("titlebar_px={d} caption_btn_w={d} caption_clicks={d} titlebar_cells={d}\n", .{ titlebar_px, caption_btn_w, caption_clicks, titlebar_cells.items.len });
+    try stdout.print("caption_save_clicks={d}\n", .{caption_save_clicks});
     if (caption_judgeable) {
         // **동어반복이 아니다**: 내가 보낸 좌표를 되읽는 것이 아니라 **OS 의 창 상태**
         // (`IsZoomed`)를 읽는다. 히트테스트·라우팅·`toggleMaximize` 가 전부 이어져야 뒤집힌다.
@@ -12523,13 +16199,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **그리고 끝나면 내린다** — 안 내리면 늘 켜 두는 것과 같아 아무 말도 안 하는 셈이다.
                 notice_settled_judgeable and !notice_still_busy,
         });
+        const sidebar_clip_ok = clip_partial > 0 and clip_clipped > 0 and clip_over == 0;
         try stdout.print("sidebar_clip: partial={d} clipped={d} over_header={d} clip_ok={}\n", .{
             clip_partial,
             clip_clipped,
             clip_over,
             // **자를 것이 있었어야**(`clipped > 0`) 이 판정이 무언가를 묻는다. 그리고 자른 뒤에는
             // 헤더 위에 **아무것도 없어야** 한다.
-            clip_partial > 0 and clip_clipped > 0 and clip_over == 0,
+            sidebar_clip_ok,
         });
         try stdout.print("sidebar_rows_cap: cards={d} rows={d} off={d} last_visible={} drawn {d}+{d} rows_cap_ok={}\n", .{
             cap_cards,
@@ -12557,6 +16234,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **상한은 접힌 뒤의 목록이 정한다** — 판정이 앞 값을 쓰면 아무것도 안 묻는다.
             const dc_content: u32 = @intCast(dclamp_rows_after *| cell_h);
             const dc_max: u32 = dc_content -| geom.tree_content.h;
+            const dock_clamp_ok = dclamp_judgeable and dclamp_captured and dclamp_off_before > dc_max and
+                dclamp_off_after <= dc_max and dclamp_drawn_after > 0 and
+                dclamp_draw_start_after == dclamp_off_after / @max(1, cell_h);
             try stdout.print("dock_clamp: rows {d}->{d} off {d}->{d} max_after={d} drawn={d} draw_start={d}/{d} clamps={d} dock_clamp_ok={}\n", .{
                 dclamp_rows_before,
                 dclamp_rows_after,
@@ -12569,12 +16249,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 dock_clamps,
                 // **접기 전에 그 상한을 넘고 있어야** 이 판정이 무언가를 묻는다. 그리고 되돌아온
                 // 자리에 **행이 그려져 있어야** 한다 — 값만 맞고 화면이 비면 고친 것이 아니다.
-                dclamp_judgeable and dclamp_off_before > dc_max and dclamp_off_after <= dc_max and
-                    dclamp_drawn_after > 0 and
-                    // **그린 첫 행이 되돌아온 자리와 같은가** — 값만 고치고 셀을 다시 안 지으면
-                    // 여기가 갈린다(뮤턴트가 그렇게 살아남았다).
-                    dclamp_draw_start_after == dclamp_off_after / @max(1, cell_h),
+                // **그린 첫 행이 되돌아온 자리와 같은가**도 dock_clamp_ok가 함께 검사한다.
+                dock_clamp_ok,
             });
+            if (!sidebar_clip_ok or !dock_clamp_ok) {
+                try stdout.flush();
+                return error.ChromeScrollVerificationFailed;
+            }
         }
         try stdout.print("sidebar_reveal: slot {d}->{d} visible {}->{} off {d}->{d} digest {x}->{x} reveals={d} reveal_ok={}\n", .{
             reveal_slot,
@@ -12621,6 +16302,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             hterm_judgeable and hterm_scrolls_after == hterm_scrolls_before and
                 hterm_reports_after == hterm_reports_before,
         });
+        for (vbar_probe_checks, 0..) |passed, round| {
+            try stdout.print("editor_vdrag_round_{d}_ok={} drags={d}\n", .{ round + 1, passed, editor_vdrags });
+        }
+        for (vbar_probe_checks) |passed| if (!passed) return error.VerticalScrollbarVerificationFailed;
         try stdout.print("editor_hdrag: col {d}->{d} thumb {d:.1}->{d:.1} drags={d} hdrag_ok={}\n", .{
             hdrag_col_before,
             hdrag_col_after,
@@ -12894,7 +16579,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             const x: f64 = (@as(f64, @floatFromInt(g.col)) + 0.5) * @as(f64, @floatFromInt(cell_w));
             // **아이콘 줄의 중앙을 찌른다** — 헤더 한복판은 이제 검색 밴드다.
             const y: f64 = @as(f64, @floatFromInt(sidebar_header_icon_band)) * 0.5;
-            if (sb_h.headerHit(x, y, sidebar_w, cell_w, cell_h, sidebar_header_h, sidebar_header_icon_band) == want) routed += 1;
+            if (sb_h.headerHit(x, y, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_header_h, sidebar_header_icon_band) == want) routed += 1;
         }
         // **검색 밴드도 잰다** — 그 줄을 그렸으니 눌려야 한다(안 그렸으면 `.search` 가 나오면 안 된다).
         const search_y: f64 = @as(f64, @floatFromInt(sidebar_header_icon_band + sidebar_header_h)) * 0.5;
@@ -12904,8 +16589,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             @as(f64, @floatFromInt(sidebar_w)) * 0.5,
             search_y,
             sidebar_w,
-            cell_w,
-            cell_h,
+            chrome_cell_w,
+            chrome_cell_h,
             sidebar_header_h,
             sidebar_header_icon_band,
         ) == .search;
@@ -13353,7 +17038,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         {
             // **새 스냅샷이 펼침을 버렸는가.** 무장 조건은 *"펼친 채로 시작했고, 실제로 새 목록이
             // 적용됐다"* 다 — 훑기가 안 끝났으면 잴 것이 없다.
-            const snap_applied = agent_applies > asnap_applies_before;
+            const snap_applied = asnap_captured and agent_applies > asnap_applies_before;
             const snap_ok = asnap_judgeable and snap_applied and asnap_expanded_before != null and
                 asnap_expanded_after == null and asnap_det_identity_after == 0 and
                 asnap_req_after > asnap_req_before;
@@ -13684,8 +17369,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d} ime_caret_updates={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes, ime_caret_updates });
+    try stdout.print("ime_settings_caret_updates={d}\n", .{ime_settings_caret_updates});
+    try stdout.print("ime_settings_edit_caret_updates={d}\n", .{ime_settings_edit_caret_updates});
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
-    try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus_todo={d}\n", .{ copies, copy_bytes, right_click_pastes, right_click_menus_unimplemented });
+    try stdout.print("window_focus_losses={d} retained_overlay_blurs={d} dismissed_overlay_blurs={d}\n", .{ window.focus_loss_serial, window.retained_overlay_blurs, window.dismissed_overlay_blurs });
+    try stdout.print("settings_wheel_events={d} settings_scroll_moves={d} settings_scroll_peak={d}\n", .{ settings_host.wheel_events, settings_host.scroll_moves, settings_host.scroll_peak });
+    try stdout.print("font_applies={d} font_apply_errors={d} font_resize_errors={d} applied_cell_px={d}x{d}\n", .{ font_applies, font_apply_errors, font_resize_errors, cell_w, cell_h });
+    try stdout.print("settings_saves={d} settings_save_errors={d} settings_request_errors={d} settings_previews={d} settings_rollbacks={d}\n", .{ settings_host.saves, settings_host.save_errors, settings_host.request_errors, settings_host.previews, settings_host.rollbacks });
+    try stdout.print("explorer_menus={d} explorer_menu_actions={d} root_changes={d} explorer_roots={d} root_busy={}\n", .{ root_menus_opened, root_menu_actions, root_changes, dock_tree.rootCount(), root_flow.busy() });
+    try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus={d} menu_actions={d} menu_cells_peak={d} menu_draw_failures={d}\n", .{ copies, copy_bytes, right_click_pastes, terminal_menus_opened, terminal_menu_actions, terminal_menu_cells_peak, terminal_menu_draw_failures });
     // **갈래별로 센다.** 합치면 "이벤트는 왔는데 선택이 안 됐다"를 못 가른다.
     try stdout.print("mouse_events={d} reports={d} selections={d} selection_frames={d} extends={d} words={d} lines={d}\n", .{ mouse_events, mouse_reports, selections, selection_frames, extends, word_selections, line_selections });
     // **이 줄이 판정이다.** 명령을 몇 개 보냈는지가 아니라, 그것이 코어에 **닿아 선택이 생겼는지**를
@@ -13725,11 +17417,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             @tagName(tracking), @tagName(fmt_mode), alt, alt_scroll, bracketed,
         });
     }
+    try stdout.print("config_language: preference={s} effective={s}\n", .{ @tagName(cfg.ui_language), @tagName(maru.i18n.lang()) });
+    try stdout.print("appearance_apply_errors={d} appearance_ui_errors={d}\n", .{ appearance_apply_errors, appearance_ui_errors });
+    try stdout.print("text_apply_errors={d} text_apply_pending_peak={d} text_spawn_while_changed={d}\n", .{ text_apply_errors, text_apply_pending_peak, text_spawn_while_changed });
+    for (sessions.items) |session| {
+        session.surface.lockCore(io);
+        const live_text: maru.app.text_config.Values = .{
+            .scrollback = @intCast(session.surface.core.maxScrollback()),
+            .ambiguous_wide = session.surface.core.ambiguous_wide,
+            .emoji_wide = session.surface.core.emoji_wide,
+        };
+        const live_cursor = session.surface.core.default_cursor_shape;
+        const live_fg = session.surface.core.default_fg_rgb;
+        const live_bg = session.surface.core.default_bg_rgb;
+        const live_history = session.surface.core.screen.sb.count;
+        session.surface.unlockCore(io);
+        try stdout.print("appearance_core: surface={d} cursor={s} fg={d},{d},{d} bg={d},{d},{d} pending={}\n", .{ session.surface.id, @tagName(live_cursor), live_fg.r, live_fg.g, live_fg.b, live_bg.r, live_bg.g, live_bg.b, session.appearance_config.pending() });
+        try stdout.print("text_core: surface={d} scrollback={d} ambiguous_wide={} emoji_wide={} pending={} history={d}\n", .{ session.surface.id, live_text.scrollback, live_text.ambiguous_wide, live_text.emoji_wide, session.text_config.pending(), live_history });
+    }
     try stdout.print("osc52_writes={d} osc52_reads={d} clipboard_errors={d}\n", .{ osc52_writes, osc52_reads, clipboard_errors });
     // **읽기 요청을 갈라 찍는다.** `osc52_reads` 는 정책과 무관하게 오르므로 그것만으로는 "정책이 막았다" 와
-    // "정책은 allow 인데 응답 인코더가 없어 못 보냈다" 가 구분되지 않는다 — 후자는 사용자가
-    // `osc52.read = allow` 로 켠 뒤에야 나타나고, 조용하면 원인을 못 찾는다.
-    try stdout.print("osc52_reads_unanswered_allow={d}\n", .{osc52_reads_denied_unimplemented});
+    // "허용된 읽기가 실패했다" 가 구분되지 않는다. queued는 host FIFO 인수 횟수이며,
+    // 실제 PTY 왕복 성공은 별도 앱 검증으로 확인한다.
+    try stdout.print("osc52_reads_unanswered_allow={d}\n", .{osc52_read_failures});
+    try stdout.print("osc52_read_responses_queued={d}\n", .{osc52_read_responses_queued});
     try stdout.print("shell_ended={}\n", .{ended});
     try stdout.print("swapchain_px={d}x{d} driver={s}\n", .{ present.width_px, present.height_px, @tagName(present.driver) });
     // **어느 ConPTY 를 썼는지 찍는다.** `conpty.dll` 은 `OpenConsole.exe` 를 못 찾으면 시스템 conhost 로
@@ -16445,7 +20156,8 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru d3d11-cells-smoke
         \\  maru dwrite-text-smoke
         \\  maru win32-frame-smoke
-        \\  maru win32-terminal-smoke
+        \\  maru win32-terminal-smoke [--hold-editor-ms n] [--hold-notice-ms n]
+        \\  maru win32-editor-document-smoke
         \\  maru win32-clipboard-smoke [<expected> | --paste-encode]
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru editor open <file> [-l N | --line N] [-c N | --column N]
@@ -16589,6 +20301,7 @@ const EditorBuilt = struct {
     ops_text: usize,
     ops_fill: usize,
     ops_dropped: usize,
+    navigation_rows: u16 = 1,
 
     pub fn deinit(self: *@This(), a: std.mem.Allocator) void {
         self.cells.deinit(a);
@@ -16599,7 +20312,7 @@ const EditorBuilt = struct {
 /// 확인 모달을 셀로 낮춰 **맨 위에** 얹는다. 그린 셀 수를 돌려준다(0 이면 안 그렸다).
 ///
 /// **편집기와 같은 길을 쓴다** — `confirm.view` 가 내는 op 를 `buildTextDrawList` 로 글자로, 단색
-/// 사각은 `appendConfirmSolids` 로(편집기의 `appendSolidOps` 와 같은 평탄화 + 패널 키우기). 모달은 창
+/// 사각은 `appendModalPaintOps` 로(편집기의 `appendSolidOps` 와 같은 평탄화 + 패널 키우기). 모달은 창
 /// 좌표에 그려지므로 원점이 (0,0)이다.
 fn appendConfirmCells(
     allocator: std.mem.Allocator,
@@ -16622,9 +20335,90 @@ fn appendConfirmCells(
     try maru.chrome.components.confirm.view(state, p, tk, arena.allocator(), &ops);
     if (ops.items.len == 0) return 0;
 
+    _ = confirm_unpainted_quads;
+    return appendModalOpsCells(allocator, out, ops.items, p, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, frame_slot);
+}
+
+fn appendTerminalPopupCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    popup: *const terminal_clipboard_menu.Popup,
+    p: maru.chrome.props.ChromeProps,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    frame_slot: *?maru.renderer.RenderFrame,
+) !usize {
+    const labels = terminal_clipboard_menu.labels();
+    return appendContextMenuCells(allocator, out, &popup.state, &labels, p, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, frame_slot);
+}
+
+fn appendContextMenuCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    state: *const maru.chrome.components.context_menu.State,
+    labels: []const []const u8,
+    p: maru.chrome.props.ChromeProps,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    frame_slot: *?maru.renderer.RenderFrame,
+) !usize {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    try maru.chrome.components.context_menu.view(state, labels, p, tk, arena.allocator(), &ops);
+    return appendModalOpsCells(allocator, out, ops.items, p, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, frame_slot);
+}
+
+fn appendNoticeCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    state: *const maru.chrome.components.notice.State,
+    p: maru.chrome.props.ChromeProps,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    frame_slot: *?maru.renderer.RenderFrame,
+) !usize {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    defer ops.deinit(arena.allocator());
+    try maru.chrome.components.notice.view(state, p, tk, arena.allocator(), &ops);
+    if (ops.items.len == 0) return 0;
+
+    return appendModalOpsCells(allocator, out, ops.items, p, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, frame_slot);
+}
+
+fn appendModalOpsCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    ops: []const maru.chrome.draw.Op,
+    p: maru.chrome.props.ChromeProps,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    raw_builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    frame_slot: *?maru.renderer.RenderFrame,
+) !usize {
+    const chrome_scope = ChromeTextScope.init(renderer_state, p.metrics.cell_width_px, p.metrics.cell_height_px);
+    defer chrome_scope.deinit();
+    const builder = ChromeTextScope.builder(raw_builder);
     const cols: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, p.metrics.backing_width_px / p.metrics.cell_width_px)));
     const rows: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, p.metrics.backing_height_px / p.metrics.cell_height_px)));
-    const dl = try chrome_draw_lowering.buildTextDrawList(allocator, ops.items, tk, p.metrics.cell_width_px, p.metrics.cell_height_px, cols, rows);
+    const dl = try chrome_draw_lowering.buildTextDrawList(allocator, ops, tk, p.metrics.cell_width_px, p.metrics.cell_height_px, cols, rows);
     const frame = renderer_state.buildFrameFromDrawListWithRasterizer(allocator, dl, builder.shaper, builder.rasterizer) catch |err| {
         var l = dl;
         l.deinit(allocator);
@@ -16636,37 +20430,25 @@ fn appendConfirmCells(
     try draw_host.syncAtlasTexture(pipeline, renderer_state, atlas_w, atlas_h);
     _ = draw_host.uploadFrameRegions(pipeline, frame);
 
-    // **버려지는 op 를 센다.** 이 셰이더에 그라디언트 계산이 없어 그런 quad 는 안 그려지는데(테두리는 단색 사각으로 그린다),
-    // 조용히 넘기면 "패널 없이 글자만 뜨는" 화면이 그럴듯해 보인다(실측으로 그랬다).
-    for (ops.items) |op| switch (op) {
-        // **그라디언트만 남았다.** 테두리는 단색 사각으로 그린다(`chrome.solid_rects` — 둥근 상자는 바깥판 + 들인 채움).
-        .quad => |q| if (q.gradient != .solid) {
-            confirm_unpainted_quads.* += 1;
-        },
-        else => {},
-    };
+    // Both fill and border are lowered, including declared gradients.
     const before = out.items.len;
-    try appendConfirmSolids(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, out);
-    const colors = maru.renderer.metal_frame.CellColors{
-        .default_fg = blk: {
-            const c = tk.get(.surface_fg);
-            break :blk .{ .r = c.r, .g = c.g, .b = c.b };
-        },
-        .default_bg = blk2: {
-            const c = tk.get(.surface_bg);
-            break :blk2 .{ .r = c.r, .g = c.g, .b = c.b };
-        },
-    };
-    const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
-    defer allocator.free(native);
-    try out.ensureUnusedCapacity(allocator, native.len);
-    for (native) |n| out.appendAssumeCapacity(win32_terminal.cellFromNative(n, p.metrics.cell_width_px, p.metrics.cell_height_px, atlas_w.*, atlas_h.*));
+    try appendModalPaintOps(allocator, ops, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, out);
+    // Backgrounds use exact pixel origins. Preserve those same origins for
+    // text: flooring to a terminal row moves dark focus labels above their
+    // contrasting button fill, making them disappear against the panel.
+    var placement = try chrome_draw_lowering.buildRichTextArtifact(allocator, ops, tk, p.metrics.cell_width_px, p.metrics.cell_height_px, cols, rows);
+    defer placement.deinit(allocator);
+    var glyphs: std.ArrayList(maru.renderer.metal_frame.GpuGlyph) = .empty;
+    defer glyphs.deinit(allocator);
+    try placement.appendGpuGlyphs(allocator, frame, renderer_state.atlas.config, p.metrics.cell_width_px, p.metrics.cell_height_px, 0, 0, &glyphs);
+    try out.ensureUnusedCapacity(allocator, glyphs.items.len);
+    for (glyphs.items) |glyph| out.appendAssumeCapacity(win32_terminal.cellFromGpuGlyph(glyph, atlas_w.*, atlas_h.*));
     return out.items.len - before;
 }
 
 /// 확인 모달 ops 의 단색 몫(패널·버튼 배경). **패널은 패딩만큼 키운다** — 규칙은 중립 `chrome.solid_rects.flattenModal` 이
 /// 갖는다(macOS rich lowering 과 같은 그림: 모서리·테두리·패딩).
-fn appendConfirmSolids(
+fn appendModalPaintOps(
     a: std.mem.Allocator,
     ops: []const maru.chrome.draw.Op,
     tk: *const maru.chrome.Tokens,
@@ -16674,10 +20456,13 @@ fn appendConfirmSolids(
     client_h: u32,
     out: *std.ArrayList(d3d11_cells.Cell),
 ) !void {
-    var rects: std.ArrayList(maru.chrome.solid_rects.SolidRect) = .empty;
-    defer rects.deinit(a);
-    try maru.chrome.solid_rects.flattenModal(a, ops, tk, &rects);
-    try appendSolidRects(a, rects.items, client_w, client_h, 0, 0, out);
+    // Match flattenModal's first-panel expansion before choosing solid or gradient paint.
+    // Applying padding after clipping would move the gradient endpoints and modal hit geometry.
+    var modal_paint: win_modal.Paint = .{};
+    for (ops) |op| {
+        const painted = modal_paint.prepare(op, tk);
+        try appendPaintOps(a, &.{painted}, tk, client_w, client_h, 0, 0, out);
+    }
 }
 
 // 확인 모달이 떠 있으면 마우스 루프는 **새 제스처를 시작하지 않는다** — 그 삼킴이 디바이더 잡기·스크롤바 누름·도크 키보드 주인 바꾸기보다
@@ -16709,9 +20494,76 @@ test "확인 모달(Windows): props 가 제품 토큰의 모양을 싣는다 —
     // `confirmProps` 는 그리기(`confirm.view`)와 판정(`buttonAtPoint`)이 함께 받는 단일 출처다. shape 를 안 실으면 기본값 0 이 돼
     // macOS 확인 모달(rich: 모서리 8·테두리 1·패딩 12)과 다른 기반 모양이 된다 — 컴파일러는 모른다(2026-10-14).
     const tk = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors));
-    const p = confirmProps(1200, 800, 8, 16, 200, &tk);
+    const p = confirmProps(1200, 800, 8, 16, 200, .{ .x = 200, .y = 40, .w = 1000, .h = 730 }, &tk);
     try std.testing.expectEqual(maru.chrome.props.ShapeTokens.fromTokens(&tk), p.shape);
     try std.testing.expect(p.shape.modal_padding_px > 0); // 전제: rich 는 0 이 아니다
+}
+
+/// Lower gradients without replacing the shared solid geometry rules.
+fn appendPaintOps(
+    a: std.mem.Allocator,
+    ops: []const maru.chrome.draw.Op,
+    tk: *const maru.chrome.Tokens,
+    clip_w: u32,
+    clip_h: u32,
+    origin_x: u32,
+    origin_y: u32,
+    out: *std.ArrayList(d3d11_cells.Cell),
+) !void {
+    for (ops) |op| {
+        // Keep main's shared rounded-border and alpha rules for solid operations.
+        // Only gradient paint needs the native shader path below.
+        if (op != .quad or op.quad.gradient == .solid) {
+            try appendSolidOps(a, &.{op}, tk, clip_w, clip_h, origin_x, origin_y, out);
+            continue;
+        }
+        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
+            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
+            .quad => |q| .{ q.rect, q.fill_role, q.alpha, q.corner_radii },
+            else => continue,
+        };
+        // Intersect both the viewport and the op clip; preserve the original paint
+        // rectangle below so a clipped gradient does not restart at the new edge.
+        const op_clip = if (op == .quad) op.quad.clip else null;
+        const cx0: i32 = if (op_clip) |c| @max(c.x, 0) else 0;
+        const cy0: i32 = if (op_clip) |c| @max(c.y, 0) else 0;
+        const cx1: i32 = if (op_clip) |c| @min(c.x + @as(i32, @intCast(c.w)), @as(i32, @intCast(clip_w))) else @intCast(clip_w);
+        const cy1: i32 = if (op_clip) |c| @min(c.y + @as(i32, @intCast(c.h)), @as(i32, @intCast(clip_h))) else @intCast(clip_h);
+        const x0 = @max(rect.x, cx0);
+        const y0 = @max(rect.y, cy0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), cx1);
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), cy1);
+        if (x1 <= x0 or y1 <= y0) continue;
+        const rgb = tk.get(role);
+        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+        const end: ?[4]f32 = if (op == .quad and op.quad.gradient != .solid and op.quad.fill_role_end != null) blk: {
+            const rgb_end = tk.get(op.quad.fill_role_end.?);
+            break :blk d3d11_cells.colorFromArgb((@as(u32, alpha) << 24) | (@as(u32, rgb_end.r) << 16) | (@as(u32, rgb_end.g) << 8) | rgb_end.b);
+        } else null;
+        const direction: d3d11_cells.FillDirection = if (op == .quad) switch (op.quad.gradient) {
+            .solid => .solid,
+            .vertical => .vertical,
+            .horizontal => .horizontal,
+        } else .solid;
+        var painted = d3d11_cells.paintCell(
+            .{ @floatFromInt(x0 + @as(i32, @intCast(origin_x))), @floatFromInt(y0 + @as(i32, @intCast(origin_y))), @floatFromInt(x1 - x0), @floatFromInt(y1 - y0) },
+            .{ @floatFromInt(rect.x + @as(i32, @intCast(origin_x))), @floatFromInt(rect.y + @as(i32, @intCast(origin_y))), @floatFromInt(rect.w), @floatFromInt(rect.h) },
+            d3d11_cells.colorFromArgb(argb),
+            end,
+            direction,
+            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+        );
+        if (op == .quad) {
+            const q = op.quad;
+            const border: ?[4]f32 = if (q.border_role) |br| blk: {
+                const bc = tk.get(br);
+                const ba = q.border_alpha orelse q.alpha;
+                break :blk d3d11_cells.colorFromArgb((@as(u32, ba) << 24) | (@as(u32, bc.r) << 16) | (@as(u32, bc.g) << 8) | bc.b);
+            } else null;
+            painted = d3d11_cells.withBorder(painted, .{ @floatFromInt(q.border_widths[0]), @floatFromInt(q.border_widths[1]), @floatFromInt(q.border_widths[2]), @floatFromInt(q.border_widths[3]) }, border);
+        }
+        try out.append(a, painted);
+    }
 }
 
 /// `draw.Op` 의 **단색 사각**(fill·solid quad)을 셀로 낮춘다. 글리프는 호출자가 따로 넣는다 —
@@ -16733,8 +20585,12 @@ fn appendSolidOps(
     // `chrome.solid_rects`. 여기는 원점을 더하고 창 밖을 자르는 일만 한다.
     var rects: std.ArrayList(maru.chrome.solid_rects.SolidRect) = .empty;
     defer rects.deinit(a);
-    try maru.chrome.solid_rects.flatten(a, ops, tk, &rects);
-    try appendSolidRects(a, rects.items, clip_w, clip_h, origin_x, origin_y, out);
+    for (ops) |op| {
+        rects.clearRetainingCapacity();
+        try maru.chrome.solid_rects.flatten(a, &.{op}, tk, &rects);
+        const op_clip = if (op == .quad) op.quad.clip else null;
+        try appendSolidRects(a, rects.items, clip_w, clip_h, origin_x, origin_y, op_clip, out);
+    }
 }
 
 /// 단색 사각들을 셀로 — 창(`clip_w`×`clip_h`) 밖은 자르고, 비면 안 낸다.
@@ -16745,24 +20601,100 @@ fn appendSolidRects(
     clip_h: u32,
     origin_x: u32,
     origin_y: u32,
+    op_clip: ?maru.chrome.draw.Rect,
     out: *std.ArrayList(d3d11_cells.Cell),
 ) !void {
     for (rects) |sr| {
         const rect = sr.rect;
-        const x0 = @max(rect.x, 0);
-        const y0 = @max(rect.y, 0);
-        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(clip_w)));
-        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(clip_h)));
+        // Clip each flattened solid without moving its original rounded corners.
+        const cx0: i32 = if (op_clip) |c| @max(c.x, 0) else 0;
+        const cy0: i32 = if (op_clip) |c| @max(c.y, 0) else 0;
+        const cx1: i32 = if (op_clip) |c| @min(c.x + @as(i32, @intCast(c.w)), @as(i32, @intCast(clip_w))) else @intCast(clip_w);
+        const cy1: i32 = if (op_clip) |c| @min(c.y + @as(i32, @intCast(c.h)), @as(i32, @intCast(clip_h))) else @intCast(clip_h);
+        const x0 = @max(rect.x, cx0);
+        const y0 = @max(rect.y, cy0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), cx1);
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), cy1);
         if (x1 <= x0 or y1 <= y0) continue;
-        try out.append(a, d3d11_cells.solidCell(
-            @floatFromInt(x0 + @as(i32, @intCast(origin_x))),
-            @floatFromInt(y0 + @as(i32, @intCast(origin_y))),
-            @floatFromInt(x1 - x0),
-            @floatFromInt(y1 - y0),
+        try out.append(a, d3d11_cells.paintCell(
+            .{ @floatFromInt(x0 + @as(i32, @intCast(origin_x))), @floatFromInt(y0 + @as(i32, @intCast(origin_y))), @floatFromInt(x1 - x0), @floatFromInt(y1 - y0) },
+            .{ @floatFromInt(rect.x + @as(i32, @intCast(origin_x))), @floatFromInt(rect.y + @as(i32, @intCast(origin_y))), @floatFromInt(rect.w), @floatFromInt(rect.h) },
             d3d11_cells.colorFromArgb(sr.argb),
+            null,
+            .solid,
             .{ @floatFromInt(sr.radii[0]), @floatFromInt(sr.radii[1]), @floatFromInt(sr.radii[2]), @floatFromInt(sr.radii[3]) },
         ));
     }
+}
+
+test "Windows paint rebase preserves shared solids and gradient geometry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var tk = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors));
+    tk.palette.set(.surface_bg, .{ .r = 30, .g = 40, .b = 50 });
+    tk.palette.set(.focus_accent, .{ .r = 200, .g = 100, .b = 20 });
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(a);
+    var q: maru.chrome.draw.Op.Quad = .{
+        .rect = .{ .x = 10, .y = 20, .w = 100, .h = 60 },
+        .fill_role = .surface_bg,
+        .border_role = .focus_accent,
+        .border_widths = .{ 1, 2, 3, 4 },
+        .corner_radii = .{ 8, 8, 8, 8 },
+    };
+    // Rounded opaque borders must retain main's outer plate and inset fill.
+    try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 2), cells.items.len);
+    try std.testing.expectEqual([4]f32{ 14, 21, 94, 56 }, cells.items[1].rect);
+    try std.testing.expectEqual([4]f32{ 4, 4, 4, 4 }, cells.items[1].shape);
+    // Transparent fills cannot use the opaque plate; independent border alpha survives.
+    cells.clearRetainingCapacity();
+    q.alpha = 0;
+    q.border_alpha = 255;
+    try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 5), cells.items.len);
+    try std.testing.expectEqual(@as(f32, 0), cells.items[0].bg[3]);
+    try std.testing.expectEqual(@as(f32, 1), cells.items[1].bg[3]);
+    // Clipping a gradient must preserve its original endpoints.
+    cells.clearRetainingCapacity();
+    q.alpha = 255;
+    q.border_role = null;
+    q.gradient = .horizontal;
+    q.fill_role_end = .focus_accent;
+    q.clip = .{ .x = 40, .y = 30, .w = 20, .h = 15 };
+    try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.items.len);
+    try std.testing.expectEqual([4]f32{ 40, 30, 20, 15 }, cells.items[0].rect);
+    try std.testing.expectEqual([4]f32{ 10, 20, 100, 60 }, cells.items[0].paint_rect);
+    try std.testing.expectEqual(@as(f32, 2), cells.items[0].paint_info[0]);
+    // Mixed operations retain z order instead of batching all solids ahead of gradients.
+    cells.clearRetainingCapacity();
+    const fill: maru.chrome.draw.Op = .{ .fill = .{ .rect = q.rect, .role = .surface_bg } };
+    try appendPaintOps(a, &.{ fill, .{ .quad = q }, fill }, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 3), cells.items.len);
+    try std.testing.expectEqual(@as(f32, 0), cells.items[0].paint_info[0]);
+    try std.testing.expectEqual(@as(f32, 2), cells.items[1].paint_info[0]);
+    try std.testing.expectEqual(@as(f32, 0), cells.items[2].paint_info[0]);
+    // A solid with an empty clip must not cover the previously painted background.
+    cells.clearRetainingCapacity();
+    var solid = q;
+    solid.gradient = .solid;
+    solid.clip = .{ .x = 10, .y = 20, .w = 0, .h = 60 };
+    try appendPaintOps(a, &.{.{ .quad = solid }}, &tk, 300, 200, 0, 0, &cells);
+    try std.testing.expectEqual(@as(usize, 0), cells.items.len);
+    // Clipped solid corners stay tied to the original rectangle, including translated origins.
+    solid.clip = .{ .x = 40, .y = 30, .w = 20, .h = 15 };
+    try appendPaintOps(a, &.{.{ .quad = solid }}, &tk, 300, 200, 7, 9, &cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.items.len);
+    try std.testing.expectEqual([4]f32{ 47, 39, 20, 15 }, cells.items[0].rect);
+    try std.testing.expectEqual([4]f32{ 17, 29, 100, 60 }, cells.items[0].paint_rect);
+    // Modal padding expands the first panel before native gradient lowering.
+    cells.clearRetainingCapacity();
+    q.clip = null;
+    const panel = q.visibleRect(tk.space.modal_padding_px);
+    try appendModalPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, &cells);
+    try std.testing.expectEqual(@as(usize, 1), cells.items.len);
+    try std.testing.expectEqual([4]f32{ @floatFromInt(panel.x), @floatFromInt(panel.y), @floatFromInt(panel.w), @floatFromInt(panel.h) }, cells.items[0].paint_rect);
 }
 
 /// 편집기 프레임에 필요한 렌더 자원. **스모크는 `draw_host.Host` 가, 합성 루프는 흩어져 있는 자기
@@ -16865,20 +20797,32 @@ fn buildEditorFrame(
     // 행 → 문서 줄 대응은 **여기서** 푼다(랩·접힘이 없으므로 순차다). 그것이 축을 정하는
     // 일이고, 그 파일 머리말이 호출자 몫이라고 적어 둔 자리다.
     var sel_marks: ?[]const []const editor_view.frame.Mark = null;
-    if (sel) |sr| {
+    var document_marks: ?[][]const editor_view.frame.Mark = null;
+    defer if (document_marks) |rows| a.free(rows);
+    if (@hasField(@TypeOf(ss), "selection_marks")) {
+        sel_marks = ss.selection_marks;
+    } else if (sel) |sr| {
         const n = @min(ss.rows.len, ls.len -| first_line);
         for (0..n) |i| {
             const li = first_line + i;
             ss.spans[i] = .{ .start = ss.line_starts[li], .end = ss.line_starts[li] + ls[li].len };
         }
         editor_view.selection_marks.build(sr.lo, sr.hi, ss.spans[0..n], ss.rows[0..n], ss.buf[0..n]);
-        sel_marks = ss.rows[0..n];
+        // frame indexes marks by document line, not viewport-relative row.
+        const rows = try a.alloc([]const editor_view.frame.Mark, ls.len);
+        document_marks = rows;
+        @memset(rows, &.{});
+        @memcpy(rows[@min(first_line, ls.len)..][0..n], ss.rows[0..n]);
+        sel_marks = rows;
     }
 
     const side: editor_view.diff_frame.Side = .{
         .lines = ls,
-        .total_lines = ls.len,
+        .total_lines = if (@hasField(@TypeOf(ss), "total_lines")) ss.total_lines else ls.len,
+        .numbers = if (@hasField(@TypeOf(ss), "numbers")) ss.numbers else null,
+        .bands = if (@hasField(@TypeOf(ss), "bands")) ss.bands else null,
         .selection_marks = sel_marks,
+        .carets = if (@hasField(@TypeOf(ss), "carets")) ss.carets else null,
         .line_colors = line_colors,
         // 가로 스크롤은 **쪽마다**다(그 필드 doc: 공유하면 반대쪽이 엉뚱한 곳을 본다).
         .first_col = first_col,
@@ -16926,13 +20870,560 @@ fn buildEditorFrame(
         .ops_text = n_text,
         .ops_fill = n_fill,
         .ops_dropped = n_drop,
+        .navigation_rows = editor_view.diff_frame.sideProps(side, shared, inn, bg).visible_rows,
     };
     errdefer built.deinit(a);
 
     // **단색 사각(배경·스크롤바)을 글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다.
-    try appendSolidOps(a, op_buf[0..w.ops], tk, v.w, v.h, origin_x, origin_y, &built.cells);
+    try appendPaintOps(a, op_buf[0..w.ops], tk, v.w, v.h, origin_x, origin_y, &built.cells);
     _ = try h.appendGlyphCellsAt(a, built.frame, cl, origin_x, origin_y, &built.cells);
+    // Thin bar/underline carets belong above text. Keep block carets below
+    // their contrasting glyph, preserving the shared component's shape policy.
+    if (editor_view.diff_frame.sideProps(side, shared, inn, bg).caret_shape != .block) {
+        for (op_buf[0..w.ops]) |op| {
+            if (op == .quad and op.quad.fill_role == .cursor)
+                try appendPaintOps(a, &.{op}, tk, v.w, v.h, origin_x, origin_y, &built.cells);
+        }
+    }
     return built;
+}
+
+/// Exercise the product's composed editor through real DirectWrite/D3D frames.
+/// In-memory fixtures and one new disposable file are writable; ordinary user
+/// files remain readonly and no config is changed.
+fn runWin32EditorDocumentSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (builtin.os.tag != .windows) {
+        try stderr.writeAll("maru win32-editor-document-smoke: Windows only\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    const cfg: maru.config.Config = .{};
+    var host = try draw_host.Host.open(allocator, cfg, .{ .title = std.unicode.utf8ToUtf16LeStringLiteral("maru (editor revision smoke)") });
+    defer host.close();
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = allocator };
+    defer documents.deinit() catch unreachable;
+    // Korean here is file-content fixture data for fallback/CRLF checks, not UI
+    // copy. CLI verdicts stay English; i18n_literals records these two fixtures.
+    const original = "const before = 1;\r\n// 한글\r\n";
+    var prepared: editor.document_state.State = .{};
+    defer prepared.clear(allocator);
+    const file = try editor.edit_doc.EditableFile.init(allocator, original, false);
+    prepared.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content) };
+    prepared.path = try allocator.dupe(u8, "revision-smoke.zig");
+    const lease = try documents.create(&prepared, allocator);
+    defer _ = documents.release(lease) catch unreachable;
+    var view = try editor_document.attach(&documents, lease, allocator);
+    defer view.deinit(allocator);
+    const ops = try allocator.alloc(maru.chrome.draw.Op, 4096);
+    defer allocator.free(ops);
+    const tokens = chromeTokensFor(cfg);
+    var items = [_]editor.selection.Selection{editor.selection.Selection.at(0)};
+    var selections = editor.selection.Selections.init(&items, 0);
+    var inverse: ?editor.delta.Inverse = null;
+    defer if (inverse) |*owned| owned.deinit();
+    var frames: usize = 0;
+    var before_digest: u64 = 0;
+    for (0..3) |phase| {
+        const state = documents.get(lease).?;
+        if (phase == 1) inverse = try state.opened.?.file.apply(.{ .changes = &.{.{ .start = 0, .end = 0, .text = "// 수정된 문서\r\n" }} }, &selections);
+        if (phase == 2) {
+            var undone = try state.opened.?.file.apply(inverse.?.delta(), &selections);
+            undone.deinit();
+        }
+        // No explicit view refresh: the same paint entry used by the app must do it.
+        var built = try buildComposedEditor(allocator, EditorHost.fromHost(&host), &view, .{
+            .x = 0,
+            .y = 0,
+            .w = host.initial.width_px,
+            .h = host.initial.height_px,
+        }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(allocator);
+        if (view.cached_revision != state.opened.?.file.revision or view.text.ptr != state.opened.?.file.content.ptr)
+            return error.StaleEditorProjection;
+        if (view.lines.items.len != state.opened.?.file.lines.lines.len) return error.StaleEditorLines;
+        for (view.lines.items, view.line_starts, state.opened.?.file.lines.lines) |line, start, expected| {
+            if (start != expected.start or !std.mem.eql(u8, line, view.text[expected.start..expected.contentEnd()]))
+                return error.StaleEditorOffsets;
+        }
+        if (state.opened.?.isDirty() != (phase == 1)) return error.WrongEditorDirtyState;
+        if (built.frame.glyph_quad_frame.glyphs.len == 0) return error.EmptyEditorGlyphs;
+        const digest = d3d11_cells.cellsDigest(built.cells.items);
+        if (phase == 0) before_digest = digest;
+        if (phase == 1 and digest == before_digest) return error.UnchangedEditorPicture;
+        if (phase == 2 and !std.mem.eql(u8, view.text, original)) return error.EditorUndoMismatch;
+        const shown = try host.presentLoop(built.cells.items, 0xFF1E2430, 20);
+        if (shown != 20) return error.EditorSmokeInterrupted;
+        frames += shown;
+        try stdout.print("editor_document_phase={d} revision={d} lines={d} dirty={} glyphs={d} digest=0x{X}\n", .{
+            phase, state.opened.?.file.revision, view.lines.items.len, state.opened.?.isDirty(), built.frame.glyph_quad_frame.glyphs.len, digest,
+        });
+    }
+    try stdout.print("editor_document_smoke_ok=true frames_presented={d}\n", .{frames});
+    try runEditorNavigationFrames(allocator, &host, stdout);
+    try runEditorExternalReadFrames(io, allocator, &host, stdout);
+    try runEditorTypingFrames(io, allocator, &host, stdout);
+    try stdout.flush();
+}
+
+/// Real WM_KEYDOWN -> neutral event -> the product view's applyKey -> the
+/// product frame builder. This fixture cannot write any user file.
+fn runEditorNavigationFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = a };
+    defer documents.deinit() catch unreachable;
+    const bytes = "x\u{1100}\u{1161}\u{11a8}\u{1f468}\u{200d}\u{1f469}z\r\nsecond\r\nthird";
+    var prepared: editor.document_state.State = .{};
+    defer prepared.clear(a);
+    const file = try editor.edit_doc.EditableFile.init(a, bytes, true);
+    prepared.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content) };
+    prepared.path = try a.dupe(u8, "navigation-smoke.txt");
+    const lease = try documents.create(&prepared, a);
+    defer _ = documents.release(lease) catch unreachable;
+    var view = try editor_document.attach(&documents, lease, a);
+    defer view.deinit(a);
+    const ops = try a.alloc(maru.chrome.draw.Op, 4096);
+    defer a.free(ops);
+    const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+    const stops = [_]usize{ 1, 10, 21, 22, 24, 22 };
+    var events_seen: usize = 0;
+    var frames: usize = 0;
+    _ = try host.poll();
+    for (stops, 0..) |stop, step| {
+        host.window.postSyntheticVirtualKey(if (step == stops.len - 1) 0x25 else 0x27);
+        var received = false;
+        for (0..120) |_| {
+            for (try host.poll()) |event| switch (event) {
+                .key => |ingress| {
+                    const key = ingress.value;
+                    if (try view.applyKey(a, key, .{ .now_ms = step, .views = &.{} })) |copied| a.free(copied);
+                    events_seen += 1;
+                    received = true;
+                },
+                .close_requested => return error.EditorSmokeInterrupted,
+                else => {},
+            };
+            if (received) break;
+            try host.drawFrame(&.{}, 0xFF1E2430);
+        }
+        if (!received or view.navigation.items.items.len != 1 or view.navigation.items.items[0].focus != stop)
+            return error.EditorWindowNavigationMismatch;
+        var built = try buildComposedEditor(a, EditorHost.fromHost(host), &view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+        var carets: usize = 0;
+        for (ops[0..built.written.ops]) |op| switch (op) {
+            .quad => |q| if (q.fill_role == .cursor) {
+                carets += 1;
+            },
+            else => {},
+        };
+        if (carets != 1) return error.EditorCaretPaintMissing;
+        try host.drawFrame(built.cells.items, 0xFF1E2430);
+        frames += 1;
+    }
+    // Modified chords are tested as neutral events: PostMessage does not
+    // change GetKeyState. Do not misreport them as physical modifier tests.
+    _ = try view.applyKey(a, .{ .key = .{ .char = 'a' }, .modifiers = .{ .control = true } }, .{ .now_ms = 100, .views = &.{} });
+    view.first_line = 1;
+    var selected = try buildComposedEditor(a, EditorHost.fromHost(host), &view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+    defer selected.deinit(a);
+    if (view.selection_paint.mark_rows.items[0].len != 0 or view.selection_paint.mark_rows.items[1].len != 1 or view.selection_paint.mark_rows.items[1][0].len != 6)
+        return error.EditorScrolledSelectionMismatch;
+    var selection_quads: usize = 0;
+    for (ops[0..selected.written.ops]) |op| switch (op) {
+        .quad => |q| if (q.fill_role == .selection) {
+            selection_quads += 1;
+        },
+        else => {},
+    };
+    if (selection_quads != 2) return error.EditorSelectionPaintMissing;
+    const copied = (try view.applyKey(a, .{ .key = .{ .char = 'c' }, .modifiers = .{ .control = true } }, .{ .now_ms = 101, .views = &.{} })) orelse return error.EditorCopyMissing;
+    defer a.free(copied);
+    const state = documents.get(lease).?;
+    if (!std.mem.eql(u8, copied, bytes) or !std.mem.eql(u8, state.opened.?.file.content, bytes) or state.opened.?.file.revision != 0 or state.opened.?.isDirty())
+        return error.EditorReadonlyNavigationMutated;
+    try host.drawFrame(selected.cells.items, 0xFF1E2430);
+    frames += 1;
+    try stdout.print("editor_navigation_smoke_ok=true window_keys={d} frames_presented={d} readonly_revision=0\n", .{ events_seen, frames });
+}
+
+/// Exercise the ordinary app opener on a disposable file and backup location.
+/// Window messages then use the same input/paint methods as user documents.
+fn runEditorExternalReadFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
+    var nonce: [16]u8 = undefined;
+    try io.randomSecure(&nonce);
+    const path = try std.fmt.allocPrint(a, ".zig-cache/editor-external-smoke-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
+    defer a.free(path);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDir(io, path, .default_dir);
+    defer cwd.deleteDir(io, path) catch unreachable;
+    var root = try cwd.openDir(io, path, .{});
+    defer root.close(io);
+    try root.writeFile(io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase\r\n" });
+    defer root.deleteFile(io, "file.txt") catch unreachable;
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = a };
+    defer documents.deinit() catch unreachable;
+    var book: file_host.Book = .{ .allocator = a, .registry = &documents };
+    defer book.deinit(io) catch unreachable;
+    const lease = try book.open(io, root, "file.txt", 128);
+    defer _ = documents.release(lease) catch unreachable;
+    var views = [_]OpenFile{try editor_document.attach(&documents, lease, a)};
+    defer views[0].deinit(a);
+    try views[0].navigation.items.append(a, editor.selection.Selection.at(6));
+    const external = "\xef\xbb\xbfbaseEXT\r\n";
+    try root.writeFile(io, .{ .sub_path = "file.txt", .data = external });
+    var reader: @import("platform/windows/editor/file_read_worker.zig").Reader = .{};
+    defer reader.deinit(io) catch unreachable;
+    _ = try book.submitRead(&reader, views[0].document);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    const ops = try a.alloc(maru.chrome.draw.Op, 4096);
+    defer a.free(ops);
+    const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+    var applied = false;
+    var frames: usize = 0;
+    while (frames < 2 or !applied) {
+        for (try host.poll()) |event| if (event == .close_requested) return error.EditorSmokeInterrupted;
+        if (!applied) if (try reader.takeResult()) |value| {
+            var result = value;
+            defer result.deinit();
+            if (result != .image or !try book.acceptsRead(&reader, result, views[0].document)) return error.EditorExternalReadMismatch;
+            if (!try views[0].acceptExternal(a, &views, result.image.bytes, std.Io.Clock.awake.now(io).nanoseconds)) return error.EditorExternalEditMissing;
+            applied = true;
+            frames = 0;
+        };
+        var frame = try buildComposedEditor(a, EditorHost.fromHost(host), &views[0], .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer frame.deinit(a);
+        try host.drawFrame(frame.cells.items, 0xFF1E2430);
+        frames += 1;
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.EditorExternalReadTimeout;
+    }
+    const state = documents.get(lease).?;
+    if (!std.mem.eql(u8, views[0].text, "baseEXT\r\n") or views[0].navigation.items.items[0].focus != 9 or state.opened.?.isDirty()) return error.EditorExternalPublicationMismatch;
+    if (state.history.undo_len != 1 or state.opened.?.disk_hash != editor.document_state.contentHash(external)) return error.EditorExternalAuthorityMismatch;
+    const participants = [_]editor.edit_commands.Participant{.{ .view = &views[0].navigation, .id = views[0].document.id }};
+    _ = try editor.edit_commands.run(a, state, &participants, 0, .undo, .{ .now_ms = 1 });
+    if (!std.mem.eql(u8, state.opened.?.file.content, "base\r\n") or !state.opened.?.isDirty()) return error.EditorExternalUndoMismatch;
+    try stdout.print("editor_external_read_smoke_ok=true painted_frames={d} clean_update=true cursor_mapped=true undo_preserved=true\n", .{frames});
+}
+
+fn runEditorTypingFrames(io: std.Io, a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer) !void {
+    const editor = maru.session.editor;
+    var documents: editor.document_registry.Registry = .{ .allocator = a };
+    defer documents.deinit() catch unreachable;
+    const original = "\xef\xbb\xbf// base\r\n";
+    // Own a newly created disposable root. Cleanup removes only its known
+    // file and empty directory; an existing directory is never reused/deleted.
+    var nonce: [16]u8 = undefined;
+    try io.randomSecure(&nonce);
+    const fixture_path = try std.fmt.allocPrint(a, ".zig-cache/editor-save-smoke-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
+    defer a.free(fixture_path);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDir(io, fixture_path, .default_dir);
+    defer cwd.deleteDir(io, fixture_path) catch unreachable;
+    var fixture_root = try cwd.openDir(io, fixture_path, .{});
+    defer fixture_root.close(io);
+    try fixture_root.writeFile(io, .{ .sub_path = "typing-smoke.txt", .data = original });
+    defer fixture_root.deleteFile(io, "typing-smoke.txt") catch unreachable;
+    var app_files: file_host.Book = .{ .allocator = a, .registry = &documents };
+    defer app_files.deinit(io) catch unreachable;
+    const ordinary_path = try fixture_root.realPathFileAlloc(io, "typing-smoke.txt", a);
+    defer a.free(ordinary_path);
+    var fixture_base: [std.fs.max_path_bytes]u8 = undefined;
+    const fixture_base_len = try fixture_root.realPath(io, &fixture_base);
+    var existing_backups: ?@import("platform/windows/editor/backup_store.zig").LocalData = null;
+    defer if (existing_backups) |*owner| owner.deinit(io);
+    var views: [2]OpenFile = undefined;
+    views[0] = switch (openAppFile(&app_files, io, &existing_backups, ordinary_path, fixture_base[0..fixture_base_len])) {
+        .opened => |value| value,
+        else => return error.EditorHostOpenFailed,
+    };
+    defer views[0].deinit(a);
+    const lease = views[0].document;
+    if (documents.get(lease).?.opened.?.file.read_only or app_files.controllers.items.len != 1) return error.EditorHostCapabilityFailed;
+    const saving = &app_files.controllers.items[0];
+    views[1] = try editor_document.attach(&documents, lease, a);
+    defer views[1].deinit(a);
+    const ops = try a.alloc(maru.chrome.draw.Op, 4096);
+    defer a.free(ops);
+    const tokens = chromeTokensFor(@as(maru.config.Config, .{}));
+    // Exercise the app grant's worker admission while the real window keeps
+    // polling and painting. This does not yet wire notification-driven reload.
+    var file_reader: @import("platform/windows/editor/file_read_worker.zig").Reader = .{};
+    defer file_reader.deinit(io) catch unreachable;
+    _ = try app_files.submitRead(&file_reader, lease);
+    const read_deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    var read_frames: usize = 0;
+    while (true) {
+        for (try host.poll()) |event| if (event == .close_requested) return error.EditorSmokeInterrupted;
+        var read_frame = try buildComposedEditor(a, EditorHost.fromHost(host), &views[0], .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer read_frame.deinit(a);
+        try host.drawFrame(read_frame.cells.items, 0xFF1E2430);
+        read_frames += 1;
+        if (try file_reader.takeResult()) |value| {
+            var result = value;
+            defer result.deinit();
+            if (result != .image or !std.mem.eql(u8, result.image.bytes, original) or !try app_files.acceptsRead(&file_reader, result, lease)) return error.EditorReadWorkerMismatch;
+            break;
+        }
+        if (std.Io.Clock.awake.now(io).nanoseconds >= read_deadline) return error.EditorReadWorkerTimeout;
+    }
+    try stdout.print("editor_read_worker_smoke_ok=true painted_frames={d} current_ticket=true\n", .{read_frames});
+    const Fixture = struct { char: ?u16 = null, vk: ?u32 = null, neutral: ?maru.terminal.KeyEvent = null, expected: []const u8 };
+    const ctrl = maru.terminal.ModifierSet{ .control = true };
+    const ctrl_shift = maru.terminal.ModifierSet{ .control = true, .shift = true };
+    const undo = maru.terminal.KeyEvent{ .key = .{ .char = 'z' }, .modifiers = ctrl };
+    const redo = maru.terminal.KeyEvent{ .key = .{ .char = 'z' }, .modifiers = ctrl_shift };
+    const jamo = "\u{1100}\u{1161}\u{11a8}";
+    const fixtures = [_]Fixture{
+        .{ .char = 'A', .expected = "A// base\r\n" },
+        .{ .vk = 0x0d, .expected = "A\r\n// base\r\n" },
+        .{ .char = 0x1100, .expected = "A\r\n\u{1100}// base\r\n" },
+        .{ .char = 0x1161, .expected = "A\r\n\u{1100}\u{1161}// base\r\n" },
+        .{ .char = 0x11a8, .expected = "A\r\n" ++ jamo ++ "// base\r\n" },
+        .{ .vk = 0x08, .expected = "A\r\n// base\r\n" },
+        .{ .vk = 0x2e, .expected = "A\r\n/ base\r\n" },
+        .{ .neutral = undo, .expected = "A\r\n" ++ jamo ++ "// base\r\n" },
+        .{ .neutral = redo, .expected = "A\r\n/ base\r\n" },
+        .{ .neutral = undo, .expected = "A\r\n" ++ jamo ++ "// base\r\n" },
+        .{ .neutral = undo, .expected = "A\r\n// base\r\n" },
+        .{ .neutral = undo, .expected = "A// base\r\n" },
+        .{ .neutral = undo, .expected = "// base\r\n" },
+    };
+    var window_keys: usize = 0;
+    _ = try host.poll();
+    for (fixtures, 0..) |fixture, index| {
+        const context: OpenFile.InputContext = .{ .now_ms = index * 10, .views = &views };
+        if (fixture.neutral) |key| {
+            if (try views[0].applyKey(a, key, context)) |copied| a.free(copied);
+        } else {
+            if (fixture.char) |cp| host.window.postSyntheticChar(cp);
+            if (fixture.vk) |vk| host.window.postSyntheticVirtualKey(vk);
+            var received = false;
+            for (0..120) |_| {
+                for (try host.poll()) |event| switch (event) {
+                    .key => |ingress| {
+                        const key = ingress.value;
+                        if (try views[0].applyKey(a, key, context)) |copied| a.free(copied);
+                        window_keys += 1;
+                        received = true;
+                    },
+                    .close_requested => return error.EditorSmokeInterrupted,
+                    else => {},
+                };
+                if (received) break;
+                try host.drawFrame(&.{}, 0xFF1E2430);
+            }
+            if (!received) return error.EditorTypingKeyMissing;
+        }
+        const state = documents.get(lease).?;
+        if (!std.mem.eql(u8, state.opened.?.file.content, fixture.expected)) return error.EditorTypingBodyMismatch;
+        if (state.opened.?.isDirty() != (index + 1 != fixtures.len)) return error.EditorTypingDirtyMismatch;
+        // Both projections must refresh from the same body. Selection buffers
+        // are view-owned and already mapped before either view paints.
+        for (&views) |*view| {
+            var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+            defer built.deinit(a);
+            if (view.cached_revision != state.opened.?.file.revision or view.text.ptr != state.opened.?.file.content.ptr) return error.EditorTypingStaleView;
+            const offset = view.navigation.items.items[view.navigation.primary].focus;
+            if (offset > view.text.len) return error.EditorTypingCaretMismatch;
+            const line = state.opened.?.file.lines.lines[state.opened.?.file.lines.lineAt(offset)];
+            if (offset > line.contentEnd() or maru.grapheme.snapToBoundary(view.text[line.start..line.contentEnd()], offset - line.start) != offset - line.start) return error.EditorTypingCaretMismatch;
+            try host.drawFrame(built.cells.items, 0xFF1E2430);
+        }
+    }
+    const state = documents.get(lease).?;
+    if (state.history.undo_len != 0 or state.history.redo_len != 7) return error.EditorTypingHistoryMismatch;
+    const bytes = try state.opened.?.file.saveBytes(a);
+    defer a.free(bytes);
+    if (!std.mem.eql(u8, bytes, original)) return error.EditorTypingFormatMismatch;
+    try stdout.print("editor_typing_smoke_ok=true window_keys={d} neutral_history_keys=6 asserted_frames={d} revision={d} dirty=false\n", .{ window_keys, fixtures.len * views.len, state.opened.?.file.revision });
+
+    // Actual window typing enters the ordinary app-opened document. Feed the
+    // neutral Ctrl+S event through the same app key handler; this is not physical
+    // keyboard/IME proof, which remains a separate desktop exercise.
+    host.window.postSyntheticChar('X');
+    var got_saved_char = false;
+    for (0..120) |_| {
+        for (try host.poll()) |event| switch (event) {
+            .key => |ingress| {
+                const key = ingress.value;
+                if (try views[0].applyKey(a, key, .{ .now_ms = 1000, .views = &views })) |copied| a.free(copied);
+                got_saved_char = true;
+            },
+            .close_requested => return error.EditorSmokeInterrupted,
+            else => {},
+        };
+        if (got_saved_char) break;
+        try host.drawFrame(&.{}, 0xFF1E2430);
+    }
+    if (!got_saved_char or !std.mem.eql(u8, state.opened.?.file.content, "X// base\r\n") or !state.opened.?.isDirty()) return error.EditorGrantedInputMismatch;
+    if (try applyFileKey(&app_files, io, .{}, &views[0], .{ .key = .{ .char = 's' }, .modifiers = ctrl }, .{ .now_ms = 1010, .views = &views })) |copied| a.free(copied);
+    const receipt = saving.last_receipt orelse return error.EditorHostSaveKeyMissing;
+    if (receipt.decision != .committed or receipt.acknowledgment_error != null or receipt.cleanup_error != null or saving.status() != .idle) return error.EditorControllerReceiptMismatch;
+    if (state.opened.?.isDirty() or state.persistence.persisted_revision != 19) return error.EditorGrantedSaveAckMismatch;
+    const disk = try fixture_root.readFileAlloc(io, "typing-smoke.txt", a, .limited(4 << 20));
+    defer a.free(disk);
+    if (!std.mem.eql(u8, disk, "\xef\xbb\xbfX// base\r\n")) return error.EditorGrantedDiskMismatch;
+    var reopened = switch (openFileFor(&documents, a, io, saving.grant.path)) {
+        .opened => |value| value,
+        else => return error.EditorGrantedReopenFailed,
+    };
+    defer reopened.deinit(a);
+    const reopened_state = documents.get(reopened.document).?;
+    if (!std.mem.eql(u8, reopened.text, "X// base\r\n") or reopened_state.opened.?.isDirty() or !reopened_state.opened.?.file.read_only or !reopened_state.opened.?.file.format.has_bom) return error.EditorGrantedReopenMismatch;
+    const disk_identity = try @import("platform/windows/editor/identity.zig").Identity.capture(saving.grant.original.handle);
+    if (!disk_identity.eql(saving.grant.identity)) return error.EditorGrantedIdentityMismatch;
+    for ([_]*OpenFile{ &views[0], &views[1], &reopened }) |view| {
+        var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+        if (!std.mem.eql(u8, view.text, "X// base\r\n")) return error.EditorGrantedPaintMismatch;
+        try host.drawFrame(built.cells.items, 0xFF1E2430);
+    }
+    try stdout.writeAll("editor_granted_save_smoke_ok=true window_chars=1 native_commit=true disk_reopen=true asserted_frames=3 persisted_revision=19 dirty=false\n");
+    try stdout.print("editor_save_controller_smoke_ok=true decision=committed revision={d} sequence={d} status=idle\n", .{ receipt.revision, receipt.sequence });
+    try stdout.writeAll("editor_app_save_key_smoke_ok=true ordinary_open=true capability=true neutral_ctrl_s=true native_disk=true physical_keyboard=false\n");
+    // Recovery storage is isolated from user backups. An independent native
+    // reader loads its disk record, then both live views paint recovery and undo.
+    const backup_mod = @import("platform/windows/editor/backup_store.zig");
+    var backups = try backup_mod.Store.open(a, fixture_root, "backups", 4 << 20);
+    defer fixture_root.deleteDir(io, "backups") catch unreachable;
+    defer backups.deinit(io);
+    // Drop the known fixture record before closing its root; no tree deletion.
+    const backup_doc: editor.backup.Doc = .{ .path = .{ .path = saving.grant.path, .disk_hash = state.opened.?.disk_hash } };
+    defer backups.drop(io, backup_doc) catch unreachable;
+    // Korean is fixture content for UTF-8 recovery/paint, not a UI message.
+    const recovery_text = "recovered 한글\r\n";
+    try backups.write(io, backup_doc, recovery_text);
+    var backup_reader = try backup_mod.Store.open(a, fixture_root, "backups", 4 << 20);
+    defer backup_reader.deinit(io);
+    var restored = (try backup_reader.read(io, backup_doc)) orelse return error.EditorBackupRecordMissing;
+    defer restored.deinit();
+    const participants = [_]editor.edit_commands.Participant{
+        .{ .view = &views[0].navigation, .id = views[0].document.id },
+        .{ .view = &views[1].navigation, .id = views[1].document.id },
+    };
+    try backup_mod.restorePath(a, state, &restored, &participants, 0, 4 << 20);
+    if (!state.opened.?.isDirty() or !std.mem.eql(u8, state.opened.?.file.content, recovery_text) or state.opened.?.disk_hash != backup_doc.path.disk_hash) return error.EditorBackupRestoreMismatch;
+    for (&views) |*view| {
+        var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+        if (!std.mem.eql(u8, view.text, recovery_text) or built.cells.items.len == 0) return error.EditorBackupPaintMismatch;
+        try host.drawFrame(built.cells.items, 0xFF1E2430);
+    }
+    // Exercise the same lazy owner/frame/shutdown entry used by the app, with
+    // an explicit disposable LOCALAPPDATA base rather than the user's profile.
+    var local_path: [std.fs.max_path_bytes]u8 = undefined;
+    const local_len = try fixture_root.realPath(io, &local_path);
+    var lifecycle_owner: ?backup_mod.LocalData = null;
+    defer {
+        fixture_root.deleteDir(io, "maru/editor-backups") catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => unreachable,
+        };
+        fixture_root.deleteDir(io, "maru") catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => unreachable,
+        };
+    }
+    defer if (lifecycle_owner) |*owner| owner.deinit(io);
+    // Always delete the known fixture record, including an assertion failure;
+    // product teardown intentionally retains records instead.
+    defer if (lifecycle_owner) |*owner| owner.store.drop(io, backup_doc) catch unreachable;
+    backup_mod.noteEdit(state, 0);
+    const early = try runFileBackups(a, io, &lifecycle_owner, &views, 1, false, local_path[0..local_len]);
+    if (early.attempted != 0 or lifecycle_owner != null) return error.EditorBackupOpenedBeforeDeadline;
+    const flushed = try runFileBackups(a, io, &lifecycle_owner, &views, 1, true, local_path[0..local_len]);
+    if (flushed.attempted != 1 or flushed.failed != 0 or state.notifications.backup_dirty) return error.EditorBackupShutdownMismatch;
+    var lifecycle_record = (try lifecycle_owner.?.store.read(io, backup_doc)) orelse return error.EditorBackupShutdownRecordMissing;
+    defer lifecycle_record.deinit();
+    if (!std.mem.eql(u8, lifecycle_record.parsed.content, recovery_text)) return error.EditorBackupShutdownBodyMismatch;
+    backup_mod.noteEdit(state, 10);
+    const due = try runFileBackups(a, io, &lifecycle_owner, &views, 10 + editor.backup.debounce_ns, false, local_path[0..local_len]);
+    if (due.attempted != 1 or due.failed != 0) return error.EditorBackupFrameMismatch;
+    _ = try editor.edit_commands.run(a, state, &participants, 1, .undo, .{ .now_ms = 1 });
+    backup_mod.noteEdit(state, 20);
+    const clean = try runFileBackups(a, io, &lifecycle_owner, &views, 20 + editor.backup.debounce_ns, false, local_path[0..local_len]);
+    if (clean.attempted != 1 or clean.failed != 0 or state.notifications.backup_on_disk) return error.EditorBackupCleanMaintenanceMismatch;
+    if (try lifecycle_owner.?.store.read(io, backup_doc) != null) return error.EditorBackupCleanRecordRetained;
+    if (state.opened.?.isDirty() or !std.mem.eql(u8, state.opened.?.file.content, "X// base\r\n")) return error.EditorBackupUndoMismatch;
+    for (&views) |*view| {
+        var built = try buildComposedEditor(a, EditorHost.fromHost(host), view, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, ops, &tokens, host.cell_w, host.cell_h);
+        defer built.deinit(a);
+        if (!std.mem.eql(u8, view.text, "X// base\r\n") or built.cells.items.len == 0) return error.EditorBackupUndoPaintMismatch;
+        try host.drawFrame(built.cells.items, 0xFF1E2430);
+    }
+    const unchanged = try fixture_root.readFileAlloc(io, "typing-smoke.txt", a, .limited(4 << 20));
+    defer a.free(unchanged);
+    if (!std.mem.eql(u8, unchanged, disk)) return error.EditorBackupWroteOriginal;
+    try backups.drop(io, backup_doc);
+    try stdout.writeAll("editor_backup_smoke_ok=true disk_record=true restored_dirty=true restored_frames=2 undo_frames=2 undo_clean=true original_untouched=true\n");
+    try stdout.writeAll("editor_backup_lifecycle_smoke_ok=true lazy_root=true shared_views=true before_debounce_flush=true frame_write=true clean_drop=true\n");
+    try runEditorCloseModalFrames(a, host, stdout, &tokens);
+}
+
+/// Render the app's three-choice close UI through its actual D3D lowering.
+/// Posted window keys prove that each displayed choice has the same intent.
+fn runEditorCloseModalFrames(a: std.mem.Allocator, host: *draw_host.Host, stdout: *std.Io.Writer, tokens: *const maru.chrome.Tokens) !void {
+    const confirm = maru.chrome.components.confirm;
+    const fixtures = [_]struct { vk: u32, focus: confirm.Focus, action: confirm.Action }{
+        .{ .vk = 0x0d, .focus = .confirm, .action = .confirmed },
+        .{ .vk = 0x0d, .focus = .alternate, .action = .alternate },
+        .{ .vk = 0x1b, .focus = .confirm, .action = .cancelled },
+    };
+    var frame: ?maru.renderer.RenderFrame = null;
+    defer if (frame) |*owned| owned.deinit(a);
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(a);
+    var unpainted: usize = 0;
+    const props = confirmProps(host.initial.width_px, host.initial.height_px, host.cell_w, host.cell_h, 0, .{ .x = 0, .y = 0, .w = host.initial.width_px, .h = host.initial.height_px }, tokens);
+    for (fixtures) |fixture| {
+        var modal: confirm.State = .{};
+        showFileClose(&modal);
+        modal.focused = fixture.focus;
+        if (!modal.has_alternate or modal.has_extra or modal.cancel_label.len == 0) return error.EditorCloseChoicesMissing;
+        cells.clearRetainingCapacity();
+        const painted = try appendConfirmCells(a, &cells, &modal, props, tokens, &host.renderer_state, .{ .shaper = host.shaper, .rasterizer = host.rasterizer }, host.pipeline, &host.atlas_w, &host.atlas_h, &frame, &unpainted);
+        if (painted == 0 or frame.?.glyph_quad_frame.glyphs.len == 0) return error.EditorCloseModalUnpainted;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var semantic: std.ArrayList(maru.chrome.draw.Op) = .empty;
+        try confirm.view(&modal, props, tokens, arena.allocator(), &semantic);
+        for (semantic.items) |op| {
+            if (op != .text) continue;
+            const expected = tokens.get(op.text.role);
+            var matched = false;
+            for (cells.items) |cell| {
+                if (cell.uv[0] < 0 or cell.rect[0] != @as(f32, @floatFromInt(op.text.origin.x)) or cell.rect[1] != @as(f32, @floatFromInt(op.text.origin.y))) continue;
+                if (@abs(cell.fg[0] - @as(f32, @floatFromInt(expected.r)) / 255) > 0.001 or
+                    @abs(cell.fg[1] - @as(f32, @floatFromInt(expected.g)) / 255) > 0.001 or
+                    @abs(cell.fg[2] - @as(f32, @floatFromInt(expected.b)) / 255) > 0.001) return error.EditorCloseLabelColorMismatch;
+                matched = true;
+                break;
+            }
+            if (!matched) return error.EditorCloseLabelOriginMismatch;
+        }
+        // Several presented frames also let an external capture observe the
+        // real product pixels, without a separate mock rendering path.
+        for (0..60) |_| try host.drawFrame(cells.items, 0xFF1E2430);
+        _ = try host.poll();
+        host.window.postSyntheticVirtualKey(fixture.vk);
+        var received: ?confirm.Action = null;
+        for (0..120) |_| {
+            for (try host.poll()) |event| switch (event) {
+                .key => |ingress| {
+                    const key = ingress.value;
+                    if (confirm.handle(.{ .key = if (key.key == .enter) .enter else if (key.key == .escape) .escape else .other }, &modal)) |action| received = action;
+                },
+                .close_requested => return error.EditorSmokeInterrupted,
+                else => {},
+            };
+            if (received != null) break;
+            try host.drawFrame(cells.items, 0xFF1E2430);
+        }
+        if (received != fixture.action or modal.open) return error.EditorCloseModalIntentMismatch;
+    }
+    try stdout.writeAll("editor_close_modal_smoke_ok=true d3d=true choices=3 window_keys=3 physical_keyboard=false\n");
 }
 
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.
@@ -17377,7 +21868,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                 // 양수 델타 = 위로 굴림(Windows 규약) → 화면은 위로, 즉 `first_line` 이 준다.
                 scroll -= win32_mouse.wheelLines(&wheel_remainder, m.wheel_delta, win32_mouse.default_lines_per_notch);
             },
-            .key => |k| switch (k.key) {
+            .key => |k| switch (k.value.key) {
                 .page_down => scroll += @intCast(grid.rows),
                 .page_up => scroll -= @intCast(grid.rows),
                 .arrow_down => scroll += 1,
@@ -18271,4 +22762,957 @@ test "TBPROBE 패닉 사유는 stderr 잠금을 거치기 전에 나온다" {
 
     try std.testing.expect(std.mem.indexOf(u8, buf[0..filled], "maru panic: ") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..filled], "tbprobe reason survives") != null);
+}
+
+test "Windows editor directory watch busy scan retains owned request and queue order" {
+    const a = std.testing.allocator;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.requeueScan("C:/selected/first");
+    try tree.requeueScan("C:/selected/second");
+    const request = tree.takeScanRequest().?;
+    const allocation = request.ptr;
+    tree.returnScanRequest(request);
+    const retry = tree.takeScanRequest().?;
+    defer a.free(retry);
+    try std.testing.expect(retry.ptr == allocation);
+    try std.testing.expectEqualStrings("C:/selected/first", retry);
+    const next = tree.takeScanRequest().?;
+    defer a.free(next);
+    try std.testing.expectEqualStrings("C:/selected/second", next);
+    try std.testing.expect(tree.takeScanRequest() == null);
+}
+
+fn drainTreeWatchTestJobs(backend: *file_tree_backend.Backend) void {
+    const io = std.testing.io;
+    const state = backend.state.?;
+    while (true) {
+        state.mutex.lockUncancelable(io);
+        const inflight = state.inflight;
+        state.mutex.unlock(io);
+        while (backend.takeResult()) |taken| {
+            var result = taken;
+            result.deinit(std.testing.allocator, io);
+        }
+        if (inflight == 0) return;
+        io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+    }
+}
+
+test "Windows editor directory watch coalesces queued native scan but permits a different directory" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "other", .default_dir);
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    defer drainTreeWatchTestJobs(&backend);
+    const first = try a.dupe(u8, path);
+    if (!backend.submitCoalescedDirectory(first, 0)) {
+        a.free(first);
+        return error.FirstScanRejected;
+    }
+    const state = backend.state.?;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (true) {
+        state.mutex.lockUncancelable(io);
+        const queued = state.results_len != 0;
+        state.mutex.unlock(io);
+        if (queued) break;
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.ScanCompletionMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const duplicate = try a.dupe(u8, path);
+    const duplicate_accepted = backend.submitCoalescedDirectory(duplicate, 0);
+    if (!duplicate_accepted) a.free(duplicate);
+    const other = try std.fs.path.join(a, &.{ path, "other" });
+    const other_accepted = backend.submitCoalescedDirectory(other, 0);
+    if (!other_accepted) a.free(other);
+    var old = backend.takeResult().?;
+    old.deinit(a, io);
+    const fresh = try a.dupe(u8, path);
+    const fresh_accepted = backend.submitCoalescedDirectory(fresh, 0);
+    if (!fresh_accepted) a.free(fresh);
+    // Deferred native draining also runs before any negative assertion unwinds
+    // the fixture. Accepted mutant jobs still own and finish their paths.
+    try std.testing.expect(!duplicate_accepted);
+    try std.testing.expect(other_accepted);
+    try std.testing.expect(fresh_accepted);
+}
+
+test "Windows editor directory watch rejects a reserved same-path worker slot" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    defer drainTreeWatchTestJobs(&backend);
+    const state = backend.state.?;
+    // Model the reserved interval before a worker publishes its result. No
+    // runtime scheduling toggle or filesystem timing is needed for this axis.
+    state.mutex.lockUncancelable(io);
+    state.active[0] = .{ .path = path, .kind = .directory, .was_remote = false };
+    state.inflight += 1;
+    state.mutex.unlock(io);
+    const duplicate = a.dupe(u8, path) catch |failure| {
+        state.mutex.lockUncancelable(io);
+        state.active[0] = null;
+        state.inflight -= 1;
+        state.mutex.unlock(io);
+        return failure;
+    };
+    const accepted = backend.submitCoalescedDirectory(duplicate, 0);
+    if (!accepted) a.free(duplicate);
+    state.mutex.lockUncancelable(io);
+    state.active[0] = null;
+    state.inflight -= 1;
+    state.mutex.unlock(io);
+    try std.testing.expect(!accepted);
+}
+
+test "Windows recovery backup worker app debounce starts one native job and adopts its durable root" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const state = f.documents.get(f.views.items[0].document).?;
+    if (try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| a.free(copied);
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try f.tmp.dir.realPath(io, &root_buffer)];
+    var worker = BackupWorker.init(a, &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, 20) catch unreachable;
+    const due = state.notifications.backup_due_ns;
+    _ = try tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due - 1, true, root);
+    try std.testing.expect(!worker.isBusy() and f.backups == null);
+    _ = try tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due, false, root);
+    try std.testing.expect(!worker.isBusy() and f.backups == null);
+    _ = try tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due, true, root);
+    try std.testing.expect(worker.isBusy() and state.notifications.backup_dirty);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (worker.isBusy()) {
+        _ = try tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due, false, root);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.AppBackupCompletionMissing;
+        if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(f.backups != null and state.notifications.backup_on_disk and !state.notifications.backup_dirty);
+    var record = (try f.backups.?.store.read(io, @import("platform/windows/editor/backup_store.zig").identity(state).?)).?;
+    defer record.deinit();
+    try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker app start failure retries without synchronous storage fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    if (try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| a.free(copied);
+    const state = f.documents.get(f.views.items[0].document).?;
+    const due = state.notifications.backup_due_ns;
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try f.tmp.dir.realPath(io, &root_buffer)];
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var worker = BackupWorker.init(failing.allocator(), &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, due) catch unreachable;
+    try std.testing.expectError(error.OutOfMemory, tickFileBackupWorker(io, &worker, &f.backups, f.views.items, due, true, root));
+    try std.testing.expect(!worker.isBusy() and f.backups == null);
+    try std.testing.expect(state.notifications.backup_dirty and !state.notifications.backup_on_disk);
+    try std.testing.expectEqual(due + maru.session.editor.backup.debounce_ns, state.notifications.backup_due_ns);
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.openDir(io, "maru", .{}));
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker app preserves queued window close and allows immediate Cancel" {
+    var deferred = false;
+    var requested = true;
+    holdBackupWindowClose(true, &deferred, &requested);
+    try std.testing.expect(deferred and !requested);
+    holdBackupWindowClose(true, &deferred, &requested);
+    try std.testing.expect(deferred and !requested);
+    holdBackupWindowClose(false, &deferred, &requested);
+    try std.testing.expect(!deferred and requested);
+    try std.testing.expect(!backupAllowsCloseAction(true, .confirmed));
+    try std.testing.expect(!backupAllowsCloseAction(true, .alternate));
+    try std.testing.expect(backupAllowsCloseAction(true, .cancelled));
+    try std.testing.expect(backupAllowsCloseAction(true, .extra));
+    try std.testing.expect(backupAllowsCloseAction(false, .confirmed));
+}
+
+test "Windows editor directory watch allocation failure never publishes partial listing" {
+    const a = std.testing.allocator;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.addExplicitRoot("C:/selected");
+    try tree.applySnapshot("C:/selected", &.{.{ .name = "old.txt", .kind = .file }});
+    var result: file_tree_backend.Result = .{ .path = try a.dupe(u8, "C:/selected"), .expected_root_generation = tree.rootGeneration() };
+    defer result.deinit(a, std.testing.io);
+    for ([_][]const u8{ "first.txt", "second.txt" }) |name| {
+        try result.entries.append(a, .{ .name = try a.dupe(u8, name), .kind = .file, .identity = .{ .device = 1, .inode = 1, .kind = 1 } });
+    }
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, applyTreeScan(failing.allocator(), &tree, &result));
+    try std.testing.expectEqual(@as(usize, 1), tree.roots.items[0].children.items.len);
+    try std.testing.expectEqualStrings("old.txt", tree.roots.items[0].children.items[0].name);
+    try applyTreeScan(a, &tree, &result);
+    try std.testing.expectEqual(@as(usize, 2), tree.roots.items[0].children.items.len);
+    try std.testing.expectEqualStrings("first.txt", tree.roots.items[0].children.items[0].name);
+    try std.testing.expectEqualStrings("second.txt", tree.roots.items[0].children.items[1].name);
+}
+
+test "Windows editor directory watch failed result retains snapshot and requests retry" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.addExplicitRoot("C:/selected");
+    try tree.applySnapshot("C:/selected", &.{.{ .name = "old.txt", .kind = .file }});
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    var rows: std.ArrayList(maru.session.file_tree.Row) = .empty;
+    defer rows.deinit(a);
+    backend.pushResultForTest(.{ .path = try a.dupe(u8, "C:/selected"), .ok = false, .expected_root_generation = tree.rootGeneration() });
+    var retry = false;
+    try std.testing.expect(!drainTreeScan(a, io, &tree, &backend, &rows, "C:/selected", &retry));
+    try std.testing.expect(retry);
+    try std.testing.expectEqualStrings("old.txt", tree.roots.items[0].children.items[0].name);
+
+    // A successful native reply can still fail during UI-side conversion.
+    // Exercise the drain path so dropping its retry flag remains observable.
+    {
+        var ready: file_tree_backend.Result = .{ .path = try a.dupe(u8, "C:/selected"), .ok = true, .expected_root_generation = tree.rootGeneration() };
+        errdefer ready.deinit(a, io);
+        try ready.entries.ensureUnusedCapacity(a, 1);
+        ready.entries.appendAssumeCapacity(.{
+            .name = try a.dupe(u8, "new.txt"),
+            .kind = .file,
+            .identity = .{ .device = 1, .inode = 1, .kind = 1 },
+        });
+        backend.pushResultForTest(ready);
+    }
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    retry = false;
+    try std.testing.expect(!drainTreeScan(failing.allocator(), io, &tree, &backend, &rows, "C:/selected", &retry));
+    try std.testing.expect(retry);
+    try std.testing.expectEqual(@as(usize, 1), tree.roots.items[0].children.items.len);
+    try std.testing.expectEqualStrings("old.txt", tree.roots.items[0].children.items[0].name);
+}
+
+test "Windows editor directory watch row allocation failure discards incomplete borrowed projection" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.addExplicitRoot("C:/selected");
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    var rows: std.ArrayList(maru.session.file_tree.Row) = .empty;
+    defer rows.deinit(a);
+    backend.pushResultForTest(.{ .path = try a.dupe(u8, "C:/selected"), .ok = true, .expected_root_generation = tree.rootGeneration() });
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var retry = false;
+    try std.testing.expect(drainTreeScan(failing.allocator(), io, &tree, &backend, &rows, "C:/selected", &retry));
+    try std.testing.expect(retry);
+    try std.testing.expectEqual(@as(usize, 0), rows.items.len);
+}
+
+test "Windows recovery backup worker shutdown flush bypasses debounce and drains native receipts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const view = &f.views.items[0];
+    if (try applyFileKey(&f.book, io, .{}, view, .{ .key = .{ .char = 'X' } }, .{ .now_ms = 10, .views = f.views.items })) |copied| a.free(copied);
+    const state = f.documents.get(view.document).?;
+    try std.testing.expect(state.notifications.backup_due_ns > 1);
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try f.tmp.dir.realPath(io, &root_buffer)];
+    var worker = BackupWorker.init(a, &f.documents);
+    const report = try flushFileBackupWorker(io, &worker, &f.backups, f.views.items, 1, root);
+    try std.testing.expectEqual(@as(usize, 0), report.failed);
+    try std.testing.expectEqual(@as(usize, 1), report.attempted);
+    try std.testing.expect(!worker.isBusy());
+    try std.testing.expect(state.notifications.backup_on_disk and !state.notifications.backup_dirty);
+    var record = (try f.backups.?.store.read(io, @import("platform/windows/editor/backup_store.zig").identity(state).?)).?;
+    defer record.deinit();
+    try std.testing.expectEqualStrings("Xbase\r\n", record.parsed.content);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker clean close waits for native drop before releasing view" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    _ = try f.book.save(io, lease, 4 << 20);
+    const state = f.documents.get(lease).?;
+    var worker = BackupWorker.init(a, &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, 10) catch unreachable;
+    const now: i128 = 0;
+    try std.testing.expect(state.notifications.backup_due_ns > now);
+    try std.testing.expect(!try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, now, false, false));
+    try std.testing.expect(worker.isBusy() and state.notifications.backup_on_disk);
+    try std.testing.expect(f.documents.get(lease) != null);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (worker.isBusy()) {
+        try worker.voteDrop();
+        if (try worker.finish(&f.backups, now)) |completed| {
+            try std.testing.expectEqual(@import("platform/windows/editor/backup_worker.zig").Outcome.dropped, completed.outcome);
+            try std.testing.expect(completed.thread_id != std.Thread.getCurrentId());
+        }
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, now, false, false));
+    try std.testing.expect(!state.notifications.backup_on_disk);
+    f.backups.?.deinit(io);
+    f.backups = null; // final close cannot use a native store fallback
+    try std.testing.expect(try approveFileClose(io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .confirmed));
+    try f.expectDisk("\xef\xbb\xbfXbase\r\n");
+}
+
+test "Windows recovery backup worker clean close refuses dirty body and missing root" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    var worker = BackupWorker.init(std.testing.allocator, &f.documents);
+    defer _ = drainFileBackupWorker(std.testing.io, &worker, &f.backups, 10) catch unreachable;
+    try std.testing.expectError(error.DirtyDocument, prepareFileCloseBackup(std.testing.io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, std.math.maxInt(i128), false, false));
+    _ = try f.book.save(std.testing.io, lease, 4 << 20);
+    f.backups.?.deinit(std.testing.io);
+    f.backups = null;
+    try std.testing.expectError(error.BackupRootUnavailable, prepareFileCloseBackup(std.testing.io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, std.math.maxInt(i128), false, false));
+    try std.testing.expect(f.documents.get(lease).?.notifications.backup_on_disk);
+    try std.testing.expect(!worker.isBusy());
+}
+
+test "Windows recovery backup worker discard deletes only with current consent and rearms cancelled protection" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    var worker = BackupWorker.init(std.testing.allocator, &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, 10) catch unreachable;
+    for ([_]bool{ false, true }) |stale| {
+        try std.testing.expect(!try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, 0, false, true));
+        if (stale) f.documents.get(lease).?.opened.?.file.revision += 1;
+        const reject_deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+        while (worker.isBusy()) {
+            try worker.voteDrop();
+            try worker.voteDiscard(stale); // false consent or stale true consent
+            if (try worker.finish(&f.backups, 10)) |completed| {
+                try std.testing.expectEqual(@as(usize, if (stale) 1 else 0), completed.report.failed);
+                if (stale) try std.testing.expectEqual(error.StaleDocument, completed.report.first_error.?);
+            }
+            if (std.Io.Clock.awake.now(io).nanoseconds >= reject_deadline) return error.BackupCompletionMissing;
+            if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(f.documents.get(lease).?.notifications.backup_on_disk);
+        var preserved = (try f.backups.?.store.read(io, @import("platform/windows/editor/backup_store.zig").identity(f.documents.get(lease).?).?)).?;
+        defer preserved.deinit();
+        try std.testing.expectEqualStrings("Xbase\r\n", preserved.parsed.content);
+    }
+    try std.testing.expect(!try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, 0, false, true));
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (worker.isBusy()) {
+        try worker.voteDrop(); // ordinary clean voting cannot approve Discard
+        try worker.voteDiscard(true);
+        _ = try worker.finish(&f.backups, 10);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const state = f.documents.get(lease).?;
+    try std.testing.expect(!state.notifications.backup_on_disk and state.notifications.backup_dirty);
+    try std.testing.expect(state.opened.?.isDirty());
+    const absent = try f.backups.?.store.read(io, @import("platform/windows/editor/backup_store.zig").identity(state).?);
+    if (absent) |record| {
+        var leaked = record;
+        leaked.deinit();
+    }
+    try std.testing.expect(absent == null);
+    try std.testing.expect(!try approveFileClose(io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .cancelled));
+    try std.testing.expect(state.notifications.backup_dirty);
+    try std.testing.expect(try approveFileClose(io, &f.book, &f.backups, f.views.items, .{ .file = lease }, .alternate));
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker post-claim edit revokes discard intent and protects later body" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    try f.editAndBackup();
+    const lease = f.views.items[0].document;
+    var worker = BackupWorker.init(a, &f.documents);
+    defer _ = drainFileBackupWorker(io, &worker, &f.backups, 10) catch unreachable;
+    try std.testing.expect(!try prepareFileCloseBackup(io, &worker, &f.book, &f.backups, f.views.items, .{ .file = lease }, 0, false, true));
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.ready_drop.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try worker.voteDiscard(true);
+    if (try applyFileKey(&f.book, io, .{}, &f.views.items[0], .{ .key = .{ .char = 'Y' } }, .{ .now_ms = 20, .views = f.views.items })) |copied| a.free(copied);
+    var observed = false;
+    while (worker.isBusy()) {
+        if (try worker.finish(&f.backups, 10)) |completed| {
+            try std.testing.expectEqual(@as(usize, 1), completed.report.failed);
+            try std.testing.expectEqual(error.StaleDocument, completed.report.first_error.?);
+            observed = true;
+        }
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.BackupCompletionMissing;
+        if (worker.isBusy()) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(observed);
+    const state = f.documents.get(lease).?;
+    try std.testing.expect(state.notifications.backup_dirty and !state.notifications.backup_on_disk);
+    try std.testing.expectEqualStrings("XYbase\r\n", state.opened.?.file.content);
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+test "Windows recovery backup worker focus close shares dirty consent and clean FIFO" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const f = try FileCloseFixture.init();
+    defer f.deinit();
+    const lease = f.views.items[0].document;
+    var queue: std.ArrayList(maru.session.editor.document_registry.Lease) = .empty;
+    defer queue.deinit(a);
+    var target: ?FileCloseTarget = null;
+    var conflict: ?maru.session.editor.document_registry.Lease = null;
+    var confirm: maru.chrome.components.confirm.State = .{};
+    var action: ?maru.chrome.components.confirm.Action = null;
+    try requestFileViewClose(a, &f.book, lease, &queue, &target, &conflict, &confirm, &action);
+    try requestFileViewClose(a, &f.book, lease, &queue, &target, &conflict, &confirm, &action);
+    try std.testing.expectEqual(@as(usize, 1), queue.items.len);
+    try std.testing.expect(!confirm.open and target == null);
+    queue.clearRetainingCapacity();
+    try f.editAndBackup();
+    action = .alternate;
+    try requestFileViewClose(a, &f.book, lease, &queue, &target, &conflict, &confirm, &action);
+    try std.testing.expect(confirm.open and target != null and action == null);
+    try std.testing.expectEqual(@as(usize, 0), queue.items.len);
+    try std.testing.expect(f.documents.get(lease).?.opened.?.isDirty());
+    try f.expectDisk("\xef\xbb\xbfbase\r\n");
+}
+
+// Real ConPTY ownership is required here: a list-only fixture cannot detect a
+// dangling runtime route or teardown before the running-session approval.
+test "Windows editor host native terminal close preserves routes identity and approval" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.heap.smp_allocator;
+    const io = std.testing.io;
+    var runtime = maru.app.SurfaceRuntime.init(a);
+    defer runtime.deinit();
+    var sessions: std.ArrayList(*WinSession) = .empty;
+    defer {
+        for (sessions.items) |session| {
+            session.live.closeAndDetach(&runtime);
+            session.destroy(a);
+        }
+        sessions.deinit(a);
+    }
+    var tabs: std.ArrayList(*maru.session.surface.Surface) = .empty;
+    defer tabs.deinit(a);
+    var window: maru.session.window.AppWindow = .{ .tabs = &.{} };
+    var next: usize = 0;
+    const cfg: maru.config.theme.Config = .{};
+    const opts: WinSession.SpawnOptions = .{
+        .io = io,
+        .command = maru.pty.resolveShell("", .cmd),
+        .args = &.{ "/Q", "/K" },
+        .size = .default,
+        .cfg = cfg,
+        .appearance = try maru.config.appearance.resolve(cfg),
+        .cell_w = 9,
+        .cell_h = 19,
+    };
+    for (0..4) |_| try spawnWinSession(a, &sessions, &tabs, &window, &runtime, &next, opts);
+    const first_id = sessions.items[0].surface.id;
+    const target_id = sessions.items[1].surface.id;
+    const kept_id = sessions.items[2].surface.id;
+    const fourth_id = sessions.items[3].surface.id;
+    try std.testing.expect(window.selectTab(2));
+    sessions.items[1].surface.lockCore(io);
+    try sessions.items[1].surface.core.write("\x1b]133;C\x1b\\");
+    sessions.items[1].surface.unlockCore(io);
+    try std.testing.expectEqual(CloseSessionResult.busy_needs_confirm, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, 1, false));
+    try std.testing.expectEqual(@as(usize, 4), sessions.items.len);
+    _ = try runtime.writeInputNonBlocking(target_id, "");
+    try std.testing.expectEqual(CloseSessionResult.closed, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, 0, true));
+    try std.testing.expectError(error.UnknownSurface, runtime.writeInputNonBlocking(first_id, ""));
+    try std.testing.expectEqual(@as(usize, 3), tabs.items.len);
+    try std.testing.expectEqual(kept_id, window.active().?.id);
+    try std.testing.expectEqual(@as(?usize, 0), sessionIndexById(sessions.items, target_id));
+    try std.testing.expect(sessionIndexById(sessions.items, first_id) == null);
+    const current = sessionIndexById(sessions.items, target_id).?;
+    try std.testing.expectEqual(CloseSessionResult.closed, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, current, true));
+    try std.testing.expectError(error.UnknownSurface, runtime.writeInputNonBlocking(target_id, ""));
+    try std.testing.expectEqual(@as(usize, 2), tabs.items.len);
+    try std.testing.expectEqual(kept_id, window.active().?.id);
+    try std.testing.expectEqual(CloseSessionResult.closed, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, sessionIndexById(sessions.items, fourth_id).?, true));
+    try std.testing.expectEqual(@as(usize, 1), tabs.items.len);
+    try std.testing.expectEqual(kept_id, window.active().?.id);
+    try std.testing.expectEqual(CloseSessionResult.last_session, closeWinSession(a, io, &sessions, &tabs, &window, &runtime, 0, true));
+    _ = try runtime.writeInputNonBlocking(kept_id, "");
+}
+
+// Native admission can fail after a PTY has been created. Verify publication
+// against real runtime routes, not a synthetic list of session numbers.
+test "Windows editor host native new terminal publishes fresh size and focus only on success" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.heap.smp_allocator;
+    const io = std.testing.io;
+    var runtime = maru.app.SurfaceRuntime.init(a);
+    defer runtime.deinit();
+    var sessions: std.ArrayList(*WinSession) = .empty;
+    defer {
+        for (sessions.items) |session| {
+            session.live.closeAndDetach(&runtime);
+            session.destroy(a);
+        }
+        sessions.deinit(a);
+    }
+    var tabs: std.ArrayList(*maru.session.surface.Surface) = .empty;
+    defer tabs.deinit(a);
+    var window: maru.session.window.AppWindow = .{ .tabs = &.{} };
+    var next: usize = 0;
+    var view: ActiveView = .{ .file = 99 };
+    const cfg: maru.config.theme.Config = .{};
+    const opts: WinSession.SpawnOptions = .{
+        .io = io,
+        .command = maru.pty.resolveShell("", .cmd),
+        .args = &.{ "/Q", "/K" },
+        .size = .{ .cols = 41, .rows = 12 },
+        .cfg = cfg,
+        .appearance = try maru.config.appearance.resolve(cfg),
+        .cell_w = 9,
+        .cell_h = 19,
+    };
+    try std.testing.expect(try win_session_actions.spawnFocused(a, io, &sessions, &tabs, &window, &runtime, &next, opts, &view, 3, spawnWinSession));
+    const first_id = window.active().?.id;
+    const resized: maru.terminal.Size = .{ .cols = 72, .rows = 24 };
+    try runtime.resize(first_id, resized, io);
+    view = .{ .file = 99 };
+    try std.testing.expect(try win_session_actions.spawnFocused(a, io, &sessions, &tabs, &window, &runtime, &next, opts, &view, 3, spawnWinSession));
+    try std.testing.expectEqual(@as(usize, 1), window.active_tab);
+    try std.testing.expect(view == .terminal and view.terminal == 1);
+    const second_id = window.active().?.id;
+    try std.testing.expect(second_id != first_id);
+    window.active().?.lockCore(io);
+    const actual_size = window.active().?.core.size;
+    window.active().?.unlockCore(io);
+    try std.testing.expectEqualDeep(resized, actual_size);
+    _ = try runtime.writeInputNonBlocking(first_id, "");
+    _ = try runtime.writeInputNonBlocking(second_id, "");
+    view = .{ .file = 99 };
+    try std.testing.expect(!try win_session_actions.spawnFocused(a, io, &sessions, &tabs, &window, &runtime, &next, opts, &view, 2, spawnWinSession));
+    try std.testing.expectEqual(@as(usize, 2), sessions.items.len);
+    try std.testing.expectEqual(second_id, window.active().?.id);
+    try std.testing.expect(view == .file and view.file == 99);
+    var invalid = opts;
+    const missing_command = try std.fmt.allocPrint(a, "{s}.maru-missing-new-terminal-fixture", .{opts.command});
+    defer a.free(missing_command);
+    invalid.command = missing_command;
+    try std.testing.expectError(error.SpawnFailed, win_session_actions.spawnFocused(a, io, &sessions, &tabs, &window, &runtime, &next, invalid, &view, 3, spawnWinSession));
+    try std.testing.expectEqual(@as(usize, 2), sessions.items.len);
+    try std.testing.expectEqual(@as(usize, 2), tabs.items.len);
+    try std.testing.expectEqual(second_id, window.active().?.id);
+    try std.testing.expect(view == .file and view.file == 99);
+    _ = try runtime.writeInputNonBlocking(first_id, "");
+    _ = try runtime.writeInputNonBlocking(second_id, "");
+}
+
+test "Windows editor host resize cursor preserves client bounds and capture ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var window: win32_window.Window = .{ .hwnd = undefined, .allocator = std.testing.allocator, .horizontal_resize_rect = .{ .left = 500, .top = 38, .right = 510, .bottom = 613 } };
+    try std.testing.expect(window.wantsHorizontalCursor(500, 38, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(510, 38, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(500, 613, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(499, 200, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(505, 200, false));
+    window.capturing = true;
+    try std.testing.expect(!window.wantsHorizontalCursor(600, 200, true));
+    window.horizontal_resize_active = true;
+    try std.testing.expect(window.wantsHorizontalCursor(600, 200, true));
+    window.capturing = false;
+    try std.testing.expect(!window.wantsHorizontalCursor(600, 200, true));
+    window.capturing = true;
+    window.horizontal_resize_rect = .{ .left = 500, .top = 38, .right = 500, .bottom = 613 };
+    try std.testing.expect(!window.wantsHorizontalCursor(600, 200, true));
+    window.horizontal_resize_rect = null;
+    try std.testing.expect(!window.wantsHorizontalCursor(600, 200, true));
+    window.capturing = false;
+    window.sidebar_resize_rect = .{ .left = 175, .top = 38, .right = 185, .bottom = 613 };
+    try std.testing.expect(window.wantsHorizontalCursor(180, 200, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(185, 200, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(180, 613, true));
+    try std.testing.expect(!window.wantsHorizontalCursor(180, 200, false));
+}
+
+test "Windows editor host sidebar width clamps huge pointers and preserves grab offset" {
+    try std.testing.expectEqual(@as(u32, 300), win_sidebar.widthForPointer(297, 3, 9));
+    try std.testing.expectEqual(@as(u32, 120), win_sidebar.widthForPointer(-1000, 0, 9));
+    try std.testing.expectEqual(@as(u32, 260), win_sidebar.widthForPointer(1, 0, 20));
+    try std.testing.expectEqual(@as(u32, 480), win_sidebar.widthForPointer(std.math.maxInt(i32), std.math.maxInt(i32), 9));
+    try std.testing.expectEqual(@as(u32, 480), win_sidebar.widthForPointer(0, 0, std.math.maxInt(u32)));
+}
+
+test "Windows editor host sidebar atomic config preserves comments unrelated keys and refuses oversized source" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const dir = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    const path = try std.fmt.allocPrint(a, "{s}/config", .{dir});
+    defer a.free(path);
+    const source = "# keep comment\nfont.size = 17\nsidebar.width = 180\nfuture.key = keep\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = source });
+    try win_sidebar.writeWidth(a, io, path, 300);
+    const updated = try tmp.dir.readFileAlloc(io, "config", a, .limited(1 << 20));
+    defer a.free(updated);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "# keep comment") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "font.size = 17") != null);
+    try std.testing.expect(std.mem.indexOf(u8, updated, "future.key = keep") != null);
+    var parsed = try maru.config.loader.parse(a, updated);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u32, 300), parsed.config.sidebar.width_pt);
+    try std.testing.expectError(error.InvalidWidth, win_sidebar.writeWidth(a, io, path, 481));
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "sidebar.width = 180\nsidebar.width.macos = 210\nsidebar.width.windows = 220\n" });
+    try win_sidebar.writeWidth(a, io, path, 320);
+    const overrides = try tmp.dir.readFileAlloc(io, "config", a, .limited(1 << 20));
+    defer a.free(overrides);
+    try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width = 180") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width.macos = 210") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overrides, "sidebar.width.windows = 320") != null);
+    // A valid source at the loader limit must not become an unreadable config
+    // merely because the writer appends the missing sidebar key.
+    const limit_source = try a.alloc(u8, 1 << 20);
+    defer a.free(limit_source);
+    @memset(limit_source, 'a');
+    const valid_prefix = "sidebar.width = 180\n#";
+    @memcpy(limit_source[0..valid_prefix.len], valid_prefix);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = limit_source });
+    try win_sidebar.writeWidth(a, io, path, 300);
+    const exact_limit = try tmp.dir.readFileAlloc(io, "config", a, .limited((1 << 20) + 1));
+    defer a.free(exact_limit);
+    try std.testing.expectEqual(@as(usize, 1 << 20), exact_limit.len);
+    try std.testing.expect(std.mem.startsWith(u8, exact_limit, "sidebar.width = 300\n#"));
+    @memset(limit_source, 'a');
+    limit_source[0] = '#';
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = limit_source });
+    try std.testing.expectError(error.StreamTooLong, win_sidebar.writeWidth(a, io, path, 200));
+    const unchanged = try tmp.dir.readFileAlloc(io, "config", a, .limited((1 << 20) + 1));
+    defer a.free(unchanged);
+    try std.testing.expectEqualSlices(u8, limit_source, unchanged);
+    var file = try tmp.dir.createFile(io, "config", .{});
+    try file.setLength(io, (1 << 20) + 1);
+    file.close(io);
+    try std.testing.expectError(error.StreamTooLong, win_sidebar.writeWidth(a, io, path, 200));
+    const stat = try tmp.dir.statFile(io, "config", .{});
+    try std.testing.expectEqual(@as(u64, (1 << 20) + 1), stat.size);
+}
+
+test "Windows editor host titlebar dock icons share caption line and free content height" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const tk = chromeTokensFor(maru.config.Config{});
+    const geom = dockGeometryFor(1000, 640, 9, 19, true, 0, .explorer, 180, 38, 27, &tk);
+    try std.testing.expectEqual(@as(u32, 0), geom.view_bar.y);
+    try std.testing.expectEqual(@as(u32, 38), geom.view_bar.h);
+    try std.testing.expectEqual(@as(u32, 38), geom.tree_content.y);
+    try std.testing.expectEqual(@as(u32, 816), geom.view_bar.x + geom.view_bar.w);
+    try std.testing.expectEqual(maru.session.dock_layout.Region.view_bar, maru.session.dock_layout.regionAt(geom, @floatFromInt(geom.view_bar.x + 1), 19));
+    const tiny = dockGeometryFor(300, 640, 9, 19, true, 0, .explorer, 180, 38, 27, &tk);
+    try std.testing.expectEqual(@as(u32, 0), tiny.view_bar.w);
+}
+
+test "Windows editor host sidebar writer coalesces releases and drains final width on shutdown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [4096]u8 = undefined;
+    const dir = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    const path = try std.fmt.allocPrint(a, "{s}/config", .{dir});
+    defer a.free(path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "# coalesced\nsidebar.width = 180\n" });
+    var writer: win_sidebar.Writer = .{ .io = io, .path = try std.heap.smp_allocator.dupe(u8, path) };
+    writer.schedule(200);
+    writer.tick() catch |err| {
+        writer.deinit();
+        return err;
+    };
+    writer.schedule(260);
+    writer.schedule(320);
+    writer.deinit();
+    const result = try tmp.dir.readFileAlloc(io, "config", a, .limited(1 << 20));
+    defer a.free(result);
+    var parsed = try maru.config.loader.parse(a, result);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u32, 320), parsed.config.sidebar.width_pt);
+    try std.testing.expect(std.mem.indexOf(u8, result, "# coalesced") != null);
+}
+
+test "Windows editor host archive log action requires matching ready detail witness" {
+    const id: agent_archive_backend.source_identity.Identity = .{ .volume = 2, .file = @splat(0) };
+    const card: AgentCard = .{ .provider = .codex, .title = "fixture", .summary = "", .messages = "", .age = "", .model = "", .source_path = "C:/fixture.jsonl", .inode = 1, .device = 2, .origin = id, .scan_provider = .codex };
+    var det: AgentDetail = .{ .state = .ready, .proved_origin = id };
+    try std.testing.expect(canRevealAgentLog(card, &det));
+    det.reveal_busy = true;
+    try std.testing.expect(!canRevealAgentLog(card, &det));
+    det.reveal_busy = false;
+    det.proved_origin.?.file[15] ^= 1;
+    try std.testing.expect(!canRevealAgentLog(card, &det));
+    det.proved_origin = null;
+    try std.testing.expect(!canRevealAgentLog(card, &det));
+    det.proved_origin = id;
+    det.state = .stale;
+    try std.testing.expect(!canRevealAgentLog(card, &det));
+}
+
+test "Windows editor host dock visibility restores view width and expands every terminal layout" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const tk = chromeTokensFor(maru.config.Config{});
+    for ([_]maru.session.dock_panel.View{ .explorer, .source_control, .agent_sessions, .agent_activity }) |view| {
+        const shown = dockGeometryFor(1600, 1000, 9, 19, true, 400, view, 320, 38, 27, &tk);
+        const hidden = dockGeometryFor(1600, 1000, 9, 19, false, 400, view, 320, 38, 27, &tk);
+        try std.testing.expectEqual(@as(u32, 0), hidden.dock.w);
+        try std.testing.expectEqual(@as(u32, 0), hidden.view_bar.w);
+        try std.testing.expectEqual(@as(u32, 1280), hidden.terminal.w);
+        try std.testing.expect(shown.terminal.w < hidden.terminal.w);
+        const again = dockGeometryFor(1600, 1000, 9, 19, true, 400, view, 320, 38, 27, &tk);
+        try std.testing.expectEqualDeep(shown, again);
+        const button = win_dock.buttonRect(1600, 320, 38, 46);
+        try std.testing.expect(shown.view_bar.x + shown.view_bar.w <= button.x);
+        try std.testing.expect(button.w != 0);
+    }
+}
+
+test "Windows editor host dock launcher paint survives collapsed content without crossing captions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(std.testing.allocator);
+    const tk = chromeTokensFor(maru.config.Config{});
+    const rect = win_dock.buttonRect(1000, 180, 38, 46);
+    try appendDockToggle(std.testing.allocator, &cells, rect, false, &tk);
+    try std.testing.expect(cells.items.len >= 5);
+    const collapsed_len = cells.items.len;
+    for (cells.items) |cell| {
+        try std.testing.expect(cell.rect[0] >= @as(f32, @floatFromInt(rect.x)));
+        try std.testing.expect(cell.rect[0] + cell.rect[2] <= 862);
+        try std.testing.expect(cell.rect[1] >= 0 and cell.rect[1] + cell.rect[3] <= 38);
+    }
+    cells.clearRetainingCapacity();
+    try appendDockToggle(std.testing.allocator, &cells, rect, true, &tk);
+    try std.testing.expectEqual(collapsed_len + 1, cells.items.len);
+}
+
+test "Terminal clipboard popup native caption ownership prevents click through and resize cursor" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var window: win32_window.Window = .{
+        .hwnd = @ptrFromInt(1),
+        .allocator = std.testing.allocator,
+        .titlebar_strip_px = 38,
+        .titlebar_client_left_px = 180,
+        .caption_buttons_px = 138,
+        .horizontal_resize_rect = .{ .left = 390, .top = 38, .right = 410, .bottom = 680 },
+    };
+    const rect: @TypeOf(window.windowRect()) = .{ .left = 0, .top = 0, .right = 1000, .bottom = 700 };
+    try std.testing.expectEqual(@as(isize, 2), window.hitTestFrame(rect, 500, 16));
+    try std.testing.expect(window.wantsHorizontalCursor(400, 300, true));
+    window.input_overlay_open = true;
+    try std.testing.expectEqual(@as(isize, 1), window.hitTestFrame(rect, 500, 16));
+    try std.testing.expectEqual(@as(isize, 1), window.hitTestFrame(rect, 2, 300));
+    try std.testing.expect(!window.wantsHorizontalCursor(400, 300, true));
+    window.input_overlay_open = false;
+    try std.testing.expectEqual(@as(isize, 2), window.hitTestFrame(rect, 500, 16));
+    try std.testing.expect(window.wantsHorizontalCursor(400, 300, true));
+}
+
+test "Terminal clipboard popup client coordinates map to rendered terminal after chrome offsets" {
+    const Case = struct { point: maru.session.mouse_coordinates.Point, x: u32, y: u32, relative: maru.session.mouse_coordinates.Point, cell: maru.session.mouse_coordinates.Cell };
+    const cases = [_]Case{
+        .{ .point = .{ .x = 315, .y = 50 }, .x = 300, .y = 38, .relative = .{ .x = 15, .y = 12 }, .cell = .{ .row = 0, .col = 1 } },
+        .{ .point = .{ .x = 415, .y = 50 }, .x = 400, .y = 38, .relative = .{ .x = 15, .y = 12 }, .cell = .{ .row = 0, .col = 1 } },
+        .{ .point = .{ .x = 15, .y = 12 }, .x = 0, .y = 0, .relative = .{ .x = 15, .y = 12 }, .cell = .{ .row = 0, .col = 1 } },
+        .{ .point = .{ .x = -1, .y = -1 }, .x = 300, .y = 38, .relative = .{ .x = -301, .y = -39 }, .cell = .{ .row = 0, .col = 0 } },
+        .{ .point = .{ .x = std.math.minInt(i32), .y = std.math.minInt(i32) }, .x = std.math.maxInt(u32), .y = std.math.maxInt(u32), .relative = .{ .x = std.math.minInt(i32), .y = std.math.minInt(i32) }, .cell = .{ .row = 0, .col = 0 } },
+        .{ .point = .{ .x = std.math.maxInt(i32), .y = std.math.maxInt(i32) }, .x = 300, .y = 38, .relative = .{ .x = 2147483347, .y = 2147483609 }, .cell = .{ .row = 23, .col = 79 } },
+    };
+    for (cases) |case| {
+        const relative = maru.session.mouse_coordinates.pointRelativeTo(case.point, case.x, case.y);
+        try std.testing.expectEqualDeep(case.relative, relative);
+        try std.testing.expectEqualDeep(case.cell, maru.session.mouse_coordinates.cellFromPixel(relative.x, relative.y, 8, 19, 80, 24).?);
+    }
+}
+
+test "Windows settings focus transient menu dismisses immediately" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    w.setInputOverlay(true, .dismiss_on_blur);
+    w.noteFocusLoss();
+    try std.testing.expect(!w.input_overlay_open);
+    try std.testing.expectEqual(@as(u64, 1), w.focus_loss_serial);
+}
+test "Windows settings focus retained modal still owns caption and resize" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator, .titlebar_strip_px = 38, .titlebar_client_left_px = 180, .caption_buttons_px = 138, .horizontal_resize_rect = .{ .left = 390, .top = 38, .right = 410, .bottom = 680 } };
+    w.setInputOverlay(true, .retain_on_blur);
+    w.noteFocusLoss();
+    w.noteFocusLoss();
+    const rect: @TypeOf(w.windowRect()) = .{ .left = 0, .top = 0, .right = 1000, .bottom = 700 };
+    try std.testing.expect(w.input_overlay_open);
+    try std.testing.expectEqual(@as(isize, 1), w.hitTestFrame(rect, 500, 16));
+    try std.testing.expect(!w.wantsHorizontalCursor(400, 300, true));
+    try std.testing.expectEqual(@as(u64, 2), w.focus_loss_serial);
+}
+test "Windows settings focus closing clears retained policy" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    w.setInputOverlay(true, .retain_on_blur);
+    w.setInputOverlay(false, .retain_on_blur);
+    try std.testing.expectEqual(win32_window.OverlayFocusPolicy.dismiss_on_blur, w.overlay_focus_policy);
+    try std.testing.expect(!w.input_overlay_open);
+}
+test "Windows settings focus switching to a menu replaces old policy" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    w.setInputOverlay(true, .retain_on_blur);
+    w.setInputOverlay(true, .dismiss_on_blur);
+    w.noteFocusLoss();
+    try std.testing.expect(!w.input_overlay_open);
+}
+test "Windows settings focus loss generation wraps without reviving overlay" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator, .focus_loss_serial = std.math.maxInt(u64) };
+    w.noteFocusLoss();
+    try std.testing.expectEqual(@as(u64, 0), w.focus_loss_serial);
+    try std.testing.expect(!w.input_overlay_open);
+}
+
+test "Windows IME UI app paint hides composition only" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator, .app_drawn_preedit = true };
+    try std.testing.expectEqual(@as(usize, 0x4000000F), w.imeUiOptions(0xC000000F));
+    try std.testing.expectEqual(@as(usize, 0xF), w.imeUiOptions(0x8000000F));
+    try std.testing.expectEqual(@as(usize, 0), w.imeUiOptions(0x80000000));
+}
+test "Windows IME UI native fallback preserves all flags" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    try std.testing.expectEqual(std.math.maxInt(usize), w.imeUiOptions(std.math.maxInt(usize)));
+    try std.testing.expectEqual(@as(usize, 0xC000000F), w.imeUiOptions(0xC000000F));
+}
+test "Windows IME UI ownership switches restore native options" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    for ([_]usize{ 0, 0x80000000, 0xC000000F, std.math.maxInt(usize) }) |flags| {
+        w.setAppDrawnPreedit(true);
+        try std.testing.expectEqual(flags & ~@as(usize, 0x80000000), w.imeUiOptions(flags));
+        w.setAppDrawnPreedit(false);
+        try std.testing.expectEqual(flags, w.imeUiOptions(flags));
+    }
+}
+test "Windows IME UI claims only supported composition renderers" {
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .terminal_visible = true }));
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .settings_open = true }));
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .sidebar_search = true }));
+    try std.testing.expect(!windowsAppDrawnPreedit(.{}));
+    try std.testing.expect(!windowsAppDrawnPreedit(.{ .settings_open = true, .settings_picking = true }));
+}
+test "Windows IME UI ignores stale agent focus and respects top overlays" {
+    try std.testing.expect(!windowsAppDrawnPreedit(.{ .agent_search = true, .dock_view = .explorer }));
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .agent_search = true, .dock_view = .agent_sessions }));
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .blocked = true, .settings_open = true, .settings_picking = true }));
+}
+
+fn expectRejectedTreeScan(kind: file_tree_backend.ResultKind, remote: bool, stale: bool, ok: bool) !void {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.addExplicitRoot("C:/selected");
+    try tree.applySnapshot("C:/selected", &.{.{ .name = "keep.txt", .kind = .file }});
+    tree.roots.items[0].loading = true;
+    var result: file_tree_backend.Result = .{
+        .path = try a.dupe(u8, "C:/selected"),
+        .kind = kind,
+        .was_remote = remote,
+        .expected_root_generation = if (stale) tree.rootGeneration() - 1 else tree.rootGeneration(),
+        .ok = ok,
+    };
+    var result_owned = true;
+    defer if (result_owned) result.deinit(a, io);
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    try std.testing.expectError(error.StaleTreeScan, applyTreeScan(a, &tree, &result));
+    backend.pushResultForTest(result);
+    result_owned = false;
+    var rows: std.ArrayList(maru.session.file_tree.Row) = .empty;
+    defer rows.deinit(a);
+    var retry = false;
+    try std.testing.expect(!drainTreeScan(a, io, &tree, &backend, &rows, "C:/selected", &retry));
+    try std.testing.expect(!retry and tree.roots.items[0].loading);
+    try std.testing.expectEqualStrings("keep.txt", tree.roots.items[0].children.items[0].name);
+}
+
+test "Windows editor directory watch rejects stale success at the same root path" {
+    try expectRejectedTreeScan(.directory, false, true, true);
+}
+test "Windows editor directory watch stale failure cannot clear current loading or schedule retry" {
+    try expectRejectedTreeScan(.directory, false, true, false);
+}
+test "Windows editor directory watch root validation cannot publish a directory snapshot" {
+    try expectRejectedTreeScan(.root_validation, false, false, true);
+}
+test "Windows editor directory watch remote reply cannot replace a local directory" {
+    try expectRejectedTreeScan(.directory, true, false, true);
+}
+test "Windows editor directory watch submits the current root generation to its real worker" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const native_path = buffer[0..try tmp.dir.realPath(io, &buffer)];
+    const path = try maru.path_shape.normalizeSeparators(a, native_path);
+    defer a.free(path);
+    var tree = maru.session.file_tree.Tree.init(a);
+    defer tree.deinit();
+    try tree.addExplicitRoot(path);
+    var backend = try file_tree_backend.Backend.init(a, io);
+    defer backend.deinit();
+    defer drainTreeWatchTestJobs(&backend);
+    try std.testing.expect(pumpTreeScanRequest(&tree, &backend));
+    var rounds: usize = 0;
+    while (rounds < 5000) : (rounds += 1) {
+        if (backend.takeResult()) |taken| {
+            var result = taken;
+            defer result.deinit(a, io);
+            try std.testing.expect(result.ok);
+            try std.testing.expectEqual(tree.rootGeneration(), result.expected_root_generation);
+            return;
+        }
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TreeWorkerTimeout;
 }

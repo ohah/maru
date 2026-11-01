@@ -54,6 +54,13 @@ const WriteQueueIo = struct {
         self.session.signalWrite();
     }
 
+    fn enqueueCommandNonBlocking(ctx: *anyopaque, cmd: core_command.CoreCommand) !bool {
+        const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
+        const accepted = try self.command_queue.tryEnqueueAfterInput(cmd, self.write_queue.enqueuedTotal());
+        if (accepted) self.session.signalWrite();
+        return accepted;
+    }
+
     /// 메인이 코어에 남긴 응답을 reader 가 다음 명령 단계에서 비우게 하고 poll 을 깨운다(PtyIo.request_response_flush).
     fn requestResponseFlush(ctx: *anyopaque) void {
         const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
@@ -64,6 +71,13 @@ const WriteQueueIo = struct {
     fn writeInputNonBlocking(ctx: *anyopaque, bytes: []const u8) !usize {
         const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
         const n = try self.write_queue.enqueueSome(bytes); // paste: 들어가는 만큼만(잔량은 다음 tick)
+        if (n > 0) self.session.signalWrite();
+        return n;
+    }
+
+    fn writeProtocolResponseNonBlocking(ctx: *anyopaque, bytes: []const u8) !usize {
+        const self: *WriteQueueIo = @ptrCast(@alignCast(ctx));
+        const n = try self.write_queue.enqueueProtocolSome(bytes);
         if (n > 0) self.session.signalWrite();
         return n;
     }
@@ -371,7 +385,9 @@ pub const LivePtySession = struct {
                 .write_input = WriteQueueIo.writeInput,
                 .resize_fn = WriteQueueIo.resize,
                 .write_input_nb = WriteQueueIo.writeInputNonBlocking,
+                .write_protocol_response_nb = WriteQueueIo.writeProtocolResponseNonBlocking,
                 .enqueue_command = WriteQueueIo.enqueueCommand,
+                .enqueue_command_nb = WriteQueueIo.enqueueCommandNonBlocking,
                 .request_response_flush = WriteQueueIo.requestResponseFlush,
                 .resize_with_cell_fn = WriteQueueIo.resizeWithCell,
             };

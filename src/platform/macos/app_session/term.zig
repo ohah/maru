@@ -545,10 +545,11 @@ pub fn createTerm(
     // 새 host runtime은 reader를 시작하기 전에 이 snapshot을 적용해야 한다. spawn 뒤 별도 RPC만 쓰면 child가
     // 즉시 낸 첫 출력이 기본 폭/scrollback/theme으로 parse되는 race가 생긴다. in-process도 같은 값으로 시작하고,
     // 재접속은 아래 attach 뒤 명령으로 현재 GUI config를 다시 맞춘다.
+    const text_values = maru.app.text_config.Values.fromConfig(self.loaded_config.config);
     const runtime_config: maru.session.core_command.RuntimeConfig = .{
-        .max_scrollback = self.loaded_config.config.scrollback.lines,
-        .ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide,
-        .emoji_wide = self.loaded_config.config.emoji_width == .wide,
+        .max_scrollback = text_values.scrollback,
+        .ambiguous_wide = text_values.ambiguous_wide,
+        .emoji_wide = text_values.emoji_wide,
         .palette = self.appearance.theme.palette,
         .default_colors = .{
             .foreground = self.appearance.theme.foreground,
@@ -862,7 +863,7 @@ fn destroyTermWithAbandonBackend(
     // (pending_pastes 주석). 잔여 바이트는 대상이 사라졌으니 버린다(다시 쓸 수 없다).
     if (self.pending_pastes.fetchRemove(surface_id)) |kv| {
         var q = kv.value;
-        q.buf.deinit(self.allocator);
+        q.deinit(self.allocator);
     }
     // rename 대상이 이 Term이면 비운다(teardown 중 — 직접 null, closeRename 부수효과 없이).
     // **팝업 갈래까지 본다**(`renameTargetsTerm` 의 doc): 포인터가 아니라 `surface_id` 로 들어 stale

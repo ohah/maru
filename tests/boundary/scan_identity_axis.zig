@@ -53,9 +53,19 @@ const inventory = [_]Entry{
         .why = "타입 정의와 그 축의 소유자 — 노드 필드·비교·기록·이전 규칙(`Node.inheritIdentityFrom`). 노드를 새로 만드는 네 자리(복제·스냅샷 이전·root 재구성·root 트랜잭션)는 그 함수 **하나**를 지나므로 축이 늘어도 여기만 는다.",
     },
     .{
-        .path = "src/platform/macos/file_tree_backend.zig",
+        .path = "src/app/file_tree_backend.zig",
+        .count = 2,
+        .why = "`fstat` 축의 생성 소유자 — 스캔 결과 필드와 열린 디렉터리 identity 포착 함수. Windows 감시 준비도 같은 fstat 함수로 재검증한다.",
+    },
+    .{
+        .path = "src/app/file_tree_root_validation.zig",
         .count = 1,
-        .why = "`fstat` 축을 **만드는 유일한 자리** — 디렉터리 스캔과 root 검증이 열린 핸들에서 잰다.",
+        .why = "macOS·Windows 공통 root 검증의 Pending이 첫 라운드의 fstat 축을 보유하고 두 번째 결과와 비교한다. readdir/lstat 값으로 다시 만들지 않는다.",
+    },
+    .{
+        .path = "src/platform/windows/file_tree_root_commit.zig",
+        .count = 1,
+        .why = "시작 시 열린 root 감시를 adopt할 때 backend가 포착한 fstat 축을 전달받아 보관한다. 이름이나 자식 항목 identity로 재구성하지 않는다.",
     },
     .{
         .path = "src/platform/macos/app_session.zig",
@@ -65,9 +75,11 @@ const inventory = [_]Entry{
 };
 
 const scan_roots = [_][]const u8{
+    "src/app",
     "src/session",
     "src/platform/macos",
     "src/platform/macos/app_session",
+    "src/platform/windows",
 };
 
 fn readZigFileZ(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {

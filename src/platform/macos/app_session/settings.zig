@@ -378,20 +378,7 @@ pub fn refreshSettingsFieldCount(self: *AppSession) void {
 /// 짧은 쿼리라고 특별히 더 늘지는 않는다(≤3자 +15.7%로 전체와 같다).
 /// 그것을 감수하는 이유는, "결과가 조금 많다" 와 "선택이 조용히 다른 키로 미끄러진다" 가 같은 무게가 아니기
 /// 때문이다. 부수 효과로 **영어 이름으로도 찾을 수 있다**(한국어 화면에서 `language` 로 `ui.language` 를).
-pub fn settingsRowMatches(doc_key: ?maru.i18n.Key, label: []const u8, key: []const u8, query: []const u8) bool {
-    if (query.len == 0) return true;
-    if (std.ascii.findIgnoreCase(key, query) != null) return true;
-    // 키가 있으면 **모든 언어**를 본다. 없으면(환경변수 이름·chord 표기처럼 번역 대상이 아닌 라벨) 그 라벨
-    // 하나만 보는데, 그런 라벨은 애초에 언어를 안 타므로 판정도 언어 독립이다.
-    if (doc_key) |dk| {
-        inline for (@import("type_info_fields").enumFields(maru.i18n.Lang)) |lf| {
-            const sentence = maru.i18n.tIn(@field(maru.i18n.Lang, lf.name), dk);
-            if (std.ascii.findIgnoreCase(sentence, query) != null) return true;
-        }
-        return false;
-    }
-    return std.ascii.findIgnoreCase(label, query) != null;
-}
+pub const settingsRowMatches = maru.app.settings_model.settingsRowMatches;
 
 /// 언어 드롭다운의 표시 목록. **`Preference` 선언 순서 그대로** 만든다 — 팝업 선택은 인덱스로
 /// 적용되므로(`enumIndex`·`dropdown.show(len, cur_idx)`) 이 순서가 스키마의 변형 순서와 어긋나면
@@ -405,23 +392,7 @@ fn uiLanguageVariants(arena: std.mem.Allocator) ![]const []const u8 {
 
 /// 섹션 표시 라벨. null=스키마 섹션 미지정 그룹("기타"). 표시 문자열은 `i18n` 이 소유하므로
 /// **현재 UI 언어를 따른다** — 예전에는 여기서 한국어 리터럴을 직접 돌려줬다.
-pub fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
-    const s = sec orelse return maru.i18n.t(.set_section_other);
-    return maru.i18n.t(switch (s) {
-        .app => .set_section_app,
-        .font => .set_section_font,
-        .theme => .set_section_theme,
-        .cursor => .set_section_cursor,
-        .window => .set_section_window,
-        .input => .set_section_input,
-        .terminal => .set_section_terminal,
-        .workspace => .set_section_workspace,
-        .quick_terminal => .set_section_quick_terminal,
-        .sidebar => .set_section_sidebar,
-        .global_hotkey => .set_section_global_hotkey,
-        .editor => .set_section_editor,
-    });
-}
+pub const settingsSectionLabel = maru.app.settings_model.settingsSectionLabel;
 
 /// 이 섹션에 보일 행이 하나라도 있는가(좌측 네비에 그 섹션을 넣을지 판정).
 ///
@@ -429,27 +400,14 @@ pub fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
 /// 동어반복이라 지워졌다(키 존재와 무관하게 늘 같은 답을 냈다). 지금 `chrome.theme`·`chrome.preset` 이
 /// 안 보이는 이유는 그 필터가 아니라 **스키마에 없어서**이고, 되살아남을 막는 것은 실제 행 목록을 훑는
 /// 테스트다. 지운 메커니즘을 설명하는 주석이 남아 있으면 다음 사람이 없는 방어를 믿는다.
-pub fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, colors: []const config_mod.schema.ColorField, sec: ?config_mod.Section) bool {
-    // `.global_hotkey`는 schema 필드가 없는 특수 섹션이라 강제로 목록에 넣는다(전역 단축키 녹음 행만 — theme의
-    // palette·input의 keybind 특수 행 패턴처럼 currentSectionFields가 행을 합성한다). 좌측 네비에 항상 보여야 한다.
-    if (sec == .global_hotkey) return true;
-    for (bools) |b| if (b.section == sec) return true;
-    for (nums) |n| if (n.section == sec) return true;
-    for (enums) |e| if (e.section == sec) return true;
-    for (texts) |t| if (t.section == sec) return true;
-    for (colors) |c| if (c.section == sec) return true;
-    return false;
-}
+pub const settingsSectionHasField = maru.app.settings_model.settingsSectionHasField;
 
 /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
-/// (없으면 키), 값=현재 raw config. buildPaletteRows의 settings 짝 — arena 소유. macOS 전용.
+/// (없으면 키), 값=현재 raw config. buildPaletteRows의 settings 짝 — arena 소유. 검색·라벨 규칙은 공통 설정 모델을 사용한다.
 /// 교차 검색(cross)일 때 행 라벨 앞에 섹션명을 붙인다(`<섹션> › <라벨>`) — 결과가 어느 섹션 설정인지 보이게.
 /// 빈 쿼리(현재 섹션만)면 라벨 그대로. 모든 행 종류(scalar=필드 .section, palette=.theme·keybind=.input·global=
 /// .global_hotkey)가 이 단일 헬퍼를 거쳐 접두 규칙이 한 곳. 단일 출처: docs/config-gui.md §6.8.
-pub fn settingsRowLabel(arena: std.mem.Allocator, cross: bool, section: ?config_mod.Section, label: []const u8) ![]const u8 {
-    if (!cross) return label;
-    return std.fmt.allocPrint(arena, "{s} › {s}", .{ settingsSectionLabel(section), label });
-}
+pub const settingsRowLabel = maru.app.settings_model.settingsRowLabel;
 
 pub fn buildSettingsDefaults(arena: std.mem.Allocator) !SettingsDefaults {
     const def = config_mod.Config{};
@@ -2048,17 +2006,16 @@ pub fn acceptContextMenu(self: *AppSession) void {
     if (self.file_tree_background_menu) {
         const selected = self.chrome_host.context_menu.selected;
         closeContextMenu(self);
-        switch (selected) {
-            0 => file_panel_ops.requestFilePanelPick(self),
-            1 => file_panel_ops.requestFileTreeRootPick(self, .replace),
-            2 => file_panel_ops.requestFileTreeRootPick(self, .add),
+        if (maru.app.file_tree_context_menu.actionAt(.background, false, selected)) |action| switch (action) {
+            .open_file => file_panel_ops.requestFilePanelPick(self),
+            .open_folder => file_panel_ops.requestFileTreeRootPick(self, .replace),
+            .add_root => file_panel_ops.requestFileTreeRootPick(self, .add),
             else => {},
-        }
+        };
         return;
     }
     if (self.file_tree_context_target) |target| {
         const sel = self.chrome_host.context_menu.selected;
-        const create_allowed = !(target.symlink and (target.row_kind == .root or target.row_kind == .directory));
         self.file_tree_context_target = null;
         self.chrome_host.context_menu.hide();
         if (target.root_generation != self.file_tree.rootGeneration()) {
@@ -2070,22 +2027,20 @@ pub fn acceptContextMenu(self: *AppSession) void {
             return;
         };
         _ = file_panel_ops.setFileTreeSelection(self, current_index);
-        if (target.row_kind == .root) {
-            switch (sel) {
-                0 => file_panel_ops.startFileTreeEdit(self, .create_file),
-                1 => file_panel_ops.startFileTreeEdit(self, .create_directory),
-                2 => file_panel_ops.requestFilePanelPick(self),
-                3 => file_panel_ops.requestFileTreeRootPick(self, .replace),
-                4 => file_panel_ops.requestFileTreeRootPick(self, .add),
-                5 => file_panel_ops.removeFileTreeRoot(self, target.path()),
-                else => {},
-            }
-        } else if (create_allowed and sel == 0) file_panel_ops.startFileTreeEdit(self, .create_file) else if (create_allowed and sel == 1)
-            file_panel_ops.startFileTreeEdit(self, .create_directory)
-        else {
-            const base: usize = if (create_allowed) 2 else 0;
-            if (sel == base) file_panel_ops.startFileTreeEdit(self, .rename) else if (sel == base + 1) file_panel_ops.requestDeleteSelectedFileTreeEntry(self);
-        }
+        const menu = maru.app.file_tree_context_menu;
+        const kind = menu.targetForRow(target.row_kind) orelse return;
+        // Dispatch exactly the catalog that produced the visible rows. A symlink
+        // root omits creation, so its first visible command is Open File.
+        if (menu.actionAt(kind, target.symlink, sel)) |action| switch (action) {
+            .new_file => file_panel_ops.startFileTreeEdit(self, .create_file),
+            .new_folder => file_panel_ops.startFileTreeEdit(self, .create_directory),
+            .rename => file_panel_ops.startFileTreeEdit(self, .rename),
+            .trash => file_panel_ops.requestDeleteSelectedFileTreeEntry(self),
+            .open_file => file_panel_ops.requestFilePanelPick(self),
+            .open_folder => file_panel_ops.requestFileTreeRootPick(self, .replace),
+            .add_root => file_panel_ops.requestFileTreeRootPick(self, .add),
+            .remove_root => file_panel_ops.removeFileTreeRoot(self, target.path()),
+        };
         self.metal_dirty = true;
         return;
     }
@@ -2618,11 +2573,9 @@ pub fn disableFollowSystemTheme(self: *AppSession) void {
 /// core_mutex 아래서 한다(docs/io-render-threading.md PR3 — OSC 4 변경과의 data race 방지). metal_dirty는
 /// 호출자(applyAppearance→applyMetricsPipeline)가 이미 세운다.
 pub fn reapplyConfigPalette(self: *AppSession) void {
-    const palette = self.appearance.theme.palette;
-    const default_colors: maru.session.core_command.DefaultColors = .{
-        .foreground = self.appearance.theme.foreground,
-        .background = self.appearance.theme.background,
-    };
+    const values = maru.app.appearance_config.Values.fromAppearance(self.appearance);
+    const palette = values.palette;
+    const default_colors = values.colors;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
@@ -2649,7 +2602,7 @@ pub fn reapplyScrollback(self: *AppSession) void {
     // 있는 Term 을 지금 가장 큰 값으로 맞춘다(작은 값으로 만든 새 Term 은 늘어난다 — 줄어든 값은 새 Term 부터).
     const shrink_ok = self.allow_scrollback_shrink;
     self.allow_scrollback_shrink = false;
-    const target = if (shrink_ok or lines >= self.live_scrollback_max) lines else self.live_scrollback_max;
+    const target = maru.app.text_config.liveScrollbackTarget(self.live_scrollback_max, lines, shrink_ok);
     self.live_scrollback_max = target;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
@@ -2674,7 +2627,7 @@ pub fn reapplyScrollback(self: *AppSession) void {
 /// 지금은 `settingsRowMatches` 가 언어를 안 보므로(그 함수의 계약) 행 집합도 순서도 안 흔들린다 —
 /// 흔들릴 것이 없으므로 붙잡을 것도 없다. 그 성질은 전칭 테스트가 지킨다.
 pub fn reapplyUiLanguage(self: *AppSession) void {
-    maru.i18n.applyPreference(self.loaded_config.config.ui_language);
+    _ = maru.app.language_config.apply(self.loaded_config.config.ui_language);
 }
 
 /// 지금 선택된 행의 config 키를 `buf` 에 **복사해서** 돌려준다.
@@ -2748,7 +2701,7 @@ fn synthKey(buf: []u8, prefix: []const u8, tail: []const u8) ?[]const u8 {
 /// surface에도). reader 단일 mutator 계약상 set_max_scrollback과 같이 CoreCommand로 위임한다. 이후 putCell부터
 /// 새 폭이 반영된다(이미 저장된 셀은 옛 폭 유지 — 폭 변경은 본래 redraw 필요; max_scrollback과 같은 best-effort).
 pub fn reapplyAmbiguousWidth(self: *AppSession) void {
-    const wide = self.loaded_config.config.ambiguous_width == .wide;
+    const wide = maru.app.text_config.Values.fromConfig(self.loaded_config.config).ambiguous_wide;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
@@ -2761,7 +2714,7 @@ pub fn reapplyAmbiguousWidth(self: *AppSession) void {
 /// text.emoji-width reload를 라이브 코어에 재적용한다(reapplyAmbiguousWidth와 같은 best-effort 패턴 — 이후
 /// putCell부터 새 폭, 이미 저장된 셀은 옛 폭 유지). 이모지(VS16/키캡)를 2칸으로 볼지를 라이브 surface에 반영.
 pub fn reapplyEmojiWidth(self: *AppSession) void {
-    const wide = self.loaded_config.config.emoji_width == .wide;
+    const wide = maru.app.text_config.Values.fromConfig(self.loaded_config.config).emoji_wide;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
@@ -2811,11 +2764,7 @@ pub fn fileContentMenuHoldsWebFocus(self: *const AppSession) bool {
 /// (config: block/bar/underline, terminal: block/underline/bar) — `@intFromEnum` 재해석은 bar↔underline을 조용히
 /// 뒤바꾼다. 명시 switch라 어느 쪽에 variant가 늘면 컴파일이 멈춘다(unfocusedCursorMode와 같은 경계 규율).
 pub fn configCursorShape(self: *const AppSession) terminal.CursorShape {
-    return switch (self.appearance.cursor.shape) {
-        .block => .block,
-        .bar => .bar,
-        .underline => .underline,
-    };
+    return maru.app.appearance_config.cursorShape(self.appearance.cursor.shape);
 }
 
 /// config `input.link-detection`을 자동 감지 범위(scopes)로 변환한다. osc8-only=자동 감지 끔(OSC 8 명시 링크만),

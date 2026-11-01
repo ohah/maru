@@ -89,6 +89,29 @@ pub fn buildFrameAfterDrainWithRasterizer(
     drain_summary: runtime_pump.DrainSummary,
     io: std.Io,
 ) HostError!AppHostFrame {
+    const Adapter = struct {
+        shaper: @TypeOf(shaper),
+        rasterizer: @TypeOf(rasterizer),
+        pub fn buildDrawList(self: @This(), a: std.mem.Allocator, list: renderer.DrawList, state: *renderer.RendererState) HostError!renderer.RenderFrame {
+            var owned = list;
+            errdefer owned.deinit(a);
+            return state.buildFrameFromDrawListWithRasterizer(a, list, self.shaper, self.rasterizer);
+        }
+    };
+    return buildFrameAfterDrainWithDrawListBuilder(allocator, app_window, renderer_state, Adapter{ .shaper = shaper, .rasterizer = rasterizer }, drain_summary, io);
+}
+
+/// Native run builders consume the same owned snapshot as per-cell builders.
+/// A builder must consume its DrawList on both success and failure; this keeps
+/// platform shaping outside the core lock without duplicating snapshot policy.
+pub fn buildFrameAfterDrainWithDrawListBuilder(
+    allocator: std.mem.Allocator,
+    app_window: *window_mod.AppWindow,
+    renderer_state: *renderer.RendererState,
+    builder: anytype,
+    drain_summary: runtime_pump.DrainSummary,
+    io: std.Io,
+) !AppHostFrame {
     // 실제 app loop에서는 queue drain과 frame 조립이 같은 frame 안에 있지만, smoke나
     // trace recorder는 raw event를 먼저 관찰해야 할 수 있다. 이 helper는 drain 결과를
     // 받은 뒤 active surface만 renderer frame으로 바꾸므로 두 경로가 같은 조립 코드를 쓴다.
@@ -100,16 +123,12 @@ pub fn buildFrameAfterDrainWithRasterizer(
     // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 코어 읽기(renderSnapshot→buildDrawList,
     // 코어 메모리를 DrawList로 복사)는 **락 아래**, shaping(buildFrameFromDrawList — DrawList 복사본만
     // 봄)은 **락 밖**. PR3에서 리더의 core.write가 렌더 shaping에 안 막히게 한다.
-    active.lockCore(io);
-    const list_or = renderer.buildDrawList(allocator, active.renderSnapshot());
-    active.unlockCore(io);
-    var list = try list_or;
-    errdefer list.deinit(allocator);
-    const render_frame = try renderer_state.buildFrameFromDrawListWithRasterizer(allocator, list, shaper, rasterizer);
+    const snapshot = try @import("frame_snapshot.zig").capture(allocator, active, io, .normal);
+    const render_frame = try builder.buildDrawList(allocator, snapshot.draw_list, renderer_state);
 
     return .{
         .surface_id = active.id,
-        .size = active.core.size,
+        .size = render_frame.draw_list.size,
         .process_state = active.process_state,
         .drain_summary = drain_summary,
         .render_frame = render_frame,

@@ -50,7 +50,8 @@ pub const State = enum(u8) {
 /// `Client` 가 쥐는 이미지 채널의 끝(fd)과 상태. 받은 세그먼트 fd 는 IC3b 의 세그먼트 표(따로 둔 Client 필드)가 쥔다(§6). `Client` 이동은 구조체째 옮기고 남은
 /// 자리를 기본값으로 다시 만들므로 fd 가 두 주인을 갖지 않는다.
 pub const Channel = struct {
-    fd: c.fd_t = -1,
+    // Pure client reflection also runs on Windows, whose fd_t is a handle.
+    fd: c.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1,
     state: State = .not_negotiated,
     /// 수립 중에 받은 `bind_ack` 바이트 수와 그 바이트 — 펌프마다 남은 만큼만 읽는다.
     bind_ack_got: u8 = 0,

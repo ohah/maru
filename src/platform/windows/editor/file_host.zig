@@ -1,0 +1,1575 @@
+//! App-owned native save grants outlive individual editor views. The shared
+//! registry owns text; this host owns Windows handles and terminal save replies.
+const std = @import("std");
+const builtin = @import("builtin");
+const maru = @import("maru");
+const editor = maru.session.editor;
+const grants = @import("document_grant.zig");
+const saving = @import("save_controller.zig");
+const transactions = @import("transaction.zig");
+const identity = @import("identity.zig");
+const reading = @import("file_read_worker.zig");
+const watching = @import("directory_watch.zig");
+const opening = @import("open_worker.zig");
+const w = std.os.windows;
+extern "kernel32" fn SetFileAttributesW([*:0]const u16, u32) callconv(maru.win32_abi.winapi) w.BOOL;
+
+const native_open = @import("native_open.zig");
+const acceptsVolume = native_open.acceptsVolume;
+
+/// App focus-close remains an app action in an editor; never turn an explicit
+/// unbind/macro/release or an editor context action into a close gesture.
+pub fn closeKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru.terminal.KeyEvent) bool {
+    const resolved = resolver.resolveEditorDetailed(event, false);
+    return resolved == .app_action and resolved.app_action == .close_focused;
+}
+
+/// Keep app-key ownership when a file is focused; plain shell Ctrl+T stays distinct.
+pub fn newTermKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru.terminal.KeyEvent) bool {
+    const resolved = resolver.resolveEditorDetailed(event, false);
+    return resolved == .app_action and resolved.app_action == .new_term;
+}
+
+pub fn saveKey(resolver: maru.config.keybinding.KeyBindingResolver, event: maru.terminal.KeyEvent) bool {
+    const original = resolver.resolveEditor(event, false);
+    switch (original) {
+        .consumed => return false,
+        .app_action => |action| return action == .editor_save,
+        .editor => {},
+    }
+    // Plain Ctrl+S belongs to the shell outside a file. Only this editor-local
+    // fallback maps it to the configured primary chord; explicit Ctrl rebind,
+    // unbind and terminal macros already won above.
+    if (!event.modifiers.control or event.modifiers.command or event.modifiers.shift or event.modifiers.option) return false;
+    if (event.key != .char or (event.key.char != 's' and event.key.char != 'S')) return false;
+    var primary = event;
+    primary.modifiers.control = false;
+    primary.modifiers.command = true;
+    const result = resolver.resolveEditor(primary, false);
+    return result == .app_action and result.app_action == .editor_save;
+}
+
+test "Windows editor host save chord honors configured unbind and release without affecting shell modifiers" {
+    const defaults: maru.config.keybinding.KeyBindingResolver = .{};
+    const ctrl_s: maru.terminal.KeyEvent = .{ .key = .{ .char = 's' }, .modifiers = .{ .control = true } };
+    try std.testing.expect(saveKey(defaults, ctrl_s));
+    try std.testing.expect(!saveKey(defaults, .{ .key = ctrl_s.key, .modifiers = ctrl_s.modifiers, .event_type = .release }));
+    const unbinds = [_]maru.config.keybinding.KeyChord{.{ .key = .{ .char = 'S' }, .modifiers = .{ .command = true } }};
+    try std.testing.expect(!saveKey(.{ .unbinds = &unbinds }, ctrl_s));
+    const ctrl_unbinds = [_]maru.config.keybinding.KeyChord{.{ .key = .{ .char = 'S' }, .modifiers = .{ .control = true } }};
+    try std.testing.expect(!saveKey(.{ .unbinds = &ctrl_unbinds }, ctrl_s));
+    try std.testing.expect(ctrl_s.modifiers.control and !ctrl_s.modifiers.command);
+}
+
+pub const Book = struct {
+    pub const SaveReady = union(enum) { receipt: saving.Receipt, cancelled };
+    allocator: std.mem.Allocator,
+    registry: *editor.document_registry.Registry,
+    controllers: std.ArrayList(saving.Controller) = .empty,
+    read_scope: u64 = 0,
+
+    /// Publish only on the app owner. Failure retains the complete worker result;
+    /// after success its raw bytes cannot outlive the independent document text.
+    pub fn admitOpen(self: *Book, result: *opening.Result) !editor.document_registry.Lease {
+        if (result.consumed) return error.OpenResultConsumed;
+        if (result.cancelled) return error.OpenCancelled;
+        if (result.failure) |err| return err;
+        if (result.document == null or (result.snapshot != null) == (result.readonly != null)) return error.InvalidOpenResult;
+        const file = result.file orelse return error.InvalidOpenResult;
+        const parsed = result.document.?;
+        if (file.read_only != parsed.read_only or !std.meta.eql(file.format, parsed.format) or !std.mem.eql(u8, file.content, parsed.content)) return error.OpenImageChanged;
+        if (result.snapshot) |*snapshot| {
+            if (!snapshot.capability_verified) return error.SaveCapabilityUnavailable;
+            try self.controllers.ensureUnusedCapacity(self.allocator, 1);
+            var opened = try grants.Grant.publishPrepared(self.allocator, self.registry, snapshot, &result.file);
+            self.controllers.appendAssumeCapacity(saving.Controller.take(&opened.grant));
+            result.snapshot = null;
+            result.document = null;
+            result.consumed = true;
+            return opened.view;
+        }
+        const image = &result.readonly.?;
+        if (editor.document_state.contentHash(image.bytes) != image.raw_hash) return error.OpenImageChanged;
+        var state: editor.document_state.State = .{};
+        defer {
+            state.opened = null;
+            state.clear(self.allocator);
+        }
+        state.opened = .{ .file = file, .saved_hash = editor.document_state.contentHash(file.content), .disk_hash = image.raw_hash };
+        state.path = try self.allocator.dupe(u8, image.path);
+        const view = try self.registry.create(&state, self.allocator);
+        result.file = null;
+        image.deinit();
+        result.readonly = null;
+        result.document = null;
+        result.consumed = true;
+        return view;
+    }
+
+    pub fn open(self: *Book, io: std.Io, root: std.Io.Dir, name: []const u8, limit: usize) !editor.document_registry.Lease {
+        // Allocate the publication slot first. A successfully probed document
+        // cannot be stranded by an allocation after native ownership transfers.
+        try self.controllers.ensureUnusedCapacity(self.allocator, 1);
+        var snapshot = try native_open.Snapshot.open(self.allocator, io, root, name, limit);
+        defer snapshot.deinit(io);
+        try snapshot.probe(io, limit);
+        var opened = try grants.Grant.publishOpen(self.allocator, self.registry, &snapshot);
+        errdefer opened.grant.deinit(io);
+        errdefer _ = self.registry.release(opened.view) catch unreachable;
+        self.controllers.appendAssumeCapacity(saving.Controller.take(&opened.grant));
+        return opened.view;
+    }
+
+    pub fn openPath(self: *Book, io: std.Io, path: []const u8, limit: usize) !editor.document_registry.Lease {
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        const root_path = try native_open.rootForPath(path);
+        // The native grant walks the full suffix relative to this selected root,
+        // rejecting reparse points and escapes instead of reopening its dirname.
+        var root = try std.Io.Dir.openDirAbsolute(io, root_path, .{ .follow_symlinks = false });
+        defer root.close(io);
+        return self.open(io, root, path[root_path.len..], limit);
+    }
+
+    fn index(self: *Book, view: editor.document_registry.Lease) !usize {
+        if (view.owner != self.registry or view.kind != .view or self.registry.get(view) == null) return error.StaleDocument;
+        for (self.controllers.items, 0..) |controller, i| {
+            if (std.meta.eql(controller.grant.lease.document, view.document)) return i;
+        }
+        return error.NoSaveGrant;
+    }
+
+    pub fn readTicket(self: *Book, view: editor.document_registry.Lease) !reading.Ticket {
+        const controller = &self.controllers.items[try self.index(view)];
+        const state = self.registry.get(view).?;
+        if (controller.status() != .idle or state.persistence.uncertain_sequence != null or state.persistence.live_save_images != 0) return error.SaveBusy;
+        if (controller.grant.epoch != state.persistence.epoch) return error.StaleGrant;
+        if (!std.mem.eql(u8, controller.grant.path, state.path orelse return error.GrantPathChanged)) return error.GrantPathChanged;
+        const opened = state.opened orelse return error.MissingDocument;
+        if (self.read_scope == 0) self.read_scope = try reading.issueScope();
+        return .{ .source_id = self.read_scope, .document = view.document, .epoch = state.persistence.epoch, .revision = opened.file.revision, .disk_hash = opened.disk_hash };
+    }
+
+    pub fn submitRead(self: *Book, reader: *reading.Reader, view: editor.document_registry.Lease) !u64 {
+        const ticket = try self.readTicket(view);
+        const grant = &self.controllers.items[try self.index(view)].grant;
+        // Frame-side work only copies the selected handle and counted name.
+        // Path traversal, file reads and raw hashing happen on the worker.
+        return reader.submit(grant.root, grant.relative_path, grant.identity, ticket, reading.max_bytes);
+    }
+
+    /// Called during document admission, never for each frame. An absolute
+    /// grant may start at the volume root, but a nonrecursive native watcher
+    /// must subscribe to the pinned file's actual parent directory.
+    pub fn subscribeWatch(self: *Book, io: std.Io, groups: *watching.Groups, view: editor.document_registry.Lease) !watching.Lease {
+        _ = try self.readTicket(view);
+        const grant = &self.controllers.items[try self.index(view)].grant;
+        var pinned = try maru.win32_relative_file.open(self.allocator, grant.root, grant.relative_path);
+        defer pinned.deinit(io);
+        if (!grant.identity.eql(try identity.Identity.capture(pinned.original.handle))) return error.IdentityChanged;
+        return groups.acquire(pinned.parent());
+    }
+
+    pub fn acceptsRead(self: *Book, reader: *const reading.Reader, result: reading.Result, view: editor.document_registry.Lease) !bool {
+        const current = try self.readTicket(view);
+        if (!reader.accepts(result, current)) return false;
+        if (result == .image and !result.image.identity.eql(self.controllers.items[try self.index(view)].grant.identity)) return false;
+        return true;
+    }
+
+    pub fn beginSave(self: *Book, view: editor.document_registry.Lease, limit: usize) !bool {
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() != .idle) return error.SaveBusy;
+        const state = self.registry.get(view).?;
+        if (!state.opened.?.isDirty()) return false;
+        try controller.prepareAsync(view, limit);
+        return true;
+    }
+
+    pub fn saveStatus(self: *Book, view: editor.document_registry.Lease) !saving.Status {
+        return self.controllers.items[try self.index(view)].status();
+    }
+
+    pub fn cancelSave(self: *Book, io: std.Io, view: editor.document_registry.Lease) !void {
+        _ = io;
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() == .preparing) {
+            try controller.cancelPreparation();
+        } else if (controller.status() == .committing) {
+            try controller.cancelCommit();
+        } else if (controller.status() == .closed) {
+            return error.ControllerClosed;
+        } else if (controller.status() != .idle) {
+            controller.pending.?.preparation_error = error.SaveCancelled;
+            if (controller.status() != .settling and controller.status() != .cleaning and controller.status() != .finishing) try controller.abortAsync();
+        }
+    }
+
+    /// Preparation is polled after input dispatch so queued Esc wins before
+    /// the final commit vote. Explicit cancel/preparation failure rollback and
+    /// uncertain outcome queries, native commit and terminal cleanup use
+    /// workers; the final live authority vote and document CAS stay on main.
+    pub fn pollSave(self: *Book, io: std.Io, view: editor.document_registry.Lease) !?SaveReady {
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() == .preparing) {
+            const ready = (try controller.pollPreparationForApp(io)) orelse return null;
+            if (ready == .cancelled) return .cancelled;
+            if (ready == .settling) return null;
+        }
+        if (controller.status() == .committing) {
+            const receipt = (try controller.pollCommit(io)) orelse return null;
+            return .{ .receipt = receipt };
+        }
+        if (controller.status() == .settling) {
+            const failure = controller.pending.?.preparation_error;
+            const receipt = (try controller.pollSettlementForApp(io)) orelse return null;
+            // A lost commit may already be durable despite a later Esc. Only
+            // confirmed abort turns a cancellation into a cancelled UI result.
+            if (receipt.decision == .aborted) if (failure) |err| {
+                if (err == error.SaveCancelled) return .cancelled;
+                return err;
+            };
+            return .{ .receipt = receipt };
+        }
+        if (controller.status() == .cleaning) {
+            const failure = controller.pending.?.preparation_error;
+            const receipt = (try controller.pollCleanup(io)) orelse return null;
+            if (receipt.decision == .aborted) if (failure) |err| {
+                if (err == error.SaveCancelled) return .cancelled;
+                return err;
+            };
+            return .{ .receipt = receipt };
+        }
+        if (controller.status() == .finishing) {
+            if (std.Io.Clock.awake.now(io).nanoseconds < controller.settlement_retry_after_ns) return null;
+            try controller.cleanupAsync();
+            return null;
+        }
+        if (controller.status() == .prepared) {
+            if (controller.pending.?.preparation_error != null) {
+                try controller.abortAsync();
+                return null;
+            }
+            const receipt = (try controller.commitForApp(io)) orelse return null;
+            return .{ .receipt = receipt };
+        }
+        if (controller.status() == .uncertain) {
+            const cancelled = if (controller.pending.?.preparation_error) |failure| failure == error.SaveCancelled else false;
+            if (!cancelled and std.Io.Clock.awake.now(io).nanoseconds < controller.settlement_retry_after_ns) return null;
+            if (controller.pending.?.preparation_error != null) try controller.abortAsync() else try controller.reconcileAsync();
+            return null;
+        }
+        if (controller.last_receipt) |receipt| return .{ .receipt = receipt };
+        return error.NoPendingSave;
+    }
+
+    pub fn save(self: *Book, io: std.Io, view: editor.document_registry.Lease, limit: usize) !?saving.Receipt {
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() == .uncertain) {
+            const receipt = try controller.reconcile(io);
+            if (receipt.acknowledgment_error) |err| return err;
+            if (receipt.cleanup_error) |err| std.log.warn("editor save native decision confirmed; cleanup failed({s})", .{@errorName(err)});
+        }
+        if (controller.status() != .idle) return error.SaveBusy;
+        const state = self.registry.get(view).?;
+        if (!state.opened.?.isDirty()) return null;
+        try controller.prepare(io, view, limit);
+        const receipt = try controller.commit(io);
+        if (receipt.acknowledgment_error) |err| return err;
+        if (receipt.cleanup_error) |err| std.log.warn("editor save committed; cleanup failed({s})", .{@errorName(err)});
+        return receipt;
+    }
+
+    /// Explicit overwrite requires a fresh admitted native read. Its raw hash
+    /// fences the native write; the document keeps its old save base until ack.
+    pub fn overwrite(self: *Book, io: std.Io, reader: *const reading.Reader, result: reading.Result, view: editor.document_registry.Lease, limit: usize) !?saving.Receipt {
+        if (result != .image) return error.MissingOverwriteImage;
+        if (!try self.acceptsRead(reader, result, view)) return error.StaleExternalRead;
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() != .idle) return error.SaveBusy;
+        const state = self.registry.get(view).?;
+        if (!state.opened.?.isDirty()) return null;
+        try controller.prepareOverwrite(io, view, limit, result.image.raw_hash);
+        const receipt = try controller.commit(io);
+        if (receipt.acknowledgment_error) |err| return err;
+        if (receipt.cleanup_error) |err| std.log.warn("editor overwrite committed; cleanup failed({s})", .{@errorName(err)});
+        return receipt;
+    }
+
+    /// Retain the document's original saved/disk CAS while preparing against
+    /// the freshly observed native source. Result bytes remain reader-owned;
+    /// the save pipeline owns a separate image before this call returns.
+    pub fn beginOverwrite(self: *Book, reader: *const reading.Reader, result: reading.Result, view: editor.document_registry.Lease, limit: usize) !bool {
+        if (result != .image) return error.MissingOverwriteImage;
+        if (!try self.acceptsRead(reader, result, view)) return error.StaleExternalRead;
+        const controller = &self.controllers.items[try self.index(view)];
+        if (controller.status() != .idle) return error.SaveBusy;
+        const state = self.registry.get(view).?;
+        if (!state.opened.?.isDirty()) return false;
+        try controller.prepareOverwriteAsync(view, limit, result.image.raw_hash);
+        return true;
+    }
+
+    /// Closing one peer does not revoke the surviving view's save authority.
+    /// Last-view discard requires explicit acceptance; pending native ownership
+    /// always wins over discard. Backup deletion remains the app's responsibility.
+    pub fn requireClose(self: *Book, view: editor.document_registry.Lease, accepted: bool) !void {
+        const i = self.index(view) catch |err| {
+            if (err == error.NoSaveGrant) return;
+            return err;
+        };
+        if (self.registry.viewCount(view).? > 1) return;
+        const controller = &self.controllers.items[i];
+        const state = self.registry.get(view).?;
+        if (controller.status() != .idle or state.persistence.uncertain_sequence != null or state.persistence.live_save_images != 0) return error.SaveBusy;
+        if (!accepted and state.opened.?.isDirty()) return error.DirtyDocument;
+    }
+
+    pub fn release(self: *Book, io: std.Io, view: editor.document_registry.Lease, accepted: bool) !void {
+        try self.requireClose(view, accepted);
+        if (self.registry.viewCount(view).? > 1) return;
+        const i = self.index(view) catch |err| {
+            if (err == error.NoSaveGrant) return;
+            return err;
+        };
+        try self.controllers.items[i].deinit(io);
+        _ = self.controllers.orderedRemove(i);
+    }
+
+    pub fn requireIdle(self: *const Book) !void {
+        // Refuse before releasing any grant. A blocked teardown must be retryable
+        // with every other document still owning its original authority.
+        for (self.controllers.items) |controller| {
+            const state = self.registry.get(controller.grant.lease).?;
+            if (controller.status() != .idle or state.persistence.uncertain_sequence != null or state.persistence.live_save_images != 0) return error.SaveBusy;
+        }
+    }
+
+    pub fn deinit(self: *Book, io: std.Io) !void {
+        try self.requireIdle();
+        for (self.controllers.items) |*controller| try controller.deinit(io);
+        self.controllers.deinit(self.allocator);
+        self.controllers = .empty;
+        self.read_scope = 0;
+    }
+};
+
+test "Windows editor host volume policy refuses missing transaction readonly and foreign filesystem flags" {
+    const ntfs = std.unicode.utf8ToUtf16LeStringLiteral("NTFS");
+    try std.testing.expect(acceptsVolume(0x00200000, ntfs));
+    try std.testing.expect(!acceptsVolume(0, ntfs));
+    try std.testing.expect(!acceptsVolume(0x00280000, ntfs));
+    try std.testing.expect(!acceptsVolume(0x00200000, std.unicode.utf8ToUtf16LeStringLiteral("ReFS")));
+}
+
+fn change(registry: *editor.document_registry.Registry, view: editor.document_registry.Lease, text: []const u8) !void {
+    var nav: editor.view_navigation.View = .{};
+    defer nav.deinit(std.testing.allocator);
+    const peers = [_]editor.edit_commands.Participant{.{ .view = &nav, .id = view.id }};
+    _ = try editor.edit_commands.run(std.testing.allocator, registry.get(view).?, &peers, 0, .{ .insert = text }, .{ .now_ms = 10 });
+}
+
+test "Windows editor host probes without changing original and saves through surviving peer view" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase\r\n" });
+    var registry: editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var book: Book = .{ .allocator = a, .registry = &registry };
+    defer book.deinit(io) catch unreachable;
+    const first = try book.open(io, tmp.dir, "file.txt", 128);
+    var first_owned = true;
+    defer if (first_owned) {
+        _ = registry.release(first) catch unreachable;
+    };
+    try std.testing.expectEqual(@as(u64, 0), registry.get(first).?.persistence.issued);
+    const original = try tmp.dir.readFileAlloc(io, "file.txt", a, .limited(128));
+    defer a.free(original);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", original);
+    const peer = try registry.retain(first, .view);
+    defer _ = registry.release(peer) catch unreachable;
+    try book.release(io, first, false);
+    _ = try registry.release(first);
+    first_owned = false;
+    try std.testing.expectEqual(@as(usize, 1), book.controllers.items.len);
+    try change(&registry, peer, "X");
+    try std.testing.expectError(error.DirtyDocument, book.release(io, peer, false));
+    const receipt = (try book.save(io, peer, 128)).?;
+    try std.testing.expectEqual(saving.Decision.committed, receipt.decision);
+    try std.testing.expect(!registry.get(peer).?.opened.?.isDirty());
+    const disk = try tmp.dir.readFileAlloc(io, "file.txt", a, .limited(128));
+    defer a.free(disk);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfXbase\r\n", disk);
+    try book.release(io, peer, false);
+    try std.testing.expectEqual(@as(usize, 0), book.controllers.items.len);
+}
+
+const Fixture = struct {
+    tmp: std.testing.TmpDir,
+    registry: editor.document_registry.Registry,
+    book: Book,
+    views: [2]?editor.document_registry.Lease = .{ null, null },
+
+    fn init() !*Fixture {
+        const self = try std.testing.allocator.create(Fixture);
+        errdefer std.testing.allocator.destroy(self);
+        self.* = .{ .tmp = std.testing.tmpDir(.{}), .registry = .{ .allocator = std.testing.allocator }, .book = undefined };
+        errdefer self.tmp.cleanup();
+        self.book = .{ .allocator = std.testing.allocator, .registry = &self.registry };
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase\r\n" });
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "other.txt", .data = "other" });
+        return self;
+    }
+    fn open(self: *Fixture, slot: usize) !editor.document_registry.Lease {
+        const view = try self.book.open(std.testing.io, self.tmp.dir, if (slot == 0) "file.txt" else "other.txt", 128);
+        self.views[slot] = view;
+        return view;
+    }
+    fn deinit(self: *Fixture) void {
+        for (self.book.controllers.items) |*controller| if (controller.preparing != null) {
+            controller.cancelPreparation() catch unreachable;
+            const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+            while (controller.preparing != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native preparation timeout");
+                _ = controller.pollPreparation(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+        };
+        for (self.book.controllers.items) |*controller| if (controller.pending != null) {
+            const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+            if (controller.committing != null) controller.cancelCommit() catch unreachable;
+            while (controller.committing != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native commit timeout");
+                _ = controller.pollCommit(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+            while (controller.settling != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native settlement timeout");
+                _ = controller.pollSettlement(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+            while (controller.cleaning != null) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) @panic("native cleanup timeout");
+                _ = controller.pollCleanup(std.testing.io) catch {};
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+            if (controller.pending == null) continue;
+            _ = controller.abort(std.testing.io) catch @panic("unresolved fixture transaction");
+        };
+        self.book.deinit(std.testing.io) catch unreachable;
+        for (self.views) |view| if (view) |lease| {
+            _ = self.registry.release(lease) catch unreachable;
+        };
+        self.registry.deinit() catch unreachable;
+        self.tmp.cleanup();
+        std.testing.allocator.destroy(self);
+    }
+};
+
+fn awaitSave(book: *Book, view: editor.document_registry.Lease) !Book.SaveReady {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline) {
+        if (try book.pollSave(std.testing.io, view)) |ready| return ready;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.SaveDidNotComplete;
+}
+
+fn awaitNativePreparation(controller: *saving.Controller) !void {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!controller.preparing.?.worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.PreparationDidNotComplete;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+test "Windows editor host queued cancel keeps its slot until worker rollback returns" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    try f.book.cancelSave(std.testing.io, view);
+    const controller = &f.book.controllers.items[0];
+    try awaitNativePreparation(controller);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expectEqual(saving.Status.settling, controller.status());
+    try std.testing.expectEqual(@as(u64, 1), f.registry.get(view).?.persistence.live_save_images);
+    try std.testing.expectError(error.SaveBusy, f.book.requireClose(view, true));
+    try std.testing.expectError(error.SaveBusy, f.book.beginSave(view, 128));
+    const waiting = controller.settling.?;
+    try f.book.cancelSave(std.testing.io, view);
+    try std.testing.expectEqual(waiting, controller.settling.?);
+    try std.testing.expectEqual(Book.SaveReady.cancelled, try awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, controller.status());
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.live_save_images);
+}
+
+test "Windows editor host preparation permission failure waits for worker rollback before reporting" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    const controller = &f.book.controllers.items[0];
+    try awaitNativePreparation(controller);
+    f.registry.get(view).?.opened.?.file.read_only = true;
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expectEqual(saving.Status.settling, controller.status());
+    try std.testing.expectError(error.SaveBusy, f.book.requireClose(view, true));
+    try std.testing.expectError(error.ReadOnly, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, controller.status());
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host unknown query respects backoff while explicit cancel requests rollback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    const controller = &f.book.controllers.items[0];
+    try controller.prepareAsync(view, 128);
+    try awaitNativePreparation(controller);
+    try std.testing.expectEqual(saving.PreparationReady.prepared, (try controller.pollPreparation(std.testing.io)).?);
+    controller.pending.?.attempt.transaction.phase = .uncertain;
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expectEqual(saving.Status.settling, controller.status());
+    try std.testing.expectError(error.SaveUncertain, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.uncertain, controller.status());
+    try std.testing.expect(controller.settlement_retry_after_ns != 0);
+    controller.settlement_retry_after_ns = std.Io.Clock.awake.now(std.testing.io).nanoseconds + std.time.ns_per_s;
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expect(controller.settling == null);
+    try std.testing.expectError(error.SaveBusy, f.book.requireClose(view, true));
+    try f.book.cancelSave(std.testing.io, view);
+    try std.testing.expectEqual(saving.Status.settling, controller.status());
+    try std.testing.expectEqual(Book.SaveReady.cancelled, try awaitSave(&f.book, view));
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+}
+
+test "Windows editor host cancel after an actual lost commit returns its committed receipt" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    const controller = &f.book.controllers.items[0];
+    try controller.prepareAsync(view, 128);
+    try awaitNativePreparation(controller);
+    try std.testing.expectEqual(saving.PreparationReady.prepared, (try controller.pollPreparation(std.testing.io)).?);
+    const pending = &controller.pending.?;
+    try controller.grant.commit(std.testing.io, &pending.attempt, &pending.request);
+    pending.attempt.transaction.phase = .uncertain;
+    try f.book.cancelSave(std.testing.io, view);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(ready.receipt.acknowledgment_error == null);
+    try std.testing.expect(!f.registry.get(view).?.opened.?.isDirty());
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfXbase\r\n", bytes);
+}
+
+fn readyAppSave(f: *Fixture, view: editor.document_registry.Lease) !*saving.Controller {
+    try change(&f.registry, view, "X");
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    const controller = &f.book.controllers.items[0];
+    try awaitNativePreparation(controller);
+    try std.testing.expectEqual(saving.PreparationReady.prepared, (try controller.pollPreparation(std.testing.io)).?);
+    return controller;
+}
+
+fn awaitAppCleanup(book: *Book, view: editor.document_registry.Lease) !void {
+    const controller = &book.controllers.items[try book.index(view)];
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (controller.status() == .committing) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.CommitTimeout;
+        try std.testing.expect((try book.pollSave(std.testing.io, view)) == null);
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(saving.Status.cleaning, controller.status());
+}
+
+fn readyAppCommit(f: *Fixture, view: editor.document_registry.Lease) !*saving.Controller {
+    const controller = try readyAppSave(f, view);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expectEqual(saving.Status.committing, controller.status());
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!try controller.committing.?.worker.needsApproval()) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.CommitReadyTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return controller;
+}
+
+test "Windows editor host pending commit fence preserves document lifetime and blocks read close and teardown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppCommit(f, view);
+    try std.testing.expectError(error.SaveBusy, controller.cleanupAsync());
+    try std.testing.expectError(error.SaveBusy, f.book.readTicket(view));
+    try std.testing.expectError(error.SaveBusy, f.book.release(std.testing.io, view, true));
+    try std.testing.expectError(error.SaveBusy, f.book.deinit(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 1), f.registry.get(view).?.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+}
+
+test "Windows editor host queued cancel before final worker approval prevents native commit" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppCommit(f, view);
+    const waiting = controller.committing.?;
+    try f.book.cancelSave(std.testing.io, view);
+    try f.book.cancelSave(std.testing.io, view);
+    try std.testing.expectEqual(waiting, controller.committing.?);
+    try std.testing.expectEqual(Book.SaveReady.cancelled, try awaitSave(&f.book, view));
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.acknowledged);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host worker ready rechecks revoked permission before final vote" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    _ = try readyAppCommit(f, view);
+    f.registry.get(view).?.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host worker ready refuses changed document path before final vote" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    _ = try readyAppCommit(f, view);
+    const state = f.registry.get(view).?;
+    const original_path = state.path;
+    const changed_path = try std.testing.allocator.dupe(u8, "changed-path.txt");
+    state.path = changed_path;
+    defer {
+        state.path = original_path;
+        std.testing.allocator.free(changed_path);
+    }
+    try std.testing.expectError(error.StaleDocument, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host cancel after worker native commit preserves actual receipt and ack" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppCommit(f, view);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!controller.committing.?.worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.CommitReplyTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@import("transaction.zig").Phase.committed, controller.committing.?.worker.job.?.result.?.prepared.attempt.transaction.phase);
+    try f.book.cancelSave(std.testing.io, view);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(ready.receipt.acknowledgment_error == null);
+    try std.testing.expect(!f.registry.get(view).?.opened.?.isDirty());
+}
+
+test "Windows editor host commit waits for native cleanup before publishing saved receipt" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppSave(f, view);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expectEqual(saving.Status.committing, controller.status());
+    try awaitAppCleanup(&f.book, view);
+    try std.testing.expectEqual(saving.Status.cleaning, controller.status());
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 1), f.registry.get(view).?.persistence.live_save_images);
+    try std.testing.expectError(error.SaveBusy, f.book.requireClose(view, true));
+    try std.testing.expectError(error.SaveBusy, f.book.beginSave(view, 128));
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(!f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.live_save_images);
+}
+
+test "Windows editor host cancellation during committed cleanup keeps real committed decision" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppSave(f, view);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try awaitAppCleanup(&f.book, view);
+    const waiting = controller.cleaning.?;
+    try f.book.cancelSave(std.testing.io, view);
+    try f.book.cancelSave(std.testing.io, view);
+    try std.testing.expectEqual(waiting, controller.cleaning.?);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(ready.receipt.acknowledgment_error == null);
+    try std.testing.expect(!f.registry.get(view).?.opened.?.isDirty());
+}
+
+test "Windows editor host cancelled rollback waits through cleanup before reporting cancellation" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppSave(f, view);
+    try f.book.cancelSave(std.testing.io, view);
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (controller.status() == .settling) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.SettlementTimeout;
+        try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(saving.Status.cleaning, controller.status());
+    try std.testing.expectEqual(@as(u64, 1), f.registry.get(view).?.persistence.live_save_images);
+    try std.testing.expectEqual(Book.SaveReady.cancelled, try awaitSave(&f.book, view));
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.acknowledged);
+}
+
+test "Windows editor host final permission refusal is reported after worker rollback and cleanup" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const controller = try readyAppSave(f, view);
+    f.registry.get(view).?.opened.?.file.read_only = true;
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try std.testing.expectEqual(saving.Status.settling, controller.status());
+    try std.testing.expectError(error.SaveBusy, f.book.requireClose(view, true));
+    try std.testing.expectError(error.ReadOnly, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, controller.status());
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host cleanup reports native commit separately from newer disk CAS" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    _ = try readyAppSave(f, view);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    try awaitAppCleanup(&f.book, view);
+    const state = f.registry.get(view).?;
+    const saved = state.opened.?.saved_hash;
+    state.opened.?.disk_hash = editor.document_state.contentHash("newer-observation");
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(ready.receipt.acknowledgment_error != null);
+    try std.testing.expectEqual(saved, state.opened.?.saved_hash);
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+}
+
+test "Windows editor host async clean save issues no native request" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try std.testing.expect(!try f.book.beginSave(view, 128));
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.issued);
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+}
+
+test "Windows editor host async save preserves captured bytes and later dirty edits" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    try std.testing.expectError(error.SaveBusy, f.book.requireClose(view, true));
+    try std.testing.expectError(error.SaveBusy, f.book.beginSave(view, 128));
+    try change(&f.registry, view, "Y");
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfXbase\r\n", bytes);
+}
+
+test "Windows editor host async queued cancellation wins before the commit vote" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    _ = try f.book.beginSave(view, 128);
+    try f.book.cancelSave(std.testing.io, view);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .cancelled);
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.acknowledged);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host async source conflict retains edits and the old save baseline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    const baseline = f.registry.get(view).?.opened.?.disk_hash;
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    _ = try f.book.beginSave(view, 128);
+    try std.testing.expectError(error.SourceChanged, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+    try std.testing.expectEqual(baseline, f.registry.get(view).?.opened.?.disk_hash);
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+}
+
+test "Windows editor host async publication stays bound across book growth and foreign view polling" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    _ = try f.book.beginSave(view, 128);
+    const other = try f.open(1);
+    try std.testing.expectError(error.NoPendingSave, f.book.pollSave(std.testing.io, other));
+    var stale = view;
+    stale.document.generation ^= 1;
+    try std.testing.expectError(error.StaleDocument, f.book.pollSave(std.testing.io, stale));
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt and ready.receipt.decision == .committed);
+    try std.testing.expect(!f.registry.get(view).?.opened.?.isDirty());
+    try std.testing.expectEqualStrings("other", f.registry.get(other).?.opened.?.file.content);
+}
+
+fn awaitRead(reader: *reading.Reader) !reading.Result {
+    const io = std.testing.io;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (try reader.takeResult()) |result| return result;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.ReadDidNotComplete;
+}
+
+test "Windows editor host directory subscription pins the nested parent and routes a real external write" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    try f.tmp.dir.createDir(io, "nested", .default_dir);
+    var parent = try f.tmp.dir.openDir(io, "nested", .{});
+    defer parent.close(io);
+    try parent.writeFile(io, .{ .sub_path = "file.txt", .data = "base" });
+    const view = try f.book.open(io, f.tmp.dir, "nested/file.txt", 128);
+    f.views[0] = view;
+    var groups: watching.Groups = .{ .allocator = std.testing.allocator, .limit = 1 };
+    defer groups.deinit() catch unreachable;
+    const lease = try f.book.subscribeWatch(io, &groups, view);
+    const peer = try groups.acquire(parent);
+    try std.testing.expectEqual(@as(usize, 1), groups.entries.items.len);
+    try std.testing.expectError(error.TooManyDirectoryWatches, groups.acquire(f.tmp.dir));
+    try parent.writeFile(io, .{ .sub_path = "file.txt", .data = "external" });
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    var received = false;
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline) {
+        if (groups.poll(std.Io.Clock.awake.now(io).nanoseconds)) |notice| {
+            try std.testing.expect(notice.problem == null);
+            try std.testing.expect(try groups.receives(lease, notice.group));
+            try std.testing.expect(try groups.receives(peer, notice.group));
+            received = true;
+            break;
+        }
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(received);
+    try std.testing.expectEqualStrings("base", f.registry.get(view).?.opened.?.file.content);
+    try groups.release(lease);
+    try groups.release(peer);
+    var foreign: editor.document_registry.Registry = .{ .allocator = std.testing.allocator };
+    defer foreign.deinit() catch unreachable;
+    var wrong = view;
+    wrong.owner = &foreign;
+    try std.testing.expectError(error.StaleDocument, f.book.subscribeWatch(io, &groups, wrong));
+    const state = f.registry.get(view).?;
+    const path = state.path;
+    state.path = null;
+    const moved = f.book.subscribeWatch(io, &groups, view);
+    state.path = path;
+    if (moved) |unexpected| try groups.release(unexpected) else |_| {}
+    try std.testing.expectError(error.GrantPathChanged, moved);
+    const epoch = state.persistence.epoch;
+    state.persistence.epoch += 1;
+    const stale = f.book.subscribeWatch(io, &groups, view);
+    state.persistence.epoch = epoch;
+    // Close even an unexpectedly admitted subscription before asserting, so
+    // adversarial guard mutations cannot strand a pending native watcher.
+    if (stale) |unexpected| try groups.release(unexpected) else |_| {}
+    try std.testing.expectError(error.StaleGrant, stale);
+    // The preceding external write intentionally diverged from the save base.
+    // Restore it before preparing a save so this assertion isolates admission
+    // during a live transaction rather than failing at the unrelated CAS gate.
+    try parent.writeFile(io, .{ .sub_path = "file.txt", .data = "base" });
+    try f.book.controllers.items[0].prepare(io, view, 128);
+    const busy = f.book.subscribeWatch(io, &groups, view);
+    if (busy) |unexpected| try groups.release(unexpected) else |_| {}
+    _ = try f.book.controllers.items[0].abort(io);
+    try std.testing.expectError(error.SaveBusy, busy);
+    try parent.rename("file.txt", parent, "old.txt", io);
+    try parent.writeFile(io, .{ .sub_path = "file.txt", .data = "external" });
+    const replaced = f.book.subscribeWatch(io, &groups, view);
+    if (replaced) |unexpected| try groups.release(unexpected) else |_| {}
+    try std.testing.expectError(error.IdentityChanged, replaced);
+    try std.testing.expectEqual(@as(usize, 0), groups.entries.items.len);
+}
+
+test "Windows editor host async overwrite owns its image and preserves old document CAS until native ack" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const state = f.registry.get(view).?;
+    const saved = state.opened.?.saved_hash;
+    const disk_hash = state.opened.?.disk_hash;
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    var reader_owned = true;
+    defer if (reader_owned) reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    var fresh_owned = true;
+    defer if (fresh_owned) fresh.deinit();
+    try std.testing.expect(try f.book.beginOverwrite(&reader, fresh, view, 128));
+    fresh.deinit();
+    fresh_owned = false;
+    try reader.deinit(std.testing.io);
+    reader_owned = false;
+    try std.testing.expectEqual(saving.Status.preparing, try f.book.saveStatus(view));
+    try std.testing.expectEqual(saved, state.opened.?.saved_hash);
+    try std.testing.expectEqual(disk_hash, state.opened.?.disk_hash);
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt);
+    try std.testing.expectEqual(saving.Decision.committed, ready.receipt.decision);
+    try std.testing.expect(!state.opened.?.isDirty());
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfXbase\r\n", bytes);
+}
+
+test "Windows editor host async overwrite refuses stale read without native admission" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    try change(&f.registry, view, "Y");
+    try std.testing.expectError(error.StaleExternalRead, f.book.beginOverwrite(&reader, fresh, view, 128));
+    try std.testing.expectEqual(saving.Status.idle, try f.book.saveStatus(view));
+    try std.testing.expectEqual(@as(u64, 0), f.registry.get(view).?.persistence.live_save_images);
+}
+
+test "Windows editor host async overwrite fences native changes after the fresh read" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    const state = f.registry.get(view).?;
+    const saved = state.opened.?.saved_hash;
+    const disk_hash = state.opened.?.disk_hash;
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "newer" });
+    try std.testing.expect(try f.book.beginOverwrite(&reader, fresh, view, 128));
+    try std.testing.expectError(error.SourceChanged, awaitSave(&f.book, view));
+    try std.testing.expectEqual(saved, state.opened.?.saved_hash);
+    try std.testing.expectEqual(disk_hash, state.opened.?.disk_hash);
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("newer", bytes);
+}
+
+test "Windows editor host async overwrite cancellation preserves the externally observed file" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    try std.testing.expect(try f.book.beginOverwrite(&reader, fresh, view, 128));
+    try f.book.cancelSave(std.testing.io, view);
+    try std.testing.expectEqual(Book.SaveReady.cancelled, try awaitSave(&f.book, view));
+    try std.testing.expect(f.registry.get(view).?.opened.?.isDirty());
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("outside", bytes);
+}
+
+test "Windows editor host async overwrite rechecks permission at final native vote" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(std.testing.io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    try std.testing.expect(try f.book.beginOverwrite(&reader, fresh, view, 128));
+    const controller = &f.book.controllers.items[0];
+    try awaitNativePreparation(controller);
+    try std.testing.expectEqual(saving.PreparationReady.prepared, (try controller.pollPreparation(std.testing.io)).?);
+    try std.testing.expect((try f.book.pollSave(std.testing.io, view)) == null);
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!try controller.committing.?.worker.needsApproval()) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.CommitReadyTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    f.registry.get(view).?.opened.?.file.read_only = true;
+    try std.testing.expectError(error.ReadOnly, awaitSave(&f.book, view));
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("outside", bytes);
+}
+
+test "Windows editor host explicit overwrite requires fresh read and fences intervening native changes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const state = f.registry.get(view).?;
+    const base = state.opened.?.disk_hash;
+    try change(&f.registry, view, "X");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "outside" });
+    try std.testing.expectError(error.SourceChanged, f.book.save(io, view, 128));
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var first = try awaitRead(&reader);
+    defer first.deinit();
+    try change(&f.registry, view, "Y");
+    try std.testing.expectError(error.StaleExternalRead, f.book.overwrite(io, &reader, first, view, 128));
+    _ = try f.book.submitRead(&reader, view);
+    var second = try awaitRead(&reader);
+    defer second.deinit();
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "newer" });
+    try std.testing.expectError(error.SourceChanged, f.book.overwrite(io, &reader, second, view, 128));
+    try std.testing.expectEqual(base, state.opened.?.disk_hash);
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    _ = try f.book.submitRead(&reader, view);
+    var fresh = try awaitRead(&reader);
+    defer fresh.deinit();
+    const receipt = (try f.book.overwrite(io, &reader, fresh, view, 128)).?;
+    try std.testing.expectEqual(saving.Decision.committed, receipt.decision);
+    try std.testing.expect(!state.opened.?.isDirty());
+    const disk = try f.tmp.dir.readFileAlloc(io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(disk);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfYXbase\r\n", disk);
+}
+
+test "Windows editor host worker read uses the app grant and refuses content changed after submission" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    const old_hash = f.registry.get(view).?.opened.?.disk_hash;
+    var other_registry: editor.document_registry.Registry = .{ .allocator = std.testing.allocator };
+    defer other_registry.deinit() catch unreachable;
+    var other_book: Book = .{ .allocator = std.testing.allocator, .registry = &other_registry };
+    defer other_book.deinit(io) catch unreachable;
+    const other_view = try other_book.open(io, f.tmp.dir, "file.txt", 128);
+    defer _ = other_registry.release(other_view) catch unreachable;
+    // External bytes change in the same object; reading must not acknowledge
+    // them as a save or mutate the app's shared document behind its views.
+    const external = "\xef\xbb\xbfdisk\r\n";
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = external });
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var result = try awaitRead(&reader);
+    defer result.deinit();
+    try std.testing.expect(result == .image);
+    try std.testing.expectEqualStrings(external, result.image.bytes);
+    try std.testing.expect(try f.book.acceptsRead(&reader, result, view));
+    try std.testing.expect(!try other_book.acceptsRead(&reader, result, other_view));
+    try std.testing.expectEqual(old_hash, f.registry.get(view).?.opened.?.disk_hash);
+    try std.testing.expectEqualStrings("base\r\n", f.registry.get(view).?.opened.?.file.content);
+    try change(&f.registry, view, "X");
+    try std.testing.expect(!try f.book.acceptsRead(&reader, result, view));
+}
+
+test "Windows editor host worker admission rejects foreign view stale lifetime path drift and prepared save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(io) catch unreachable;
+    var foreign: editor.document_registry.Registry = .{ .allocator = std.testing.allocator };
+    defer foreign.deinit() catch unreachable;
+    var wrong = view;
+    wrong.owner = &foreign;
+    try std.testing.expectError(error.StaleDocument, f.book.submitRead(&reader, wrong));
+    wrong = view;
+    wrong.kind = .read;
+    try std.testing.expectError(error.StaleDocument, f.book.submitRead(&reader, wrong));
+    const state = f.registry.get(view).?;
+    {
+        const epoch = state.persistence.epoch;
+        defer state.persistence.epoch = epoch;
+        state.persistence.epoch += 1;
+        try std.testing.expectError(error.StaleGrant, f.book.submitRead(&reader, view));
+    }
+    {
+        const path = state.path;
+        defer state.path = path;
+        state.path = null;
+        try std.testing.expectError(error.GrantPathChanged, f.book.submitRead(&reader, view));
+    }
+    try f.book.controllers.items[0].prepare(io, view, 128);
+    try std.testing.expectError(error.SaveBusy, f.book.submitRead(&reader, view));
+    try std.testing.expect(reader.job == null and reader.issued == 0);
+    _ = try f.book.controllers.items[0].abort(io);
+}
+
+test "Windows editor host worker completion refuses changed identity released view and recreated ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    var reader: reading.Reader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit(io) catch unreachable;
+    _ = try f.book.submitRead(&reader, view);
+    var result = try awaitRead(&reader);
+    defer result.deinit();
+    try std.testing.expect(result == .image);
+    result.image.identity.file[15] ^= 1;
+    try std.testing.expect(!try f.book.acceptsRead(&reader, result, view));
+    result.image.identity.file[15] ^= 1;
+    try std.testing.expect(try f.book.acceptsRead(&reader, result, view));
+    try f.book.release(io, view, true);
+    _ = try f.registry.release(view);
+    f.views[0] = null;
+    try std.testing.expectError(error.StaleDocument, f.book.acceptsRead(&reader, result, view));
+    try f.book.deinit(io);
+    try std.testing.expectEqual(@as(u64, 0), f.book.read_scope);
+    try f.registry.deinit();
+    f.registry = .{ .allocator = std.testing.allocator };
+    f.book = .{ .allocator = std.testing.allocator, .registry = &f.registry };
+    const fresh = try f.open(0);
+    const current = try f.book.readTicket(fresh);
+    // Everything except the source incarnation is deliberately equal, including
+    // the Registry address. Comparing slots, bytes or pointers alone is unsafe.
+    try std.testing.expect(std.meta.eql(result.image.ticket.document, current.document));
+    try std.testing.expectEqual(result.image.ticket.epoch, current.epoch);
+    try std.testing.expectEqual(result.image.ticket.revision, current.revision);
+    try std.testing.expectEqual(result.image.ticket.disk_hash, current.disk_hash);
+    try std.testing.expect(result.image.ticket.source_id != current.source_id);
+    try std.testing.expect(!try f.book.acceptsRead(&reader, result, fresh));
+}
+
+test "Windows editor host refuses uncertain last close and teardown before releasing any other grant" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const idle = try f.open(0);
+    const pending = try f.open(1);
+    try change(&f.registry, pending, "X");
+    const controller = &f.book.controllers.items[1];
+    try controller.prepare(io, pending, 128);
+    controller.pending.?.attempt.transaction.file.close(io);
+    controller.pending.?.attempt.transaction.file_open = false;
+    controller.pending.?.attempt.transaction.phase = .uncertain;
+    try std.testing.expectError(error.SaveNotCommitted, controller.pending.?.request.complete(.uncertain));
+    try std.testing.expectError(error.SaveUncertain, f.book.save(io, pending, 128));
+    try std.testing.expectError(error.SaveBusy, f.book.release(io, pending, true));
+    try std.testing.expectError(error.SaveBusy, f.book.deinit(io));
+    try std.testing.expectEqual(@as(usize, 2), f.book.controllers.items.len);
+    try std.testing.expect(!f.book.controllers.items[0].closed);
+    try change(&f.registry, idle, "Y");
+    _ = try f.book.save(io, idle, 128);
+    try std.testing.expectEqual(saving.Status.uncertain, controller.status());
+    const receipt = try controller.abort(io);
+    try std.testing.expectEqual(saving.Decision.aborted, receipt.decision);
+}
+
+test "Windows editor host refuses prepared teardown without implicitly discarding its captured save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.open(0);
+    const view = try f.open(1);
+    try change(&f.registry, view, "X");
+    try f.book.controllers.items[1].prepare(std.testing.io, view, 128);
+    try std.testing.expectError(error.SaveBusy, f.book.deinit(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 2), f.book.controllers.items.len);
+    try std.testing.expect(!f.book.controllers.items[0].closed);
+    try std.testing.expectEqual(saving.Status.prepared, f.book.controllers.items[1].status());
+}
+
+test "Windows editor host rejects equal-byte original replacement and retains the unsaved document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const view = try f.open(0);
+    try f.tmp.dir.rename("file.txt", f.tmp.dir, "original.txt", std.testing.io);
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "\xef\xbb\xbfbase\r\n" });
+    try change(&f.registry, view, "X");
+    try std.testing.expectError(error.IdentityChanged, f.book.save(std.testing.io, view, 128));
+    const state = f.registry.get(view).?;
+    try std.testing.expect(state.opened.?.isDirty());
+    try std.testing.expectEqualStrings("Xbase\r\n", state.opened.?.file.content);
+    try std.testing.expectEqual(@as(u64, 0), state.persistence.live_save_images);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfbase\r\n", bytes);
+}
+
+test "Windows editor host refuses another registry and a non-view lease even with matching slot identity" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const g = try Fixture.init();
+    defer g.deinit();
+    const own = try f.open(0);
+    const other = try g.open(0);
+    try std.testing.expect(std.meta.eql(own.document, other.document));
+    try std.testing.expectError(error.StaleDocument, f.book.save(std.testing.io, other, 128));
+    try std.testing.expectError(error.StaleDocument, f.book.release(std.testing.io, other, true));
+    const request = try f.registry.retain(own, .request);
+    defer _ = f.registry.release(request) catch unreachable;
+    try std.testing.expectError(error.StaleDocument, f.book.save(std.testing.io, request, 128));
+    try std.testing.expectEqual(@as(usize, 1), f.book.controllers.items.len);
+}
+
+test "Windows editor host malformed absolute paths never publish an editable document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    for ([_][]const u8{ "relative.txt", "C:relative.txt", "\\rooted.txt", "\\\\?\\C:\\file.txt", "C:\\..\\file.txt", "C:\\file.txt:ads", "C:\\file\x00.txt" }) |path| {
+        if (f.book.openPath(std.testing.io, path, 128)) |view| {
+            _ = f.registry.release(view) catch unreachable;
+            return error.TestUnexpectedResult;
+        } else |_| {}
+        try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    }
+}
+
+test "Windows editor host readonly original fails capability without publishing a grant" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    const path = try f.tmp.dir.realPathFileAlloc(std.testing.io, "file.txt", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+    defer std.testing.allocator.free(wide);
+    try std.testing.expect(SetFileAttributesW(wide, 1).toBool());
+    defer std.debug.assert(SetFileAttributesW(wide, 0x80).toBool());
+    if (f.book.open(std.testing.io, f.tmp.dir, "file.txt", 128)) |view| {
+        f.views[0] = view;
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    for (f.registry.slots.items) |slot| try std.testing.expect(slot.document == null);
+}
+
+fn allocationPrefixes(a: std.mem.Allocator) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "base" });
+    var registry: editor.document_registry.Registry = .{ .allocator = std.testing.allocator };
+    defer registry.deinit() catch unreachable;
+    var book: Book = .{ .allocator = a, .registry = &registry };
+    defer book.deinit(std.testing.io) catch unreachable;
+    const view = book.open(std.testing.io, tmp.dir, "file.txt", 128) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), book.controllers.items.len);
+        for (registry.slots.items) |slot| try std.testing.expect(slot.document == null);
+        return err;
+    };
+    defer _ = registry.release(view) catch unreachable;
+    try book.release(std.testing.io, view, false);
+}
+test "Windows editor host open allocation prefixes never strand native or document ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationPrefixes, .{});
+}
+
+fn initialResult(root: std.Io.Dir, cancel_before_take: bool) !opening.Result {
+    const io = std.testing.io;
+    var base: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try root.realPath(io, &base);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ base[0..len], "file.txt" });
+    defer std.testing.allocator.free(path);
+    var worker: opening.Worker = .{ .allocator = std.testing.allocator };
+    defer {
+        if (worker.job != null) {
+            worker.cancel() catch unreachable;
+            while (true) {
+                if (worker.takeResult() catch unreachable) |value| {
+                    var result = value;
+                    result.deinit(io);
+                    break;
+                }
+                io.sleep(.fromMilliseconds(1), .awake) catch unreachable;
+            }
+        }
+        worker.deinit() catch unreachable;
+    }
+    try worker.startForApp(path, 128);
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+    while (!worker.job.?.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.OpenTimeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    if (cancel_before_take) try worker.cancel();
+    return (try worker.takeResult()).?;
+}
+
+fn expectAdmissionError(f: *Fixture, result: *opening.Result, expected: anyerror) !void {
+    if (f.book.admitOpen(result)) |view| {
+        // Negative verification must retain the unexpected view for teardown.
+        f.views[0] = view;
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(expected, err);
+}
+
+test "Windows editor host worker admission consumes once and survives result disposal through native save" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    const prepared_content = result.file.?.content.ptr;
+    const view = try f.book.admitOpen(&result);
+    f.views[0] = view;
+    try std.testing.expect(result.consumed and result.snapshot == null and result.document == null and result.file == null);
+    try std.testing.expect(f.registry.get(view).?.opened.?.file.content.ptr == prepared_content);
+    try std.testing.expectError(error.OpenResultConsumed, f.book.admitOpen(&result));
+    result.deinit(std.testing.io);
+    try change(&f.registry, view, "X");
+    try std.testing.expect(try f.book.beginSave(view, 128));
+    const ready = try awaitSave(&f.book, view);
+    try std.testing.expect(ready == .receipt and ready.receipt.decision == .committed);
+    const bytes = try f.tmp.dir.readFileAlloc(std.testing.io, "file.txt", std.testing.allocator, .limited(128));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("\xef\xbb\xbfXbase\r\n", bytes);
+}
+
+test "Windows editor host cancelled initial worker result never registers a document" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, true);
+    defer result.deinit(std.testing.io);
+    try expectAdmissionError(f, &result, error.OpenCancelled);
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
+}
+
+test "Windows editor host uncertified initial snapshot cannot register writable authority" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    result.snapshot.?.capability_verified = false;
+    try expectAdmissionError(f, &result, error.SaveCapabilityUnavailable);
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
+}
+
+test "Windows editor host failed initial capability retry revokes its earlier success" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    try std.testing.expect(result.snapshot.?.capability_verified);
+    try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "outside" });
+    try std.testing.expectError(error.SourceChanged, result.snapshot.?.probe(std.testing.io, 128));
+    try std.testing.expect(!result.snapshot.?.capability_verified);
+    try expectAdmissionError(f, &result, error.SaveCapabilityUnavailable);
+    try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
+}
+
+test "Windows editor host readonly initial result preserves raw CAS and never acquires save authority" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var base: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try f.tmp.dir.realPath(std.testing.io, &base);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ base[0..len], "file.txt" });
+    defer std.testing.allocator.free(path);
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+    defer std.testing.allocator.free(wide);
+    try std.testing.expect(SetFileAttributesW(wide, 1).toBool());
+    defer _ = SetFileAttributesW(wide, 0x80);
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    result.readonly.?.bytes[3] = 'X';
+    try expectAdmissionError(f, &result, error.OpenImageChanged);
+    try std.testing.expect(!result.consumed);
+    result.readonly.?.bytes[3] = 'b';
+    const view = try f.book.admitOpen(&result);
+    f.views[0] = view;
+    const state = f.registry.get(view).?;
+    try std.testing.expect(state.opened.?.file.read_only);
+    try std.testing.expectEqual(@as(?u64, editor.document_state.contentHash("\xef\xbb\xbfbase\r\n")), state.opened.?.disk_hash);
+    try std.testing.expectEqual(@as(usize, 0), f.book.controllers.items.len);
+    try std.testing.expectError(error.NoSaveGrant, f.book.beginSave(view, 128));
+    try std.testing.expect(result.consumed and result.readonly == null and result.document == null);
+}
+
+fn admissionAllocationPrefix(a: std.mem.Allocator, root: std.Io.Dir) !void {
+    var registry: editor.document_registry.Registry = .{ .allocator = a };
+    defer registry.deinit() catch unreachable;
+    var book: Book = .{ .allocator = a, .registry = &registry };
+    defer book.deinit(std.testing.io) catch unreachable;
+    var result = try initialResult(root, false);
+    defer result.deinit(std.testing.io);
+    const view = book.admitOpen(&result) catch |err| {
+        try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+        try std.testing.expectEqualStrings("base", result.file.?.content);
+        try result.snapshot.?.validate();
+        for (registry.slots.items) |slot| try std.testing.expect(slot.document == null);
+        return err;
+    };
+    defer _ = registry.release(view) catch unreachable;
+    try std.testing.expect(result.consumed);
+}
+
+test "Windows editor host initial result admission allocation failures retain native ownership" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "file.txt", .data = "base" });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, admissionAllocationPrefix, .{tmp.dir});
+}
+
+test "Windows editor host rejects altered prepared body format and authority before publication" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const f = try Fixture.init();
+    defer f.deinit();
+    var result = try initialResult(f.tmp.dir, false);
+    defer result.deinit(std.testing.io);
+    const byte = result.file.?.content[0];
+    result.file.?.content[0] = 'Z';
+    try expectAdmissionError(f, &result, error.OpenImageChanged);
+    result.file.?.content[0] = byte;
+    result.file.?.format.has_bom = false;
+    try expectAdmissionError(f, &result, error.OpenImageChanged);
+    result.file.?.format.has_bom = true;
+    result.file.?.read_only = true;
+    try expectAdmissionError(f, &result, error.OpenImageChanged);
+    result.file.?.read_only = false;
+    const prepared = result.file;
+    result.file = null;
+    defer if (result.file == null) {
+        var owned = prepared.?;
+        owned.deinit();
+    };
+    try expectAdmissionError(f, &result, error.InvalidOpenResult);
+    result.file = prepared;
+    try std.testing.expect(!result.consumed and result.snapshot.?.owned);
+    try std.testing.expectEqual(@as(u64, 0), f.registry.last_reference);
+}
+
+test "Windows editor host focused close honors resolver ownership and release" {
+    const k = maru.config.keybinding;
+    const key: maru.terminal.KeyEvent = .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } };
+    try std.testing.expect(closeKey(.{}, key));
+    var released = key;
+    released.event_type = .release;
+    try std.testing.expect(!closeKey(.{}, released));
+    var shell = key;
+    shell.modifiers = .{ .control = true };
+    try std.testing.expect(!closeKey(.{}, shell));
+    const chord = try k.KeyChord.parse("Cmd+W");
+    const blocked: k.KeyBindingResolver = .{ .unbinds = &.{chord} };
+    try std.testing.expect(!closeKey(blocked, key));
+    const redirected: k.KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = chord, .action = .editor_save }} };
+    try std.testing.expect(!closeKey(redirected, key));
+    const custom: k.KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = try k.KeyChord.parse("Ctrl+W"), .action = .close_focused }} };
+    try std.testing.expect(closeKey(custom, shell));
+}
+
+test "Windows editor host new terminal key honors ownership and preserves workspace action" {
+    const k = maru.config.keybinding;
+    const key: maru.terminal.KeyEvent = .{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } };
+    try std.testing.expect(newTermKey(.{}, key));
+    var released = key;
+    released.event_type = .release;
+    try std.testing.expect(!newTermKey(.{}, released));
+    var shell = key;
+    shell.modifiers = .{ .control = true };
+    try std.testing.expect(!newTermKey(.{}, shell));
+    const chord = try k.KeyChord.parse("Cmd+T");
+    try std.testing.expect(!newTermKey(.{ .unbinds = &.{chord} }, key));
+    try std.testing.expect(!newTermKey(.{ .app_bindings = &.{.{ .chord = chord, .action = .new_tab }} }, key));
+    try std.testing.expect(newTermKey(.{ .app_bindings = &.{.{ .chord = try k.KeyChord.parse("Ctrl+T"), .action = .new_term }} }, shell));
+}

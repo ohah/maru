@@ -42,7 +42,7 @@ const roots = [_][]const u8{ "src/chrome", "src/session", "src/platform/macos", 
 ///
 /// `src/platform` 전체를 뿌리로 넣지 않는 이유: Windows·wasm 어댑터가 진단·usage 문자열을 한국어로
 /// 들고 있어(실측 170건 이상) 이 게이트의 범위가 통째로 달라진다. 그것은 별도 판단이다.
-const extra_files = [_][]const u8{"src/platform/cell_text.zig"};
+const extra_files = [_][]const u8{ "src/platform/cell_text.zig", "src/app/agent_session_archive_backend.zig", "src/app/agent_session_archive_detail_backend.zig", "src/app/file_tree_backend.zig", "src/app/chrome_draw_lowering.zig", "src/app/chrome_text_request.zig", "src/app/chrome_text.zig", "src/app/git/backend.zig" };
 
 /// **영어 고정 표면**(계약 §7.1) — CLI 는 스크립트가 파싱하고 이슈에 붙여 넣는 출력이라 언어를 고르지
 /// 않는다. 그래서 여기서는 키가 아니라 **영어 문장**이 정답이고, 한국어 리터럴은 곧 위반이다.
@@ -74,6 +74,9 @@ const inventory = [_]Entry{
     // `cli/browser/run.zig`(41) 도 **0 이 되어 빠졌다**. `cli/ssh.zig` 에 남은 하나는
     // `@compileError` 라 개발자 메시지이고 §7.1 대상이 아니다 — 그 사실을 그 자리 주석이 든다.
     .{ .path = "src/cli/ssh.zig", .count = 1 },
+    // Windows editor revision/recovery smoke: three Korean file-content fixtures, not CLI
+    // messages or translated UI copy. Verdict output remains English (§7.1).
+    .{ .path = "src/main.zig", .count = 3 },
 
     // ── 번역 대상 레이어(§7.2) ──
     // **표시 문자열이 아닌 것들** — 토크나이저 전환으로 드러났고, 각각 성격을 확인해 등재했다.
@@ -108,7 +111,7 @@ const inventory = [_]Entry{
     // 26 → 28: `editor.formatter.<언어>` 의 모르는 언어·값 진단 둘(외부 포매터 — tooling §8.2t). 같은 부류의 진단이다.
     .{ .path = "src/config/loader.zig", .count = 28 },
     .{ .path = "src/config/schema.zig", .count = 28 },
-    .{ .path = "src/platform/macos/agent_session_archive_backend.zig", .count = 3 },
+    .{ .path = "src/app/agent_session_archive_backend.zig", .count = 3 },
     .{ .path = "src/platform/macos/app_pty_metal_smoke.zig", .count = 1 },
     // 26 = 16 + 원격(ssh) 축의 **진단 로그 열**(§7 의 «표시가 아니면 원장을 올린다»).
     // 전부 `std.log.scoped(.agent)` 이고 사용자 화면에 안 나온다 — 채널이 잡음으로 막혔을 때, 자식이
@@ -339,7 +342,9 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 424; // +2: 표시 색·랩·UTF-8 판정용 C 원문(UI 아님). // +2: process-only Unicode argv fixtures. +2: search candidate fixture target hashes (not UI) · +1: Save As 팔레트 검색 별칭(표시 안 됨) · +1: 포매터 정보 보기 검색 별칭(표시 안 됨 — tooling §8.2t) · +2: editor.formatter.<언어> 설정 진단 · +1: W10a 다운로드 목록 팔레트 검색 별칭 · +1: 소스 컨트롤 저장소 신뢰 검색 별칭(표시 안 됨 — 계획 WT6b-2a) · +1: 자동완성 목록 Lab 픽스처 낱말(§8.2g-e) · +1: 프로젝트 검색 팔레트 별칭 · +12: 검색 도크 컴포넌트 fixture · +1: 언어 서버 환경 변수 이름 보기 검색 별칭(표시 안 됨 — 계획 WT5b-1) · +1: 언어 서버 정보 보기 검색 별칭(표시 안 됨 — 계획 WT5a) · +1: 언어 서버 셸 환경 다시 읽기 검색 별칭(표시 안 됨 — 계획 WT3b) · +3: 언어 서버 신뢰 관리 검색 별칭(표시 안 됨 — 계획 WT4a) · +1: 아웃라인 열기 검색 별칭(표시 안 됨) · +4: 공유 편집기 분할 검색 별칭(표시 안 됨) · +2: workspace 복원 codec의 한글 경로 fixture · +1: 원격 훅 설치 시한 초과 재시도 사유(로그) · +115: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
+// Windows recovery adds one non-UI UTF-8 fixture.
+// Windows projection fixture C source adds two non-UI Korean literals; retain upstream additions.
+const header_total = 427; // +2: 표시 색·랩·UTF-8 판정용 C 원문(UI 아님). // +2: process-only Unicode argv fixtures. +2: search candidate fixture target hashes (not UI) · +1: Save As 팔레트 검색 별칭(표시 안 됨) · +1: 포매터 정보 보기 검색 별칭(표시 안 됨 — tooling §8.2t) · +2: editor.formatter.<언어> 설정 진단 · +1: W10a 다운로드 목록 팔레트 검색 별칭 · +1: 소스 컨트롤 저장소 신뢰 검색 별칭(표시 안 됨 — 계획 WT6b-2a) · +1: 자동완성 목록 Lab 픽스처 낱말(§8.2g-e) · +1: 프로젝트 검색 팔레트 별칭 · +12: 검색 도크 컴포넌트 fixture · +1: 언어 서버 환경 변수 이름 보기 검색 별칭(표시 안 됨 — 계획 WT5b-1) · +1: 언어 서버 정보 보기 검색 별칭(표시 안 됨 — 계획 WT5a) · +1: 언어 서버 셸 환경 다시 읽기 검색 별칭(표시 안 됨 — 계획 WT3b) · +3: 언어 서버 신뢰 관리 검색 별칭(표시 안 됨 — 계획 WT4a) · +1: 아웃라인 열기 검색 별칭(표시 안 됨) · +4: 공유 편집기 분할 검색 별칭(표시 안 됨) · +2: workspace 복원 codec의 한글 경로 fixture · +1: 원격 훅 설치 시한 초과 재시도 사유(로그) · +115: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
 const header_config_total = 56; // +2: editor.formatter.<언어> 설정 진단(tooling §8.2t)
 
 comptime {

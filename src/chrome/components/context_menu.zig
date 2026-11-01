@@ -7,6 +7,7 @@
 const array_repeat = @import("array_repeat");
 
 const std = @import("std");
+pub const capture = @import("context_menu/capture.zig");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");

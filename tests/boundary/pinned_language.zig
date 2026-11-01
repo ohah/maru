@@ -196,10 +196,15 @@ const inventory = [_]Entry{
     // 골든 캡처용 실행 파일. 한국어 화면을 찍는 것이 목적이라 프로세스째 `ko` 로 박는다 —
     // 사용자 화면이 아니므로 `ui.language` 를 따를 이유가 없다.
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .process = .{ .set_lang = 1 } },
-    // 둘이다. ① 설정 화면이 `ui.language` 를 바꿨을 때 적용한다 — **정당한 자리**이고 이 축이 지키려는
-    // 바로 그 경로다. ② `settingsRowKeys` — 테스트만 부르는 헬퍼인데 최상위 `fn` 이라 마스크에 안 걸린다
-    // (두 언어의 행 집합이 같은지 보려고 언어를 바꾼다 — 계약 §5.2 를 **지키는** 쪽).
-    .{ .path = "src/platform/macos/app_session/settings.zig", .process = .{ .apply_preference = 1, .set_lang = 1 } },
+    // 설정 적용은 app.language_config로 이동했다. 여기 남은 setLang은 settingsRowKeys 테스트
+    // 헬퍼가 두 언어의 행 집합을 비교하는 자리다(최상위 fn이라 test 마스크 밖, 계약 §5.2).
+    .{ .path = "src/platform/macos/app_session/settings.zig", .process = .{ .set_lang = 1 } },
+    // 두 호스트의 명시적 설정/auto 적용을 기존 i18n resolver에 위임한다. tIn 두 자리는
+    // 이전 언어의 소유 알림을 식별하고 이후 언어로 교체하므로 before/after를 명시해야 한다.
+    // setLang/setOsLocale 각 하나는 Saved.restore 테스트 헬퍼의 전역 상태 복원이다.
+    .{ .path = "src/app/language_config.zig", .count = 2, .process = .{ .apply_preference = 1, .set_lang = 1, .set_os_locale = 1 } },
+    // Windows host가 실제 OS 태그를 주입한다. auto의 입력이며 선택 판정은 공통 i18n이 한다.
+    .{ .path = "src/main.zig", .process = .{ .set_os_locale = 1 } },
     // 설정을 다시 읽을 때 언어 선택을 적용한다 — **정당한 자리**다.
     .{ .path = "src/platform/macos/app_session.zig", .process = .{ .apply_preference = 1 } },
     // host 가 준 OS 로케일을 표에 전달한다 — `auto` 판정의 입력이고, **정당한 자리**다(계약 §5.1).

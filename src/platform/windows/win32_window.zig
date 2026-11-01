@@ -49,6 +49,10 @@ pub var last_create_error: u32 = 0;
 
 /// 창이 호출자에게 올리는 **중립 이벤트**. Win32 메시지가 아니라 앱이 이해하는 어휘로 바꿔 준다 —
 /// 그래야 `app/host.zig`가 Win32를 몰라도 된다.
+const key_strokes = @import("key_strokes.zig");
+pub const KeyIngress = key_strokes.Strokes(terminal.input.KeyEvent).Event;
+pub const KeyReleaseFence = key_strokes.Fence;
+
 pub const WindowEvent = union(enum) {
     /// 클라이언트 영역이 바뀌었다. 픽셀 단위이며, 셀로 바꾸는 것은 호출자(셀 메트릭을 아는 쪽)다.
     resized: struct { width_px: u32, height_px: u32 },
@@ -57,9 +61,11 @@ pub const WindowEvent = union(enum) {
     close_requested,
     /// 그릴 때가 됐다. W7.2가 실제 present를 붙이기 전에는 호출자가 프레임만 조립한다.
     paint,
-    /// 키가 눌렸다. **중립 `KeyEvent` 그대로 준다** — 창이 키바인딩 정책을 알지 않는다. 호출자가
-    /// `FrameLoop.handleKeyEvent`에 넘기면 그쪽이 앱 동작이냐 셸 입력이냐를 정한다(W7.4a).
-    key: terminal.input.KeyEvent,
+    /// A neutral translated key plus an opaque native press identity. Bindings
+    /// receive value; UI capture uses stroke without reconstructing characters.
+    key: KeyIngress,
+    /// Completion of a press for UI ownership, not automatic terminal input.
+    key_released: KeyIngress,
     /// IME 조합 문자열이 바뀌었다(한글 `ㅎ`→`하`→`한`). **바이트를 이벤트에 싣지 않는다** — 조합은
     /// "가장 최근 상태"만 뜻이 있고(중간 상태를 큐에 쌓아 재생할 이유가 없다), 슬라이스를 실으면
     /// 다음 조합이 그 버퍼를 덮어 이미 넘긴 이벤트가 무효화된다. 호출자가 `preeditText()`를 읽는다.
@@ -193,10 +199,12 @@ const WM_DESTROY: UINT = 0x0002;
 const WM_NCCREATE: UINT = 0x0081;
 const WM_SIZE: UINT = 0x0005;
 const WM_KEYDOWN: UINT = 0x0100;
+const WM_KEYUP: UINT = 0x0101;
 const WM_CHAR: UINT = 0x0102;
 /// Alt 가 눌린 채 온 키다. Alt 조합을 이것으로도 받아야 `Alt+F` 같은 것이 메뉴로 새지 않는다.
 const WM_SYSKEYDOWN: UINT = 0x0104;
 const WM_SYSCHAR: UINT = 0x0106;
+const WM_SYSKEYUP: UINT = 0x0105;
 const VK_SHIFT: i32 = 0x10;
 const VK_CONTROL: i32 = 0x11;
 const VK_MENU: i32 = 0x12;
@@ -204,6 +212,7 @@ const VK_MENU: i32 = 0x12;
 /// VK 값이 문자와 다르므로 이 변환이 필요하다(직접 표를 만들면 레이아웃마다 틀린다).
 const MAPVK_VK_TO_CHAR: UINT = 2;
 const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
+const WM_IME_SETCONTEXT: UINT = 0x0281;
 const WM_IME_ENDCOMPOSITION: UINT = 0x010E;
 const WM_IME_COMPOSITION: UINT = 0x010F;
 /// `ImmGetCompositionStringW`의 인덱스. `COMPSTR`은 **조합 중** 문자열(미리보기), `RESULTSTR`은 확정된
@@ -217,6 +226,9 @@ const sw_maximize: i32 = 3;
 const sw_restore: i32 = 9;
 const WM_NCCALCSIZE: UINT = 0x0083;
 const WM_NCHITTEST: UINT = 0x0084;
+const WM_SETCURSOR: UINT = 0x0020;
+const WM_SETFOCUS: UINT = 0x0007;
+const WM_KILLFOCUS: UINT = 0x0008;
 // `WM_NCHITTEST` 반환값. 창이 프레임을 안 그려도 **OS 가 이 값들로 드래그·리사이즈·더블클릭
 // 최대화를 대신 해 준다** — Electron 의 `-webkit-app-region: drag` 가 하는 일을 Win32 에서는
 // `HTCAPTION` 하나가 한다.
@@ -260,6 +272,16 @@ const GWLP_USERDATA: i32 = -21;
 const CS_HREDRAW: UINT = 0x0002;
 const CS_VREDRAW: UINT = 0x0001;
 const IDC_ARROW: usize = 32512;
+const IDC_SIZEWE: usize = 32644;
+
+// Resource identifier shared with app.rc; icon metrics are the native large/small slots.
+const APP_ICON_RESOURCE: usize = 1;
+const IMAGE_ICON: UINT = 1;
+const LR_SHARED: UINT = 0x8000;
+const SM_CXICON: i32 = 11;
+const SM_CYICON: i32 = 12;
+const SM_CXSMICON: i32 = 49;
+const SM_CYSMICON: i32 = 50;
 
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(abi.winapi) ATOM;
 extern "user32" fn CreateWindowExW(DWORD, ?[*:0]const u16, ?[*:0]const u16, DWORD, i32, i32, i32, i32, ?HWND, ?HMENU, ?HINSTANCE, ?*anyopaque) callconv(abi.winapi) ?HWND;
@@ -276,8 +298,14 @@ extern "user32" fn TranslateMessage(*const MSG) callconv(abi.winapi) i32;
 extern "user32" fn DispatchMessageW(*const MSG) callconv(abi.winapi) LRESULT;
 extern "user32" fn ShowWindow(HWND, i32) callconv(abi.winapi) i32;
 extern "user32" fn GetClientRect(HWND, *RECT) callconv(abi.winapi) i32;
+extern "user32" fn GetFocus() callconv(abi.winapi) ?HWND;
 extern "user32" fn SendMessageW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) LRESULT;
 extern "user32" fn LoadCursorW(?HINSTANCE, usize) callconv(abi.winapi) ?HCURSOR;
+extern "user32" fn SetCursor(?HCURSOR) callconv(abi.winapi) ?HCURSOR;
+extern "user32" fn GetCursorPos(*POINT) callconv(abi.winapi) i32;
+
+extern "user32" fn LoadImageW(?HINSTANCE, usize, UINT, i32, i32, UINT) callconv(abi.winapi) ?HICON;
+extern "user32" fn GetSystemMetrics(i32) callconv(abi.winapi) i32;
 extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(abi.winapi) isize;
 extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(abi.winapi) isize;
 /// **`GetAsyncKeyState`가 아니라 이것을 쓴다.** 전자는 "지금 물리적으로 눌려 있는가"라 메시지가 큐에서
@@ -392,6 +420,15 @@ pub const EventQueue = struct {
 
 /// 창 하나. **이벤트를 모아 두고 호출자가 가져간다** — 콜백으로 앱 코드를 부르지 않는다. Win32 `WndProc`은
 /// OS가 재진입시켜 부르는데(모달 resize 루프 등) 그 안에서 앱 정책을 돌리면 재진입이 앱까지 번진다.
+pub const CursorRect = struct {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+};
+
+pub const OverlayFocusPolicy = enum { dismiss_on_blur, retain_on_blur };
+
 pub const Window = struct {
     hwnd: HWND,
     /// **프레임리스 창의 드래그 띠 높이**(클라이언트 px). 0 이면 네이티브 캡션을 그대로 쓴다.
@@ -405,6 +442,21 @@ pub const Window = struct {
     titlebar_client_left_px: u32 = 0,
     /// 리사이즈 테두리 두께(px). 프레임을 지우면 OS 테두리가 없어지므로 우리가 폭을 정한다.
     resize_border_px: u32 = 6,
+    /// Owned geometry, refreshed by the host; never borrow a frame buffer here.
+    horizontal_resize_rect: ?CursorRect = null,
+    sidebar_resize_rect: ?CursorRect = null,
+    horizontal_resize_active: bool = false,
+    /// A chrome popup owns the first outside click, including the caption/border.
+    input_overlay_open: bool = false,
+    overlay_focus_policy: OverlayFocusPolicy = .dismiss_on_blur,
+    app_drawn_preedit: bool = false,
+    ime_ui_options: usize = 0xC000000F,
+    /// Sticky generation: focus loss remains observable even if focus returns in one poll.
+    focus_loss_serial: u64 = 0,
+    keyboard_focused: bool = false,
+    focus_generation: u64 = 0,
+    retained_overlay_blurs: usize = 0,
+    dismissed_overlay_blurs: usize = 0,
     present: PresentTarget = .{},
     /// `WndProc`이 채우고 `poll`이 넘긴다. 창 하나당 하나라 락이 필요 없다(같은 스레드에서만 돈다).
     ///
@@ -417,6 +469,8 @@ pub const Window = struct {
     quit_requested: bool = false,
     /// WM_CHAR 로 먼저 온 UTF-16 상위 서로게이트. 짝이 오면 합쳐 코드포인트를 만든다(pushChar doc).
     pending_high_surrogate: ?u16 = null,
+    pending_high_stroke: u64 = 0,
+    strokes: key_strokes.Strokes(terminal.input.KeyEvent) = .{},
     /// 현재 IME 조합 문자열(UTF-8). **가장 최근 상태만** 들고 있다 — 조합은 중간 단계를 재생할 이유가
     /// 없다(`preedit_changed` doc). 고정 버퍼인 이유는 렌더 경로에 할당을 끼우지 않기 위해서다.
     preedit_buf: [256]u8 = undefined,
@@ -452,14 +506,16 @@ pub const Window = struct {
             .cbClsExtra = 0,
             .cbWndExtra = 0,
             .hInstance = hinstance,
-            .hIcon = null,
+            // Shared resource handles belong to Windows; never destroy them with this window.
+            // Hosts embedding the window module without the app resource keep the system fallback.
+            .hIcon = LoadImageW(hinstance, APP_ICON_RESOURCE, IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED),
             .hCursor = LoadCursorW(null, IDC_ARROW),
             // **배경 브러시를 주지 않는다.** 주면 OS가 먼저 칠하고 우리가 덮어 깜빡인다(W7.2가 매 프레임
             // 전체를 그린다). 대신 첫 프레임 전까지는 칠해지지 않은 채로 둔다.
             .hbrBackground = null,
             .lpszMenuName = null,
             .lpszClassName = class_name,
-            .hIconSm = null,
+            .hIconSm = LoadImageW(hinstance, APP_ICON_RESOURCE, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED),
         };
         // 같은 클래스를 두 번 등록하면 실패하지만(ERROR_CLASS_ALREADY_EXISTS) 그건 정상 재진입이다 —
         // 창을 여러 개 만들 때 첫 번째만 성공한다. 그래서 실패를 곧바로 오류로 보지 않고 창 생성으로 판정한다.
@@ -513,6 +569,19 @@ pub const Window = struct {
 
     pub fn show(self: *Window) void {
         _ = ShowWindow(self.hwnd, SW_SHOW);
+    }
+
+    /// A resize gesture keeps its cursor outside the band only while this window owns capture.
+    pub fn wantsHorizontalCursor(self: *const Window, x: i32, y: i32, client_hit: bool) bool {
+        if (self.input_overlay_open) return false;
+        if (!client_hit) return false;
+        for ([_]?CursorRect{ self.horizontal_resize_rect, self.sidebar_resize_rect }) |maybe_rect| {
+            const rect = maybe_rect orelse continue;
+            if (rect.left >= rect.right or rect.top >= rect.bottom) continue;
+            if (self.capturing and self.horizontal_resize_active) return true;
+            if (x >= rect.left and x < rect.right and y >= rect.top and y < rect.bottom) return true;
+        }
+        return false;
     }
 
     /// 실제로 창을 닫는다. `close_requested`를 받은 호출자가 정책을 마친 뒤 부른다.
@@ -627,6 +696,7 @@ pub const Window = struct {
     /// 캡션 버튼 자리는 `HTCLIENT` 다 — 우리가 그 클릭을 받아 최소화·최대화·닫기를 한다. 안 그러면
     /// OS 가 그 자리를 드래그로 먹어 버튼이 안 눌린다.
     pub fn hitTestFrame(self: *const Window, rect: RECT, screen_x: i32, screen_y: i32) LRESULT {
+        if (self.input_overlay_open) return HTCLIENT;
         const border: i32 = @intCast(@max(4, self.resize_border_px));
         const left = screen_x < rect.left + border;
         const right = screen_x >= rect.right - border;
@@ -778,19 +848,54 @@ pub const Window = struct {
         _ = PostMessageW(self.hwnd, msg, wparam, @intCast(lo | (hi << 16)));
     }
 
-    pub fn setImeCaret(self: *Window, row: u16, col: u16, cell_w: u32, cell_h: u32) void {
-        if (cell_w == 0 or cell_h == 0) return;
+    /// Settings remain visible across focus changes; transient menus dismiss.
+    /// Publish both values together so native hit testing never sees old policy.
+    pub fn setInputOverlay(self: *Window, open: bool, policy: OverlayFocusPolicy) void {
+        self.input_overlay_open = open;
+        self.overlay_focus_policy = if (open) policy else .dismiss_on_blur;
+    }
+    pub fn noteFocusLoss(self: *Window) void {
+        self.strokes.cancel();
+        self.pending_high_surrogate = null;
+        self.pending_high_stroke = 0;
+        self.keyboard_focused = false;
+        self.focus_generation +%= 1;
+        const was_open = self.input_overlay_open;
+        self.focus_loss_serial +%= 1;
+        if (self.overlay_focus_policy == .dismiss_on_blur) self.input_overlay_open = false;
+        // Sample inside the native callback, before the event loop can publish
+        // its next frame. This distinguishes immediate ownership from repair.
+        if (was_open) {
+            if (self.input_overlay_open) self.retained_overlay_blurs +|= 1 else self.dismissed_overlay_blurs +|= 1;
+        }
+    }
+
+    /// Microsoft WM_IME_SETCONTEXT requires custom composition renderers to
+    /// clear only ISC_SHOWUICOMPOSITIONWINDOW. Candidate/guide UI stays native.
+    /// https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-setcontext
+    pub fn imeUiOptions(self: *const Window, flags: usize) usize {
+        return if (self.app_drawn_preedit) flags & ~@as(usize, 0x80000000) else flags;
+    }
+    pub fn setAppDrawnPreedit(self: *Window, app_drawn: bool) void {
+        if (self.app_drawn_preedit == app_drawn) return;
+        self.app_drawn_preedit = app_drawn;
+        // Logical text focus can change inside one HWND. Refresh the default
+        // IME UI flags without waiting for another native window activation.
+        if (GetFocus() == self.hwnd) _ = DefWindowProcW(self.hwnd, WM_IME_SETCONTEXT, 1, @bitCast(self.imeUiOptions(self.ime_ui_options)));
+    }
+    pub fn setImeCaret(self: *Window, caret: @import("../../maru.zig").session.mouse_coordinates.ImeCaret) void {
+        const anchor = caret.anchor() orelse return;
         const himc = ImmGetContext(self.hwnd) orelse return;
         defer _ = ImmReleaseContext(self.hwnd, himc);
 
-        const below = win32_mouse.pixelBelowCell(row, col, cell_w, cell_h);
-        const cell = win32_mouse.rectForCell(row, col, cell_w, cell_h);
-        const area = RECT{ .left = cell.left, .top = cell.top, .right = cell.right, .bottom = cell.bottom };
+        const below = anchor.below;
+        const cell = anchor.top_left;
+        const area = RECT{ .left = cell.x, .top = cell.y, .right = anchor.bottom_right.x, .bottom = anchor.bottom_right.y };
 
         const comp = COMPOSITIONFORM{
             .dwStyle = CFS_POINT,
             // 조합창은 **글자 자리**에 둔다(아래가 아니라) — 조합 중인 글자가 거기 그려진다.
-            .ptCurrentPos = .{ .x = cell.left, .y = cell.top },
+            .ptCurrentPos = .{ .x = cell.x, .y = cell.y },
             .rcArea = area,
         };
         _ = ImmSetCompositionWindow(himc, &comp);
@@ -847,30 +952,53 @@ pub const Window = struct {
     ///
     /// 평범한 타이핑은 여기서 처리하지 않고 `WM_CHAR`에 맡긴다 — 레이아웃·데드키·IME 해석을 OS가 해야
     /// 하고, VK 에서 문자를 짐작하면 비영문 레이아웃이 깨진다(`win32_keys.keyFromVirtualKey` doc).
-    fn pushKeyDown(self: *Window, vk: u32) void {
+    fn pushTranslatedKey(self: *Window, vk: u32, event: terminal.input.KeyEvent) void {
+        const ingress = self.strokes.bind(vk, event) orelse KeyIngress{ .value = event, .stroke = 0 };
+        self.push(.{ .key = ingress });
+    }
+
+    fn pushKeyDown(self: *Window, vk: u32, lparam: LPARAM) void {
+        const flags: u32 = @bitCast(@as(i32, @truncate(lparam)));
+        const down = self.strokes.begin(vk, flags & (1 << 30) != 0) orelse return;
         const mods = modifierState();
         if (win32_keys.keyFromVirtualKey(vk)) |key| {
-            self.push(.{ .key = .{
+            self.pushTranslatedKey(vk, .{
                 .key = key,
                 .modifiers = win32_keys.translateModifiers(mods.ctrl, mods.shift, mods.alt, key),
                 .keypad = win32_keys.isKeypadVirtualKey(vk),
-            } });
+                .event_type = if (down.repeated) .repeat else .press,
+            });
             return;
         }
-        // 문자 키인데 Ctrl·Alt 가 눌렸다 — `WM_CHAR`는 제어 바이트를 주므로(Ctrl+A → 0x01) 여기서
-        // **문자를 복원해** 중립 인코더가 제어 바이트를 만들게 한다. 그래야 `Ctrl+Shift+T` 같은 앱
-        // 조합도 문자를 알 수 있다.
-        if (!mods.ctrl and !mods.alt) return; // 평범한 타이핑 — `WM_CHAR`가 받는다.
+        // OS layout/IME owns ordinary text. Existing modified chords keep their
+        // translation and now carry the identity of their actual native press.
+        if (!mods.ctrl and !mods.alt) return;
         const mapped = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR);
-        // 상위 비트는 데드키 표시다. 문자가 없으면(0) 버린다 — 모디파이어 키 자체 등.
         const ch: u32 = mapped & 0x7FFF;
         if (ch == 0) return;
         const key: terminal.input.Key = .{ .char = @intCast(ch) };
-        self.push(.{ .key = .{
+        self.pushTranslatedKey(vk, .{
             .key = key,
             .modifiers = win32_keys.translateModifiers(mods.ctrl, mods.shift, mods.alt, key),
             .keypad = win32_keys.isKeypadVirtualKey(vk),
-        } });
+            .event_type = if (down.repeated) .repeat else .press,
+        });
+    }
+
+    fn pushKeyUp(self: *Window, vk: u32) void {
+        var event = self.strokes.release(vk) orelse return;
+        event.value.event_type = .release;
+        self.push(.{ .key_released = event });
+    }
+
+    fn charVirtualKey(lparam: LPARAM) ?u32 {
+        // Scan information pairs ownership only; WM_CHAR's UTF-16 is still the
+        // text authority. https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-char
+        const flags: u32 = @bitCast(@as(i32, @truncate(lparam)));
+        const scan = (flags >> 16) & 0xff;
+        if (scan == 0) return null;
+        const vk = MapVirtualKeyW(scan | @as(u32, if (flags & (1 << 24) != 0) 0xe000 else 0), 3);
+        return if (vk == 0) null else vk;
     }
 
     /// `WM_CHAR`/`WM_SYSCHAR`. 평범한 타이핑이 여기로 온다 — 레이아웃과 데드키가 이미 적용된 값이다.
@@ -878,7 +1006,9 @@ pub const Window = struct {
     /// **UTF-16 서로게이트 쌍을 합친다.** BMP 밖 문자(이모지)는 상위·하위 서로게이트가 **두 번의**
     /// `WM_CHAR`로 온다. 합치지 않으면 중립 `charKeyFromCodepoint`가 lone surrogate 를 거부해 글자가
     /// 조용히 사라진다.
-    fn pushChar(self: *Window, unit: u32) void {
+    fn pushChar(self: *Window, unit: u32, lparam: LPARAM) void {
+        const vk = charVirtualKey(lparam);
+        const stroke = if (vk) |v| self.strokes.current(v) orelse 0 else 0;
         const mods = modifierState();
         // Ctrl·Alt 조합은 `pushKeyDown`이 이미 처리했다 — 여기서 또 넣으면 두 번 입력된다.
         if (mods.ctrl or mods.alt) return;
@@ -887,11 +1017,13 @@ pub const Window = struct {
         if (unit >= 0xD800 and unit <= 0xDBFF) {
             // 상위 서로게이트 — 짝을 기다린다.
             self.pending_high_surrogate = @intCast(unit);
+            self.pending_high_stroke = stroke;
             return;
         }
         if (unit >= 0xDC00 and unit <= 0xDFFF) {
             const high = self.pending_high_surrogate orelse return; // 짝 없는 하위는 버린다.
             self.pending_high_surrogate = null;
+            if (self.pending_high_stroke != stroke) return;
             cp = 0x10000 + ((@as(u32, high) - 0xD800) << 10) + (unit - 0xDC00);
         } else {
             self.pending_high_surrogate = null;
@@ -902,10 +1034,12 @@ pub const Window = struct {
         if (cp < 0x20 or cp == 0x7F) return;
 
         const key = terminal.input.charKeyFromCodepoint(cp) catch return;
-        self.push(.{ .key = .{
+        const flags: u32 = @bitCast(@as(i32, @truncate(lparam)));
+        self.pushTranslatedKey(vk orelse 256, .{
             .key = key,
             .modifiers = win32_keys.translateModifiers(false, mods.shift, false, key),
-        } });
+            .event_type = if (flags & (1 << 30) != 0) .repeat else .press,
+        });
     }
 };
 
@@ -925,6 +1059,37 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
     }
     const self = windowFrom(hwnd);
     switch (msg) {
+        // Microsoft WM_SETFOCUS/WM_KILLFOCUS define keyboard focus. Keep
+        // the callback passive: loss must not activate or show another window.
+        // https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-setfocus
+        WM_SETFOCUS => {
+            if (self) |w| {
+                w.keyboard_focused = true;
+                w.focus_generation +%= 1;
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_KILLFOCUS => {
+            if (self) |w| {
+                w.noteFocusLoss();
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_SETCURSOR => {
+            // Nonclient border/caption shapes remain the OS's responsibility.
+            if (self) |w| {
+                var point: POINT = undefined;
+                if (GetCursorPos(&point) != 0 and ScreenToClient(hwnd, &point) != 0 and
+                    w.wantsHorizontalCursor(point.x, point.y, (@as(usize, @bitCast(lparam)) & 0xffff) == HTCLIENT))
+                {
+                    if (LoadCursorW(null, IDC_SIZEWE)) |cursor| {
+                        _ = SetCursor(cursor);
+                        return 1;
+                    }
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
         // ── 프레임리스 창 (W8.8⒝) ────────────────────────────────────────────────────────
         //
         // **`wparam == TRUE` 일 때 0 을 돌려주면 클라이언트가 창 전체를 덮는다** — 캡션이 사라진다.
@@ -956,11 +1121,28 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
             return 0;
         },
         WM_KEYDOWN, WM_SYSKEYDOWN => {
-            if (self) |w| w.pushKeyDown(@intCast(wparam));
+            if (self) |w| w.pushKeyDown(@intCast(wparam), lparam);
             // `WM_SYSKEYDOWN`을 `DefWindowProcW`에 넘기지 않는다 — 넘기면 Alt 조합이 시스템 메뉴를 열고
             // Alt+F4 밖의 조합도 삼켜진다. Alt+F4(창 닫기)는 사용자가 기대하는 동작이라 예외로 넘긴다.
             if (msg == WM_SYSKEYDOWN and wparam != 0x73) return 0; // 0x73 = VK_F4
             if (msg == WM_KEYDOWN) return 0;
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_KEYUP, WM_SYSKEYUP => {
+            if (self) |w| w.pushKeyUp(@intCast(wparam));
+            return 0;
+        },
+        WM_IME_SETCONTEXT => {
+            if (self) |w| {
+                w.ime_ui_options = @bitCast(lparam);
+                return DefWindowProcW(hwnd, msg, wparam, @bitCast(w.imeUiOptions(w.ime_ui_options)));
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_IME_STARTCOMPOSITION => {
+            // The app paints these characters; forwarding start would open a
+            // second composition popup. GCS_RESULTSTR still uses DefWindowProc.
+            if (self) |w| if (w.app_drawn_preedit) return 0;
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         WM_IME_COMPOSITION => {
@@ -977,7 +1159,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         WM_CHAR, WM_SYSCHAR => {
-            if (self) |w| w.pushChar(@intCast(wparam));
+            if (self) |w| w.pushChar(@intCast(wparam), lparam);
             return 0;
         },
         WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP => {
@@ -991,6 +1173,9 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
                     WM_MBUTTONUP => .middle_up,
                     else => .moved,
                 };
+                if (kind == .moved and w.capturing and w.horizontal_resize_active and w.wantsHorizontalCursor(0, 0, true)) {
+                    if (LoadCursorW(null, IDC_SIZEWE)) |cursor| _ = SetCursor(cursor);
+                }
                 // **왼쪽 버튼 동안 포인터를 잡는다.** 안 잡으면 드래그가 창 밖으로 나가는 순간 메시지가
                 // 끊겨 선택이 거기서 멈추고, 밖에서 버튼을 떼면 `WM_LBUTTONUP`을 **영영 못 받아** 드래그
                 // 상태가 남는다.

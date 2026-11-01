@@ -2308,3 +2308,317 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 ReleaseFast 외부 사본에서 실제 OS HID 게시·문서 판·Metal drawable 표시를 연결한다.
 [준비·실행·완전한 A/B 묶음 검증](../tools/editor-input-latency/README.md)과
 [계획 및 사전 실행 범위](plans/editor-input-latency.md)를 따른다. 제품 소스나 기본 빌드는 바꾸지 않는다.
+
+## Portable chrome text request checks
+
+`zig build test-chrome-text-request` checks owned semantic text requests: Korean
+labels and SVG carriers, offscreen origins, owned family/fallback names, and cleanup
+at every failed allocation prefix. It does not require a native font-shaping device.
+
+`zig build test-chrome-draw-lowering` checks renderer-neutral projection, layer
+ordering, measured text placement, clips, gradient direction and independent border
+alpha without requiring a native GPU window.
+
+### Windows 문서 원본 권한과 실제 저장 fixture
+
+`zig build test-win32-document-grant`는 최초 읽기 원본의 full file ID와 문서/Registry/epoch/
+경로 결합, 원본 교체 거절과 native 시도/문서 수명·준비 실패 정산의 19개 판정을 실행한다.
+초기 native Snapshot의 독립 root 수명·raw BOM CAS·소비된 owner·이미지 변경 거절과
+등록 할당 실패의 소유권 유지도 포함한다(Windows 계약 §2m.181).
+
+`zig build test-win32-editor-open`은 초기 native 읽기·등록 전 zero-write capability probe의
+worker 11개를 실행한다. off-owner 실행, active/late 취소와 busy 정산, copied owner 거절,
+원본 bytes 보존, 읽기 상한과 readonly capability, app readonly fallback·UTF-8·BOM·혼합
+줄바꿈·OOM 및 web kind admission을 검사한다. `-Doptimize=ReleaseFast`도
+실행한다. 이 gate는 실제 파일/KTM 검사지만 일반 앱 파일 클릭의 비동기 배선 증거는 아니다.
+
+초기 worker의 일반 앱 연결은 Windows 계약 §2m.184가 소유한다.
+`test-win32-editor-host` 78개는 worker 결과의 실제 native 저장, 등록 실패/취소/capability,
+readonly raw CAS·권한, 단일 뷰 참조와 recovery를 포함한다. Debug/ReleaseFast로 검증하고,
+일반 앱 비동기 열기·Save-close·readonly·읽기 중 닫기는 별도 실제 소유 창에서 확인한다.
+`zig build` 뒤 `zig-out/bin/maru.exe win32-editor-document-smoke`는 실제 Windows 창 입력과
+임시 파일 native 커밋→디스크 바이트→일반 읽기 전용 재열기/paint까지 검사한다.
+저장은 fixture 직접 호출이며 원래 뷰는 살아 있다. 일반 Ctrl+S·dirty-close·물리 IME의
+완료 증거로 사용하지 않는다. full-ID witness·부모 rename/저장 pin 판정과 잔여 범위는
+[Windows 계약](windows-platform.md) §2m.150에 기록한다.
+
+`zig build test-win32-save-controller`는 grant/이미지/요청 수명과 실제 native 결과 정산의
+15개 판정을 실행한다. 부분 쓰기 rollback·실제 commit 응답 유실·미확정 종료 거절·query
+실패 재시도·준비/commit 할당 실패·마지막 view 종료/Controller 이동을 포함한다.
+`-Doptimize=ReleaseFast`로 같은 판정자를 최적화 모드에서 확인한다. 위 실제 Windows 창
+fixture도 Controller를 호출한다. 일반 GUI·비동기 I/O와 crash 복구 범위는
+[Windows 계약](windows-platform.md) §2m.151을 참조한다.
+
+`zig build test-win32-save-crash`는 Windows에서 별도 worker를 6개 저장 checkpoint ×
+두 이미지로 강제 종료하고, 부모가 실제 디스크 바이트·file ID·owner/group/DACL·기본
+메타데이터·ADS와 새 저장 준비/abort를 검증한다. `-Doptimize=ReleaseFast`도 지원한다.
+앱에 설치하지 않으며 새 cache fixture의 알려진 파일/빈 디렉터리만 정리한다. power loss,
+미저장 편집 백업/복원이나 일반 GUI 저장 완료 판정은 아니다. [Windows 계약](windows-platform.md)
+§2m.152가 실제 검증 범위와 적대적 검증 결과를 소유한다.
+
+`zig build test-win32-editor-backup`은 private Windows 백업 root/파일의 owner-only DACL,
+원자 교체·할당 실패 정리·적대적 record·native junction/hard link·복원 fingerprint CAS와 undo,
+양 OS 기본 경로 정책의 17개 판정을 실행한다. `-Doptimize=ReleaseFast`도 지원한다.
+`test-win32-save-crash`는 기존 12개 save crash 외에 backup crash 2개를 추가로 검증한다.
+실제 창의 `win32-editor-document-smoke`는 disk record의 복원/undo paint 4개를 더해 100 프레임이다.
+모든 fixture는 생성한 disposable root를 사용한다. 일반 앱 백업/GUI 연결 잔여는
+[Windows 계약](windows-platform.md) §2m.153에 기록한다. Windows simple runner도 이제
+`--maru-expect-tests`/`--maru-expect-passed` 인자를 읽고 잘못된 숫자·개수를 거절한다.
+
+§2m.154의 `zig build test-win32-editor-backup`는 수명주기 native 판정 5개를 더해 22개다.
+Debounce/frame budget/shutdown distinct flush/실패 재시도/clean 삭제/용량 pause를 실제 저장소로 센다.
+`test-win32-editor-input`는 실제 본문 편집만 백업 시계를 설정하는 연결도 검사한다.
+`test-win32-save-crash`의 backup worker는 직접 write 대신 만기 전 shutdown 유지보수를 사용한다.
+
+§2m.155의 `zig build test-win32-editor-backup`는 default root native 판정 5개를 더해 27개다.
+`win32-editor-document-smoke`는 기존 100 프레임과 함께 `editor_backup_lifecycle_smoke_ok=true`를
+요구한다. 앱과 같은 helper를 disposable LOCALAPPDATA base로 실행해 lazy root/만기 전 flush/
+shared document/due write/clean deletion을 센다. 일반 사용자 백업 폴더를 fixture로 쓰지 않는다.
+
+§2m.156의 `zig build test-win32-editor-backup`는 30개다. 실제 commit 응답 유실 또는 미정 상태에서
+Undo한 본문을 보존하고, 실제 native 결과 확정 뒤 지문 갱신/clean 삭제를 검증한다.
+Controller의 기존 독립 gate `test-win32-save-controller`는 15개를 유지한다.
+
+§2m.157의 `zig build test-win32-editor-backup`는 prepare 이후 Undo의 실제 commit/abort 두 행을
+추가해 32개다. `zig build test-editor-save-request`는 겹치는 이미지 수명, reload epoch 격리,
+counter 상한을 포함해 14개이며 전 할당 실패가 이미지 보호를 남기지 않는지도 검사한다.
+
+§2m.158의 `zig build test-win32-editor-host`는 aggregation 2개·native 14개·순수 정책
+2개, 총 18개다. 앱의 native save grant·닫기 선택·기존 백업 복원과 충돌 보존을 검사한다.
+`zig build test-win32-editor-backup`은 기존 root를 생성하지 않는 조회와 private 레코드
+재열기 두 판정을 더해 34개다. 두 gate는 Windows native 호스트에서 실행한다.
+
+§2m.159의 `zig build test-win32-editor-host`는 순수 복원 안내 우선순위·반복 항목·상한
+판정 한 행을 더해 19개다(aggregation 2·native 14·pure 3). Debug와 ReleaseFast에서 실행한다.
+
+`zig build test-win32-editor-watch`는 Windows native asynchronous directory notification
+소유권과 identity별 공유·상한·독립 구독·debounce의 14개 판정(aggregation 2·native 12)을
+실행한다. `-Doptimize=ReleaseFast`로도 실행하며 기본 test에 연결된다.
+앱의 외부 변경 갱신 전체 판정은 아직 아니다(§2m.160–161).
+
+§2m.162의 `zig build test-win32-editor-host`는 복구 전 앱 목록 slot 할당 실패와 재시도를
+포함해 20개다(aggregation 2·native 15·pure 3). Debug/ReleaseFast에서 실행한다.
+
+§2m.163의 `zig build test-win32-editor-read`는 native 읽기 작업자의 identity·sharing·
+ticket·수명·상한 11개(aggregation 2·native 8·pure 1)를 실행하며 기본 test에도 연결된다.
+`zig build test-win32-editor-host`는 app grant의 읽기 예약/수락과 실제 부모 폴더
+감시 구독·외부 변경 적용·일반 앱 자동 예약 경로를 더해 32개다
+(aggregation 2·native 27·pure 3).
+두 gate 모두 `-Doptimize=ReleaseFast`로도 실행한다.
+`maru win32-editor-document-smoke`는 실제 창의 worker read ticket과 프레임도 검사한다.
+
+§2m.165의 `zig build test-editor-commands`는 clean 외부 변경의 최소 replacement,
+다중 뷰 커서·기존 Undo/Redo·BOM/raw hash·UTF-8 경계·할당 실패 게시를 포함해
+32개(aggregation 21·behavioral 11)다. Debug와 `-Doptimize=ReleaseFast`로 실행한다.
+`maru win32-editor-document-smoke`는 외부 bytes가 표시된 실제 창 2프레임과 커서·Undo도
+검사한다. 이는 일반 앱 프레임 루프의 자동 감시 예약을 검증한 것으로 보지 않는다.
+
+§2m.166은 `test-win32-editor-host`의 자동 예약 판정자에서 실제 native 알림·현재 ticket·
+해제·재시도 deadline·directory cap·충돌 안내 합침을 검사한다. 일반 앱의 임시 파일 자동 갱신과
+dirty 충돌·저장 거절·버리기 종료는 별도의 실제 앱 실행으로 확인한다. posted 이벤트 검증이며
+물리 키보드·IME 또는 dirty reload/keep/compare 선택 완료로 보지 않는다.
+
+§2m.167의 `zig build test-editor-commands`는 명시적 dirty reload와 Undo·저장 보호를 더해
+34개(aggregation 21·behavioral 13)다. `zig build test-win32-editor-host`는 fresh choice
+예약·stale 입력 재시도·Undo와 소유된 비교의 행 번호·개행·할당 실패를 더해 35개다
+(aggregation 2·native 28·pure 5). 두 gate는 `-Doptimize=ReleaseFast`로도 실행한다.
+일반 앱의 임시 파일에서 Compare/Keep/Reload·Esc와 저장 충돌 보호를 별도 검증한다.
+
+§2m.168의 `zig build test-editor-save-request`는 명시적 overwrite의 native 관측 해시와
+document CAS·지연 ack·abort 축 보존을 포함해 16개다. `zig build test-win32-editor-host`는
+overwrite의 fresh ticket·디스크 재변경 및 queued/active/completed 취소를 포함해 39개다
+(aggregation 2·native 31·pure 6). 두 gate는 `-Doptimize=ReleaseFast`로도 실행한다.
+`test-win32-safe-save` 66개·`test-win32-document-grant` 14개·`test-win32-save-controller`
+15개를 회귀 검증한다. 실제 앱의 Save-close 충돌 모달과 writable handle을 유지한 대기/Esc
+취소는 별도 격리 파일에서 확인한다.
+
+§2m.169의 `test-editor-save-request`는 불변 이미지의 source/checksum 및 full lease·epoch·
+sequence 대조를 포함해 18개다. `test-win32-safe-save`는 같은 66개 안에서 변조된 epoch의
+native commit/ack 거절을 추가 검사한다. 두 gate를 Debug/ReleaseFast에서 실행하며,
+불변 이미지 export는 worker commit 승인이나 비동기 저장 완료로 간주하지 않는다.
+
+§2m.170의 `zig build test-win32-save-prepare`는 aggregation 2·native 7의 총 9개다.
+worker의 실제 준비·쓰기·flush thread, captured bytes/name 소유권·원본 디스크 유지,
+최종 권한 재검증·추가 편집 dirty·취소·admission 할당 실패와 실제 partial write 후
+poisoned native attempt/실패 보존 및 명시적 rollback을 검사한다.
+`-Doptimize=ReleaseFast`로도 실행한다. 일반 앱 SaveController/UI 배선과 worker commit
+승인 왕복은 아직 연결 전이므로 전체 비동기 저장 E2E를 대체하지 않는다.
+
+§2m.171의 `zig build test-win32-save-controller`는 aggregation 2·native 21의 총 23개다.
+비동기 준비의 controller 이동·취소/drain·권한 철회·source retry·미확정 rollback 보유와
+취소 commit 거절·할당 prefix·overwrite CAS를 검사한다. `-Doptimize=ReleaseFast`로도 실행하고
+`test-win32-save-prepare` 9개를 두 모드에서 함께 회귀 검증한다. 앱 Book/UI는 아직 동기
+진입점이며 완료 poll의 native abort/commit·정산은 main thread라 전체 async E2E로 세지 않는다.
+
+
+§2m.172의 `zig build test-win32-editor-host`는 47개(aggregation 2·native 38·pure 7)다.
+일반 앱의 비동기 준비 진입점, clean 생략·취소·source 실패·controller 이동·lease 격리와
+receipt/ack 이후 닫기를 검사한다. `-Doptimize=ReleaseFast`도 실행한다.
+`test-win32-save-controller` 23개를 회귀 검증하며 실제 앱의 Ctrl+S·Save-close와
+물리 키보드/IME 검증은 구분한다. native commit/abort와 초기 open은 아직 동기 I/O다.
+
+§2m.173의 `zig build test-win32-save-settle`은 native 테스트 7개다. 다른 thread의 실제
+rollback·unknown/committed native 조회·실패 후 재시도·미소비 소유권·copied owner·admission
+할당 실패와 Request 해제 후 독립 이미지를 검사한다. `-Doptimize=ReleaseFast`도 실행한다.
+worker 결과는 문서 ack가 아니며 controller/앱 연결 전이므로 앱의 async rollback 증거로 세지 않는다.
+
+§2m.174의 `zig build test-win32-save-controller`는 28개(aggregation 2·native 26)다.
+비동기 rollback/reconcile의 문서·pending 소유권, busy guard·controller 이동·unknown 보유와
+실제 retry·유실 commit ack·admission 할당 prefix를 검사한다. `-Doptimize=ReleaseFast`와
+`test-win32-save-settle` 7개도 실행한다. Book/UI의 settlement 연결은 별도 후속 작업이다.
+
+§2m.175의 `zig build test-win32-editor-host`는 51개(aggregation 2·native 42·pure 7)다.
+cancel/권한 실패의 worker rollback 정산, unknown backoff·명시적 cancel과 유실 commit 뒤
+정확한 receipt를 검사한다. `-Doptimize=ReleaseFast` 및 controller 28개를 회귀 검증한다.
+실제 앱의 큰 임시 파일에서 Ctrl+S/Esc·추가 편집·Save-close를 별도 확인한다. 대상 입력 큐
+검증은 물리 키보드/IME와 구분하며 commit·final cleanup·초기 open의 worker 이관은 남아 있다.
+
+§2m.176의 `zig build test-win32-save-cleanup`은 native 10개다. 실제 terminal handle 정리,
+KTM query 실패/unknown 소유권 유지·실제 재시도·정리 오류·binding/checksum·SMP 소유권,
+admission 실패·미소비/busy/copied owner와 Request 해제 뒤 이미지를 검사한다.
+`-Doptimize=ReleaseFast`도 실행한다. controller/앱 연결 전이며 결과는 문서 ack가 아니다.
+
+§2m.177의 `zig build test-editor-save-request`는 23개다. 최종 main-thread 승인 발급의 현재
+권한/source/checksum, final address·scope·one-use·전체 binding과 미게시 실패를 검사한다.
+`-Doptimize=ReleaseFast`도 실행한다. 승인 값은 native commit API나 앱 연결 전이며 host의
+native fence·non-reused scope·문서 수명/경로/권한 보유와 승인 왕복은 후속 작업이다.
+
+§2m.178의 `test-win32-save-controller`는 33개, `test-win32-editor-host`는 56개다.
+일반 앱의 terminal 정리 worker 연결, 정리 중 Request/busy, confirmed abort와 늦은 취소,
+최종 권한 실패의 rollback/cleanup, later edit와 stale disk acknowledgment, admission
+재시도를 검사한다. Debug와 `-Doptimize=ReleaseFast` 모두 실행한다. controller와 앱 연결을
+각각 다섯 compiled runtime 변형으로 검증했다. native commit 승인 왕복은 아직 후속이다.
+
+§2m.179의 `zig build test-win32-save-commit`은 독립 native 7개다. fresh namespace fence,
+최종 main-thread 승인·scope, copied/busy owner, 취소와 실행 시작 경합, 실제 commit 응답 유실과
+scope exhaustion을 검사한다. Debug와 `-Doptimize=ReleaseFast` 모두 실행하고 다섯 compiled
+runtime 변형을 검출했다. 일반 앱 연결은 host 61개·controller 33개 Debug/ReleaseFast와
+별도의 다섯 compiled runtime 변형으로 검증한다. 승인 대기 중 권한/경로 변경·취소,
+실제 native commit 뒤 늦은 취소와 read/release/teardown busy를 검사한다.
+
+§2m.180의 `test-win32-editor-host`는 66개다. 비동기 overwrite의 새 native source와 old
+문서 CAS, reader 해제 뒤 이미지 수명, stale read·후속 native 변경 거절, 취소·final permission을
+검사한다. Debug/ReleaseFast와 다섯 compiled runtime 변형을 검증했다. 앱 충돌 선택과 전체
+회귀 gate도 실행한다.
+
+§2m.186의 `test-win32-editor-open`은 15개, `test-win32-editor-host`는 80개다.
+초기 worker의 private backup 읽기·무생성 absence·오류 분류·native path key와 record/store
+소유권, late 취소, 복구의 old CAS 및 첫 Save-close 정리를 Debug/ReleaseFast로 검사한다.
+다섯 compiled runtime 변형과 격리 실앱의 crash/reopen/저장/종료도 검증한다.
+
+§2m.187의 `test-win32-editor-open`은 19개, `test-win32-editor-host`는 82개다.
+worker projection/syntax의 독립 소유권·본문/revision 결합·행/폭·부분 할당 실패와 main에서의
+parser 조회/인계·편집 refresh를 Debug/ReleaseFast로 검사한다. 다섯 compiled runtime
+변형과 실앱 Zig 색 표시·편집·Save-close의 exact CRLF도 확인한다.
+
+
+§2m.188의 `test-win32-editor-watch`는 18개다. 기존 native 소유권·취소·공유 구독
+검사에 재귀 root의 깊은 파일 알림과 busy 스캔 요청의 주소/순서 보존을 포함한다.
+완료된 native 알림 이름 확인은 판정자만 수행하고 제품의 payload 비권위 정책은 유지한다.
+
+Windows 단독 worker 판정자와 crash probe의 모듈 루트는 platform/windows의
+얇은 aggregation/entry 파일이다. 공용 native import가 editor 밖으로 이동해도
+모듈 경계를 벗어나지 않는다. aggregation test 하나가 추가되어 open 20개,
+settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 유지한다.
+
+
+§2m.189: `zig build test-win32-backup-worker`는 15개(집계 2 + worker 10 + 앱 3)다.
+독립 immutable recovery job의 실제 native I/O, 현재 문서에 맞는 ack/drop 승인,
+소유권/실패/backoff와 앱 debounce/close 보존을 검증한다. 기존
+`test-win32-editor-backup` 34개의 private store/restore 검사는 그대로 유지한다.
+
+## Windows OSC 52 읽기 실앱 검증
+
+`mise exec -- zig build test-clipboard-response test-windows-clipboard-raw test-typed-input-queue test-command-admission test-input-dispatcher test-protocol-response-write test-protocol-frame-queue test-input-queue-regression -j1`로 중립 인코딩·소유권과 native raw 읽기 계약을 검사한다.
+실앱은 Windows 대화형 데스크톱에서 별도 캐시 실행 파일로 검사한다. 기존 설치본이나 실행 중인 앱은 대상이 아니다.
+
+```powershell
+mise exec -- zig build -p .zig-cache/windows-osc52 -j1
+New-Item -ItemType Directory -Force .zig-cache/windows-osc52/bin/assets
+Copy-Item -LiteralPath assets/fonts -Destination .zig-cache/windows-osc52/bin/assets -Recurse -Force
+python -X utf8 tools/windows/check-osc52-read.py --exe .zig-cache/windows-osc52/bin/maru.exe --output .zig-cache/osc52-read-result
+python -X utf8 tools/windows/check-osc52-read.py --exe .zig-cache/windows-osc52/bin/maru.exe --output .zig-cache/osc52-large-result --large
+```
+
+출력 폴더는 매번 새 경로를 준다. 기본 검사는 클립보드를 읽기만 하며 텍스트 대신 길이·해시를 기록한다.
+`--large`는 기존 클립보드가 비어 있을 때만 생성 데이터를 설치하고, 마지막으로 관측한 sequence·전체 생성 데이터·텍스트 형식을 대조한 뒤 원래의 빈 상태로 복구한다. 외부 변경은 보존하고 검사를 실패 처리한다.
+다섯 policy/target 사례를 모두 실행하거나 `--case allow-c`처럼 한 사례를 선택할 수 있다.
+큰 사례는 약 7 MB 응답을 여러 tick에 나눠 받는 동안 소유한 Maru 창만 반복 resize하고, 전체 OSC 응답 뒤에 in-band resize 통지가 오는지 검사한다. 자식이 prefix를 받은 뒤 DSR을 보내는 초기 방식은 리더 순서 결함을 놓쳤으므로 중간 삽입 방지의 증거로 쓰지 않는다.
+각 앱은 격리된 프로필·설정·자식과 PID 소유 창을 쓰며, 클립보드 내용을 로그에 남기거나 물리 키·IME 입력을 증명하지 않는다.
+
+Windows 스크롤백·문자 폭 설정 집중 검사는 `zig build test-live-text-config test-windows-settings-shrink test-windows-settings -j2`로 실행한다. 공통 상태 전이, 성공 저장의 단발 축소 권한과 기존 설정 회귀를 검사한다.
+
+`zig build test-live-appearance-config`는 공유 팔레트·기본 색·커서 정책과 reader 명령 수락 재시도를 검사한다. Windows 화면 검증은 별도로 필요하다.
+
+`zig build test-cursor-presentation`는 커서 깜빡임 조건·포커스 정책·시간 위상·페이드를 검사한다. Windows 실제 커서 픽셀 및 네이티브 포커스 시험을 대신하지 않는다.
+
+`zig build test-native-cell-rect`는 macOS·Windows가 공유하는 커서 변·텍스트 장식선·거터·divider 사각형을 검사한다. `test-windows-positioned-frame`은 Windows 클리핑·suffix·실제 GPU 합성을 함께 확인한다.
+
+`zig build test-language-config test-windows-locale test-settings-form test-windows-settings`는 언어 적용·알림 소유권·OS 로케일의 UTF-16 경계·표시명/저장값 분리를 검사한다. 실제 네이티브 로케일 호출은 Windows에서 실행하고 다른 OS에서는 해당 경우를 건너뛴다.
+
+- File-tree context menu catalog: `mise exec -- zig build test-file-tree-context-menu`. Verifies visible rows, command selection, symlink policy and invalid selections. Native popup routing requires separate app verification.
+
+- Windows native file dialog: `mise exec -- zig build test-windows-file-dialog`.
+  Checks request ownership, result routing, cancellation and real COM option flags without opening a dialog.
+- Native dialog integration on Windows: `python tools/windows/check-file-dialog.py --show --output <new-receipt.json>`.
+  Pass `--zig <zig.exe>` when Zig is outside PATH; `--optimize O3` checks the optimized C adapter.
+  The opt-in probe opens private file and folder dialogs, cancels each through the adapter, and verifies
+  that the modal call returns, the dialog disappears and its private owner becomes enabled again.
+  These probes do not establish app menu routing, selected-file acceptance or Zig worker scheduling.
+
+- `mise exec -- zig build test-windows-file-dialog-live` is an explicit UI probe.
+  It opens and cancels private file/folder dialogs through the actual Zig detached
+  worker and verifies one-shot results, routing tokens and owner restoration.
+  Run again with `-Doptimize=ReleaseFast`; this is excluded from ordinary checks.
+
+- Root validation protocol: `mise exec -- zig build test-file-tree-root-validation`.
+  Checks reply routing, two-round identity checks, capability requirements and
+  stale generations. Native root switching still needs separate host validation.
+
+- Windows root request host: `mise exec -- zig build test-windows-tree-root-host`.
+  Exercises real two-round directory validation, cancellation, monotonic request
+  IDs and rejected submissions. A ready reply still requires tree/watcher/row
+  staging; this does not establish app folder switching or popup routing.
+
+- Native watcher retirement: `mise exec -- zig build test-windows-watch-retirement`.
+  Verifies cancellation start, idempotence, completion polling and stable ownership.
+  `test-win32-editor-watch` also runs these cases with the existing watch tests.
+
+- Root watch preparation: `mise exec -- zig build test-windows-root-watch-prepare`.
+  Uses real validated directory handles and a detached native preparation worker.
+  Checks cancellation, result ownership, identity rejection and reference retirement.
+  It does not exercise root model commit or app menu routing.
+
+- Root transaction: `mise exec -- zig build test-windows-root-transaction`.
+  Uses real native watch preparation and first-scan capability transfer. Checks
+  replace/add publication, stale metadata, failed allocation/submission and root
+  identity before the first successful enumeration. App popup routing is separate.
+
+- Root flow: `mise exec -- zig build test-windows-root-flow`.
+  Exercises validation, native watch preparation and root publication together,
+  including cancellation, close priority and allocation-free emergency retirement.
+  Actual app folder picker and popup interaction require separate UI validation.
+
+- Explorer background menu: `mise exec -- zig build test-windows-explorer-menu`.
+  Checks the three visible shared catalog commands, generation rejection, key
+  release suppression and pointer capture. This does not prove app rendering.
+  `python tools/windows/check-app-explorer-menu.py --exe <cache-build>/bin/maru.exe
+  --case file|replace|add|cancel|dismiss --output <new-receipt.json>` exercises
+  the actual app popup, native selection, root publication and dismissal in an
+  isolated profile.
+
+- Native press ownership: `mise exec -- zig build test-windows-key-strokes`.
+  Eight pure checks cover repeats, translated values, unrelated/stale release,
+  focus cancellation and exhausted identities. They do not run a native window.
+  `python tools/windows/check-app-explorer-menu.py --exe <cache-build>/bin/maru.exe
+  --case input --output <new-receipt.json>` runs five private HWND cases in the
+  actual app. Its IME case checks an empty native preedit-clear route, not physical
+  IME input or candidate content.
+
+
+### Windows 모달의 작업영역과 패딩
+
+`mise exec -- zig build test-windows-modal-layout -j2`와 `-Doptimize=ReleaseFast`는
+작업영역의 원점·빈 영역·모양 토큰, 패널 패딩과 gradient/clip 보존 등 8개를 검사한다.
+컴파일된 수와 실제 통과 수를 각각 8개로 제한한다. 이 순수 검사는 실제 창의 페인트와
+입력 연결을 대신하지 않는다. 진행 결과는 [Windows 계획](plans/windows-platform.md)을 따른다.

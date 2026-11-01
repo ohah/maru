@@ -8,13 +8,13 @@ const terminal = maru.terminal;
 
 /// NativeDrawCell.style_flags 비트 — bold cell이면 셰이퍼가 bold 폰트 face를 골라 bold variant의
 /// glyph_id/PostScript name을 만든다(rasterizer가 그 이름으로 다시 그려 실제 굵은 글리프가 나온다).
-pub const draw_cell_bold_bit: u16 = 1 << 0;
+pub const draw_cell_bold_bit: u16 = renderer.shaping_runs.bold_bit;
 /// italic(SGR 3) cell — 셰이퍼가 italic face(font.family-italic 또는 주 family italic variant)로 그린다(F2-3).
 /// bold와 같이 켜지면 bold-italic face. native MaruDrawCellItalicBit와 동일 비트.
-pub const draw_cell_italic_bit: u16 = 1 << 1;
+pub const draw_cell_italic_bit: u16 = renderer.shaping_runs.italic_bit;
 /// 커서가 앉은 칸(`MaruDrawCellCursorBit`). 셰이퍼가 이 비트로 run 을 갈라 그 칸만 합자 없이 그린다 —
-/// 근거는 `cellIsAtCursor` 주석.
-pub const draw_cell_cursor_bit: u16 = 1 << 2;
+/// 판정은 `renderer.shaping_runs.atCursor`가 소유한다.
+pub const draw_cell_cursor_bit: u16 = renderer.shaping_runs.cursor_bit;
 /// 렌더러가 코드포인트로 **직접 합성하는** 글리프(box·block·Powerline·Braille·Legacy Computing·등록 아이콘 —
 /// `renderer.isSynthesizedCodepoint`)인 칸(`MaruDrawCellSynthesizedBit`). 셰이퍼는 이 비트로 「폰트 글리프가
 /// 없어도 record 를 남긴다」·「glyph_id 를 0 으로 정규화한다」를 정한다. 예전에는 `coretext_smoke.m` 이 같은 범위
@@ -328,28 +328,12 @@ pub const CoreTextDrawListShaper = struct {
     }
 };
 
-/// **커서가 앉은 칸은 합자를 풀어 그린다.** 셰이퍼는 이 비트가 다르면 face 가 같아도 run 을 갈라
-/// 그 칸만 합자 없이 셰이핑한다(`MaruDrawCellCursorBit`). 편집 중 `===` 가 이어진 한 덩어리면 커서가
-/// 어느 글자에 있는지 알 수 없다 — Ghostty 도 같은 이유로 커서 위 합자를 푼다(사용자 요청 2026-08-17).
-///
-/// 커서가 **보이지 않으면**(hidden·blink off) 풀지 않는다. 안 그러면 깜빡임마다 합자가 붙었다 떨어져
-/// 글자가 흔들린다.
-fn cellIsAtCursor(cell: renderer.DrawCell, cursor: terminal.Cursor) bool {
-    if (!cursor.visible) return false;
-    if (cell.row != cursor.row) return false;
-    // wide 셀은 자기 폭만큼 열을 차지하므로 그 범위 안이면 커서 칸이다.
-    const span: u16 = if (cell.width == 0) 1 else cell.width;
-    return cursor.col >= cell.col and cursor.col < cell.col + span;
-}
-
 fn nativeDrawCellFromDrawCell(cell: renderer.DrawCell, cursor: terminal.Cursor) NativeDrawCell {
     return .{
         .row = cell.row,
         .col = cell.col,
         .width = cell.width,
-        .style_flags = (if (cell.style.bold) draw_cell_bold_bit else 0) |
-            (if (cell.style.italic) draw_cell_italic_bit else 0) |
-            (if (cellIsAtCursor(cell, cursor)) draw_cell_cursor_bit else 0) |
+        .style_flags = renderer.shaping_runs.styleKey(cell, cursor) |
             (if (renderer.isSynthesizedCodepoint(cell.codepoint)) draw_cell_synthesized_bit else 0),
         .codepoint = cell.codepoint,
         .grapheme_offset = cell.grapheme_offset,

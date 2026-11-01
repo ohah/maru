@@ -32,7 +32,7 @@ fn fnBody(source: []const u8, name: []const u8) ?[]const u8 {
 
 test "원격 스캔 갈래는 로컬 파일시스템에 닿지 않는다 (§2.4)" {
     const allocator = std.testing.allocator;
-    const backend = try read(allocator, "src/platform/macos/file_tree_backend.zig", 2 * 1024 * 1024);
+    const backend = try read(allocator, "src/app/file_tree_backend.zig", 2 * 1024 * 1024);
     defer allocator.free(backend);
 
     // 원격 갈래 둘의 본문에서 로컬 FS 진입 토큰을 센다. **호출 토큰**이다 — 주석의 낱말이 아니라
@@ -55,7 +55,7 @@ test "원격 스캔 갈래는 로컬 파일시스템에 닿지 않는다 (§2.4)
     }
     // 전송은 정확히 하나의 문으로 나간다.
     const scan = fnBody(backend, "remoteScanDirectory").?;
-    try std.testing.expect(std.mem.indexOf(u8, scan, "runRemoteCapped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scan, "transport.runCapped") != null);
 }
 
 test "원격 submit 의 소비처 재고 — 여는 자리는 정확히 하나다" {
@@ -67,6 +67,22 @@ test "원격 submit 의 소비처 재고 — 여는 자리는 정확히 하나�
     const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
     defer allocator.free(panel);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, panel, ".submitRemoteDirectory("));
+    // Every native host construction must install the existing SSH capability after extraction.
+    for ([_][]const u8{
+        "src/platform/macos/app_session.zig",
+        "src/platform/macos/app_session/file_panel.zig",
+        "src/platform/macos/app_session/workspace.zig",
+    }) |path| {
+        const source = try read(allocator, path, 8 * 1024 * 1024);
+        defer allocator.free(source);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "file_tree_backend.Backend.initWithRemote("));
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "file_tree_backend.Backend.init("));
+        try std.testing.expect(std.mem.indexOf(u8, source, "file_tree_remote.zig\").transport") != null);
+    }
+    const adapter = try read(allocator, "src/platform/macos/file_tree_remote.zig", 64 * 1024);
+    defer allocator.free(adapter);
+    try std.testing.expect(std.mem.indexOf(u8, adapter, ".runCapped = ssh_upload.runRemoteCapped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, adapter, ".list_script = ssh_upload.list_script") != null);
     const still_zero = [_][]const u8{
         "src/platform/macos/file_tree_mutation_backend.zig",
         "src/platform/macos/app_session.zig",
@@ -95,11 +111,21 @@ test "원격 상호작용 펜스가 서 있다 — 열기·변경이 원격 모�
 
 test "로컬 root 커밋의 capability 요구는 그대로다 — 갈래는 정확히 둘이어야 한다 (§2.2)" {
     // 원격 갈래가 생기면서 가장 위험한 한 줄은 「원격 root 가 capability 없는 로컬 root 로 커밋되는
-    // 것」이다. 로컬 쪽 하드 게이트(`.fp_root_capability_gone`)가 사라지면 그 문이 열린다.
+    // 것」이다. 공유 검증의 capability 게이트와 양쪽 로컬 호출 연결을 함께 고정한다.
     const allocator = std.testing.allocator;
     const panel = try read(allocator, "src/platform/macos/app_session/file_panel.zig", 8 * 1024 * 1024);
     defer allocator.free(panel);
-    try std.testing.expect(std.mem.count(u8, panel, ".fp_root_capability_gone") >= 1);
+    const protocol = try read(allocator, "src/app/file_tree_root_validation.zig", 1024 * 1024);
+    defer allocator.free(protocol);
+    try std.testing.expect(std.mem.indexOf(u8, protocol, ".has_capability = result.validated_dir != null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, protocol, "if (!reply.is_root_validation or reply.was_remote or") != null);
+    try std.testing.expect(std.mem.indexOf(u8, protocol, "if (!reply.has_capability) return failed(.identity_missing, .fp_root_capability_gone);") != null);
+    const validation = std.mem.indexOf(u8, panel, "switch (protocol.evaluate(pending, protocol.Reply.fromBackend(&result), self.file_tree.rootGeneration()))") orelse return error.TestUnexpectedResult;
+    const capability = std.mem.indexOfPos(u8, panel, validation, "const validated_dir = result.validated_dir.?;") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(validation < capability);
+    const windows = try read(allocator, "src/platform/windows/file_tree_roots.zig", 1024 * 1024);
+    defer allocator.free(windows);
+    try std.testing.expect(std.mem.indexOf(u8, windows, "switch (protocol.evaluate(pending, protocol.Reply.fromBackend(result), tree.rootGeneration()))") != null);
 }
 
 test "감시 채널은 창 당 하나다 — 뷰가 나눠 쓰지, 트리 전용 채널을 새로 만들지 않는다 (RF5a §③)" {

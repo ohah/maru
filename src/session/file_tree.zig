@@ -512,6 +512,9 @@ pub const Tree = struct {
         for (self.roots.items) |*root| {
             if (!std.mem.eql(u8, root.path, path)) continue;
             root.identity = identity;
+            // Root pins originate from the validated directory's fstat axis.
+            // Protect the first successful scan too, including a failed-scan retry.
+            root.scan_identity = .{ .value = identity };
             return true;
         }
         return false;
@@ -949,6 +952,14 @@ pub const Tree = struct {
     pub fn takeScanRequest(self: *Tree) ?[]u8 {
         if (self.scan_requests.items.len == 0) return null;
         return self.scan_requests.orderedRemove(0);
+    }
+
+    /// Return the just-taken request after a busy backend, without allocating.
+    /// No queue mutation may intervene between take and return: removal retained
+    /// the spare slot, so even allocator exhaustion cannot lose the request.
+    pub fn returnScanRequest(self: *Tree, owned: []u8) void {
+        std.debug.assert(self.scan_requests.items.len < self.scan_requests.capacity);
+        self.scan_requests.insertAssumeCapacity(0, owned);
     }
 
     /// A root picker commit transfers its retained directory capability to the exact first scan path.

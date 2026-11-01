@@ -64,6 +64,7 @@ extern "user32" fn IsClipboardFormatAvailable(UINT) callconv(abi.winapi) i32;
 extern "kernel32" fn GlobalAlloc(UINT, usize) callconv(abi.winapi) ?HANDLE;
 extern "kernel32" fn GlobalFree(?HANDLE) callconv(abi.winapi) ?HANDLE;
 extern "kernel32" fn GlobalLock(HANDLE) callconv(abi.winapi) ?*anyopaque;
+extern "kernel32" fn GlobalSize(HANDLE) callconv(abi.winapi) usize;
 extern "kernel32" fn GlobalUnlock(HANDLE) callconv(abi.winapi) i32;
 extern "kernel32" fn GetLastError() callconv(abi.winapi) u32;
 
@@ -140,6 +141,23 @@ pub fn utf8ForTerminal(allocator: std.mem.Allocator, units: []const u16) error{ 
     return out.toOwnedSlice(allocator);
 }
 
+/// OSC replies preserve clipboard text; paste alone translates Enter.
+fn utf8Raw(allocator: std.mem.Allocator, units: []const u16) error{ OutOfMemory, InvalidUtf16 }![]u8 {
+    return std.unicode.utf16LeToUtf8Alloc(allocator, units) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidUtf16,
+    };
+}
+
+/// GlobalSize includes padding. Locate NUL only within allocated complete
+/// UTF-16 units and the cap, never beyond the global-memory object.
+/// https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-globalsize
+fn terminatedText(storage: []const u16, max_units: usize) error{Unterminated}![]const u16 {
+    const bounded = storage[0..@min(storage.len, max_units)];
+    const end = std.mem.indexOfScalar(u16, bounded, 0) orelse return error.Unterminated;
+    return bounded[0..end];
+}
+
 // ── OS 호출 ──────────────────────────────────────────────────────────────────────────────────
 
 /// 클립보드에 UTF-8 문자열을 쓴다.
@@ -187,6 +205,15 @@ pub fn write(allocator: std.mem.Allocator, hwnd: ?HWND, utf8: []const u8) Error!
 
 /// 클립보드에서 UTF-8 문자열을 읽는다. 텍스트가 없으면 `null`. 호출자가 해제한다.
 pub fn read(allocator: std.mem.Allocator, hwnd: ?HWND) Error!?[]u8 {
+    return readWith(allocator, hwnd, false);
+}
+
+/// Raw UTF-8 for OSC52: preserve CR/LF. Empty or unavailable text is null.
+pub fn readRaw(allocator: std.mem.Allocator, hwnd: ?HWND) Error!?[]u8 {
+    return readWith(allocator, hwnd, true);
+}
+
+fn readWith(allocator: std.mem.Allocator, hwnd: ?HWND, comptime raw: bool) Error!?[]u8 {
     if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
     if (IsClipboardFormatAvailable(cf_unicodetext) == 0) return null;
 
@@ -197,26 +224,27 @@ pub fn read(allocator: std.mem.Allocator, hwnd: ?HWND) Error!?[]u8 {
     defer _ = CloseClipboard();
 
     const handle = GetClipboardData(cf_unicodetext) orelse return null;
+    return readMemory(allocator, handle, raw);
+}
+
+fn readMemory(allocator: std.mem.Allocator, handle: HANDLE, comptime raw: bool) Error!?[]u8 {
     const ptr = GlobalLock(handle) orelse {
         last_error = GetLastError();
         return null;
     };
     defer _ = GlobalUnlock(handle);
 
-    // **NUL 까지 센다.** `GlobalSize`는 할당 크기라 실제 문자열보다 클 수 있어, 그대로 쓰면 뒤쪽 쓰레기가
-    // 붙는다. `CF_UNICODETEXT`는 NUL 종단이 규약이다.
+    const byte_count = GlobalSize(handle);
+    if (byte_count == 0) {
+        last_error = GetLastError();
+        return error.Unterminated;
+    }
     const wide: [*]const u16 = @ptrCast(@alignCast(ptr));
-    var len: usize = 0;
-    // 상한을 둔다 — 종단이 없는 잘못된 데이터에서 무한히 읽지 않는다(16 MiB 상당).
     const max_units: usize = 8 * 1024 * 1024;
-    while (len < max_units and wide[len] != 0) len += 1;
-    // **상한에 닿으면 잘라서 주지 않고 실패로 올린다.** 여기 닿았다는 것은 NUL 종단이 없다는 뜻이라
-    // 데이터가 이미 잘못됐고, 그것을 잘라 셸 명령줄에 밀어 넣으면 **명령의 앞부분만** 붙는다 —
-    // `InvalidUtf16` 을 U+FFFD 로 갈음하지 않는 것과 같은 판단이다.
-    if (len == max_units) return error.Unterminated;
-    if (len == 0) return null;
-
-    return try utf8ForTerminal(allocator, wide[0..len]);
+    // Ignore a trailing odd padding byte rather than reading a partial unit.
+    const text = try terminatedText(wide[0 .. byte_count / @sizeOf(u16)], max_units);
+    if (text.len == 0) return null;
+    return if (raw) try utf8Raw(allocator, text) else try utf8ForTerminal(allocator, text);
 }
 
 const testing = std.testing;
@@ -305,4 +333,81 @@ test "utf8ForTerminal: 짝 없는 서로게이트를 OutOfMemory 로 부르지 �
 
     const lone_low = [_]u16{0xDC00};
     try testing.expectError(error.InvalidUtf16, utf8ForTerminal(a, &lone_low));
+}
+
+test "Windows clipboard raw preserves line endings while paste normalizes" {
+    const a = testing.allocator;
+    const units = [_]u16{ 'A', 13, 10, 'B', 10, 0xac00, 32, 0xd83d, 0xdc19, 13 };
+    const raw = try utf8Raw(a, &units);
+    defer a.free(raw);
+    try testing.expectEqualStrings("A\r\nB\n\xea\xb0\x80 \xf0\x9f\x90\x99\r", raw);
+    const paste = try utf8ForTerminal(a, &units);
+    defer a.free(paste);
+    try testing.expectEqualStrings("A\rB\r\xea\xb0\x80 \xf0\x9f\x90\x99\r", paste);
+}
+
+test "Windows clipboard raw NUL ends text before padding" {
+    try testing.expectEqualSlices(u16, &.{'a'}, try terminatedText(&.{ 'a', 0, 0xd800 }, 8));
+    try testing.expectEqual(@as(usize, 0), (try terminatedText(&.{ 0, 0xd800 }, 8)).len);
+}
+
+test "Windows clipboard raw scan is bounded by storage and cap" {
+    try testing.expectError(error.Unterminated, terminatedText(&.{ 'a', 'b' }, 8));
+    try testing.expectError(error.Unterminated, terminatedText(&.{ 'a', 'b', 0 }, 2));
+    try testing.expectError(error.Unterminated, terminatedText(&.{}, 8));
+    try testing.expectError(error.Unterminated, terminatedText(&.{0}, 0));
+    try testing.expectEqualSlices(u16, &.{ 'a', 'b' }, try terminatedText(&.{ 'a', 'b', 0 }, 3));
+}
+
+test "Windows clipboard raw rejects malformed UTF16 without replacement" {
+    try testing.expectError(error.InvalidUtf16, utf8Raw(testing.allocator, &.{0xd800}));
+    try testing.expectError(error.InvalidUtf16, utf8Raw(testing.allocator, &.{0xdc00}));
+}
+
+fn rawAllocationProbe(a: std.mem.Allocator) !void {
+    const raw = try utf8Raw(a, &.{ 'a', 13, 10, 0xd83d, 0xdc19 });
+    defer a.free(raw);
+    try testing.expectEqualStrings("a\r\n\xf0\x9f\x90\x99", raw);
+}
+
+test "Windows clipboard raw allocation failures do not publish partial text" {
+    try testing.checkAllAllocationFailures(testing.allocator, rawAllocationProbe, .{});
+}
+
+test "Windows clipboard raw native global memory is bounded without touching clipboard" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = testing.allocator;
+    const handle = GlobalAlloc(gmem_moveable, 8) orelse return error.AllocFailed;
+    defer _ = GlobalFree(handle);
+    const capacity = GlobalSize(handle);
+    try testing.expect(capacity >= 8);
+    var pointer = GlobalLock(handle) orelse return error.AllocFailed;
+    @memset(@as([*]u8, @ptrCast(pointer))[0..capacity], 0x41);
+    _ = GlobalUnlock(handle);
+    try testing.expectError(error.Unterminated, readMemory(a, handle, true));
+
+    pointer = GlobalLock(handle) orelse return error.AllocFailed;
+    const words: [*]u16 = @ptrCast(@alignCast(pointer));
+    words[0] = 'A';
+    words[1] = 13;
+    words[2] = 10;
+    words[3] = 0;
+    _ = GlobalUnlock(handle);
+    const raw = (try readMemory(a, handle, true)).?;
+    defer a.free(raw);
+    try testing.expectEqualStrings("A\r\n", raw);
+    const paste = (try readMemory(a, handle, false)).?;
+    defer a.free(paste);
+    try testing.expectEqualStrings("A\r", paste);
+
+    pointer = GlobalLock(handle) orelse return error.AllocFailed;
+    const broken: [*]u16 = @ptrCast(@alignCast(pointer));
+    broken[0] = 0xd800;
+    broken[1] = 0;
+    _ = GlobalUnlock(handle);
+    try testing.expectError(error.InvalidUtf16, readMemory(a, handle, true));
+    pointer = GlobalLock(handle) orelse return error.AllocFailed;
+    @as([*]u16, @ptrCast(@alignCast(pointer)))[0] = 0;
+    _ = GlobalUnlock(handle);
+    try testing.expect((try readMemory(a, handle, true)) == null);
 }

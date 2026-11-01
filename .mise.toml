@@ -10,6 +10,26 @@ run = "zig build"
 description = "Run Zig tests"
 run = "zig build test"
 
+[tasks.test-frame-snapshot]
+description = "Verify owned frame inputs and snapshot metadata"
+run = "zig build test-frame-snapshot"
+
+[tasks.test-shaping-runs]
+description = "Verify shared native shaping inputs"
+run = "zig build test-shaping-runs"
+
+[tasks.test-windows-raster-origin]
+description = "Verify native glyph bitmap origins and clipping"
+run = "zig build test-windows-raster-origin"
+
+[tasks.test-windows-run-faces]
+description = "Verify native terminal run face selection"
+run = "zig build test-windows-run-faces"
+
+[tasks.test-windows-registry-raster]
+description = "Verify styled registry face raster selection"
+run = "zig build test-windows-registry-raster"
+
 [tasks.e2e]
 description = "Run headless E2E tests"
 run = "zig build test-e2e"
@@ -606,3 +626,115 @@ run = "zig build test-editor-project-search-owner"
 [tasks.test-macos-project-search-worker]
 description = "실제 프로젝트 검색 worker·불변 문서·취소·부분 결과 검증"
 run = "zig build test-macos-project-search-worker"
+
+[tasks.test-windows-run-frame]
+description = "Verify native terminal shaping to atlas frames"
+run = "zig build test-windows-run-frame"
+
+[tasks.test-windows-run-allocation-path]
+description = "Compare native frame output across allocation strategies"
+run = "zig build test-windows-run-allocation-path"
+
+[tasks.test-clipboard-response]
+description = "Verify shared OSC52 response encoding and bounds"
+run = "zig build test-clipboard-response"
+
+[tasks.test-windows-clipboard-raw]
+description = "Verify raw clipboard text and bounded native storage scans"
+run = "zig build test-windows-clipboard-raw"
+
+[tasks.test-protocol-response-write]
+description = "Verify private nonblocking response transport"
+run = "zig build test-protocol-response-write"
+
+[tasks.test-typed-input-queue]
+description = "Verify typed FIFO privacy and transfer ownership"
+run = "zig build test-typed-input-queue"
+
+[tasks.test-command-admission]
+description = "Verify nonblocking command backpressure and byte fences"
+run = "zig build test-command-admission"
+
+[tasks.test-input-dispatcher]
+description = "Verify ordered byte and command admission ownership"
+run = "zig build test-input-dispatcher"
+
+[tasks.test-protocol-frame-queue]
+description = "Verify bounded protocol frame reservations and reply boundaries"
+run = "zig build test-protocol-frame-queue"
+
+[tasks.test-input-queue-regression]
+description = "Verify existing FIFO, blocking backpressure, close wakeup and command fences"
+run = "zig build test-input-queue-regression"
+
+[tasks.test-live-text-config]
+description = "Verify live text commands, shrink consent and retry ownership"
+run = "zig build test-live-text-config"
+
+[tasks.test-windows-settings-shrink]
+description = "Verify explicit successful shrink permission without preview data loss"
+run = "zig build test-windows-settings-shrink"
+
+[tasks.test-live-appearance-config]
+description = "Verify shared live appearance policy and reader admission retries"
+run = "zig build test-live-appearance-config"
+
+[tasks.test-cursor-presentation]
+description = "Verify shared cursor focus, blink gating, time and fade policy"
+run = "zig build test-cursor-presentation"
+
+[tasks.test-native-cell-rect]
+description = "Verify shared native cursor and text-decoration pixel geometry"
+run = "zig build test-native-cell-rect"
+
+[tasks.test-language-config]
+description = "Verify shared live language transitions and owned notice translation"
+run = "zig build test-language-config"
+
+[tasks.test-windows-locale]
+description = "Verify bounded native UTF16 locale reads and the actual Windows API"
+run = "zig build test-windows-locale"
+
+[tasks.test-file-tree-context-menu]
+description = "Verify shared file-tree menu rows, actions and symlink policy"
+run = "zig build test-file-tree-context-menu"
+
+[tasks.test-file-tree-root-validation]
+description = "Verify shared two-round root validation and reply isolation"
+run = "zig build test-file-tree-root-validation"
+
+[tasks.test-windows-modal-layout]
+description = "Verify Windows modal workspace and paint/input padding"
+run = "zig build test-windows-modal-layout"
+
+[tasks.test-windows-root-flow]
+description = "Verify asynchronous Windows root validation preparation and publication"
+run = "zig build test-windows-root-flow"
+
+[tasks.test-windows-explorer-menu]
+description = "Verify explorer background menu commands and input ownership"
+run = "zig build test-windows-explorer-menu"
+
+[tasks.test-windows-key-strokes]
+description = "Verify native press identities and UI release ownership"
+run = "zig build test-windows-key-strokes"
+
+[tasks.test-windows-root-transaction]
+description = "Verify atomic Windows root model rows and native watch publication"
+run = "zig build test-windows-root-transaction"
+
+[tasks.test-windows-root-watch-prepare]
+description = "Verify native root watch preparation outside the frame thread"
+run = "zig build test-windows-root-watch-prepare"
+
+[tasks.test-windows-watch-retirement]
+description = "Verify nonblocking native directory watcher retirement"
+run = "zig build test-windows-watch-retirement"
+
+[tasks.test-windows-tree-root-host]
+description = "Verify Windows root validation request ownership and native worker routing"
+run = "zig build test-windows-tree-root-host"
+
+[tasks.test-windows-file-dialog]
+description = "Verify Windows native file dialog request ownership and pre-show cancellation"
+run = "zig build test-windows-file-dialog"

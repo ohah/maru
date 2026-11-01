@@ -22,6 +22,10 @@ const dwrite_font = @import("dwrite_font.zig");
 
 const renderer = maru.renderer;
 
+/// Measured chrome keeps its primary family. Native terminal runs can opt in
+/// to the configured SGR style banks while retaining registry font identities.
+pub const RegistryFacePolicy = enum { primary, terminal_style };
+
 /// 합성 글리프(box-drawing·block·braille…)의 `font_id`. **폰트가 아니라 코드포인트가 정체이므로** 실제
 /// face와 겹치지 않는 번호를 준다 — 아틀라스 캐시 키가 둘을 갈라야 한다.
 ///
@@ -46,6 +50,7 @@ pub fn faceIndexFromFontId(font_id: renderer.glyph_layout.FontId) ?usize {
 /// 문자열)은 하지 않는다(계약 §2e "한계"). 터미널은 대부분 셀 단위라 이 경로로 대부분이 덮인다.
 pub const Shaper = struct {
     raster: *dwrite_font.Rasterizer,
+    variants: [3]?*dwrite_font.Rasterizer = @splat(null),
 
     pub fn shape(self: Shaper, cell: renderer.draw_list.DrawCell) renderer.glyph_layout.ShapeResult {
         // **안 쓴 칸(codepoint 0)은 공백으로 본다.** 안 그러면 화면의 빈 칸이 전부 "지원 못 하는 글자"로
@@ -58,9 +63,12 @@ pub const Shaper = struct {
             return .{ .font_id = synthesized_font_id, .glyph_id = 0 };
         }
 
-        if (self.raster.glyphFor(cp)) |choice| {
+        const requested: usize = renderer.shaping_runs.faceKey(cell.style);
+        const style: usize = if (requested != 0 and self.variants[requested - 1] != null) requested else 0;
+        const raster = if (style == 0) self.raster else self.variants[style - 1].?;
+        if (raster.glyphFor(cp)) |choice| {
             return .{
-                .font_id = fontIdForFace(choice.face_index),
+                .font_id = fontIdForFace(choice.face_index + style * dwrite_font.max_faces),
                 .glyph_id = choice.glyph_id,
                 // face 0이 주 폰트다 — 그 밖은 폴백으로 셌다는 사실을 렌더러가 통계로 본다.
                 .fallback = choice.face_index > 0,
@@ -84,6 +92,7 @@ pub const Shaper = struct {
 /// ClearType 텍스처는 임시 버퍼가 필요하다. 프레임마다 할당하면 렌더 경로에 할당이 끼므로 한 번 잡아 둔다.
 pub const NeutralRasterizer = struct {
     raster: *dwrite_font.Rasterizer,
+    variants: [3]?*dwrite_font.Rasterizer = @splat(null),
     scratch: []u8,
     /// 터미널 폰트 크기(논리 pt). `raster_font_size_milli` 가 0 인 글리프가 이 값을 쓴다.
     font_size_pt: f32 = 0,
@@ -92,6 +101,7 @@ pub const NeutralRasterizer = struct {
     /// measured 텍스트가 쓰는 폰트 이름 표. **없으면 그 경로가 통째로 빈 화면이 된다** — 아래
     /// `faceFor` 의 doc 참고.
     registry: ?*const renderer.FontIdentityRegistry = null,
+    registry_face_policy: RegistryFacePolicy = .primary,
 
     /// 슬롯 하나가 최대로 필요한 스크래치. `cell_w`는 **두 칸 글자를 포함한** 최대 슬롯 폭이어야 한다.
     pub fn scratchSizeFor(cell_w: u32, cell_h: u32) usize {
@@ -110,7 +120,29 @@ pub const NeutralRasterizer = struct {
     ///
     /// **이제 못 찾으면 `RasterizerFailed` 다.** 잉크가 없는 글자와 폰트를 못 찾은 것은 다른
     /// 사실이고, 뒤엣것을 앞엣것으로 접으면 빈 화면이 정상으로 보고된다.
+    fn rasterFor(self: NeutralRasterizer, font_id: renderer.glyph_layout.FontId) ?*dwrite_font.Rasterizer {
+        return self.rasterForStyle(font_id, .{});
+    }
+
+    fn rasterForStyle(self: NeutralRasterizer, font_id: renderer.glyph_layout.FontId, style_flags: maru.terminal.Style) ?*dwrite_font.Rasterizer {
+        if (self.registry != null) {
+            if (self.registry_face_policy == .primary) return self.raster;
+            const key: usize = renderer.shaping_runs.faceKey(style_flags);
+            if (key == 0) return self.raster;
+            return self.variants[key - 1];
+        }
+        const encoded = faceIndexFromFontId(font_id) orelse return null;
+        const style = encoded / dwrite_font.max_faces;
+        if (style == 0) return self.raster;
+        if (style > self.variants.len) return null;
+        return self.variants[style - 1];
+    }
+
     fn faceFor(self: NeutralRasterizer, font_id: renderer.glyph_layout.FontId) ?usize {
+        return self.faceForStyle(font_id, .{});
+    }
+
+    fn faceForStyle(self: NeutralRasterizer, font_id: renderer.glyph_layout.FontId, style_flags: maru.terminal.Style) ?usize {
         // **두 체계의 값 범위가 겹친다.** 터미널 인코딩은 `face_font_id_base`(= 2)부터 시작하고
         // 레지스트리 id 는 1 부터 하나씩 늘어난다 — 그래서 measured 크롬의 **두 번째 face 부터**
         // 터미널 id 로 잘못 읽혔다. 폴백 face(id 2)가 `2 - 2 = 0`, 즉 **주 폰트**가 되어 폴백에서
@@ -119,14 +151,18 @@ pub const NeutralRasterizer = struct {
         // 통계도 안 움직였다** — 캡처가 유일한 관측점이었다).
         //
         // **한 래스터라이저는 한 체계만 쓴다.** measured 경로는 `registry` 를 채운 복사본으로만
-        // 그리고(`main.zig` 의 두 자리, `win32_draw_host.SurfaceCtx` 의 doc), 터미널은 그것을
-        // 안 채운다. 그래서 `registry` 의 유무가 **어느 체계인지를 가르는 유일한 사실**이다.
+        // 그리고(`main.zig` 의 두 자리, `win32_draw_host.SurfaceCtx` 의 doc), 기존 셀 터미널은
+        // 안 채운다. `registry`가 id 체계를 결정하고 registry_face_policy가 이름을 찾을 bank를
+        // 결정한다. 새 terminal run은 terminal_style을 명시해야 별도 family도 보존한다.
         if (self.registry) |reg| {
             const identity = reg.get(font_id) orelse return null;
-            return self.raster.faceIndexForName(identity.postscript_name);
+            const raster = self.rasterForStyle(font_id, style_flags) orelse return null;
+            return raster.faceIndexForName(identity.postscript_name);
         }
         if (faceIndexFromFontId(font_id)) |i| {
-            if (i < self.raster.face_count) return i;
+            const raster = self.rasterFor(font_id) orelse return null;
+            const index = i % dwrite_font.max_faces;
+            if (index < raster.face_count) return index;
             return null;
         }
         return null;
@@ -153,7 +189,7 @@ pub const NeutralRasterizer = struct {
         // 셰이퍼가 정한 결정을 **그대로** 쓴다. 코드포인트로 다시 풀지 않는다(§ 위 doc).
         // **못 찾으면 오류다**(`error_skip` 으로 센다) — 잉크 없는 글자와 폰트를 못 찾은 것은
         // 다른 사실이고, 뒤엣것을 앞엣것으로 접으면 빈 화면이 정상으로 보고된다.
-        const face_index = self.faceFor(request.run.font_id) orelse return error.RasterizerFailed;
+        const face_index = self.faceForStyle(request.run.font_id, request.run.style) orelse return error.RasterizerFailed;
         if (request.run.glyph_id == 0) return .{ .non_clear_pixels = 0 }; // 셰이퍼가 "없다"고 한 칸이다.
         const glyph_id: u16 = std.math.cast(u16, request.run.glyph_id) orelse return error.InvalidGlyphIndex;
 
@@ -169,7 +205,22 @@ pub const NeutralRasterizer = struct {
         else
             self.raster.em_size_px; // 크기를 안 준 호출자(기존 스모크) — 예전 동작 그대로
 
-        const n = self.raster.rasterizeGlyphAtSize(
+        const raster = self.rasterForStyle(request.run.font_id, request.run.style) orelse return error.RasterizerFailed;
+        const n = if (request.run.cache_key.raster_origin) |origin| raster.rasterizeGlyphAtOrigin(
+            .{ .face_index = face_index, .glyph_id = glyph_id },
+            em_px,
+            w,
+            h,
+            origin.x(),
+            origin.y(),
+            request.bytes_per_row,
+            request.pixels,
+            self.scratch,
+        ) catch |err| switch (err) {
+            error.BufferTooSmall => return error.RasterByteCountMismatch,
+            error.InvalidRasterGeometry => return error.InvalidRasterOrigin,
+            else => return error.RasterizerFailed,
+        } else raster.rasterizeGlyphAtSize(
             .{ .face_index = face_index, .glyph_id = glyph_id },
             em_px,
             w,

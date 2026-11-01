@@ -100,6 +100,12 @@
 
 **한계(정직)**: 실제 Metal/Swift GPU 경로는 headless 단위테스트 불가 — 그러나 결함은 GPU가 아니라 **I/O 전달**이라 무관하고, 결함이 사는 런타임 층은 GPU 없이 검증된다. 타이밍 상한 테스트는 관대 bound로 flaky를 줄이되 0은 아니다. race-freedom은 TSan/스트레스로 낮추되 증명은 아니다.
 
+프레임 입력의 공통 복사 경계는 `app.frame_snapshot.capture`다. 공통 Windows/fake host와
+macOS CoreText build·shape-only는 이 함수가 잠금 아래에서 만든 owned DrawList와 같은
+시점의 view offset을 받고, 잠금을 해제한 뒤 셰이핑한다. 프레임 크기는 셰이핑 후 live
+core를 재조회하지 않고 결과 DrawList에서 읽는다. `test-frame-snapshot`은 코어 변경 후
+복사본 독립성·실패 시 잠금/버퍼 회수·셰이핑 중 resize의 메타데이터 일치를 검증한다.
+
 ## 7. 비목표
 
 - 렌더 백엔드 변경(Metal/WebGPU) — 무관, [renderer-strategy.md].

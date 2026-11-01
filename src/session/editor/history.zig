@@ -1,4 +1,5 @@
-//! 문서 Undo/Redo의 소유 자원. 입력·시계·뷰 선택은 platform이 정산한다.
+//! 문서 Undo/Redo의 소유 자원. 호스트가 입력·시각·연결 뷰를 관측하고,
+//! edit_commands가 주어진 값으로 편집·선택·이력 게시를 정산한다.
 //! 문서가 이력을 공유하며 entry는 원래 뷰의 선택 snapshot을 독립 소유한다. 뷰 연결은 platform coordinator가 소유한다.
 const std = @import("std");
 const delta = @import("delta.zig");

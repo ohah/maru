@@ -474,7 +474,7 @@ pub fn rebuildFileTreeFromDock(self: *AppSession) !void {
     self.file_tree_backend.deinit();
     self.file_tree.deinit();
     self.file_tree = file_tree.Tree.init(self.allocator);
-    self.file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
+    self.file_tree_backend = try file_tree_backend.Backend.initWithRemote(self.allocator, self.io, @import("../file_tree_remote.zig").transport);
     self.file_tree_rows.clearRetainingCapacity();
     self.file_tree_rows_dirty = true;
     self.file_tree_watch_reset_pending = true;
@@ -577,71 +577,33 @@ pub fn updateFileTree(self: *AppSession) !void {
                 const restore_auto = self.file_tree_root_auto_follow;
                 self.file_tree_root_auto_follow = pending.auto;
                 defer self.file_tree_root_auto_follow = restore_auto;
-                if (pending.request_id != result.request_id or
-                    pending.expected_root_generation != result.expected_root_generation or
-                    @backingInt(pending.operation) != result.root_operation or
-                    pending.round != result.root_validation_round) break :root_result;
-                if (self.file_tree.rootGeneration() != pending.expected_root_generation) {
-                    self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .stale_generation, .fp_root_stale_generation);
-                    break :root_result;
-                }
-                if (!result.ok) {
-                    self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .validation_failed, .fp_root_open_failed);
-                    break :root_result;
-                }
-                if (pending.round == 0) {
-                    const identity = result.identity orelse {
+                const protocol = maru.app.file_tree_root_validation;
+                switch (protocol.evaluate(pending, protocol.Reply.fromBackend(&result), self.file_tree.rootGeneration())) {
+                    .ignore => break :root_result,
+                    .failed => |failure| {
                         self.file_tree_root_validation = null;
-                        reportFileTreeRootOutcome(self, .identity_missing, .fp_root_identity_unknown);
+                        reportFileTreeRootOutcome(self, failure.outcome, failure.notice);
                         break :root_result;
-                    };
-                    const canonical = self.allocator.dupe(u8, result.path) catch {
-                        self.file_tree_root_validation = null;
-                        reportFileTreeRootOutcome(self, .allocation_failed, .fp_root_revalidate_alloc_failed);
+                    },
+                    .revalidate => |identity| {
+                        const canonical = self.allocator.dupe(u8, result.path) catch {
+                            self.file_tree_root_validation = null;
+                            reportFileTreeRootOutcome(self, .allocation_failed, .fp_root_revalidate_alloc_failed);
+                            break :root_result;
+                        };
+                        if (!self.file_tree_backend.submitRootValidation(canonical, pending.request_id, pending.expected_root_generation, @backingInt(pending.operation), 1)) {
+                            self.allocator.free(canonical);
+                            self.file_tree_root_validation = null;
+                            reportFileTreeRootOutcome(self, .backend_busy, .fp_root_revalidate_start_failed);
+                            break :root_result;
+                        }
+                        self.file_tree_root_validation.?.round = 1;
+                        self.file_tree_root_validation.?.identity = identity;
                         break :root_result;
-                    };
-                    if (!self.file_tree_backend.submitRootValidation(
-                        canonical,
-                        pending.request_id,
-                        pending.expected_root_generation,
-                        @backingInt(pending.operation),
-                        1,
-                    )) {
-                        self.allocator.free(canonical);
-                        self.file_tree_root_validation = null;
-                        reportFileTreeRootOutcome(self, .backend_busy, .fp_root_revalidate_start_failed);
-                        break :root_result;
-                    }
-                    self.file_tree_root_validation.?.round = 1;
-                    // root 검증도 같은 `fstat` 축이지만, root 계열(RootCapability·pin·mutation 가드)은
-                    // 아직 타입이 안 따라왔다 — 여기서 명시적으로 풀어 그 사실이 보이게 둔다(후속 범위).
-                    self.file_tree_root_validation.?.identity = identity.value;
-                    break :root_result;
+                    },
+                    .ready => {},
                 }
-                const expected_identity = pending.identity orelse {
-                    self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .identity_missing, .fp_root_revalidate_invalid);
-                    break :root_result;
-                };
-                const actual_identity = result.identity orelse {
-                    self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .identity_missing, .fp_root_identity_gone);
-                    break :root_result;
-                };
-                const validated_dir = result.validated_dir orelse {
-                    self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .identity_missing, .fp_root_capability_gone);
-                    break :root_result;
-                };
-                // 양변 다 `fstat` 축이다(기대값은 1라운드에서 같은 검증이 남긴 값) — root 계열이
-                // 아직 타입을 안 입어 여기서 풀어 비교한다(후속 범위).
-                if (!expected_identity.eql(actual_identity.value)) {
-                    self.file_tree_root_validation = null;
-                    reportFileTreeRootOutcome(self, .identity_changed, .fp_root_identity_changed);
-                    break :root_result;
-                }
+                const validated_dir = result.validated_dir.?;
                 self.file_tree_root_validation = null;
                 var candidate = self.file_tree.cloneForRootTransaction() catch {
                     reportFileTreeRootOutcome(self, .allocation_failed, .fp_root_change_alloc_failed);
@@ -2536,39 +2498,19 @@ pub fn fileEntryForSurfaceId(self: *AppSession, surface_id: u64) ?*dock_panel.En
 
 pub fn buildFileTreeContextMenuItems(self: *AppSession) []const []const u8 {
     const target = self.file_tree_context_target orelse return &.{};
-    var n: usize = 0;
-    if (!(target.symlink and (target.row_kind == .root or target.row_kind == .directory))) {
-        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_new_file);
-        n += 1;
-        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_new_folder);
-        n += 1;
-    }
-    if (target.row_kind == .file or target.row_kind == .directory) {
-        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_rename);
-        n += 1;
-        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_move_to_trash);
-        n += 1;
-    }
-    if (target.row_kind == .root) {
-        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_open_file);
-        n += 1;
-        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_open_folder);
-        n += 1;
-        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_add_folder_to_workspace);
-        n += 1;
-        self.context_menu_items_buf[n] = maru.i18n.t(.ctx_remove_folder_from_workspace);
-        n += 1;
-    }
-    self.context_menu_items_len = n;
-    return self.context_menu_items_buf[0..n];
+    const menu = maru.app.file_tree_context_menu;
+    const kind = menu.targetForRow(target.row_kind) orelse return &.{};
+    const rows = menu.items(kind, target.symlink);
+    for (rows, 0..) |row, i| self.context_menu_items_buf[i] = row.label();
+    self.context_menu_items_len = rows.len;
+    return self.context_menu_items_buf[0..rows.len];
 }
 
 pub fn buildFileTreeBackgroundMenuItems(self: *AppSession) []const []const u8 {
-    self.context_menu_items_buf[0] = maru.i18n.t(.ctx_open_file);
-    self.context_menu_items_buf[1] = maru.i18n.t(.ctx_open_folder);
-    self.context_menu_items_buf[2] = maru.i18n.t(.ctx_add_folder_to_workspace);
-    self.context_menu_items_len = 3;
-    return self.context_menu_items_buf[0..3];
+    const rows = maru.app.file_tree_context_menu.items(.background, false);
+    for (rows, 0..) |row, i| self.context_menu_items_buf[i] = row.label();
+    self.context_menu_items_len = rows.len;
+    return self.context_menu_items_buf[0..rows.len];
 }
 
 pub fn openedFileIdentity(self: *AppSession, file: std.Io.File) FilePanelReadError!file_tree.Identity {

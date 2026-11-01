@@ -1,0 +1,2 @@
+// Resource 1 is shared by Explorer shortcuts and the native window class.
+1 ICON "Maru.ico"

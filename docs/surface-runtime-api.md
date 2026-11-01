@@ -289,3 +289,28 @@ const DrainSummary = struct {
 - `SurfaceRuntime` 단독으로 read error event를 적용하면 `ReadFailed`로 관측된다.
 - pump는 queued output/exit/read_error를 runtime에 적용하고 event ownership을 끝낸다.
 - pump는 read_error를 `DrainSummary.ended.read_error`로 반환하고, 같은 drain에서 먼저 처리한 output count를 잃지 않는다.
+
+## Native host ordered admission
+
+`SurfaceRuntime.input_admission` is an optional process-local owner callback.
+A host installs it only at a stable address, with nonblocking byte and command
+backend capabilities, and removes it before destroying that owner/runtime.
+Ordinary keys, paste/IME bytes, private protocol responses and inline commands
+then enter the same Surface-targeted FIFO. `detachSurface` drops that Surface's
+pending owner. Existing hosts without this callback keep their prior behavior.
+
+A nonblocking admission result counts bytes copied into the host-owned FIFO;
+it does not certify child receipt. `flushInputChunkNonBlocking` bypasses
+readmission and returns the backend-accepted prefix. Ordinary accepted prefixes
+retain input tracing; private protocol bytes never enter raw diagnostics or
+input trace. `flushCoreCommandNonBlocking` retries a saturated command backend
+without blocking. Commands retain byte barriers so later input cannot pass a
+pending command or a partial protocol frame.
+
+Reader-backed `PtyIo` exposes optional `enqueue_command_nb` and
+`write_protocol_response_nb`. Ordered private flush selects the framed byte
+callback when present; legacy producers retain their existing transport.
+`app.input_dispatcher.Dispatcher` is the native UI owner; its lifecycle, bounds
+and actual Windows checks are documented in [Windows platform](windows-platform.md).
+The callback is reconstructed by each UI host and is never serialized as a
+pointer across session-host exec.

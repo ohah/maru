@@ -25,9 +25,24 @@ const metal_frame = renderer.metal_frame;
 ///
 /// 셰이퍼와 래스터라이저를 **함께** 든다 — 둘이 같은 `Rasterizer`(face 체인)를 보아야 `font_id` 결정이
 /// 어긋나지 않는다(`win32_text.zig` doc).
+/// Context is heap-stable and owned by the configured text-resource generation.
+/// build_fn always consumes its DrawList, including error returns.
+pub const NativeDrawListBuilder = struct {
+    context: *anyopaque,
+    build_fn: *const fn (*anyopaque, std.mem.Allocator, renderer.DrawList, *renderer.RendererState, win32_text.Shaper, win32_text.NeutralRasterizer) anyerror!renderer.RenderFrame,
+};
+
 pub const FrameBuilder = struct {
     shaper: win32_text.Shaper,
     rasterizer: win32_text.NeutralRasterizer,
+    native: ?NativeDrawListBuilder = null,
+
+    pub fn buildDrawList(self: FrameBuilder, allocator: std.mem.Allocator, list: renderer.DrawList, state: *renderer.RendererState) !renderer.RenderFrame {
+        if (self.native) |native| return native.build_fn(native.context, allocator, list, state, self.shaper, self.rasterizer);
+        var owned = list;
+        errdefer owned.deinit(allocator);
+        return state.buildFrameFromDrawListWithRasterizer(allocator, list, self.shaper, self.rasterizer);
+    }
 
     pub fn build(
         self: FrameBuilder,
@@ -37,17 +52,71 @@ pub const FrameBuilder = struct {
         drain_summary: maru.app.runtime_pump.DrainSummary,
         io: std.Io,
     ) !host.AppHostFrame {
-        return host.buildFrameAfterDrainWithRasterizer(
+        return host.buildFrameAfterDrainWithDrawListBuilder(
             allocator,
             app_window,
             renderer_state,
-            self.shaper,
-            self.rasterizer,
+            self,
             drain_summary,
             io,
         );
     }
 };
+
+/// Consume the shared ordered packet in one append transaction. Clipping occurs
+/// after native/pixel projection so a negative GPOS offset cannot paint chrome.
+pub fn appendPositionedFrame(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(d3d11_cells.Cell),
+    frame: metal_frame.PositionedTerminalFrame,
+    cell_w: u32,
+    cell_h: u32,
+    atlas_w: u32,
+    atlas_h: u32,
+    viewport: [4]f32,
+) !void {
+    _ = try appendPositionedFrameSplit(allocator, cells, frame, cell_w, cell_h, atlas_w, atlas_h, viewport);
+}
+
+/// Return the clipped cursor suffix length, including reversed positioned ink.
+pub fn appendPositionedFrameSplit(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(d3d11_cells.Cell),
+    frame: metal_frame.PositionedTerminalFrame,
+    cell_w: u32,
+    cell_h: u32,
+    atlas_w: u32,
+    atlas_h: u32,
+    viewport: [4]f32,
+) !usize {
+    if (cell_w == 0 or cell_h == 0 or atlas_w == 0 or atlas_h == 0) return error.InvalidFrameMetrics;
+    const original_len = cells.items.len;
+    errdefer cells.shrinkRetainingCapacity(original_len);
+    for (frame.base) |native| {
+        const clipped = d3d11_cells.clipCellRect(cellFromNative(native, cell_w, cell_h, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    for (frame.ink) |glyph| {
+        const clipped = d3d11_cells.clipCellRect(cellFromGpuGlyph(glyph, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    if (frame.cursor_cells > frame.overlays.len) return error.InvalidCursorSuffix;
+    const cursor_start = frame.overlays.len - frame.cursor_cells;
+    for (frame.overlays[0..cursor_start]) |native| {
+        const clipped = d3d11_cells.clipCellRect(cellFromNative(native, cell_w, cell_h, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    const before_cursor = cells.items.len;
+    for (frame.overlays[cursor_start..]) |native| {
+        const clipped = d3d11_cells.clipCellRect(cellFromNative(native, cell_w, cell_h, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    for (frame.cursor_ink) |glyph| {
+        const clipped = d3d11_cells.clipCellRect(cellFromGpuGlyph(glyph, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    return cells.items.len - before_cursor;
+}
 
 /// 한 프레임이 실제로 무엇을 만들었는지. **셋을 갈라 센다** — 합쳐 세면 폰트 경로가 죽어도 합성 글리프가
 /// 수를 채워 성공처럼 보인다(W7.2b·W7.3에서 같은 함정을 두 번 겪었다).
@@ -134,13 +203,15 @@ pub fn cellFromNative(
     // 폭 0은 "이 칸은 앞 칸의 뒤쪽 절반"이라는 뜻이 아니라 아직 정해지지 않은 값이다 — 1로 접는다.
     const width_cells: u32 = @max(1, native.width);
     return .{
-        .rect = .{
+        .rect = maru.renderer.native_cell_rect.project(native.reserved, .{
             @floatFromInt(native.origin_x + @as(u32, native.col) * cell_w),
             @floatFromInt(native.origin_y + @as(u32, native.row) * cell_h),
             @floatFromInt(cell_w * width_cells),
             @floatFromInt(cell_h),
-        },
-        .uv = d3d11_cells.uvFromAtlasRect(
+        }, @floatFromInt(cell_w), @floatFromInt(cell_h), 1),
+        // Background/cursor sentinels are not an atlas sample at pixel (0,0).
+        // That texel can contain ink, which would replace a solid fill with it.
+        .uv = if (native.u0 < 0 or native.atlas_width_px == 0 or native.atlas_height_px == 0) .{ -1, -1, -1, -1 } else d3d11_cells.uvFromAtlasRect(
             native.atlas_x_px,
             native.atlas_y_px,
             native.atlas_width_px,

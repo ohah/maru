@@ -11,7 +11,7 @@ const AppSession = @import("../app_session.zig").AppSession;
 const turn_store = @import("turn_store.zig");
 const git_ops = @import("git.zig");
 const scm_dock_ops = @import("scm_dock.zig");
-const git_backend_mod = @import("../git_backend.zig");
+const git_backend_mod = maru.app.git_backend;
 const turn_snapshot = maru.session.turn_snapshot;
 
 pub var test_allow = false;

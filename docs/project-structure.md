@@ -217,6 +217,8 @@ src/
                         동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측). 위 세 예외(editor·editor_diff·
                         scm_dock)는 분해 산물이 아니므로 이 규칙 밖이다.
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현.
+                        chrome_text_request·chrome_text·chrome_draw_lowering은 양쪽 desktop host가 공유하는
+                        요청·아티팩트/배치·draw 투영이다. CoreText 호출은 macOS adapter가 주입한다.
                         persistent-session P2: terminal runtime의 수명·입출력·관측을 GUI layout에서 분리하는
                         vtable 계약 `term_runtime_backend.zig`(TermRuntimeBackend·RuntimeHandle — opaque, PtyIo와 같은
                         관용구)와 그 in-process 구현 `in_process_term_backend.zig`(기존 LiveSurfaceRegistry+LivePtySession+
@@ -231,6 +233,7 @@ src/
                         action 투영)·ids(frame-local intent 표)·view(semantic paint와 text 투영)는 서로 다른 이유로 바뀐다.
                         editor_view/는 facade 없이 폴더만 두고 편집기 본문 렌더를 content·frame·diff_frame·geometry·gutter·scrollbar·surface·viewport로 가른다.
   cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; lsp_trust: `maru editor lsp trust list|revoke|forget` 파서·`--help`·client wire — 언어 서버 신뢰 조회·철회·잊기(부여 없음, 워크스페이스 신뢰 WT4b); sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다.
+                        internal_contract.zig는 hidden child command 이름·notification runtime 영수증 스키마의 공통 wire 계약을 소유한다. native argv grammar와 실행 권한은 플랫폼 adapter에 남는다.
                         **이 폴더의 제품 코드는 순수하다**(std + 계약 모듈만, 소켓·OS 0) — 그 순수성이 파서·wire·validator를 테스트 가능하게 만드는 근거다.
                         `test` 블록은 이 규칙 밖이다(실제 동작을 실측하느라 fork/pipe를 쓸 수 있다 — `ssh.zig`의 신호 수명 헬퍼가 그 예다).
                         **이 규칙은 산문이 아니라 `tests/boundary/cli_purity.zig`가 기계로 고정한다** — 재고에 없는 파일은 impure 토큰 0이고,
@@ -249,7 +252,9 @@ src/
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
   renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, font identity registry, persistent renderer state, glyph atlas, frame stats
+  app/git/              공통 Git 작업자(backend.zig)와 임시 index 수명(index_cache.zig).
   platform/             OS별 process/window/input bridge
+    posix/              macOS·Linux가 공유하는 no-follow 파일 열기 adapter.
     macos/              AppKit/Metal/CoreText smoke bridge, Swift app host app shell, Swift/Zig C ABI 계약, workspace_checkpoint_file.zig(P4 C2: parent-fd 결속 fixed temp→atomic rename, typed failure·crash fixture; capture/coordinator/AppKit 비소유), control_socket.zig(1b: 컨트롤 플레인 unix socket bind/accept/peer-cred/hello + A2a `serveReadOnly` per-connection read-only serve 함수(`readInto`+`Framer`→`dispatchReadOnly`→응답+`\n`) + poll-gated accept·read-timeout 헬퍼(A2b용) — macOS-gated 테스트), control_server.zig(**A2b 라이브 서버**: 앱-전역 소켓+accept 스레드+메인 marshal 큐(`ControlRequestQueue`·`PendingRequest`, generic·AppSession 비의존, §8.8 lock-order 준수) — macOS-gated 테스트), app_host_abi.zig(A2b start/drain/stop ABI + collectSessionsInto 멀티창 조립·auth(metadata:self)·dispatch 배선), app_session.zig 안 A1 컨트롤 플레인 per-session collector(collectSessionInto/collectSession — 실 트리→중립 SurfaceDto[]+membership, private 자산 재사용 위해 세션 모듈에 co-locate)
     macos/web_sidecar/  웹 OSR sidecar(W1b — plans/web-osr-backend.md). `host_main.zig`(`maru-web-host` — CEF 브라우저 프로세스, 샌드박스 밖)·
                         `helper_main.zig`(`maru-web-helper` — 샌드박스를 먼저 켜고 프레임워크를 연다)·`library.zig`(프레임워크 dlopen 함수 표)·
@@ -260,7 +265,7 @@ src/
                         `profile.zig`(0700·소유자·ACL·링크 거절·백업 제외)·앱 쪽(W3b): `../web_osr.zig`(sidecar 띄우기·재시작 예산·브라우저 기록·알림 적용 — lsp_process 선례)·`session/web_osr_plan.zig`(창 배치 → sidecar 명령, 순수)·`session/web_osr_view.zig`(보일 링 고르기·GPU 소비자 규칙, 순수)·`session/web_osr_input.zig`(W4b — 본문 hit·divider 잡는 띠 제외·DIP·수식자·휠, 순수)·`session/web_osr_console.zig`(W9c① — 탭의 콘솔 링·읽는 쪽에 따른 거름, 순수)·`session/web_osr_network.zig`(W9d① — 탭의 네트워크 기록·읽는 쪽마다 시작점·설정이 꺼지면 투영, 순수)·`session/web_sidecar/net_fields.zig`·`net_policy.zig`(W9d① — 네트워크 메시지의 닫힌 칸·헤더 덩어리, 보이는 칸의 규칙 — sidecar 와 maru 가 같은 파일)·픽셀 링(W2): `ring_producer.zig`(sidecar — 복사·맞바꾸기·세대)·`ring_receiver.zig`(maru —
                         pid·토큰 검증, CEF 없이 시험)·`ring_message.zig`·`mach.zig`·`iosurface.zig`·`ring.zig`(판정자·W3 입구)·`app`·`settings`·`layout`·`object`·`cef`. CEF 헤더는 저장소에 없고 `-Dcef-sdk` 가 있을 때만 빌드한다(build/web_sidecar.zig).
     session_host.zig     P3 barrel(protocol·framing·screen_stream·registry·server·socket_server re-export + test 집약, test module은 socket용 link_libc). 구현은 session_host/에 목적별로.
-    session_host/        P3 진행: entrypoint.zig(hidden `__session-host` CLI command의 launcher/main 공용 단일 출처),
+    session_host/        P3 진행: entrypoint.zig(POSIX native argv grammar; hidden command 이름은 cli/internal_contract.zig가 소유),
                         protocol.zig(`MRSH` 32-byte header·kind/flag·error 어휘 codec — **구현됨, P3-a**),
                         framing.zig(partial I/O incremental parser·kind별 cap·unknown optional skip — **구현됨, P3-a**),
                         screen_stream.zig(`maru.screen-stream.v1` 28-byte record header + snapshot/delta record codec·resolved run·
@@ -323,7 +328,45 @@ src/
     ios/                iOS 전용 — UIKit host·Metal 백엔드·CoreText 래스터(`ios_app_host.m`)
     android/            Android 전용 — NativeActivity host·Vulkan 백엔드·JNI 래스터(`android_app_host.c`),
                         IME shim(`MaruActivity.java` — NDK에는 InputConnection 대응물이 없어 Java로 받는다), shaders/(SPIR-V)
-    windows/
+    windows/            Win32·ConPTY·DirectWrite·D3D11 adapter. editor/의 document.zig는 L2 registry view를
+                        붙이고 file_host.zig는 앱 수명의 native grant/controller를 소유한다. identity·transaction·
+                        document_grant·save_controller·backup_store는 Windows 파일 권한·저장·복구 I/O 경계다.
+                        native_open은 Registry를 참조하지 않는 최초 파일 snapshot과 native 소유권을 만들고,
+                        document_grant는 앱 스레드에서 이를 문서로 등록한 뒤 권한 소유권을 인수한다.
+                        open_worker는 Registry 없이 초기 읽기·capability probe를 실행하며 취소 뒤 실제
+                        종료까지 Job을 보유하고, native Snapshot의 인수·정리 소유권을 반환한다.
+                        app용 읽기 전용 이미지는 writable grant 없이 같은 읽기 상한을 유지하고,
+                        UTF-8·BOM·줄바꿈 해석 결과는 함께 소유한 raw bytes만 빌린다.
+                        독립 EditableFile의 buffer/line index와 초기 복구 record를 worker에서 준비한다.
+                        복구는 native 문서 경로를 키로 사용하고 pinned store도 앱에 인계한다.
+                        prepared_view는 초기 projection/syntax를 Registry 없이 준비하고 같은 본문
+                        allocation/revision에만 인계한다. view는 초기 배열 allocator도 인수한다.
+                        file_host의 admitOpen은 worker 결과를 앱 소유 문서/권한으로 등록하고 취소·capability·
+                        raw CAS 및 소비/실패 소유권을 검사한다. main의 파일 클릭은 이 worker 경로를 사용한다.
+                        directory_watch는 native 비동기 알림과 identity별 공유·상한·debounce 및
+                        알림을 살아 있는 문서 구독에 배분하는 검사를 소유한다.
+                        file_read_worker는 selected handle 기반 읽기·raw hash와 값 ticket을 프레임 밖에서 만든다.
+                        save_prepare_worker는 bytes/name/root를 소유해 native TxF 준비·쓰기·flush를 worker에서 실행한다.
+                        결과 commit의 main-thread grant/request 재검증은 유지하며 일반 앱 Ctrl+S·Save-close에 연결한다.
+                        save_controller는 heap에 고정한 준비 worker와 두 이미지/native attempt의 이동·취소 정산을 소유한다.
+                        save_settle_worker는 독립 준비 이미지/attempt를 이동받아 Registry 없이 native rollback/outcome 조회를 실행한다.
+                        controller는 고정 주소의 settlement worker를 시작하며 미소비·실패 결과의 소유권을 유지한다.
+                        Request/문서 ack는 controller에 남고 일반 앱 Book/UI의 cancel/preparation 오류와 unknown 조회에 연결한다.
+                        일반 앱은 native commit·실패 rollback·final handle cleanup을 worker에 연결하고 문서 CAS만 main에서 수행한다.
+                        save_cleanup_worker는 실제 KTM terminal outcome과 committed binding/checksum을 확인하고 native 정리를 실행한다.
+                        unknown/query 실패는 attempt/image를 반환하며 handle을 정리한 결과도 Request ack는 하지 않는다.
+                        save_commit_worker는 fresh root-relative fence를 유지하며 main의 final-address/scope 승인을 받아 native commit한다.
+                        controller의 committing 상태는 원래 Request를 보유하고 취소 경합·unknown 조회와 후속 정리를 정산한다.
+                        external_changes는 앱의 감시 구독·단일 읽기 슬롯·재시도·현재 문서 적용과 안내 대기를 소유한다.
+                        external_comparison은 현재 편집본과 새 디스크 이미지의 복사본·공통 diff 행 대응·표시 번호/색을 소유한다.
+                        공유 문서·Undo·clean 외부 변경의 차분 적용 정책과 플랫폼 중립 경로 선택은
+                        session/editor/와 user_paths에 둔다.
+                        session/editor/save_request의 CommitApproval은 bytes 없는 final-address/scope/one-use 승인 경계다.
+                        Windows host가 native fence·main-thread 승인 왕복과 문서 변경 제한을 연결한다.
+                        terminal/session.zig는 heap-pinned Surface·ConPTY·runtime routing의 생성/닫기와
+                        admission rollback을 소유하고, session_actions.zig는 생성 상한·최신 크기·성공 후
+                        focus publication을 묶는다. main은 기존 세션 호출 진입점을 이 구현에 연결하며
+                        공통 core config 적용은 compile-time callback으로 전달한다.
     linux/
   workspace/            project workspace, layout restore, recent workspaces
   observability/        TraceEvent, RenderSnapshot, replayTrace
@@ -690,3 +733,59 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 
 
 검색 helper의 argv/env/cwd/stdout 준비와 fd 격리는 `src/pty/macos_spawn.zig::captureStdout`이 소유한다. 제품 worker의 스트림·취소·회수는 `src/platform/macos/app_session/editor/search/process.zig`에 남는다. `src/platform/macos/project_search_fd_judges.zig`는 이 제품 runner에 대한 20개 실제 프로세스 회귀의 전용 진입점이다.
+
+Windows 공용 파일 경계: `src/platform/windows/file_identity.zig`는 열린 handle의
+volume/128-bit ID, `src/platform/windows/directory_watch.zig`는 고정 주소 native
+알림 소유권과 nonrecursive/recursive 모드 및 공유 구독을 소유한다. 기존
+`editor/identity.zig`와 `editor/directory_watch.zig`는 호환 re-export 진입점이다.
+파일 트리와 editor가 같은 Windows 구현을 사용하며 macOS 폴더를 경유하지 않는다.
+
+Windows 단독 worker 판정자와 crash probe의 모듈 루트는 platform/windows의
+얇은 aggregation/entry 파일이다. 공용 native import가 editor 밖으로 이동해도
+모듈 경계를 벗어나지 않는다. aggregation test 하나가 추가되어 open 20개,
+settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 유지한다.
+
+
+Windows `editor/backup_worker.zig`는 주기적 recovery의 독립 body/identity 이미지와
+native I/O job을 소유한다. Registry ack와 drop 승인은 앱 스레드에 남으며 pinned
+store의 borrowed handle은 actual 완료까지 유지한다. 앱은 close 의도를 보존해
+백업 쓰기 뒤 삭제가 다시 레코드를 생성하는 경쟁을 막는다.
+
+### Windows sidebar chrome 저장 소유
+
+`src/platform/windows/chrome/sidebar.zig`는 sidebar 폭 정책과 비동기 partial config writer를
+소유한다. `main.zig`는 release 요청·완료 polling과 공통 geometry/present 연결을 맡는다.
+Win32 cursor/HTCLIENT 처리는 `src/platform/windows/win32_window.zig`에 남긴다.
+
+
+Windows archive 로그 선택은 `src/platform/windows/agents/reveal.zig`, titlebar 오른쪽 도크
+launcher의 geometry와 클릭 소유권은 `src/platform/windows/chrome/dock.zig`가 맡는다.
+공통 archive 원본 DTO와 OS별 capture 분기는 `src/app/archive_source_identity.zig`에 있고,
+Windows full file identity는 maru facade가 한 번 소유하여 editor·watcher·archive가 공유한다.
+
+터미널 복사·붙여넣기 팝업의 안정적 surface ID와 입력 제스처 소유권은
+`src/app/terminal_clipboard_menu.zig`가 맡는다. 박스·행 그리기와 hit-test는 기존 공통
+`chrome/components/context_menu.zig`, OS 클립보드와 터미널 붙여넣기 보호는 플랫폼 호스트가 소유한다.
+Windows의 키보드·메뉴 복사와 보호된 붙여넣기 연결은
+`src/platform/windows/terminal/clipboard.zig`가 맡으며 `main.zig`는 이벤트와 렌더 연결만 담당한다.
+
+### 마우스 좌표 소유권
+
+`src/session/mouse_coordinates.zig`는 surface 원점 보정과 픽셀→셀 변환을 소유한다. Windows 메시지 해석은 `src/platform/windows/win32_mouse.zig`에 두고, 공통 좌표 계산은 `session` facade를 통해 사용한다.
+
+`src/app/settings/model.zig`는 설정 검색과 섹션 표시 규칙을 공유한다. macOS·Windows 호스트의 네이티브 저장·런타임 적용은 이 모델에 포함하지 않는다.
+
+`src/app/settings/edit.zig`는 설정 편집의 키·원본 값·세대 번호를 소유한다. 미리보기는 영속하지 않고, 저장 실패는 편집을 유지하며, 이전 세대의 응답은 새 편집을 닫지 않는다. Windows 화면·저장 호스트 연결은 별도 작업으로 진행한다.
+
+`src/app/settings/form.zig`는 스키마 스칼라 행·설정 키의 프레임 스냅샷과 위젯 액션을 편집 요청으로 바꾸는 컨트롤러를 소유한다. 프레임이 바뀌어도 원래 키를 유지하며, 네이티브 저장 성공 응답이 와야 편집을 완료한다.
+
+`src/platform/windows/settings/host.zig`는 Windows 설정 입력·그리기 어댑터와 비동기 부분 저장을 소유한다. `src/app/config/write_lock.zig`는 같은 프로세스의 설정 작성자가 read/patch/replace를 서로 덮지 않도록 직렬화한다.
+
+`src/platform/windows/terminal/text_resources.zig`는 DirectWrite face와 래스터 작업 버퍼의 준비/해제를 함께
+소유한다. builder는 이 heap 자원을 빌리며, renderer/atlas와 레이아웃을 포함한 게시 시점은 앱 호스트가 맡는다.
+
+`src/platform/windows/terminal/renderer_resources.zig`는 CPU renderer의 font identity/atlas와 GPU
+CellPipeline의 준비/해제를 묶는다. Present의 device/context를 빌리고, 캐시된 UI와 core/PTY를 포함한
+세대 게시 시점은 앱 호스트에 남긴다.
+
+`session.input_math.WheelAccumulator`는 정밀 휠 나머지와 눈금→줄 변환의 공통 수학을 소유하고 Win32 어댑터는 이를 재출력한다. Windows 설정 호스트는 축·모달 소유권과 공통 설정 스크롤 API의 연결만 소유한다.

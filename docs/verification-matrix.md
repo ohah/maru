@@ -5428,3 +5428,573 @@ mise exec -- zig test -OReleaseFast --dep array_repeat -Mroot=src/platform/macos
 
 이 검사는 가짜 DevTools 응답의 수명·상한 거절·UTF-8 이름 자르기·객체 묶음 반환을 확인한다.
 실제 Chromium이나 물리 GUI를 실행한 증거로 취급하지 않는다. 제품 동작과 공개 API는 바꾸지 않는다.
+
+### Windows 파일 트리 변경 감시 (§2m.188)
+
+`test-win32-editor-watch` 18개 Debug/ReleaseFast와 다섯 compiled runtime 변형을
+검증했다. 실제 Windows 앱에서 root 파일 생성/삭제와 펼친 하위 폴더 파일 추가/삭제를
+재시작 없이 캡처했고 펼침 상태 유지 및 정상 종료를 확인했다. private fixture와
+synthetic owned HWND 입력을 사용했다. 물리 입력·IME, sleep/unmount·root 교체
+장기 soak와 원격 감시는 미검증이며 이 항목의 완료 주장이 아니다.
+
+
+### Windows 주기적 backup worker (§2m.189)
+
+`test-win32-backup-worker` 15개 Debug/ReleaseFast와 다섯 compiled runtime 변형을
+검증했다. private 실제 앱에서 자동 백업의 durable bytes/원본 보존, owned PID의 강제
+종료와 재시작 후 파일 클릭 복구, 첫 Save-close의 BOM/Xbase/CRLF·정상 종료·백업 삭제를
+확인했다. 초기 잘못된 활성 화면 입력은 성공에서 제외했다. synthetic HWND만 사용했다.
+물리 입력/IME·긴 UNC/권한 변경/대형 다중 파일 닫기 soak, capture/복구 CPU와 close/shutdown
+I/O 이관은 남아 있으며 이 증거로 완료를 주장하지 않는다.
+
+
+### §2m.190 Windows 파일 트리 스캔 실패의 원자성 및 재시도
+
+네이티브 목록을 전부 EntryInput으로 변환한 뒤에만 Tree의 staged snapshot을 적용한다.
+변환 OOM을 부분 목록 성공으로 취급하지 않는다. 실패한 scan/result/apply는 기존 노드를
+보존하고 loading을 해제하며 200ms 후 expanded root를 다시 스캔한다. 재시도는 native
+watcher 설치 여부와 독립적이다. snapshot 적용 후 행 투영 OOM은 이미 교체된 노드를
+가리키는 이전 행을 재사용하지 않고 불완전한 행을 비운 뒤 다시 스캔한다.
+
+`test-win32-editor-watch` 21개가 Debug/ReleaseFast에서 통과했다. 새 검증은 변환 OOM의
+기존 목록 보존과 정상 재적용, 실패 응답과 성공 응답의 변환 OOM 뒤 retry,
+행 투영 OOM의 안전한 폐기를 포함한다.
+부분 변환 성공, retry 소실, recursive 감시, queue 순서, rearm을 깨뜨린 5개 compiled
+runtime 변형 모두 검출하고 원본을 복원했다. 지속적인 권한 오류·root 교체의 사용자
+표시 및 장기 soak는 별도 잔여 항목이다. 이번 실패 주입은 테스트 allocator 경로이며
+실앱의 강제 OOM을 재현했다고 주장하지 않는다.
+
+
+### §2m.191 Windows 종료 flush의 worker 연결
+
+실앱 종료 defer는 주기적 in-flight job을 실제 결과까지 drain한 다음, 아직 backup_dirty인
+문서를 한 번씩 worker에 제출한다. 종료에는 debounce를 적용하지 않는다. clean 삭제는
+최신 packet 검증과 vote를 거치고 실제 완료 뒤에만 문서 lease/root를 해제한다.
+실패는 보고하고 다음 문서로 진행하며 동기 store.write fallback이나 무한 재시도를 하지 않는다.
+
+`test-win32-backup-worker` 16개가 Debug/ReleaseFast에서 통과했다. 종료 flush 테스트는
+미래 debounce를 가진 Xbase/CRLF를 즉시 백업하고 원본 BOM/base/CRLF를 보존하며
+완료 시 pending job이 없는지 확인한다. 종료 debounce 복원·flush 생략·본문 손상·epoch
+검증 제거·uncertain clean 판정 손상의 다섯 compiled runtime 결함을 검출한 뒤 원본을 복원했다.
+이는 앱이 호출하는 동일 종료 helper와 네이티브 저장 검증이며 실앱 crash 종료는 flush를
+실행하지 않으므로 이 테스트의 대체 증거로 주장하지 않는다. 명시적 close의 backup 삭제와
+owner/드문 extra-root handle 정리는 아직 동기다. 전체 Windows 지원의 완료를 의미하지 않는다.
+
+
+### §2m.192 Windows 종료 backup root handle 정리
+
+종료의 모든 백업 job을 drain한 뒤 LocalData.deinitOnWorker가 별도 스레드에서 private
+store 및 선택된 부모 chain의 native handle을 닫는다. join 완료 후 부모 handle 배열은
+원래 allocator 스레드에서 해제한다. spawn 실패는 owner를 그대로 보존하고 보고하며
+동기 native close fallback을 실행하지 않는다. 종료에는 실제 완료를 기다리며 프레임용
+비동기 cleanup API라고 주장하지 않는다.
+
+`test-win32-editor-backup` 35개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+worker thread ID와 store·모든 부모 handle의 INVALID_HANDLE 결과를 확인한다.
+store close 누락·부모 close 누락·잘못된 thread ID·hardlink guard 제거·record identity
+검사 누락의 다섯 compiled runtime 변형을 검출하고 원본을 복원했다. 명시적 close의
+backup 삭제, 프레임 중 드문 extra-root 정리 및 종료 메모리 capture CPU는 아직 남아 있다.
+
+
+### §2m.193 Windows extra-root의 비동기 cleanup 단계
+
+백업 job이 root를 만든 사이 앱이 이미 다른 owner를 보유하면 finish는 redundant root의
+cleanup worker를 시작하고 null을 반환한다. 프레임에서 native close나 join을 하지 않는다.
+독립 SMP owner와 기존 job/request lease를 실제 cleanup 완료까지 유지하고 acquire한
+최종 결과로만 revision/epoch/CAS를 다시 검증한다. 기존 앱 owner를 교체하지 않는다.
+cleanup spawn 실패는 root와 receipt를 보존하고 실제 awake clock의 200ms backoff 후
+재시도한다. 종료 drain도 같은 clock을 사용하므로 고정 now 인자 때문에 재시도가 멈추지 않는다.
+
+`test-win32-backup-worker` 18개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+첫 poll의 pending, 유지된 owner, worker cleanup ID와 닫힌 extra handle, cleanup 중
+revision 변경 및 spawn 실패의 lease/root 보존·backoff·실제 후속 완료를 확인한다.
+close 누락·backoff 제거·동기 조기 ack·epoch/CAS guard 제거의 다섯 compiled runtime
+변형을 검출하고 원본을 복원했다. 컴파일 단계에서 막힌 재귀 ack 변형은 횟수에서 제외했다.
+명시적 파일 닫기의 백업 삭제와 capture/후속 projection CPU 등 전체 잔여 Windows 범위는
+계속 남아 있다. 이 절은 강제 실패를 실제 앱 GUI에서 재현했다고 주장하지 않는다.
+
+
+### §2m.194 Windows clean close/Save-close의 백업 삭제 worker 연결
+
+clean sidebar X는 공통 pending close FIFO로 들어가고, clean window close도 같은 승인
+경로를 지난다. Save-close의 저장 worker 완료 후 prepareCleanCloseBackup이 첫 native
+삭제를 debounce 없이 시작한다. 문서와 request lease는 실제 drop 완료까지 살아 있고
+마지막 close 승인에는 native store fallback이 필요 없다. 여러 문서의 window close는
+한 문서씩 처리한다. 공유 문서의 마지막 view가 아니면 백업을 삭제하지 않는다.
+
+대기 중 키·IME·앱 마우스 입력을 막되 caption 제어를 유지한다. Esc는 pending close와
+보류된 window close를 취소한다. 새 window intent는 이전 file wait를 대체한다. 실패한
+native 삭제는 view/backup 보호를 유지하고 기존 close intent를 종료해 새 요청을 요구한다.
+대기·backoff는 프레임의 render/present를 건너뛰는 busy loop를 만들지 않는다.
+
+`test-win32-backup-worker` 20개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+pending/lease 보존, 다른 thread의 실제 삭제, future debounce 우회, store 없이 최종 view
+해제, dirty/누락 root 거절과 원본 BOM/CRLF를 검사한다. 조기 승인·dirty 승인·epoch/CAS
+제거·uncertain clean 판정 손상의 다섯 compiled runtime 변형을 검출하고 복원했다.
+최종 실제 앱 PID 12964에서 Xbase/CRLF 자동 백업 및 원본 BOM/base/CRLF를 확인한 뒤
+WM_CLOSE/Save로 exact BOM/Xbase/CRLF 저장, 백업 삭제와 exit code 0을 확인했다.
+synthetic owned HWND 증거이며 물리 입력/IME·강제 native 실패 GUI 증거로 세지 않는다.
+Discard의 dirty backup 삭제는 아직 기존 동기 경로다. 전체 잔여 Windows 범위는 완료로
+보지 않으며 capture/후속 projection CPU·플랫폼 결합과 장기 검증도 계속 남아 있다.
+
+
+### §2m.195 Windows Discard의 dirty 백업 삭제 worker 연결
+
+prepareFileCloseBackup은 clean/Save-close와 Discard를 구분한다. Discard packet은
+본문 복사·hash 없이 신원/epoch/revision/CAS와 persistence 상태를 캡처하고 별도 한 번의
+voteDiscard 승인을 기다린다. 일반 clean vote는 이를 승인할 수 없다. Main의 현재 pending
+Discard와 동일 packet의 최신 결합, unknown/live-save 부재를 확인한 뒤 native drop한다.
+거절/버전 변경은 기존 레코드를 보존한다. 승인 후 늦은 편집도 실패 receipt로 이전 close
+intent를 종료하여 새 승인을 요구한다. 이전 요청으로 새 버전을 자동 Discard하지 않는다.
+
+실제 삭제가 끝나도 dirty 본문이 살아 있으면 backup_dirty를 재설정한다. 이후 취소된
+close는 보호를 재시작할 수 있고, 실제 승인한 close만 문서를 해제하며 이 플래그를 정리한다.
+원본 문서에는 쓰지 않는다. 명시적 GUI Discard도 이제 native 삭제를 프레임에서 실행하지
+않으며 실패 시 문서와 보호를 유지한다. 동기 approveFileClose API는 기존 fixture 계약이다.
+
+`test-win32-backup-worker` 22개가 Debug/ReleaseFast에서 통과했다. false consent와 stale
+true consent의 실제 레코드 보존, 실제 삭제와 cancelled protection, 승인 뒤 실제 Y 편집의
+XYbase/CRLF 유지·StaleDocument receipt·원본 보존을 확인한다. consent/binding 제거,
+취소 보호 재설정 제거, 삭제 대신 write, stale intent 실패 제거의 다섯 compiled runtime
+변형을 검출하고 원본을 복원했다. 최종 실제 앱 PID 49900에서 Xbase/CRLF 자동 백업 후
+WM_CLOSE/Discard로 원본 exact BOM/base/CRLF, 백업 삭제 및 exit code 0을 수집했다.
+synthetic owned HWND이며 물리 IME·장기 soak나 강제 stale GUI 재현 증거로 세지 않는다.
+전체 Windows 잔여에는 후속 편집/복구 CPU·플랫폼 결합·키바인딩/브라우저/SSH 등이 남아 있다.
+
+
+### §2m.196 Windows 저장 pending 중 caption 마우스 제어
+
+mouse의 pending_save 차단을 caption hit 처리 뒤로 옮겼다. native 최소화·최대화·닫기
+경로는 유지하고 편집기/앱 영역 입력은 계속 차단한다. save/close/open busy 마우스는
+이전 편집기 가로·세로 스크롤바 capture와 release 플래그를 해제하므로 삼켜진 release가
+끝나지 않은 drag를 남기지 않는다. 기존 종료 진단에 caption_save_clicks를 추가했다.
+
+최종 실앱 PID 50912에서 실제 Ctrl+S와 caption 닫기 메시지를 연속 전달했다. 저장 pending
+중 처리된 caption_save_clicks=1, 본문을 유지한 close 확인창을 관찰했고 Save 이후
+exact BOM/Xbase/CRLF, 백업 삭제와 exit code 0을 확인했다. synthetic owned HWND이며
+물리 IME·모든 caption/drag 조합의 장기 검증 증거로 세지 않는다.
+
+승인·binding 제거, cancel rearm 제거, 삭제 대신 write, stale intent 실패 제거의 기존
+다섯 compiled runtime 변형을 최종 코드에서 다시 검출했다. 이 다섯은 저장/닫기의
+보호 계약 검사이며 caption 위치 자체의 변형 검사라고 주장하지 않는다. 복원 후
+backup worker 22개가 Debug/ReleaseFast에서 통과했다. caption 순서는 실앱 pending
+계측으로 검증하며 단순 순서 조건을 복사한 unit test를 추가하지 않았다.
+전체 잔여 Windows 지원·후속 편집/복구 CPU와 플랫폼 결합 범위는 계속 남아 있다.
+
+### §2m.197 Windows 파일 편집 중 focused close 단축키
+
+기존 resolver의 close_focused 액션을 파일 편집 경로에서 처리한다. Windows 기본
+Ctrl+Shift+W는 공통 command+W 바인딩을 사용하며 Ctrl+W 셸 입력과 명시적
+unbind·재바인딩·release 소유권을 보존한다. 사이드바 X와 같은 닫기 요청 함수를
+사용해 dirty 문서는 새 확인을 받고 clean 요청은 중복 없는 FIFO에서 재검증한다.
+다른 전역 액션 및 비교 패널의 단축키 연결은 여전히 후속 범위다.
+
+실앱 PID 13352에서 단축키로 닫기 확인, 취소 후 Xbase 유지, 다시 Save하여
+파일만 닫히고 터미널 유지, exact BOM/Xbase/CRLF와 정상 종료 코드 0을 확인했다.
+owned HWND 합성 입력이며 물리 키보드·IME 장기 검증으로 세지 않는다. dispatch
+차단·resolver 무시·이전 consent 유지·중복 요청·dirty 확인 누락의 다섯 compiled
+runtime 변형을 검출했다. 복원 후 host 83개와 backup worker 23개가 Debug와
+ReleaseFast에서 통과했다.
+
+### §2m.198 Windows 터미널 focused close와 파일에서 터미널 복귀
+
+터미널 close_focused 액션을 실제 닫기 요청으로 연결했다. 사이드바 X와 키보드는
+stable surface ID를 같은 입력 배치의 요청에 넣고, 배치 뒤에 ID를 다시 풀어 기존
+closeWinSession을 실행한다. 실행 중이면 확인을 받고 마지막 세션은 caption과 같은
+창 닫기 경로로 넘어가 미저장 파일의 저장·취소 계약을 유지한다. 같은 활성 터미널
+카드 클릭을 거르던 조건도 파일 화면에서는 전환을 허용하도록 수정했다.
+
+실앱 PID 30124에서 파일→이미 활성 터미널 복귀, 마지막 세션 닫기 Cancel 후 Xbase
+유지, 다시 Save 후 exact BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다.
+PID 46540에서 두 세션의 busy 확인 Cancel은 둘 다 유지하고 Confirm은 선택한 것만
+제거함을 관찰했으며 마지막 단축키 종료도 exit code 0이었다. owned HWND 합성 입력이며
+물리 키보드·장기 IME 증거로 세지 않는다. PID 44788의 첫 시도는 복귀 버그로 파일만
+닫혔으므로 터미널 종료 증거에서 제외했다. 격리 폴더의 전체 화면 스모크는 필요한
+파일·목록이 없어 일부 판정 불가와 실패였고 전체 통과로 세지 않는다.
+
+실제 ConPTY 네 세션 테스트는 busy 승인, 닫힌 routing 제거, stable ID 재해석,
+탭 목록·활성 세션 정합성과 마지막 세션 보호를 확인한다. 승인 제거·detach 누락·
+active 보정 누락·탭 삭제 누락·ID 색인 오염의 다섯 compiled runtime 변형을 검출했다.
+컴파일 실패인 초기 detach 변형은 제외했고, 세 세션에서 살아남은 active 변형은
+네 세션의 중간 활성 선택으로 강화해 검출했다. 복원 후 host 84개 Debug/ReleaseFast가
+통과했다. 단축키/마지막 창 연결 자체는 위 실앱 증거로 검증하며 다섯 변형이 그 입력
+연결을 직접 검사한다고 주장하지 않는다. 다른 전역 액션과 플랫폼 결합은 남아 있다.
+
+### §2m.199 Windows 새 터미널 단축키와 공통 생성 경로
+
+Windows 기본 Ctrl+Shift+T(new_term)를 터미널 및 파일 편집 경로에서 실제 생성에
+연결했다. 상단 +와 키보드는 같은 요청 처리와 terminal/session_actions.zig의
+spawnFocused를 사용한다. 최신 활성 core 크기는 lock 아래에서 읽고, 생성 상한을
+먼저 검사하며 Native admission 성공 후에만 활성 탭과 파일/터미널 view를 바꾼다.
+기존 Windows 평면 목록에 new_tab을 new_term으로 임의 합치지 않았다. 워크스페이스
+계층과 다른 전역 액션은 남은 범위다. Native 생성 자체의 UI 스레드 배치도 그대로다.
+
+실제 ConPTY 테스트는 resize 후 새 core 크기, 살아 있는 기존 routing, 서로 다른 ID,
+생성 상한과 실제 SpawnFailed 후 목록/선택/파일 view 보존을 확인한다. 포커스·view·
+최신 크기·상한·실패 전 view publication의 다섯 compiled runtime 변형을 검출했고
+복원 후 host 86개가 Debug/ReleaseFast에서 통과했다. resolver release·unbind·rebind와
+new_tab 구분도 검사한다. 다섯 변형은 생성 계약이며 키 입력 연결 자체는 실앱 증거다.
+
+실앱 PID 45336에서 파일 편집→Ctrl+Shift+T→session 2, 파일 복귀 Xbase 유지,
+파일에서 +→session 3, 터미널에서 Ctrl+Shift+T→session 4를 관찰했다. Save 종료 후
+exact BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다. 종료 직후 capture는 사라진
+창과 경합하여 실패했으므로 증거에서 제외했다. owned HWND 합성 입력이며 물리 입력·
+모든 resize/장기 IME 조합의 검증으로 세지 않는다.
+
+### §2m.200 Windows 터미널 세션 소유권의 플랫폼 폴더 경계
+
+main.zig의 WinSession·spawnWinSession·closeWinSession·stable ID 조회 실제 구현을
+platform/windows/terminal/session.zig로 이동했다. 기존 Main 호출 이름과 타입은 alias/
+얇은 wrapper로 유지하고 공통 core config는 compile-time callback으로 전달한다.
+ConPTY 생성, heap 고정 surface, Native admission rollback, runtime routing 해제와
+탭/활성 보정이 같은 Windows 책임 파일에 있다. public facade 경로·새 runtime 의존성·
+기존 확인 계약은 변경하지 않는다. 모든 main/platform 결합을 정리했다고 주장하지 않는다.
+
+이동한 파일에 승인 제거·detach 누락·활성 보정 누락·탭 삭제 누락·ID 색인 오염의
+다섯 compiled runtime 변형을 넣어 실제 ConPTY 소유권 테스트가 모두 검출함을 확인했다.
+복원 후 기존 host 86개가 Debug/ReleaseFast에서 통과했다. 실앱 PID 44080에서
+파일 Xbase 편집→새 터미널, busy close Cancel 유지와 Confirm 후 선택 세션 제거,
+파일 Xbase 보존 및 마지막 터미널의 미저장 창 보호를 관찰했다. Save 후 exact
+BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다. owned HWND 합성 입력이며
+물리 키보드/IME·긴 시간 경합 증거로 세지 않는다. 워크스페이스 계층, 다른 전역 액션,
+후속 편집/복구 CPU와 전체 플랫폼 결합 범위는 계속 남아 있다.
+
+### §2m.201 Windows 에이전트 상세의 UTF-8 환경과 개인정보 가림
+
+상세 worker의 POSIX HOME/USER·ANSI getenv 의존을 제거했다. os_env의 checked 소유
+API로 HOME/USERPROFILE와 USER/USERNAME을 모두 읽고, 익명화는 모든 alias의 가장
+긴 일치값부터 한 번에 처리한다. 알려진 홈 끝 구분자와 Windows Users 경로도 처리한다.
+환경 읽기/변환·익명화 할당 실패 시 원문을 계속 표시하지 않고 redacted 빈 턴으로 남긴다.
+기존 선택적 allocValue API의 missing/failure 폴백은 유지한다. Windows host가 버리던
+redacted 플래그를 공통 Turn DTO에 전달하고 paint가 현재 언어의 안내 문구를 고른다.
+
+Windows profile·username 누락, 짧은 alias 우선, 익명화 OOM 원문 유지, 환경 OOM을
+missing으로 접는 다섯 compiled runtime 변형을 검출했다. 복원 후 archive/privacy
+52개 중 48개 통과·기존 macOS 전용 4개 제외가 Debug/ReleaseFast에서 동일했다.
+추가 paint 보호 제거 변형도 검출했고 복원한 Chrome UI는 1061개 통과·기존 6개 제외였다.
+같은 DTO를 영어→한국어로 paint할 때 raw fixture가 나오지 않고 현재 번역이 나옴을 검사했다.
+
+최종 실앱 PID 50524의 private HOME/USERPROFILE와 합성 Codex 로그에서 한글 이름·
+중첩된 두 home 폴더와 부모 계정이 user로 바뀌고 secret 대신 [sensitive content hidden]이 표시됨을 확인했다.
+해당 PID 정상 종료 코드 0을 수집했다. 실제 provider/private 이력이나 실제 토큰은 쓰지
+않았으며 owned HWND 합성 입력이다. 같은 앱의 오른쪽 dock divider 폭 조절은 동작했다.
+사용자가 확인한 왼쪽 sidebar 폭 조절 미구현과 resize cursor 미연결을 후속으로 잡는다.
+로그 보기·resume·live focus 버튼 연결과 전체 잔여 Windows 지원은 계속 남아 있다.
+
+## §2m.202 — Windows sidebar 폭·resize cursor·상단 도크 아이콘
+
+Windows sidebar의 고정 폭을 right-edge 드래그로 바꿨다. grab offset을 보존하고 120~480pt와
+header 13cell 최소 폭을 적용한다. macOS 신호등 여백은 Windows에 복사하지 않는다.
+terminal grid·sidebar·titlebar·status/dock geometry를 함께 갱신하며 captured move/up을
+caption보다 먼저 처리한다. modal/open/save가 시작되면 두 divider gesture를 취소한다.
+새 resize band gesture는 scrollbar보다 먼저 판정하되 기존 capture는 뺏지 않는다.
+
+`src/platform/windows/chrome/sidebar.zig`가 폭 정책과 config worker를 소유한다. release만
+저장하고 연속 요청은 최종 폭으로 coalesce한다. 읽기·부분 직렬화·flush/sync·atomic replace는
+worker에서 수행하고 종료 때 drain한다. 주석·미파싱 키를 보존하며 이미 Windows suffix가
+있으면 `sidebar.width.windows`만 바꾼다. editor safe-save의 ACL/CAS 계약과 config atomic
+write는 별개다. config의 동시 외부 편집 CAS는 추가하지 않았다.
+
+사용자 요청대로 explorer/SCM/agent/gallery switcher를 `— □ ×`와 같은 titlebar 줄의 caption
+버튼 왼쪽에 배치했다. 공통 slot geometry를 paint/hit에 사용하고 titlebar 배경 다음에 합성한다.
+switcher는 HTCLIENT, 남은 빈 곳은 창 이동 영역이다. 본문은 제거한 옛 switcher 높이만큼
+확장하며 좁은 창에는 반쯤 표시하지 않고 전 슬롯을 숨긴다. 전체 DPI 지원은 기존 후속 범위다.
+
+cursor의 베이스는 Microsoft Learn
+[Setting the Cursor Image](https://learn.microsoft.com/en-us/windows/win32/learnwin32/setting-the-cursor-image)다.
+HTCLIENT의 WM_SETCURSOR에서 LoadCursorW/SetCursor·IDC_SIZEWE를 사용하고 nonclient는
+DefWindowProc에 맡긴다. native window가 owned hit rect 두 개를 보관하며 capture move에서도
+모양을 유지한다. macOS API/폴더를 Windows 호출 경로에 끌어오지 않는다.
+
+5개 compiled runtime 변형(client guard 제거·capture 소유 가드 제거·grab offset 반전·
+Windows override 무시·switcher를 caption 밑으로 이동)을 모두 검출했다. 복원 후 Debug와
+ReleaseFast host 91개가 통과했다. atomic config·oversize 원문 보존·최종 폭 drain·caption-line
+geometry·좁은 창의 전체 숨김도 검사했다.
+
+최종 실앱 PID 52140의 private config/HOME·owned HWND에서 양쪽 경계 cursor 핸들은
+IDC_SIZEWE, 본문은 IDC_ARROW임을 GetCursorInfo로 확인했다. sidebar 180→300→320,
+상단 줄에서 capture release, Windows override만 320 저장, 주석/base/다른 키 보존과 상단
+agent 아이콘의 뷰 전환을 확인했다. 재시작 PID 47940에서 320 폭을 확인했고 두 PID의 정상
+종료 코드 0을 수집했다. 중간 재시작 PID 51024는 종료 watcher가 close 전에 timeout되어
+exit0 증거로 세지 않았고 fresh 재시작으로 다시 확인했다. 자동 HWND 입력/짧은 포인터 검사이며
+물리 입력 장기 soak로 세지 않는다. 전체 잔여 Windows 기능·agent resume/reveal/live 버튼은 남아 있다.
+
+## §2m.203 — sidebar config 입력·출력 크기 경계
+
+loader의 1MiB 한계에 맞춰 config writer가 입력은 정확히 1MiB까지 받고, 부분 갱신한
+결과도 1MiB 이하인지 atomic file 생성 전에 검사한다. std.Io.Limit은 도달해도 거부하므로
+입력에는 한계+1을 넘긴다. 누락 키를 추가해 출력이 커지는 경우에는 StreamTooLong을
+반환하고 원본을 보존한다. 이전 코드가 한계 바로 아래 원문에 키를 추가해 unreadable
+config를 만드는 실패를 실제 native 테스트로 재현했다.
+
+출력 guard 제거·입력 exclusive 한계 회귀·Windows override 무시·주석 버림·폭 검증 제거의
+다섯 compiled runtime 변형을 검출했다. 복원 후 host 91개 Debug/ReleaseFast가 통과했다.
+private 실앱 PID 41632에서 정확히 1MiB인 기존 Windows 폭 키 갱신을 확인했다. PID 51216은
+키 append로 한계를 넘는 요청을 실제 worker가 거부하고 원본 바이트를 보존했다. 두 PID
+정상 종료 코드 0을 수집했다. 실제 사용자 config는 쓰지 않았고 테스트의 private config는
+원래 상태로 복구했다. 에이전트 도크 버튼은 아직 비활성이다. 다음 단계는 Windows archive
+snapshot의 device=0 fallback을 full native identity와 교체 검증으로 바꾸는 것이다.
+
+
+### Windows archive 로그 선택과 titlebar 도크 launcher (§2m.204~205)
+
+두 경로 각각 5개 compiled runtime 변형을 검출했다. archive worker 56개(Windows 52 pass,
+기존 macOS skip 4)와 host 98개(Debug/ReleaseFast)를 검증했다. private 실앱 PID 18808의
+Shell 선택·정상 종료 0, 16회 toggle·400px 도크 폭·grid mismatch 0을 수집했다.
+DwmFlush/CAPTUREBLT desktop 캡처 6회에서 terminal/sidebar 유지도 확인했다.
+상세 계약과 근거는 [Windows 플랫폼](windows-platform.md#2m204--windows-archive-원본-식별과-로그-선택),
+진행 기록은 [Windows 구현 계획](plans/windows-platform.md)을 따른다. resume/live focus와
+전체 잔여 Windows 기능·물리 입력 장기 soak는 후속이다.
+
+
+### Terminal clipboard popup (Windows host wiring)
+
+`zig build test-terminal-clipboard-popup` compiles 14 cases: two root aggregation
+blocks, nine shared controller cases, client-to-terminal coordinate mapping,
+native caption/cursor ownership, and native
+clipboard target/visibility rejection before OS access. The two native cases skip
+outside Windows. The host uses the existing chrome context-menu view and protected
+paste encoder. Popup rendering, OS message routing and clipboard behavior require
+separate owned-window app evidence; a controller-only pass does not prove those.
+Coordinate cases cover sidebar resize, titlebar origin, negative capture positions,
+zero origins and signed/unsigned limits. Real app Copy exposed the prior absolute
+client-coordinate bug despite the existing controller and editor gates passing.
+Validation includes five distinct broken guards with runtime rejection, source-byte
+restoration, Debug/ReleaseFast controls, ordinary app display and cancellation,
+matched pointer release, focus loss, and protected paste. Live validation is pending.
+
+### Windows 설정 휠
+
+- `zig build test-windows-settings-wheel`: 부분 델타·가로 축·자식 모달/저장 중 소유권·스크롤 비활성 정책·넓은 수·검색/섹션 초기화.
+- `zig build test-windows-wheel-detents`(Windows): 공통 수학으로 이동한 기존 Win32 어댑터 동작 회귀.
+- `tools/windows/check-settings-scroll.py --state <격리 fixture JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`: 실제 폼 픽셀 이동·역방향·다시 열기·필터 변경·정상 종료. config/클립보드를 바꾸지 않는다.
+- `--old-control`은 휠 무시, `--stale-context-control`은 필터 변경 후 잔여 위치를 재현하는 음성 대조다. 정상 완료 증거로 섞지 않는다. 물리 마우스·키보드·IME 검증을 대신하지 않는다.
+
+### Windows 오버레이 포커스
+
+- `zig build test-windows-settings-focus`: 유지/해제 정책, 닫힌 정책 초기화, 정책 인계, 세대 번호 랩.
+- `tools/windows/check-settings-focus.py --state <격리 fixture JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`: 설정 유지·연속 focus 전환·일시 메뉴 해제·정책 재인계·바깥 클릭 잔여 릴리스 취소. 네이티브 콜백 직후 계수·정상 종료·셸 입력 격리 확인.
+- 소유한 큐의 native keyboard focus 검증이다. 전역 foreground, 물리 Alt+Tab, 키보드·IME 증거와 구분한다.
+## Windows settings search IME adapter
+
+`zig build test-windows-settings` includes five search caret judges: ownership,
+paint-to-client coordinates, wide committed text, preedit/commit, and geometry changes.
+Five coordinate/metric/row mutations must fail at runtime; restored Debug and ReleaseFast must pass.
+`ime_settings_caret_updates` and the scroll app check observe request routing only,
+not physical keyboard input or an actual OS candidate window.
+
+Inline field caret coverage adds five Windows judges for number padding, text/font
+display width, color prefix, invalid ownership, and edit-over-search priority.
+`check-settings-scroll.py --inline-caret` additionally opens/cancels a filtered
+numeric edit and requires its IMM request counter. These are request-routing and
+paint geometry checks; physical candidate evidence remains pending.
+
+Composition adds five Windows settings judges for one active caret and preview paint,
+separate preview/filter ownership, cancel/commit lifetime, UTF-8 limits, and field-edge
+clipping. A form judge covers search/section changes retiring the old edit transaction.
+Six runtime mutations exercise cursor, paint, commit clearing, UTF-8 boundary, value
+isolation, and transaction cleanup. Debug and ReleaseFast must pass after restoration.
+The native app double-caret control reproduces the old title cursor; the normal
+inline-caret mode requires it to disappear while numeric edit requests remain active.
+
+## Windows 설정 스크롤바
+
+- `zig build test-windows-settings-scrollbar`: 집계 2 + 동작 6. 발행된 paint/hit, track jump,
+  이동 없는 마지막 up, 거터 가장자리 캡처·다른 버튼 up·tick 누적, 소유권 취소, 같은 기하 carry와
+  크기 변경 취소를 검사한다. 폼·막대 할당 실패에서는 hit target이 남지 않아야 한다.
+- `zig build test-windows-settings`: 전체 설정 검사 51개. 복원 Debug/ReleaseFast를 확인한다.
+- paint/입력 경로/릴리스/버튼/기하/포커스/거터/두 할당 실패 경로의 변이 9개를 런타임 실패로
+  검출한다. 컴파일/실행 파일 누락 오류는 검출 성공으로 계산하지 않는다.
+- `check-settings-scroll.py --scrollbar --inline-caret`: 격리 앱에서 실제 픽셀·드래그·기존 입력
+  소유권을 확인한다. `--scrollbar-control`과 `--gutter-control`은 이전 바이너리 실패 대조다.
+  물리 마우스·키보드나 OS IME 후보창 검증으로 확대하지 않는다.
+
+## Windows 기본 IME 조합창 소유권
+
+- `zig build test-windows-ime-ui`: 집계 2 + 정책 5. 조합창 비트만 제거, 후보/가이드/상위 비트 보존,
+  기본 UI 복원, 지원된 입력 영역과 native 폴백, 숨겨진 agent 포커스와 최상위 모달 우선순위.
+- 중복창·후보 옵션 제거·고착된 소유권·파일 폴백 손실·숨겨진 검색 소유권의 변이 5개를 런타임
+  실패로 검출하고 복원 Debug/ReleaseFast를 확인한다.
+- `check-settings-ime.py --state <격리 앱> --binary <복사한 exe 메타> --output <결과>`:
+  실제 OS 마우스로 활성화하고 foreground/keyboard focus를 확인한 뒤 한국어 IME scan code를 보낸다.
+  두 조합 단계의 실제 픽셀 변화, 기본 조합창 부재와 앱 창 소유권, 정상 종료·config 불변·셸 입력 0을
+  확인한다. `--native-ui-control`은 이전 바이너리의 기본 조합창을 재현해야 한다.
+- `--candidates`: 실제 한자 후보창을 표시하고 첫 항목을 선택한다. 선택 후 후보창이 사라지고
+  편집 caret이 초기 caret에서 측정한 셀 폭의 정확히 두 배만 이동해야 한다. config 불변·셸 입력 0과
+  정상 종료도 유지해야 한다. 이전 바이너리 대조와 결합해 기본 조합창 중복을 따로 판정한다.
+- OS 입력 주입에 따른 설정 입력란의 조합/후보 검증이다. 물리 키보드나 전체 입력 영역의 IME 완료로 세지 않는다.
+
+### Windows 설정 조합 중 닫기
+
+`tools/windows/check-settings-ime-transition.py --state <새 격리 앱 JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON> --case <경로>`를 사용한다.
+각 경로는 새 프로세스에서 실행한다. `baseline`, `click`, `fast`, `chord`, `cancel` 다섯 경로는
+각각 조합 없는 비교, 조합 중 바깥 클릭, 클릭·공백의 단일 입력 묶음, 실제 `Ctrl+,`,
+실제 Escape로 조합 취소 후 `Ctrl+,`로 닫기를 검사한다.
+조합 경로는 한국어 변환 상태와 두 단계의 필드 픽셀 변화, 확정 전 caret 위치를 먼저 확인한다.
+닫은 뒤 의도한 공백만 보내고 Enter는 보내지 않는다. 정상 native 종료, config 바이트 불변,
+`keys_to_shell=1`·`bytes_to_shell=1`을 요구한다. 실행 파일/PID/창 클래스와 foreground/keyboard focus를 검증한다.
+다섯 경로의 성공은 해당 설정 필드에서 시험한 OS 입력 주입의 증거이며, 물리 장치나 다른 편집 대상의
+조합 소유권 전환 완료를 뜻하지 않는다.
+
+### Windows 설정 이후 새 셸 실행
+
+- `zig build test-windows-shell-refresh`: 집계 2 + 동작 5. 명령 우선순위, 이전 인자 제거,
+  공백·한글·빈 인자 경계, override 제거 후 tier 복원, 롤백과 기존 셀/격자 불변을 검사한다.
+- 명령 미갱신·인자 미갱신·config 미러 미갱신·빈 override 고착·무관한 셀 크기 변경의 다섯 변이를
+  각각 compiled runtime 실패로 검출하고 복원 Debug/ReleaseFast를 확인한다.
+- `tools/windows/check-settings-shell.py --state <새 격리 앱 JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`:
+  실제 설정 폼과 새 워크스페이스 버튼을 거쳐 cmd/PowerShell 전환, 없는 절대경로 폴백,
+  앞뒤 공백 제거와 재전환을 확인한다. 자식 프로세스의 실행 파일과 PID를 직접 관측하며 기존 자식은
+  유지되어야 한다. 화면 캡처·무관한 config 줄 보존·셸 입력 0·정상 native 종료도 요구한다.
+- `--old-control`은 첫 cmd 변경 후에도 PowerShell이 생성되는 이전 바이너리의 음성 대조다.
+  GUI에서 빈 text를 저장하는 검증은 아니며 항목별 리셋은 별도 작업이다. 입력은 소유한 HWND의
+  합성 이벤트이며 물리 키보드 검증으로 세지 않는다.
+
+### Windows 설정 텍스트·경로 검증
+
+- `zig build test-windows-settings-text-paths`: 집계 2 + 동작 5. 상대/tilde 명령 거부,
+  native 절대경로·UNC 구분자 정규화, 경로가 아닌 문자열 보존, 요청 버퍼와 독립된 소유권,
+  할당 실패 시 입력 config 보존을 검사한다. 전체 설정 51개는 복원 Debug/ReleaseFast로 확인한다.
+- 예전 setter 복원·파서 진단 무시·요청 버퍼 차용·비경로 문자열 정규화·할당 실패 삼킴의 다섯 변이를
+  각각 컴파일 후 기대값 실패로 검출한다. 정리 중 충돌은 판정 성공으로 사용하지 않는다.
+- `tools/windows/check-settings-text-path.py --state <새 격리 앱 JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`:
+  상대 이름·현재 폴더·부모 폴더·드라이브 상대·tilde의 다섯 입력에서 config 바이트 불변을 요구한다.
+  마지막 편집에서 native 절대경로로 재시도해 정규화된 저장을 확인하며, font.family의 literal 역슬래시는
+  유지되어야 한다. request 오류 5·저장 2·저장 오류 0·셸 입력 0·native exit0과 화면 캡처를 확인한다.
+- `--old-control`은 이전 setter가 상대 명령을 저장하는 음성 대조다. 기존 파일 파서의 절대경로
+  정책을 공유하며 실행 파일 존재 검사/기본 셸 폴백, OS 접미 쓰기 범위와 리셋 의미를 바꾸지 않는다.
+  소유한 HWND 합성 입력이며 물리 장치 증거가 아니다.
+
+`zig build test-windows-settings-rollback`은 집계 2 + 동작 5다. 빈 기본값의 미리보기 없는 편집 취소,
+실제 미리보기 복원/세대 종료, 저장 admission 실패 후 취소, 오래된 세대 무시, 단축키 toggle 닫기를 검사한다.
+미리보기 없는 값 재검증·세대 기록 누락·취소 후 세대 잔류·toggle의 빈 값 재검증·저장 실패 시 세대 소실의
+다섯 변이를 컴파일 후 기대값 실패로 검출한다. 실제 앱의 다섯 거부에서 request 오류는 정확히 5여야 한다.
+취소 후 남은 거래가 다음 키마다 오류를 내는 경우를 이 계수와 연속 재편집으로 검출한다.
+
+텍스트 경로 판정에는 명시적 OS의 대조도 포함한다. Windows drive/UNC는 Windows 설정에서 정규화되고,
+POSIX 설정은 drive 경로를 거부하되 `/bin/shell\literal`의 역슬래시를 보존해야 한다. 호스트 OS 사용,
+Windows 전용, POSIX 전용, 무조건 절대/상대 판정의 다섯 변이를 공용 파서에 넣어 런타임 실패로 검출한다.
+호스트와 다른 OS를 전달하는 검사는 그 OS 위에서 앱을 실제 실행한 증거와 구분한다.
+
+### Windows 폰트 자원 소유권
+
+- `zig build test-windows-text-resources`: 집계 2 + 실제 Windows native 동작 5. 기본 glyph 잉크,
+  두 폰트 크기의 동시 생존/폐기, 각 할당 실패에서 기존 폰트 유지, 한글 glyph와 scratch, 이전 소유자
+  해제 후 미리 만들어 둔 builder의 렌더링을 검사한다. 다른 OS에서 native 5개는 skip이다.
+- 초기화 실패에서 face 누수·scratch 크기 소실·builder의 scratch 누락·종료 시 scratch 누수·font size
+  고착의 다섯 변이를 컴파일 후 검사한다. 종료 누수는 런타임 추적 allocator의 실제 leak 실패로 판정하며
+  컴파일 실패로 세지 않는다. 복원 Debug/ReleaseFast 각각 7개가 통과해야 한다.
+- native glyph 검사와 실제 앱의 시작/설정 회귀는 준비 자원의 수명 증거다. 설정 변경 후 font/atlas/grid의
+  원자적 교체, line-height/letter-spacing, 전체 폰트 기능이나 물리 입력 완료를 뜻하지 않는다.
+
+### Windows CPU·GPU 렌더러 자원 준비
+
+- `zig build test-windows-renderer-resources`: 집계 2 + Windows native 5. 숨긴 전용 창의 D3D11 device를
+  사용해 세대별 font identity/texture 분리, allocator 및 실제 GPU 생성 실패 후 기존 자원 사용,
+  이전 소유자 해제 후 준비된 GPU 사용, CPU/GPU 아틀라스 치수, 메트릭 범위/자연 폭 구분을 검사한다.
+- 자연 폭 손실·GPU 치수 이탈·잘못된 메트릭 허용·GPU 소유 객체 누수·CPU registry 누수의 다섯 변이를
+  컴파일 후 런타임 기대값 또는 추적 allocator의 실제 leak 실패로 검출한다. 복원 Debug/ReleaseFast는 각각 7개다.
+- 실제 GPU API 생성/upload/draw를 호출하는 수명 검사이며 GPU 픽셀 readback이나 라이브 폰트 게시 증거가
+  아니다. 실제 앱 캡처/입력 회귀는 별도로 확인하고, cached draw list와 core/PTY 격자의 교체는 후속이다.
+
+### Windows OSC 52 읽기와 순서 보존
+
+- `test-clipboard-response`, `test-windows-clipboard-raw`, `test-typed-input-queue`, `test-command-admission`, `test-input-dispatcher`, `test-protocol-response-write`, `test-protocol-frame-queue`: raw 인코딩·cap·할당 실패·typed privacy·부분 전송·명령 byte barrier·대상 폐기·프레임 예약을 검사한다. native clipboard gate는 실제 private HGLOBAL을 검사하며 사용자 클립보드를 쓰지 않는다.
+- [실앱 명령](development-commands.md#windows-osc-52-읽기-실앱-검증)의 `tools/windows/check-osc52-read.py`는 기본 거부와 c/빈 Pc/p/s0 허용의 5개 사례를 실제 ConPTY 앱에서 실행한다. `--large`의 7000009/7000010바이트 응답은 256 KiB 큐를 넘는다. 소유한 창을 반복 resize해 자식 출력과 독립적인 in-band resize 통지를 만들고, 전체 OSC 응답 뒤에 도착하는지 검사한다. 초기 DSR 방식은 리더 순서 결함을 놓쳐 이 판정에서 제외했다.
+- 기본 검사는 클립보드를 읽기만 한다. 큰 검사는 비어 있는 클립보드에만 생성 fixture를 설치하고, 정확한 데이터·sequence·텍스트 형식을 확인해 원래의 빈 상태로 복구한다. 외부 변경은 보존하고 실패한다. 전용 프로필·자식·창만 사용하며 다른 앱을 종료하지 않는다.
+- 거부 정책, raw 줄바꿈, 요청 Pc, 리더의 응답 우선순위, 원래 Surface 라우팅의 앱 수준 결함은 별도 실행 파일과 실제 앱 결과로 판정한다. 컴파일·클립보드 준비·테스트 I/O 실패를 기능 결함 검출로 세지 않는다.
+- 단일 세션 왕복과 프로토콜 순서의 증거다. 배경 세션 질의, 물리 입력·IME, 원격 observer 권한 전환과 Windows 전체 기능 완료를 뜻하지 않는다.
+
+- `test-input-queue-regression`: 기존 PTY/명령 FIFO 13개와 집계 블록 28개를 실행해 blocking backpressure·부분 consume·포화 후 재개·닫힘 대기 해제·입력 fence를 함께 검사한다. 새 protocol 예약을 사용하지 않는 기존 생산자 계약의 회귀 검사다.
+
+Windows 스크롤백·문자 폭 설정의 진행 상태와 실제 앱 검증 범위는 [Windows 계획](plans/windows-platform.md#2026-11-01-스크롤백문자-폭-설정--검증-중)을 따른다. 집중 게이트는 `test-live-text-config`·`test-windows-settings-shrink`·`test-windows-settings`이며 전체 경계 및 배포 완료를 뜻하지 않는다.
+
+Windows cursor fade의 GPU 합성과 suffix 경계는 `test-windows-positioned-frame`, 공유 시간·포커스 정책은 `test-cursor-presentation`으로 검사한다. [Windows 진행 기록](plans/windows-platform.md)의 실앱·포커스·실패 복구 잔여 범위를 함께 따른다.
+
+### Windows UI 언어 설정
+
+부분 구현. `test-language-config`와 `test-windows-locale`은 기존 i18n 판정에 대한
+호스트 연결, 소유 알림의 언어 전환 및 Windows UTF-16 로케일 태그 경계를 검사한다.
+`test-settings-form`·`test-windows-settings`는 언어 표시명과 저장 토큰의 분리,
+미리보기·취소 및 다른 enum 보존을 검사한다. 각 영역의 독립 결함 5개를 실행으로
+검출했고 정상 Debug·ReleaseFast 대조를 통과했다. 실제 격리 Windows 앱에서 한국어
+저장→영어 미리보기→취소 복원과 `auto` 시작의 OS `ko-KR` 일치를 확인했다.
+전체 경계 4묶음·교차 타깃·문서·wasm 검사도 통과했다. 증거와 실패한 초기 판정의
+제외 이유는 [Windows 진행 기록](plans/windows-platform.md)에 둔다. 외부 설정 reload 및 Windows 전체 설정 연결의 완료를 뜻하지 않는다.
+ReleaseFast 설치본 자체의 언어 저장·미리보기·취소와 OS 자동 언어 시작을 실제 Windows
+앱에서 추가 검증했다. 내장/창 아이콘과 바로가기 3개도 확인했다. 설치 증거와 실행 코드
+커밋은 위 Windows 진행 기록의 ReleaseFast 설치 절을 따른다.
+
+
+Windows native picker adapter (in progress): `test-windows-file-dialog` checks
+request ownership, one-shot result routing, cancellation and COM options. The
+opt-in `tools/windows/check-file-dialog.py --show --output <new-receipt.json>`
+checks actual file/folder modal cancellation with a private owner; repeat with
+`--optimize O3` for optimized C. Native cancellation requires actual modal return,
+dialog disappearance and owner restoration. These C checks do not prove Windows
+sidebar/tab/file-tree menu routing, accepted-file opening or Zig detached-worker
+scheduling. The explicit `test-windows-file-dialog-live` additionally exercises
+real Zig worker scheduling, modal cancellation and one-shot request tokens in
+Debug/ReleaseFast. Menu routing and accepted-file opening still require app tests
+before marking menus complete.
+
+
+Windows app file picker: isolated ReleaseFast app cancellation and acceptance of a
+Korean-named text file passed using synthetic HWND input. A reviewed screen capture
+shows the exact fixture marker and Korean contents in the editor; app diagnostics
+confirm one registered document. Evidence: `.zig-cache/windows-file-dialog-app-reviewed-20261101.json`.
+This proves the first-open keyboard route, not context menus, reopening an existing
+file, physical input or installed-preview delivery.
+
+- Windows explorer background popup: `zig build test-windows-explorer-menu`
+  verifies command mapping, stale-generation rejection and input capture. Actual
+  popup drawing and native folder selection need the isolated
+  `tools/windows/check-app-explorer-menu.py` runtime probe and image review.
+
+  The cache-built ReleaseFast app passed folder replace/add and cancel in an
+  isolated profile; reviewed pixels show both Korean folder roots and child rows.
+  Keyboard file-open still shows the fixture marker and Korean document contents.
+  Evidence and source binding:
+  `.zig-cache/windows-explorer-menu-app-reviewed-20261101.json`.
+  Installation delivery and row/sidebar/tab menus remain outside this proof.
+
+  Background Open File and both Esc/outside-click dismissal also passed, with
+  document pixels reviewed and zero menu input delivered to the shell. The
+  expanded five-receipt source binding is
+  `.zig-cache/windows-explorer-menu-app-reviewed-r2-20261101.json`.
+
+- Windows consumed-key lifecycle: `zig build test-windows-key-strokes` checks
+  native press identities and UI completion. Five independent compiled faults
+  were rejected, with Debug/ReleaseFast controls. A private app `--case input`
+  probe covers held Escape/printable repeat, fresh identical keys, unrelated
+  release, focus cancellation and empty preedit-clear routing. The unmodified
+  checkpoint fails this probe; the isolated fix passes. The latest-main source
+  now passes full boundaries and cross-target compilation, plus the focused
+  key/menu/root-flow gates. Actual app revalidation of the integrated tree also
+  passes its native input scenarios. Preview a8663c168a19 is now installed; its
+  separate-profile settings checks and user-window startup are recorded below.
+
+
+### Windows 모달의 workspace·패널 패딩
+
+`test-windows-modal-layout` 8개는 명시적 workspace와 0 크기 권위, 모양 토큰,
+첫 패널만의 확장·후속 버튼 불변·gradient/clip 보존을 검사한다. 순수 어댑터
+검사이며 실제 HWND의 페인트·입력 검증을 대신하지 않는다.
+독립 결함 5개 및 정상 Debug/ReleaseFast 대조와 제품 통합 상태는
+[Windows 계획](plans/windows-platform.md)을 따른다.
+
+별도 ReleaseFast 앱의 설정창 13항목 및 패널 패딩의 수정 전후 픽셀 대조는
+`.zig-cache/windows-modal-layout-app-reviewed-20261101.json`에 기록했다.
+이어서 main 기반 통합 앱에서도 설정창 13개와 탐색기 5개 실행이 통과했다.
+통합 모델·의존 파일 해시와 정상 종료·wasm 대조를 포함한 근거는
+`.zig-cache/windows-modal-main-validation-20261101.json`이다. 설치본 검증은 별도다.
+
+
+### main 통합 설치 미리보기 a8663c168a19
+
+실행 자료 63개·폰트 18개·고지 36개와 기존 ConPTY의 설치 바이트, 바로가기
+3개·embedded 큰/작은 아이콘과 사용자 창의 가시성·응답을 확인했다.
+설치된 실행 파일의 별도 프로필 설정창 13개도 통과했다. 사용자 창에는 테스트
+입력을 보내지 않았다. 설치/실행 영수증과 남은 Windows 기능은
+[Windows 계획](plans/windows-platform.md)을 따른다. 미검증 clipboard·물리 IME,
+새 UI 이미지 첨부와 남은 메뉴를 이 설치 검증으로 완료 처리하지 않는다.

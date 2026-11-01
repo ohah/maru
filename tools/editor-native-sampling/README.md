@@ -27,6 +27,10 @@ python3 -m unittest discover -s tools/editor-native-sampling -p 'test_*.py'
 
 ## 대상과 주소 검증
 
+주소 reader는 GUI 앱 조사에서 명시적 실행 이미지 이름도 받는다. 기본 `archived-test` 계약은 유지하며
+다른 이름을 허용하더라도 경로·UUID·코드 영역·atos 출력의 이미지 이름은 정확히 일치해야 한다.
+GUI 진단의 모집단과 실행 절차는 [고정 입력 조사](../editor-input-attribution/README.md)가 소유한다.
+
 기준의 전체 Git 소스·실제 사본·생산자·보관 실행 파일·원문·40개 원시 로그를 먼저 검증한다.
 같은 보관 바이너리에서 dSYM을 만들고 UUID를 대조한다. trace는 실제 대상의 정상 종료까지
 기록한다. 실행 중인 유효 편집을 관측 시간 초과로 취소하지 않는다.

@@ -5425,6 +5425,11 @@ macOS에서는 제품 6개와 초기화 4개, 다른 플랫폼에서는 7개 수
 입력 ID 누락을 대조한다. SDK 없는 Python 계약은 CI에서 실행한다. 이 기록은 PID 대상 OS 게시이며
 물리 키보드·IME·광학 표시 증거가 아니다.
 
+준비 뒤 메인 실행 위치는 [입력 주소 조사](../tools/editor-input-attribution/README.md)에서 별도 기록한다.
+동기/비동기 각 3프로세스·30입력의 진단이며, 실제 기록 시작 통지 뒤 생산자를 시작한다.
+SDK 재내보내기·main thread ID·Mach-O/dSYM/atos를 대조하고 프로파일 시각을 정상 성능에 섞지 않는다.
+대상/recorder 환경은 허용 목록만 전달하고 TOC에 알 수 없는 환경 키가 있으면 채택하지 않는다.
+
 ## Chromium role 로케이터 테스트 응답 수명
 
 긴 접근성 이름 fixture는 콜백 반환 후 `Op.feed`가 소비할 때까지 JSON 바이트가 유효해야 한다.

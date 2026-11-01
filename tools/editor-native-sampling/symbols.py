@@ -56,20 +56,20 @@ def bundle_command(root, binary):
     return ['xcrun', 'dsymutil', str(binary), '-o', str(root / 'symbols.dSYM')]
 
 
-def symbol_file(root, expected_uuid):
-    path = root / 'symbols.dSYM/Contents/Resources/DWARF/archived-test'
+def symbol_file(root, expected_uuid, binary_name="archived-test"):
+    path = root / 'symbols.dSYM/Contents/Resources/DWARF' / binary_name
     stacks.require(path.is_file() and stacks.macho_uuid(path.read_bytes()) == expected_uuid, 'Debug symbol UUID differs')
     return path
 
 
-def plan(text, binary, binary_uuid):
+def plan(text, binary, binary_uuid, binary_name="archived-test"):
     root, _, refs = stacks.exported_table(text)
     region = text_region(binary.read_bytes())
     loads = set()
     for node in root.iter('binary'):
         image = refs.get(node)
-        if image.get('path') == str(binary) or image.get('name') == 'archived-test':
-            stacks.require(image.get('path') == str(binary) and image.get('name') == 'archived-test'
+        if image.get('path') == str(binary) or image.get('name') == binary_name:
+            stacks.require(image.get('path') == str(binary) and image.get('name') == binary_name
                            and image.get('UUID') == binary_uuid, 'Target image UUID or path differs')
             loads.add(hexadecimal(image.get('load-addr')))
     stacks.require(len(loads) == 1, 'Missing or ambiguous executable load address')
@@ -100,7 +100,7 @@ def commands(symbol, address_plan):
             for i in range(0, len(pcs), 256)]
 
 
-def names_from_output(text, pcs):
+def names_from_output(text, pcs, binary_name="archived-test"):
     lines = text.splitlines()
     stacks.require(len(lines) == len(pcs), 'Atos output population differs')
     names = {}
@@ -108,15 +108,15 @@ def names_from_output(text, pcs):
         if re.fullmatch(r'0x[0-9a-fA-F]+', line.strip()) or line.strip() == '???':
             names[pc] = None
             continue
-        match = re.fullmatch(r'(.+) \(in archived-test\)(?: \(.*\)| \+ [0-9]+)?', line.strip())
+        match = re.fullmatch(r'(.+) \(in '+re.escape(binary_name)+r'\)(?: \(.*\)| \+ [0-9]+)?', line.strip())
         stacks.require(match is not None, 'Atos output image differs')
         name = match[1]
         names[pc] = None if re.fullmatch(r'0x[0-9a-fA-F]+', name) else name
     return names
 
 
-def collect(folder, text, binary, symbol, binary_uuid):
-    address_plan = plan(text, binary, binary_uuid)
+def collect(folder, text, binary, symbol, binary_uuid, binary_name="archived-test"):
+    address_plan = plan(text, binary, binary_uuid, binary_name)
     calls = commands(symbol, address_plan)
     names = {}
     for index, command in enumerate(calls):
@@ -125,18 +125,18 @@ def collect(folder, text, binary, symbol, binary_uuid):
             with (folder / f'atos-{index:03d}.{suffix}').open('x') as stream:
                 stream.write(value)
         stacks.require(result.returncode == 0, 'Atos resolution failed; raw output preserved')
-        names.update(names_from_output(result.stdout, command[6:]))
+        names.update(names_from_output(result.stdout, command[6:], binary_name))
     return dict(schema=1, plan=address_plan, commands=calls, names=names)
 
 
-def checked(folder, text, binary, symbol, binary_uuid, saved):
-    address_plan = plan(text, binary, binary_uuid)
+def checked(folder, text, binary, symbol, binary_uuid, saved, binary_name="archived-test"):
+    address_plan = plan(text, binary, binary_uuid, binary_name)
     calls = commands(symbol, address_plan)
     stacks.require(type(saved.get('schema')) is int and saved['schema'] == 1, 'Wrong address resolution schema')
     stacks.require(saved.get('plan') == address_plan and saved.get('commands') == calls, 'Atos address coverage or command differs')
     recorded = {}
     for index, command in enumerate(calls):
-        recorded.update(names_from_output((folder / f'atos-{index:03d}.stdout').read_text(), command[6:]))
+        recorded.update(names_from_output((folder / f'atos-{index:03d}.stdout').read_text(), command[6:], binary_name))
     stacks.require(saved.get('names') == recorded, 'Recorded address names differ from raw output')
     # 새 사본에서도 dSYM 바이트를 확인한다. 같은 불변 자료의 재검사는 SDK 실행 결과만 재사용한다.
     key = (sha(symbol), binary_uuid, address_plan['load_address'], tuple(address_plan['pcs']))
@@ -145,7 +145,7 @@ def checked(folder, text, binary, symbol, binary_uuid, saved):
         for command in calls:
             result = subprocess.run(command, capture_output=True, text=True)
             stacks.require(result.returncode == 0, 'Atos SDK replay failed')
-            replay.update(names_from_output(result.stdout, command[6:]))
+            replay.update(names_from_output(result.stdout, command[6:], binary_name))
         _CACHE[key] = replay
     stacks.require(recorded == _CACHE[key], 'Address names differ from SDK replay')
     return dict(plan=address_plan, names=recorded)

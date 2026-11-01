@@ -2320,3 +2320,8 @@ ReleaseFast 외부 사본에서 실제 OS HID 게시·문서 판·Metal drawable
 `python3 -m unittest discover -s tools/editor-input-stream -p 'test_*.py'`는 SDK 없는 계약 검사다.
 메인 정지·표시 관측 제거·입력 누락 대조와 PID 대상 게시의 한계는
 [독립 생산자 계약](../tools/editor-input-stream/README.md)을 따른다.
+
+준비 뒤 메인 스레드 조사는 `python3 tools/editor-input-attribution/collect.py --build <불변 사본> --output <새 외부 경로>`와
+`python3 tools/editor-input-attribution/analyze.py <수집 경로> --output <새 외부 분석 경로>`로 실행한다.
+SDK 없는 계약은 `python3 -m unittest discover -s tools/editor-input-attribution -p 'test_*.py'`다.
+기록 시작 통지·환경 허용 목록·주소 재해석·진단 모집단의 한계는 [조사 계약](../tools/editor-input-attribution/README.md)을 따른다.

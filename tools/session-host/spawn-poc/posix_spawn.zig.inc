@@ -22,7 +22,13 @@ fn pocSpawnGrouped(
     // The current fork implementation also resets the shared input description's offset.
     if (input_fd) |fd| if (c.lseek(fd, 0, c.SEEK.SET) < 0) return error.SpawnSetupFailed;
     for (mappings, 0..) |source, target| if (source) |fd| {
-        if (c.posix_spawn_file_actions_adddup2(&actions, fd, @intCast(target)) != 0)
+        // Darwin's dup2(fd, fd) action does not preserve this CLOEXEC descriptor.
+        // Explicit inherit is required when a closed stdio slot makes source == target.
+        const rc = if (fd == @as(c.fd_t, @intCast(target)))
+            c.posix_spawn_file_actions_addinherit_np(&actions, fd)
+        else
+            c.posix_spawn_file_actions_adddup2(&actions, fd, @intCast(target));
+        if (rc != 0)
             return error.SpawnSetupFailed;
     };
     // dup2 sources must not become extra inherited descriptors under CLOEXEC_DEFAULT.

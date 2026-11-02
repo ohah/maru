@@ -491,7 +491,7 @@ pub const Cancellation = struct {
         entered: std.atomic.Value(bool) = .init(false),
         released: std.atomic.Value(bool) = .init(false),
         abort: bool = false,
-        stage: enum { parse, summary } = .parse,
+        stage: enum { parse, summary, folds } = .parse,
         pub fn release(self: *TestGate) void {
             self.released.store(true, .release);
         }
@@ -1332,6 +1332,14 @@ pub const Provider = struct {
         const before_gen = self.fold_changes_before orelse return null;
         if (before_gen == std.math.maxInt(u64) or before_gen + 1 != self.tree_gen) return null;
         return .{ .before = before_gen, .after = before_gen + 1, .ranges = self.fold_changes[0..self.fold_changes_len] };
+    }
+
+    /// 완료가 소유한 byte 후보만 준비한다. 뷰의 행·접힌 상태는 여기서 다루지 않는다.
+    pub fn prepareFoldCache(self: *const Provider, allocator: std.mem.Allocator, cache: *FoldCache, token: *const Cancellation) error{ OutOfMemory, Cancelled }!void {
+        if (@import("builtin").is_test) if (token.gate) |gate| {
+            if (gate.stage == .folds) gate.wait();
+        };
+        try cache.prepare(allocator, self.parser, self.tree, self.tree_gen, self.retainedChanges(), self.slot.fold_kinds, token);
     }
 
     /// 캐시 저장소는 호출자가 소유한다. 전체 순회 API는 대조군·일회 조회에 그대로 남긴다.
@@ -4967,7 +4975,8 @@ test "fold shared changes 편집 없는 같은 세대 조회는 이전 범위를
     try foldCacheJudge(&p, &cache, f.after);
     try foldCacheJudge(&p, &cache, f.after);
     try std.testing.expectEqual(@as(u64, 1), cache.reused_changes);
-    try std.testing.expectEqual(@as(u64, 1), cache.compared_changes);
+    // 같은 판은 비교와 정렬도 건너뛴다. 이전 편집의 변경 범위를 다시 적용하지 않는다.
+    try std.testing.expectEqual(@as(u64, 0), cache.compared_changes);
 }
 
 test "fold shared changes 보관하지 못한 범위와 잘못된 세대는 비교로 복귀한다" {
@@ -5691,4 +5700,139 @@ test "sticky preparation 증분 순회 중 취소는 이전 집계와 트리를 
 }
 test "sticky preparation 증분 집계 OOM은 이전 집계와 정상 후속 조회를 보존한다" {
     try summaryFailureJudge(false);
+}
+
+const FoldStopJudge = struct {
+    cache: *const FoldCache,
+    limit: u64,
+    pub fn isRequested(self: @This()) bool {
+        return self.cache.nodes >= self.limit;
+    }
+};
+
+test "fold preparation 복제와 원본 종료 뒤 첫 조회는 현재 좌표를 순회 없이 투영한다" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "fn f() void {\r\n    // 가 😀\r\n}\r\n", "fn f() void {}\n", "" }) |source| {
+        var p = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        if (p.tree == null) continue;
+        var original: FoldCache = .{};
+        var live = true;
+        defer if (live) original.deinit(a);
+        var token: Cancellation = .{};
+        try p.prepareFoldCache(a, &original, &token);
+        var peer = p.copyReady(.zig) orelse return error.NoSnapshot;
+        defer peer.deinit();
+        var copied = (try original.copyMatched(a, p.parser, p.tree_gen, peer.parser, peer.tree_gen)).?;
+        defer copied.deinit(a);
+        try std.testing.expect(copied.tree != original.tree);
+        original.deinit(a);
+        live = false;
+        try foldCacheJudge(&peer, &copied, source);
+        try std.testing.expectEqual(@as(u64, 0), copied.nodes);
+        try std.testing.expectEqual(@as(u64, 0), copied.compared_changes);
+    }
+}
+
+test "fold preparation 시작 전과 cold 순회 중 취소는 부분 후보를 공개하지 않는다" {
+    const a = std.testing.allocator;
+    var p = Provider.init("fn f() void {\n    _ = 1;\n}\nfn g() void {\n}\n", .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    var stop: Cancellation = .{};
+    stop.request();
+    try std.testing.expectError(error.Cancelled, p.prepareFoldCache(a, &cache, &stop));
+    try std.testing.expect(cache.tree == null);
+    try std.testing.expectEqual(@as(u64, 0), cache.nodes);
+    const judge: FoldStopJudge = .{ .cache = &cache, .limit = 3 };
+    try std.testing.expectError(error.Cancelled, cache.prepare(a, p.parser, p.tree, p.tree_gen, p.retainedChanges(), p.slot.fold_kinds, judge));
+    try std.testing.expect(cache.tree == null and cache.records.items.len == 0);
+    try std.testing.expectEqual(@as(u64, 3), cache.nodes);
+    try foldCacheJudge(&p, &cache, "fn f() void {\n    _ = 1;\n}\nfn g() void {\n}\n");
+}
+
+test "fold preparation 증분 취소는 캐시를 비우고 다음 정상 조회로 복구한다" {
+    const a = std.testing.allocator;
+    const f = FoldChangeFixture;
+    var p = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, f.before);
+    cache.edit(f.edit);
+    p.onEdit(f.after, f.edit);
+    const stop: FoldStopJudge = .{ .cache = &cache, .limit = cache.nodes + 1 };
+    try std.testing.expectError(error.Cancelled, cache.prepare(a, p.parser, p.tree, p.tree_gen, p.retainedChanges(), p.slot.fold_kinds, stop));
+    try std.testing.expect(cache.tree == null and cache.records.items.len == 0);
+    try foldCacheJudge(&p, &cache, f.after);
+}
+
+fn foldPreparationAllocationJudge(a: std.mem.Allocator) !void {
+    const source = "fn f() void {\n    _ = 1;\n}\nfn g() void {\n}\n";
+    var p = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    var token: Cancellation = .{};
+    try p.prepareFoldCache(a, &cache, &token);
+    var copy = (try cache.copyMatched(a, p.parser, p.tree_gen, p.parser, p.tree_gen)).?;
+    defer copy.deinit(a);
+    try std.testing.expect(copy.records.items.ptr != cache.records.items.ptr);
+    try foldCacheJudge(&p, &copy, source);
+}
+test "fold preparation 준비와 복사의 모든 Zig 할당 실패는 소유 자원을 회수한다" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, foldPreparationAllocationJudge, .{});
+}
+
+test "fold preparation 다른 parser 세대와 미반영 편집은 준비된 사본으로 복사하지 않는다" {
+    const a = std.testing.allocator;
+    var p = Provider.init("fn f() void {\n}\n", .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    var token: Cancellation = .{};
+    try p.prepareFoldCache(a, &cache, &token);
+    var peer = p.copyReady(.zig) orelse return error.NoSnapshot;
+    defer peer.deinit();
+    try std.testing.expect((try cache.copyMatched(a, peer.parser, p.tree_gen, peer.parser, peer.tree_gen)) == null);
+    try std.testing.expect((try cache.copyMatched(a, p.parser, p.tree_gen + 1, peer.parser, peer.tree_gen)) == null);
+    cache.edit(FoldChangeFixture.edit);
+    try std.testing.expect((try cache.copyMatched(a, p.parser, p.tree_gen, peer.parser, peer.tree_gen)) == null);
+}
+
+test "fold preparation 기존 대상의 복사 OOM과 잘못된 원본 거절은 내용과 참조를 보존한다" {
+    const a = std.testing.allocator;
+    var old = Provider.init("fn old() void {\n}\n", .zig, 0) orelse return error.NoProvider;
+    defer old.deinit();
+    var target: FoldCache = .{};
+    defer target.deinit(a);
+    var token: Cancellation = .{};
+    try old.prepareFoldCache(a, &target, &token);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..32) |_| try text.appendSlice(a, "fn many() void {\n}\n");
+    var source = Provider.init(text.items, .zig, 0) orelse return error.NoProvider;
+    defer source.deinit();
+    var prepared: FoldCache = .{};
+    defer prepared.deinit(a);
+    try source.prepareFoldCache(a, &prepared, &token);
+    try std.testing.expect(prepared.records.items.len > target.records.capacity);
+    const tree = target.tree;
+    const hash = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(target.records.items));
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, prepared.copyMatchedInto(fail.allocator(), source.parser, source.tree_gen, old.parser, old.tree_gen, &target));
+    try std.testing.expect(fail.has_induced_failure);
+    try std.testing.expectEqual(tree, target.tree);
+    try std.testing.expectEqual(hash, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(target.records.items)));
+    try std.testing.expectEqual(old.parser, target.parser.?);
+    try std.testing.expect(!try prepared.copyMatchedInto(a, source.parser, source.tree_gen + 1, old.parser, old.tree_gen, &target));
+    try std.testing.expectEqual(tree, target.tree);
+    try std.testing.expect(try prepared.copyMatchedInto(a, source.parser, source.tree_gen, source.parser, source.tree_gen, &target));
+    try foldCacheJudge(&source, &target, text.items);
+    const capacity = target.records.capacity;
+    prepared.invalidate();
+    try std.testing.expect(!try prepared.copyMatchedInto(a, source.parser, source.tree_gen, source.parser, source.tree_gen, &target));
+    try std.testing.expectEqual(capacity, target.records.capacity);
+    try foldCacheJudge(&source, &target, text.items);
 }

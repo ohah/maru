@@ -49,7 +49,7 @@ fn cleanupState(state: *colors.State, owner: *Runtime) void {
     if (saved != null and owner.service.heldCount() == before) saved.?.release();
 }
 fn install(owner: *Runtime, state: *colors.State, lease: registry.Lease) !void {
-    var prepared = (try view.prepare(owner, lease.owner.identity(lease).?, grammar, .zig)).?;
+    var prepared = (try view.prepare(a, owner, lease.owner.identity(lease).?, grammar, .zig)).?;
     defer cleanupPrepared(&prepared);
     try std.testing.expect(try prepared.install(owner, state, lease, grammar, .zig));
     try std.testing.expect(prepared.result == null and prepared.provider == null);
@@ -125,6 +125,8 @@ test "parse view install 공유 뷰의 색과 트리 조회는 cold 결과와 �
     try std.testing.expect(view.matches(&left, &owner, docs.identity(first).?, grammar, .zig));
     try warm(&left, first);
     try warm(&right, second);
+    try std.testing.expectEqual(@as(u64, 0), left.folds.nodes);
+    try std.testing.expectEqual(@as(u64, 0), right.folds.nodes);
     var cold = colors.openParsedBudgeted(original, .zig, 0);
     defer cold.deinit(a);
     const file = &docs.get(first).?.opened.?.file;
@@ -176,7 +178,7 @@ test "parse view install 준비 뒤 같은 본문 재요청과 편집 및 잘못
     try ready(&owner, lease);
     try install(&owner, &state, lease);
     const before = state.input_stamp.?;
-    var stale = (try view.prepare(&owner, docs.identity(lease).?, grammar, .zig)).?;
+    var stale = (try view.prepare(a, &owner, docs.identity(lease).?, grammar, .zig)).?;
     defer cleanupPrepared(&stale);
     try std.testing.expect(!try stale.install(&owner, &state, other, grammar, .zig));
     try std.testing.expect(!try stale.install(&owner, &state, read, grammar, .zig));
@@ -184,7 +186,7 @@ test "parse view install 준비 뒤 같은 본문 재요청과 편집 및 잘못
     const accepted = try stale.install(&owner, &state, lease, grammar, .zig);
     try std.testing.expect(!accepted);
     try std.testing.expectEqual(before, state.input_stamp.?);
-    var edited = (try view.prepare(&owner, docs.identity(lease).?, grammar, .zig)).?;
+    var edited = (try view.prepare(a, &owner, docs.identity(lease).?, grammar, .zig)).?;
     defer cleanupPrepared(&edited);
     try replace(&docs, lease);
     try std.testing.expect(!try edited.install(&owner, &state, lease, grammar, .zig));
@@ -204,14 +206,14 @@ test "parse view install legacy 보존과 빈 문서 및 준비 참조 overflow�
     defer legacy.deinit(a);
     const parser = legacy.provider.?.parser;
     try ready(&owner, lease);
-    var prepared = (try view.prepare(&owner, docs.identity(lease).?, grammar, .zig)).?;
+    var prepared = (try view.prepare(a, &owner, docs.identity(lease).?, grammar, .zig)).?;
     defer cleanupPrepared(&prepared);
     try std.testing.expectError(error.LegacyProvider, prepared.install(&owner, &legacy, lease, grammar, .zig));
     try std.testing.expectEqual(parser, legacy.provider.?.parser);
     var current = owner.ready(docs.identity(lease).?, grammar, .zig).?;
     const refs = current.job.main_refs;
     current.job.main_refs = std.math.maxInt(usize);
-    const failed = view.prepare(&owner, docs.identity(lease).?, grammar, .zig);
+    const failed = view.prepare(a, &owner, docs.identity(lease).?, grammar, .zig);
     current.job.main_refs = refs;
     try std.testing.expectError(error.ReferenceOverflow, failed);
     try std.testing.expectEqual(parser, legacy.provider.?.parser);
@@ -251,7 +253,9 @@ test "parse view install 교체는 이전 캐시를 비우고 최신 판을 독�
     try ready(&owner, lease);
     try install(&owner, &state, lease);
     try std.testing.expect(colors.matchesInput(&state, docs.identity(lease).?, 1));
-    try std.testing.expect(state.folds.tree == null and state.folds.records.items.len == 0);
+    try std.testing.expect(state.folds.tree != null and state.folds.records.items.len == 0);
+    try std.testing.expectEqual(state.provider.?.tree_gen, state.folds.synced_gen);
+    try std.testing.expectEqual(state.provider.?.parser, state.folds.parser.?);
     try std.testing.expect(!state.brackets.ready and state.brackets.leaves.items.len == 0);
     try std.testing.expect(state.bracket_resolved == null and state.bracket_navigation.entries.items.len == 0);
     try std.testing.expect(state.symbols.items.len == 0 and state.crumb.items.len == 0);
@@ -282,4 +286,25 @@ test "parse view install 교체는 이전 캐시를 비우고 최신 판을 독�
         try std.testing.expectEqual(@as(usize, 2), owner.service.heldCount());
         if (iteration % 2 == 0) try warm(&state, lease);
     }
+}
+
+test "parse view install 접힘 복사 OOM은 정상 트리와 본문을 보존한다" {
+    var docs: registry.Registry = .{ .allocator = a };
+    defer docs.deinit() catch unreachable;
+    const lease = try document(&docs, original);
+    defer _ = docs.release(lease) catch unreachable;
+    var owner = try Runtime.init(a, .{});
+    defer owner.deinit() catch unreachable;
+    var state: colors.State = .{};
+    defer cleanupState(&state, &owner);
+    try ready(&owner, lease);
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var prepared = (try view.prepare(fail.allocator(), &owner, docs.identity(lease).?, grammar, .zig)).?;
+    defer prepared.deinit();
+    try std.testing.expect(try prepared.install(&owner, &state, lease, grammar, .zig));
+    try std.testing.expect(fail.has_induced_failure);
+    try std.testing.expect(state.provider != null and state.parse_result != null and state.folds.tree == null);
+    try warm(&state, lease);
+    try std.testing.expect(state.folds.nodes > 0);
+    try std.testing.expect(colors.matchesInput(&state, docs.identity(lease).?, 0));
 }

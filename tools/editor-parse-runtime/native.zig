@@ -38,7 +38,7 @@ pub fn main() !void {
     var installed: parse.view.State = .{};
     var installed_live = true;
     defer if (installed_live) installed.deinit(a);
-    var prepared = (try parse.prepareView(old_identity, grammar, .zig)).?;
+    var prepared = (try parse.prepareView(a, old_identity, grammar, .zig)).?;
     defer prepared.deinit();
     if (!try parse.installView(&prepared, &installed, old_view, grammar, .zig)) return error.ViewNotInstalled;
     if (installed.provider == null or installed.input_stamp == null) return error.MissingViewProof;

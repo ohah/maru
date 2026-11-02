@@ -5442,6 +5442,11 @@ SDK 재내보내기·main thread ID·Mach-O/dSYM/atos를 대조하고 프로파�
 재구축 0을 확인한다. [검증 결과](../tools/editor-input-stream/summary-results.md)는 경계 조건과
 같은 실행 파일의 준비 끔/켬 대조를 구분한다. 접힘 캐시와 물리 IME는 이번 변경 범위가 아니다.
 
+[접힘 후보 준비](plans/editor-async-fold-preparation.md)는 byte 후보와 행 투영을 분리한다.
+`test-editor-fold-preparation`은 준비·독립 복사·취소·할당 실패를, worker/view 게이트는
+실제 준비 취소/OOM과 두 뷰의 첫 조회 재순회 0 및 복사 실패 뒤 정상 파싱 보존을 검사한다.
+기존 접힘 좌표·정렬·캐시와 제품 입력 검사는 표시 상태·LSP 우선순위 회귀를 별도로 확인한다.
+
 ## Chromium role 로케이터 테스트 응답 수명
 
 긴 접근성 이름 fixture는 콜백 반환 후 `Op.feed`가 소비할 때까지 JSON 바이트가 유효해야 한다.

@@ -766,3 +766,63 @@ test "parse worker 선택적 요약 OOM은 준비된 파싱과 기존 조회 재
     }
     try std.testing.expectEqual(copies.allocated_bytes, copies.freed_bytes);
 }
+
+test "parse worker 접힘 준비 중 취소는 완료와 자원을 회수한다" {
+    const a = std.testing.allocator;
+    var text = try buffer.Buffer.init(a, "fn f() void {\n}\n");
+    defer text.deinit();
+    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
+    {
+        var service = try Service.init(a, .{ .audit = &audit });
+        defer service.deinit() catch unreachable;
+        var gate: request.Gate = .{};
+        var pause: syntax.Cancellation.TestGate = .{ .stage = .folds };
+        defer pause.release();
+        _ = try testQueue(&service, &gate, test_input, text, &pause);
+        try waitEntered(&pause);
+        service.cancelDocument(test_input.document);
+        pause.release();
+        var result = testTake(&service);
+        defer result.release();
+        try std.testing.expectEqual(Outcome.cancelled, result.outcome());
+        try std.testing.expect(result.preparedFolds() == null);
+        try std.testing.expect(!result.accept(&gate));
+    }
+    try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
+    try std.testing.expect(!audit.wrong_thread.load(.acquire));
+}
+
+test "parse worker 접힘 후보 OOM은 파싱을 유지하고 기존 조회로 복구한다" {
+    const a = std.testing.allocator;
+    var text = try buffer.Buffer.init(a, "fn f() void {\n}\n");
+    defer text.deinit();
+    var copies = std.testing.FailingAllocator.init(std.heap.page_allocator, .{});
+    {
+        var service = try Service.init(a, .{ .copy_allocator = copies.allocator() });
+        defer service.deinit() catch unreachable;
+        var gate: request.Gate = .{};
+        var pause: syntax.Cancellation.TestGate = .{ .stage = .folds };
+        defer pause.release();
+        _ = try testQueue(&service, &gate, test_input, text, &pause);
+        try waitEntered(&pause);
+        copies.fail_index = copies.alloc_index;
+        pause.release();
+        var result = testTake(&service);
+        defer result.release();
+        try std.testing.expectEqual(Outcome.ready, result.outcome());
+        try std.testing.expect(result.accept(&gate));
+        try std.testing.expect(result.preparedFolds() == null);
+        var p = result.provider().?.copyReady(.zig) orelse return error.NoSnapshot;
+        defer p.deinit();
+        var lines = try maru.session.editor.line_index.build(a, "fn f() void {\n}\n");
+        defer lines.deinit();
+        var cache: syntax.FoldCache = .{};
+        defer cache.deinit(a);
+        var spans: std.ArrayList(syntax.Provider.FoldSpan) = .empty;
+        defer spans.deinit(a);
+        try p.foldSpansCached(a, &cache, lines.lines, &spans);
+        try std.testing.expectEqual(@as(usize, 1), spans.items.len);
+        try std.testing.expect(cache.nodes > 0);
+    }
+    try std.testing.expectEqual(copies.allocated_bytes, copies.freed_bytes);
+}

@@ -31,7 +31,7 @@ def summarize(root):
         rows.append(row)
     return dict(schema=1, protocol=proof['protocol'], root=str(pathlib.Path(root).resolve()),
                 head=proof['head'], app_sha256=proof['app_sha256'], producer_sha256=proof['producer_sha256'],
-                summary_control=proof['summary_control'],
+                summary_control=proof['summary_control'],fold_control=proof['fold_control'],
                 manifest_sha256=verify.sha(pathlib.Path(root)/'manifest.json'),verifier_sha256=proof['verifier_sha256'],
                 summary_tool_sha256=verify.sha(__file__),host=manifest.get('host'),processes=len(proof['runs']),
                 inputs=sum(row['post_to_present_ms']['count'] for row in rows),

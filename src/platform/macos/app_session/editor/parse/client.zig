@@ -78,7 +78,7 @@ pub fn install(session: *host.AppSession, term: *host.Term) void {
                 editor.syntaxDidComplete(session, term);
                 return;
             }
-            var prepared = (dispatch.prepareView(current.document, grammar(term), colors.syntaxLanguage(term.rt.editor_grammar)) catch |err| {
+            var prepared = (dispatch.prepareView(session.allocator, current.document, grammar(term), colors.syntaxLanguage(term.rt.editor_grammar)) catch |err| {
                 // 문서 결과는 정상이다. 이 뷰만 중단하고 다른 공유 뷰의 설치는 계속한다.
                 state.async_view.disabled = key(term);
                 state.pending = false;

@@ -24,7 +24,7 @@ def provider_fingerprints():
     return {str(p):verify.sha(p) if p.is_file() else None for p in paths}
 
 
-def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None):
+def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None):
     target.mkdir(mode=0o700)
     (target/'profile').mkdir();(target/'host').mkdir(mode=0o700)
     data = protocol.fixture(size)
@@ -33,6 +33,9 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     state = json.loads((build/'source.json').read_text())
     if summary_control is not None and (state.get('summary_control') is not True or summary_control not in ('disabled','prepared')):
         raise ValueError('verified summary control build/mode required')
+    if fold_control is not None and (state.get('fold_control') is not True or fold_control not in ('disabled','prepared')):
+        raise ValueError('verified fold control build/mode required')
+    if summary_control is not None and fold_control is not None:raise ValueError('one cache control required')
     app = build/'source/zig-out/Maru.app/Contents/MacOS/maru-macos-app'
     producer = build/'producer'
     if verify.sha(app) != state['app_sha256'] or verify.sha(producer) != state['producer_sha256']:
@@ -50,10 +53,11 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     if kind == 'main-pause': env['MARU_STREAM_MAIN_PAUSE_MS']='500'
     if kind == 'drop-present': env.update(MARU_STREAM_DROP_PRESENT='1',MARU_STREAM_WAIT_MS='7000')
     if summary_control=='disabled':env['MARU_STREAM_SKIP_SUMMARY_PREPARATION']='1'
+    if fold_control=='disabled':env['MARU_STREAM_SKIP_FOLD_PREPARATION']='1'
     meta = {'count':count,'mode':mode,'flow':flow,'size':size,'repeat':rep,'shared':flow=='shared','period_ns':period*1_000_000,'lateness_ns':20_000_000,
             'kind':kind,'fixture_bytes':len(data),'fixture_sha256':hashlib.sha256(data).hexdigest(),
             'fixture_tail_sha256':hashlib.sha256(data[3:]).hexdigest(),'load_before':os.getloadavg(),
-            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'summary_control':summary_control}
+            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'summary_control':summary_control,'fold_control':fold_control}
     child = sender = None
     failure = None
     with (target/'app.log').open('w') as log, (target/'producer.log').open('w') as sender_log:
@@ -131,7 +135,7 @@ def main():
     if any(not xs or len(xs)!=len(set(xs)) for xs in [sizes,periods,flows,modes]): p.error('unique nonempty dimensions required')
     source=json.loads((build/'source.json').read_text())
     if source.get('harness')!=protocol.NAME: p.error('independent stream build required')
-    if source.get('summary_control'):p.error('use summary study for the controlled experiment build')
+    if source.get('summary_control') or source.get('fold_control'):p.error('use cache study for the controlled experiment build')
     if verify.sha(build/'producer')!=source['producer_sha256'] or verify.sha(build/'source/zig-out/Maru.app/Contents/MacOS/maru-macos-app')!=source['app_sha256']: p.error('immutable build required')
     if a.kind=='skip' and a.count<4: p.error('skip control needs at least four inputs')
     subprocess.run([str(build/'producer'),'--preflight'],check=True)

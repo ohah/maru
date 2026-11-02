@@ -47,6 +47,7 @@ const Job = struct {
     unavailable_reason: ?UnavailableReason = null,
     provider: ?syntax.Provider = null,
     basis: ?Basis = null,
+    folds: syntax.FoldCache = .{},
     mode: Mode = .cold,
     fn execute(self: *Job, state: *State) void {
         const allocator = state.options.copy_allocator;
@@ -99,6 +100,8 @@ const Job = struct {
         // 파싱 완료만 복사하면 각 뷰의 첫 조회가 메인에서 전체 심볼을 다시 센다.
         // 요약은 선택적 캐시다. OOM은 기존 조회의 재구축으로, 취소는 아래의 기존 반환 경로로 간다.
         if (complete and !self.cancellation.isRequested()) parsed.prepareStickySummary(allocator, &self.cancellation) catch {};
+        // 완료의 불변 byte 후보를 한 번 준비한다. 각 뷰는 독립 복사 뒤 자기 줄로 투영한다.
+        if (complete and !self.cancellation.isRequested()) parsed.prepareFoldCache(allocator, &self.folds, &self.cancellation) catch {};
         if (builtin.is_test) if (state.options.audit) |audit| {
             if (self.cancellation.isRequested() and parsed.tree != null)
                 _ = audit.cancelled_with_tree.fetchAdd(1, .monotonic);
@@ -193,6 +196,7 @@ const State = struct {
         while (true) {
             if (self.retiring.pop()) |job| {
                 self.mutex.unlock(io_value);
+                job.folds.deinit(self.options.copy_allocator);
                 if (job.provider) |*provider| {
                     provider.deinit();
                     self.recordNative(false);
@@ -252,6 +256,11 @@ pub const Completion = struct {
     pub fn provider(self: Completion) ?*const syntax.Provider {
         if (self.job.outcome != .ready) return null;
         return if (self.job.provider) |*value| value else null;
+    }
+    /// 반환 전까지만 빌린다. 완료 이후에는 워커도 이 불변 후보를 수정하지 않는다.
+    pub fn preparedFolds(self: Completion) ?*const syntax.FoldCache {
+        if (self.outcome() != .ready or self.job.folds.tree == null) return null;
+        return &self.job.folds;
     }
     pub fn accept(self: Completion, gate: *request.Gate) bool {
         if (self.job.outcome != .ready) {

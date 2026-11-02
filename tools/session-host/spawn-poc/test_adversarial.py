@@ -6,10 +6,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import signal
+import types
+import contextlib
+import io
 
-from analyze import read_record
+from analyze import read_record, summarize
 from log_results import parse, performance_eligible
 from process_cleanup import live_session
+import process_cleanup
 from run import execute
 from snapshot import freeze, copy
 from variants import make_variant
@@ -74,6 +80,25 @@ class Evidence(unittest.TestCase):
             row = execute([sys.executable, "-c", "print(" + repr(fake) + ")"], root, root / "false-green.log", expected_names=["t1", "t2"])
             self.assertFalse(row["validation"]["complete"])
             self.assertFalse(read_record(root, row, 2)[0]["validation"]["complete"])
+    def test_failed_fence_is_excluded_by_actual_aggregator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bounded.log").write_text(log(26))
+            (root / "warm.log").write_text(perf())
+            (root / "failed.log").write_text(perf())
+            rows = [{"label": "bounded", "log": "bounded.log", "exit": 0},
+                    {"label": "fence-0", "log": "warm.log", "exit": 0, "warmup": True},
+                    {"label": "fence-1", "log": "failed.log", "exit": 1, "warmup": False}]
+            report = {"head": "fixture", "platform": "fixture", "race_controls": [], "rounds": 1,
+                      "variants": {"baseline": {"runs": rows}}}
+            (root / "results.json").write_text(json.dumps(report))
+            with contextlib.redirect_stdout(io.StringIO()): summarize(root)
+            result = json.loads((root / "comparison.json").read_text())["variants"]["baseline"]
+            self.assertEqual(result["timings"], {})
+            rows[-1]["exit"] = 0
+            (root / "results.json").write_text(json.dumps(report))
+            with contextlib.redirect_stdout(io.StringIO()): summarize(root)
+            self.assertTrue(json.loads((root / "comparison.json").read_text())["variants"]["baseline"]["timings"])
     def test_unknown_variant(self):
         with self.assertRaises(ValueError): make_variant("", "typo")
     def test_source_drift(self):
@@ -86,6 +111,34 @@ class Evidence(unittest.TestCase):
 
 
 class Ownership(unittest.TestCase):
+    def test_worker_appearing_during_cleanup_is_also_killed(self):
+        calls = []
+        with mock.patch.object(process_cleanup, "live_session", side_effect=[{100: 1}, {}, {50: 1}, {}]), \
+             mock.patch.object(process_cleanup, "LIBC", types.SimpleNamespace(getsid=lambda pid: 999)), \
+             mock.patch.object(process_cleanup, "send", side_effect=lambda pid, sig: calls.append((pid, sig))):
+            found = process_cleanup.cleanup(999)
+        self.assertEqual(found, [50, 100])
+        self.assertIn((50, signal.SIGKILL), calls)
+    def test_cleanup_cannot_report_success_with_survivors(self):
+        with mock.patch.object(process_cleanup, "live_session", return_value={100: 1}), \
+             mock.patch.object(process_cleanup, "LIBC", types.SimpleNamespace(getsid=lambda pid: 999)), \
+             mock.patch.object(process_cleanup, "send"), \
+             mock.patch.object(process_cleanup.time, "monotonic", side_effect=[0, 2]):
+            with self.assertRaises(RuntimeError): process_cleanup.cleanup(999)
+    def test_kill_order_is_ancestry_not_pid_order(self):
+        graph = {100: 1, 50: 100, 200: 50}
+        calls = []
+        with mock.patch.object(process_cleanup, "live_session", side_effect=[graph, {}, {}]), \
+             mock.patch.object(process_cleanup, "LIBC", types.SimpleNamespace(getsid=lambda pid: 999)), \
+             mock.patch.object(process_cleanup, "send", side_effect=lambda pid, sig: calls.append((pid, sig))):
+            process_cleanup.cleanup(999)
+        self.assertEqual([pid for pid, sig in calls if sig == signal.SIGKILL], [200, 50, 100])
+    def test_reused_pid_outside_session_is_never_signaled(self):
+        with mock.patch.object(process_cleanup, "live_session", side_effect=[{100: 1}, {}, {}]), \
+             mock.patch.object(process_cleanup, "LIBC", types.SimpleNamespace(getsid=lambda pid: 555)), \
+             mock.patch.object(process_cleanup, "send") as send:
+            process_cleanup.cleanup(999)
+        send.assert_not_called()
     def test_committed_snapshot_and_independent_copies(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); repo = root / "repo"; repo.mkdir()

@@ -1,7 +1,7 @@
 # Process launch strategy PoC
 
 This is an experiment, not a product repair. It generates separate source trees from Maru's own
-current checkout and changes only their `bounded_process.zig` implementation. The checkout's
+committed HEAD snapshot and changes only their `bounded_process.zig` implementation. The checkout's
 product files and its existing 24 bounded-process test expectations remain unchanged.
 
 ```sh
@@ -9,8 +9,9 @@ python3 tools/session-host/spawn-poc/run.py --output /absolute/new/directory --r
 python3 tools/session-host/spawn-poc/analyze.py /absolute/new/directory
 ```
 
-The directory must not already exist. Sources are linked read-only by convention; files modified
-by the experiment are materialized as independent copies. Run the variants sequentially with
+The directory must not already exist. `git archive` freezes the committed source, and each
+candidate gets independent files. Worktree edits and writes in another candidate cannot alter
+the snapshot. Experimental input files are frozen and hashed at startup. Run the variants sequentially with
 `-j1` to avoid making compiler or neighboring test load part of the performance comparison.
 
 | Variant | Group creation | Exec setup |
@@ -22,8 +23,9 @@ by the experiment are materialized as independent copies. Run the variants seque
 The existing bounded-process gate exercises closed environments, stdin, held working directories,
 held executable paths, separate capture streams, fd 3 pipe/socket inheritance, output bounds,
 deadline cleanup including descendants, and exact child failure observations. Two PoC-only tests
-add an actual child PGID check and a non-CLOEXEC descriptor above a lowered soft limit. Their
-test count is 26 only in the generated copies; the product gate still expects 24.
+add an actual child PGID check, closed stdio and fd 3 alias cases, real exit 126 observation,
+descriptor exhaustion cleanup, and a non-CLOEXEC descriptor above a lowered soft limit.
+The generated guard comes from the actual combined inventory; the product gate still expects 24.
 The PGID supplement also reports 30 capture-and-reap round trips per optimization mode. Use
 `--bounded-only --skip-race-control` for a focused rerun of these contracts.
 
@@ -34,6 +36,13 @@ does **not** mean every prototype passed: `results.json` retains nonzero exits a
 
 The independent syscall control synchronizes overlapping group requests, then compares ordered
 and child-only requests on the same host. A local success cannot replace macOS 15 CI evidence.
+
+`test_adversarial.py` attacks the driver itself: partial/forged counts, missing optimization
+modes, unknown/filtered tests, failed-run timing pollution, log integrity, snapshot isolation,
+and timeout/reparented-worker cleanup. `comparison.json` marks incomplete evidence explicitly.
+The analyzer reads the original logs, validates their digests and test inventory, and excludes
+failed or incomplete fence runs from timing aggregates. The driver checks its private session
+for orphaned worker groups and refuses to hide survivors behind an exit-zero result.
 
 Important interpretation limits:
 

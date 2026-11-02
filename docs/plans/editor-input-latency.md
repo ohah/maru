@@ -119,3 +119,11 @@ Time Profiler를 붙여 고정 입력을 유지했다. 동기/비동기 각각 3
 [후속 구현](editor-async-fold-preparation.md)은 완료의 byte 후보를 워커에서 만들고 뷰의
 기존 배열에 독립 복사한다. 각 뷰의 줄 투영과 접힌 상태는 유지한다. 준비 끔/켬의
 같은 바이너리 대조와 worker/뷰 OOM·취소 검증은 해당 계획과 결과 문서를 따른다.
+
+
+## 완료 괄호 잎 준비
+
+[후속 구현](editor-async-bracket-preparation.md)은 첫 잎 수집을 worker에서 준비하고
+각 뷰에 독립 복사한다. [실측](../../tools/editor-input-stream/bracket-results.md)은 구문과
+최종 색의 표시를 분리한다. 최종 색은 짧아졌지만 구문 표시 자체가 늦어진 조건도 있어
+모든 입력의 개선으로 표현하지 않는다. 미완료 생산자 지각 묶음은 별도 보존한다.

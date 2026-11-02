@@ -5476,7 +5476,9 @@ SDK 재내보내기·main thread ID·Mach-O/dSYM/atos를 대조하고 프로파�
 `test-editor-bracket-preparation`은 언어별 기존 수집·소유권·취소·Zig OOM·parser 경계를,
 worker/view 게이트는 실제 취소/OOM·두 뷰 재수집 0·개별 색 풀·낡은 판정 차단을 검사한다.
 `test-editor-bracket-continuation`은 캐시 부재의 다음 프레임 요청과 현재 판의 최종 색/탐색을 대조한다.
-실제 입력 대조는 구문 준비 표시와 최종 색을 나누며 native 검사를 OS IME 검증으로 해석하지 않는다.
+[채택 96프로세스 대조](../tools/editor-input-stream/bracket-results.md)는 구문 준비 표시와 최종 색을
+나누며 구문 표시 지연의 손익과 별도 미완료 생산자 지각 묶음을 보존한다.
+native 검사를 OS IME 검증으로 해석하지 않는다.
 
 ## Chromium role 로케이터 테스트 응답 수명
 

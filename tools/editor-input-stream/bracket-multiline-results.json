@@ -1,0 +1,1727 @@
+{
+  "schema": 1,
+  "kind": "worker-cache-study",
+  "cache": "bracket",
+  "app_sha256": "92f207958964aa321dc8ffa0eb415ef22a34986c22fa1a9adc3eecef9a8129c2",
+  "head": "66d6615b7bf1ada023378a0d95783ca5073ed462",
+  "raw_root": "~/.cache/maru-agent-artifacts/async-bracket-multiline-study-2",
+  "raw_files_sha256": {
+    "study.json": "f8a9f77543c8429f15dabb017678beb9a93388e2ec468718bbaa2bcea462891e",
+    "comparison.json": "4904f89a571c5874bec8334dfc51205efbe4ba85075a6618999c9acece8398b1",
+    "disabled/manifest.json": "ceffd34594acc7e68e441f9c3cce4ce92c672706ca2ad2421d91c747e4ebe190",
+    "prepared/manifest.json": "92a06a5b6b18544608601081a37067e707be86ffcc71a640ddb5de23459f57c4"
+  },
+  "final_reader_dependencies": {
+    "verify.py": "ad759ad29012b550dec8c296351f5e61581ee113fc7f24cae1258e73cdd9a764",
+    "bracket_control.py": "eabe91c96e64589c2fa412e2e9c6b0da6daabf9925c05e28f9bcf769730d0851",
+    "summary_control.py": "5cdf362e130b48679ea3d65a2015f9e5a34af6ea9db7cbd9aafa5db4156d67a0",
+    "protocol.py": "2e9daa89918d261fc85fd809bfd9de28ccaa8207400e470ea00e770e575c173f",
+    "summarize.py": "21cd187e5b5b14cbbc76a0c046c75aa81f91eb3c804f8a99c3b0df6ad526b27b"
+  },
+  "before": {
+    "schema": 1,
+    "protocol": "independent-target-ascii-v1",
+    "head": "66d6615b7bf1ada023378a0d95783ca5073ed462",
+    "app_sha256": "92f207958964aa321dc8ffa0eb415ef22a34986c22fa1a9adc3eecef9a8129c2",
+    "producer_sha256": "383c0d0e97c4d87b3ed5992d5147e8a30d4bbc2921c313fe94d484672a039763",
+    "fixture_kind": "multiline",
+    "summary_control": null,
+    "fold_control": null,
+    "bracket_control": "disabled",
+    "manifest_sha256": "ceffd34594acc7e68e441f9c3cce4ce92c672706ca2ad2421d91c747e4ebe190",
+    "verifier_sha256": "ad759ad29012b550dec8c296351f5e61581ee113fc7f24cae1258e73cdd9a764",
+    "summary_tool_sha256": "21cd187e5b5b14cbbc76a0c046c75aa81f91eb3c804f8a99c3b0df6ad526b27b",
+    "processes": 24,
+    "inputs": 720,
+    "aggregation": "all keys including first; pooled median and nearest-rank p95; no trimming",
+    "conditions": [
+      {
+        "size": 3000,
+        "period_ms": 50,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 30.652209,
+          "p95": 50.430042,
+          "maximum": 52.953458
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.8083335,
+          "p95": 6.601583,
+          "maximum": 11.833208
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 29.168958500000002,
+          "p95": 45.645458,
+          "maximum": 46.421958
+        },
+        "last_post_to_syntax_present_ms": [
+          29.286708,
+          46.720167,
+          41.513542
+        ],
+        "syntax_to_full_color_ms": [
+          26.6765,
+          13.338208,
+          13.338208
+        ],
+        "syntax_ready_before_next_post": [
+          25,
+          19,
+          23
+        ],
+        "syntax_ready_on_first_present_count": [
+          21,
+          7,
+          7
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          55.963208,
+          60.058375,
+          54.85175
+        ],
+        "max_producer_lateness_ms": 5.504917,
+        "memory_per_process_bytes": [
+          {
+            "peak": 146063360,
+            "baseline_resident": 136806400,
+            "final_resident": 144769024
+          },
+          {
+            "peak": 142917632,
+            "baseline_resident": 136560640,
+            "final_resident": 141606912
+          },
+          {
+            "peak": 145145856,
+            "baseline_resident": 136527872,
+            "final_resident": 143835136
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 50,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 37.704,
+          "p95": 46.861667,
+          "maximum": 51.675417
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 1.8403749999999999,
+          "p95": 9.416,
+          "maximum": 12.353042
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.0366245,
+          "p95": 45.233542,
+          "maximum": 45.539042
+        },
+        "last_post_to_syntax_present_ms": [
+          41.088666,
+          40.642625,
+          51.675417
+        ],
+        "syntax_to_full_color_ms": [
+          13.33825,
+          13.33825,
+          53.352917
+        ],
+        "syntax_ready_before_next_post": [
+          28,
+          28,
+          26
+        ],
+        "syntax_ready_on_first_present_count": [
+          23,
+          23,
+          10
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          54.426916,
+          53.980875,
+          105.028334
+        ],
+        "max_producer_lateness_ms": 5.804167,
+        "memory_per_process_bytes": [
+          {
+            "peak": 143720448,
+            "baseline_resident": 135299072,
+            "final_resident": 142426112
+          },
+          {
+            "peak": 146964480,
+            "baseline_resident": 135348224,
+            "final_resident": 144867328
+          },
+          {
+            "peak": 145866752,
+            "baseline_resident": 135331840,
+            "final_resident": 144539648
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 37.883396000000005,
+          "p95": 46.584459,
+          "maximum": 53.800042
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6320205,
+          "p95": 5.289625,
+          "maximum": 15.64575
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 35.7583335,
+          "p95": 45.395208,
+          "maximum": 45.69275
+        },
+        "last_post_to_syntax_present_ms": [
+          37.381042,
+          42.643542,
+          33.485834
+        ],
+        "syntax_to_full_color_ms": [
+          13.338208,
+          13.338292,
+          13.338208
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          30,
+          26,
+          28
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          50.71925,
+          55.981834,
+          46.824042
+        ],
+        "max_producer_lateness_ms": 5.577167,
+        "memory_per_process_bytes": [
+          {
+            "peak": 144310272,
+            "baseline_resident": 136888320,
+            "final_resident": 142983168
+          },
+          {
+            "peak": 149684224,
+            "baseline_resident": 136871936,
+            "final_resident": 148520960
+          },
+          {
+            "peak": 144310272,
+            "baseline_resident": 136921088,
+            "final_resident": 143015936
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 30.093166500000002,
+          "p95": 46.616875,
+          "maximum": 47.810375
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6456255,
+          "p95": 2.327792,
+          "maximum": 12.160875
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 29.205479,
+          "p95": 45.455166,
+          "maximum": 46.510375
+        },
+        "last_post_to_syntax_present_ms": [
+          37.749708,
+          48.836875,
+          40.873
+        ],
+        "syntax_to_full_color_ms": [
+          13.338208,
+          13.338167,
+          13.33825
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          29,
+          3,
+          4
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          51.087916,
+          62.175042,
+          54.21125
+        ],
+        "max_producer_lateness_ms": 15.048833,
+        "memory_per_process_bytes": [
+          {
+            "peak": 144031744,
+            "baseline_resident": 135757824,
+            "final_resident": 142704640
+          },
+          {
+            "peak": 147439616,
+            "baseline_resident": 135266304,
+            "final_resident": 145211392
+          },
+          {
+            "peak": 145326080,
+            "baseline_resident": 135151616,
+            "final_resident": 144015360
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 50,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 33.81675,
+          "p95": 46.768208,
+          "maximum": 56.289958
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6275625,
+          "p95": 5.576875,
+          "maximum": 17.164916
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.0990415,
+          "p95": 39.836875,
+          "maximum": 45.603625
+        },
+        "last_post_to_syntax_present_ms": [
+          154.024041,
+          147.066917,
+          140.702583
+        ],
+        "syntax_to_full_color_ms": [
+          466.837959,
+          440.1615,
+          453.499875
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          620.862,
+          587.228417,
+          594.202458
+        ],
+        "max_producer_lateness_ms": 5.586959,
+        "memory_per_process_bytes": [
+          {
+            "peak": 356581376,
+            "baseline_resident": 327417856,
+            "final_resident": 344031232
+          },
+          {
+            "peak": 356466688,
+            "baseline_resident": 327073792,
+            "final_resident": 342753280
+          },
+          {
+            "peak": 356450304,
+            "baseline_resident": 327335936,
+            "final_resident": 341458944
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 50,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 32.023729,
+          "p95": 40.716833,
+          "maximum": 54.078417
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.598437,
+          "p95": 4.749291,
+          "maximum": 15.829333
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 29.4909165,
+          "p95": 38.778417,
+          "maximum": 40.2195
+        },
+        "last_post_to_syntax_present_ms": [
+          148.201542,
+          169.3035,
+          152.848125
+        ],
+        "syntax_to_full_color_ms": [
+          466.838042,
+          533.529125,
+          440.161458
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          615.039584,
+          702.832625,
+          593.009583
+        ],
+        "max_producer_lateness_ms": 5.64625,
+        "memory_per_process_bytes": [
+          {
+            "peak": 335953920,
+            "baseline_resident": 309051392,
+            "final_resident": 321142784
+          },
+          {
+            "peak": 336969728,
+            "baseline_resident": 310820864,
+            "final_resident": 321601536
+          },
+          {
+            "peak": 335200256,
+            "baseline_resident": 309198848,
+            "final_resident": 321257472
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 35.4231455,
+          "p95": 43.473625,
+          "maximum": 54.200417
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.611896,
+          "p95": 2.513791,
+          "maximum": 15.025292
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 34.73266649999999,
+          "p95": 42.288542,
+          "maximum": 45.569458
+        },
+        "last_post_to_syntax_present_ms": [
+          153.030792,
+          155.852416,
+          140.105083
+        ],
+        "syntax_to_full_color_ms": [
+          453.49975,
+          453.499834,
+          453.499833
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          606.530542,
+          609.35225,
+          593.604916
+        ],
+        "max_producer_lateness_ms": 5.61025,
+        "memory_per_process_bytes": [
+          {
+            "peak": 357105664,
+            "baseline_resident": 327188480,
+            "final_resident": 344457216
+          },
+          {
+            "peak": 357744640,
+            "baseline_resident": 327843840,
+            "final_resident": 343949312
+          },
+          {
+            "peak": 357203968,
+            "baseline_resident": 327385088,
+            "final_resident": 340951040
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 34.491729,
+          "p95": 45.608459,
+          "maximum": 48.87575
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.633271,
+          "p95": 4.906708,
+          "maximum": 12.171583
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.8037085,
+          "p95": 43.029834,
+          "maximum": 45.461708
+        },
+        "last_post_to_syntax_present_ms": [
+          137.159291,
+          139.841542,
+          137.559042
+        ],
+        "syntax_to_full_color_ms": [
+          466.838042,
+          453.499833,
+          453.499833
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          603.997333,
+          593.341375,
+          591.058875
+        ],
+        "max_producer_lateness_ms": 5.741542,
+        "memory_per_process_bytes": [
+          {
+            "peak": 336052224,
+            "baseline_resident": 309280768,
+            "final_resident": 320274432
+          },
+          {
+            "peak": 335953920,
+            "baseline_resident": 309428224,
+            "final_resident": 319520768
+          },
+          {
+            "peak": 335331328,
+            "baseline_resident": 309280768,
+            "final_resident": 320307200
+          }
+        ]
+      }
+    ],
+    "worker_proof": [
+      {
+        "path": "3000-100-shared-0-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          62,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-shared-1-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          62,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-shared-2-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          62,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-0-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          31,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-1-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          31,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-2-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          31,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-0-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          62,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-1-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          62,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-2-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          62,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-0-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          31,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-1-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          31,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-2-async",
+        "bracket_stats": [
+          0,
+          0,
+          31,
+          28,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-0-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          4,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-1-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          4,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-2-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          4,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-0-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          2,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-1-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          2,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-2-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          2,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-0-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          4,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-1-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          4,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-2-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          4,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-0-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          2,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-1-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          2,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-2-async",
+        "bracket_stats": [
+          0,
+          0,
+          2,
+          2,
+          0
+        ]
+      }
+    ]
+  },
+  "after": {
+    "schema": 1,
+    "protocol": "independent-target-ascii-v1",
+    "head": "66d6615b7bf1ada023378a0d95783ca5073ed462",
+    "app_sha256": "92f207958964aa321dc8ffa0eb415ef22a34986c22fa1a9adc3eecef9a8129c2",
+    "producer_sha256": "383c0d0e97c4d87b3ed5992d5147e8a30d4bbc2921c313fe94d484672a039763",
+    "fixture_kind": "multiline",
+    "summary_control": null,
+    "fold_control": null,
+    "bracket_control": "prepared",
+    "manifest_sha256": "92a06a5b6b18544608601081a37067e707be86ffcc71a640ddb5de23459f57c4",
+    "verifier_sha256": "ad759ad29012b550dec8c296351f5e61581ee113fc7f24cae1258e73cdd9a764",
+    "summary_tool_sha256": "21cd187e5b5b14cbbc76a0c046c75aa81f91eb3c804f8a99c3b0df6ad526b27b",
+    "processes": 24,
+    "inputs": 720,
+    "aggregation": "all keys including first; pooled median and nearest-rank p95; no trimming",
+    "conditions": [
+      {
+        "size": 3000,
+        "period_ms": 50,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 30.754061999999998,
+          "p95": 41.377834,
+          "maximum": 53.318583
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6456245,
+          "p95": 6.163334,
+          "maximum": 14.512208
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 29.206208500000002,
+          "p95": 38.653084,
+          "maximum": 45.416417
+        },
+        "last_post_to_syntax_present_ms": [
+          49.045667,
+          39.71075,
+          52.244917
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          22,
+          28,
+          24
+        ],
+        "syntax_ready_on_first_present_count": [
+          5,
+          3,
+          20
+        ],
+        "full_ready_on_first_present_count": [
+          5,
+          3,
+          20
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          49.045667,
+          39.71075,
+          52.244917
+        ],
+        "max_producer_lateness_ms": 5.647875,
+        "memory_per_process_bytes": [
+          {
+            "peak": 148111360,
+            "baseline_resident": 136347648,
+            "final_resident": 146800640
+          },
+          {
+            "peak": 149028864,
+            "baseline_resident": 136740864,
+            "final_resident": 147881984
+          },
+          {
+            "peak": 148275200,
+            "baseline_resident": 136577024,
+            "final_resident": 146948096
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 50,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 34.613375000000005,
+          "p95": 50.108209,
+          "maximum": 66.107166
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 1.271167,
+          "p95": 20.519792,
+          "maximum": 33.342084
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 30.524146000000002,
+          "p95": 42.589166,
+          "maximum": 45.261792
+        },
+        "last_post_to_syntax_present_ms": [
+          43.487167,
+          38.7025,
+          37.593416
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          15,
+          27,
+          19
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          21,
+          10
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          21,
+          10
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          43.487167,
+          38.7025,
+          37.593416
+        ],
+        "max_producer_lateness_ms": 11.10375,
+        "memory_per_process_bytes": [
+          {
+            "peak": 147980288,
+            "baseline_resident": 135249920,
+            "final_resident": 145817600
+          },
+          {
+            "peak": 144605184,
+            "baseline_resident": 135331840,
+            "final_resident": 143278080
+          },
+          {
+            "peak": 145866752,
+            "baseline_resident": 134807552,
+            "final_resident": 144572416
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 29.6242295,
+          "p95": 42.070375,
+          "maximum": 55.130333
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.669146,
+          "p95": 5.181125,
+          "maximum": 16.512917
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 28.733896,
+          "p95": 38.617416,
+          "maximum": 42.48075
+        },
+        "last_post_to_syntax_present_ms": [
+          48.112167,
+          49.796625,
+          45.949792
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          8
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          8
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          48.112167,
+          49.796625,
+          45.949792
+        ],
+        "max_producer_lateness_ms": 6.422291,
+        "memory_per_process_bytes": [
+          {
+            "peak": 149454848,
+            "baseline_resident": 136642560,
+            "final_resident": 148226048
+          },
+          {
+            "peak": 149864448,
+            "baseline_resident": 136593408,
+            "final_resident": 148766720
+          },
+          {
+            "peak": 145637376,
+            "baseline_resident": 136495104,
+            "final_resident": 144310272
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 31.703770499999997,
+          "p95": 42.29575,
+          "maximum": 51.723
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.67125,
+          "p95": 5.1375,
+          "maximum": 13.634208
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 29.347416,
+          "p95": 41.387458,
+          "maximum": 45.425
+        },
+        "last_post_to_syntax_present_ms": [
+          29.181958,
+          31.366291,
+          43.840833
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          24,
+          26,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          24,
+          26,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          29.181958,
+          31.366291,
+          43.840833
+        ],
+        "max_producer_lateness_ms": 5.602833,
+        "memory_per_process_bytes": [
+          {
+            "peak": 145473536,
+            "baseline_resident": 135397376,
+            "final_resident": 144228352
+          },
+          {
+            "peak": 145752064,
+            "baseline_resident": 135200768,
+            "final_resident": 144424960
+          },
+          {
+            "peak": 148144128,
+            "baseline_resident": 135348224,
+            "final_resident": 146980864
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 50,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 35.5570415,
+          "p95": 46.585833,
+          "maximum": 51.567208
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6210625000000001,
+          "p95": 5.505125,
+          "maximum": 12.865375
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.9443125,
+          "p95": 42.73925,
+          "maximum": 45.567333
+        },
+        "last_post_to_syntax_present_ms": [
+          190.446959,
+          203.257791,
+          203.676
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          190.446959,
+          203.257791,
+          203.676
+        ],
+        "max_producer_lateness_ms": 5.465125,
+        "memory_per_process_bytes": [
+          {
+            "peak": 354091008,
+            "baseline_resident": 326893568,
+            "final_resident": 338935808
+          },
+          {
+            "peak": 354828288,
+            "baseline_resident": 326877184,
+            "final_resident": 339427328
+          },
+          {
+            "peak": 355336192,
+            "baseline_resident": 326778880,
+            "final_resident": 340426752
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 50,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 31.397167,
+          "p95": 38.655917,
+          "maximum": 49.842208
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.607396,
+          "p95": 4.455208,
+          "maximum": 12.908167
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 29.4721875,
+          "p95": 37.3105,
+          "maximum": 38.830167
+        },
+        "last_post_to_syntax_present_ms": [
+          201.400292,
+          204.786375,
+          200.723625
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          201.400292,
+          204.786375,
+          200.723625
+        ],
+        "max_producer_lateness_ms": 5.620916,
+        "memory_per_process_bytes": [
+          {
+            "peak": 334249984,
+            "baseline_resident": 307757056,
+            "final_resident": 318783488
+          },
+          {
+            "peak": 334610432,
+            "baseline_resident": 307363840,
+            "final_resident": 320962560
+          },
+          {
+            "peak": 334610432,
+            "baseline_resident": 308019200,
+            "final_resident": 319619072
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 34.9049165,
+          "p95": 41.367333,
+          "maximum": 49.503667
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.8465210000000001,
+          "p95": 4.705167,
+          "maximum": 11.685542
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.931937500000004,
+          "p95": 39.610292,
+          "maximum": 43.068708
+        },
+        "last_post_to_syntax_present_ms": [
+          207.787292,
+          204.354833,
+          202.521458
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          207.787292,
+          204.354833,
+          202.521458
+        ],
+        "max_producer_lateness_ms": 5.649333,
+        "memory_per_process_bytes": [
+          {
+            "peak": 355467264,
+            "baseline_resident": 326533120,
+            "final_resident": 339656704
+          },
+          {
+            "peak": 354582528,
+            "baseline_resident": 326680576,
+            "final_resident": 338771968
+          },
+          {
+            "peak": 354435072,
+            "baseline_resident": 326811648,
+            "final_resident": 338755584
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 33.6072915,
+          "p95": 39.430292,
+          "maximum": 49.865584
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6113955,
+          "p95": 4.188375,
+          "maximum": 17.335208
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 32.591916999999995,
+          "p95": 38.347708,
+          "maximum": 39.098041
+        },
+        "last_post_to_syntax_present_ms": [
+          199.886834,
+          202.893959,
+          203.071541
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          199.886834,
+          202.893959,
+          203.071541
+        ],
+        "max_producer_lateness_ms": 5.510916,
+        "memory_per_process_bytes": [
+          {
+            "peak": 335495168,
+            "baseline_resident": 307904512,
+            "final_resident": 319750144
+          },
+          {
+            "peak": 334299136,
+            "baseline_resident": 307888128,
+            "final_resident": 318865408
+          },
+          {
+            "peak": 335888384,
+            "baseline_resident": 308019200,
+            "final_resident": 321503232
+          }
+        ]
+      }
+    ],
+    "worker_proof": [
+      {
+        "path": "3000-100-shared-0-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-shared-1-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-shared-2-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-0-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-1-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-2-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-0-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-1-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-2-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-0-async",
+        "bracket_stats": [
+          30,
+          30,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-1-async",
+        "bracket_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-2-async",
+        "bracket_stats": [
+          31,
+          29,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-0-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-1-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-2-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-0-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-1-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-2-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-0-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-1-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-2-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-0-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-1-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-2-async",
+        "bracket_stats": [
+          2,
+          2,
+          0,
+          0,
+          0
+        ]
+      }
+    ]
+  }
+}

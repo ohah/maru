@@ -19,7 +19,6 @@ class BracketControl(unittest.TestCase):
             with self.subTest(mode=mode,stats=stats),self.assertRaises(ValueError):self.valid(mode,stats)
 
 
-if __name__=='__main__':unittest.main()
 
 
 class SyntaxStages(unittest.TestCase):
@@ -54,3 +53,14 @@ class SyntaxStages(unittest.TestCase):
             elif mutation=='prefix':broken['syntax_presentations'][0][2]=100
             else:broken['syntax_presentations'].pop()
             with self.subTest(mutation=mutation),self.assertRaises(ValueError):bracket_control.stages(broken,p,m,verify.require)
+
+    def test_same_generation_cannot_change_syntax_ready_flag(self):
+        app,p,m=self.fixture();app['keys'][0][9]=0;app['keys'][0][10]=0
+        verify.validate(app,p,m)
+        with self.assertRaises(ValueError):bracket_control.stages(app,p,m,verify.require)
+
+    def test_more_prepared_than_attempted_is_rejected(self):
+        with self.assertRaises(ValueError):bracket_control.validate({'bracket_stats':[1,2,0,0,0]},{'bracket_control':'prepared'},verify.require)
+
+
+if __name__=='__main__':unittest.main()

@@ -4,6 +4,7 @@ import json
 import pathlib
 import protocol
 import summary_control
+import fold_control
 
 
 def require(ok, reason):
@@ -94,6 +95,7 @@ def classify(app, producer, meta):
     if meta['kind'] in ('normal', 'main-pause'):
         require(meta['producer_exit'] == 0, 'producer exit')
         summary_control.validate(app,meta,require)
+        fold_control.validate(app,meta,require)
         return validate(app, producer, meta)
     n = protocol.count(meta['count'])
     require(app['pid'] == meta['app_pid'] and producer['pid'] == meta['producer_pid'] and producer['target_pid'] == app['pid'] and app['pid'] != producer['pid'], 'control identity')
@@ -153,6 +155,9 @@ def read(root):
         require(sha(path/'record.json') == entry['record_sha256'], 'record drift')
         record = json.loads((path/'record.json').read_text())
         require(record.get('diagnostic',False) is False, 'diagnostic cohort is not baseline performance')
+        require(record.get('fold_control')==manifest.get('fold_control'),'fold experiment label differs')
+        require(bool(record.get('fold_control'))==bool(source.get('fold_control')),'fold experiment source differs')
+        require(not (record.get('summary_control') and record.get('fold_control')),'mixed cache experiments')
         require(record.get('summary_control')==manifest.get('summary_control'),'summary experiment label differs')
         require(bool(record.get('summary_control'))==bool(source.get('summary_control')),'summary experiment source differs')
         require(record['error'] is None and record['count'] == manifest['count'] and record['kind'] == manifest['kind'], 'run failure')
@@ -175,7 +180,7 @@ def read(root):
         results.append({'path':entry['path'],'identity':list(identity),'metrics':result,'app_sha256':record['app.json_sha256'],'posts_sha256':record['posts.json_sha256']})
     require(found == expected, 'missing matrix member')
     return {'schema':1,'protocol':protocol.NAME,'kind':manifest['kind'],'head':source['head'],'app_sha256':source['app_sha256'],
-            'summary_control':manifest.get('summary_control'),
+            'summary_control':manifest.get('summary_control'),'fold_control':manifest.get('fold_control'),
             'producer_sha256':source['producer_sha256'],'verifier_sha256':sha(__file__),'runs':results}
 
 

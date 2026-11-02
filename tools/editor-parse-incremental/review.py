@@ -87,7 +87,7 @@ def main():
             if name in mutants:
                 if result.returncode == 0 or not re.search(r'FAIL \(Test(?:UnexpectedResult|ExpectedEqual)\)', text):
                     raise RuntimeError('semantic fault not detected: ' + name)
-            elif result.returncode or 'All 21 tests passed.' not in text:
+            elif result.returncode or 'All 23 tests passed.' not in text:
                 raise RuntimeError('normal control failed: ' + name)
             results.append({'name': name, 'returncode': result.returncode, 'source_sha256': sha(leaf),
                             'native_sha256': sha(native), 'binary_sha256': sha(archive), 'log_sha256': sha(out / (name + '.log'))})

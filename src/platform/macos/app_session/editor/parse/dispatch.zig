@@ -66,8 +66,8 @@ pub fn observe(identity: registry.DocumentIdentity, grammar: request.Grammar, la
     return .none;
 }
 /// 기존 상태를 건드리기 전에 보유 참조와 독립 native 복사를 준비한다.
-pub fn prepareView(identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) error{ ReferenceOverflow, NativeCopyFailed }!?view.Prepared {
-    if (active) |*owner| return view.prepare(owner, identity, grammar, language);
+pub fn prepareView(view_allocator: std.mem.Allocator, identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) error{ ReferenceOverflow, NativeCopyFailed }!?view.Prepared {
+    if (active) |*owner| return view.prepare(view_allocator, owner, identity, grammar, language);
     return null;
 }
 /// 호출자가 준비 후 입력·언어·뷰를 바꿀 수 있으므로 설치 직전에 다시 검증한다.

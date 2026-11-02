@@ -402,6 +402,8 @@ Runtime 검증 12개는 이전 판 보유 중 새 결과 교체와 마지막 뷰
 성공하면 실제 `syntax.State`에 provider와 완료 보유 참조를 이동하고 새 parser·tree generation으로
 input stamp를 발급한다. 이전 접힘 tree·괄호 순회기와 판정·심볼/breadcrumb·색 스팬을 먼저
 무효화한다. 배열 용량과 괄호 순회 예산은 유지하되 이전 판의 부분 변경 범위는 재사용하지 않는다.
+후속 [접힘 후보 준비](editor-async-fold-preparation.md)는 이전 후보 무효화 뒤 worker의 현재 판
+후보를 독립 복사한다. 배열 용량은 재사용하며 행 투영과 접힌 상태는 뷰가 소유한다.
 이전 뷰의 native 자원을 모두 놓은 뒤 보유 참조를 반환해 워커의 최종 해제 경계를 지킨다.
 `State.deinit`도 같은 반환 순서를 따르고 `prepareSharedSnapshot`은 완료 보유 참조를 별도로
 retain한다. split 준비에서 보유 수가 넘치면 새 복사만 정산하고 기존 뷰는 보존한다.

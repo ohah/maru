@@ -16,8 +16,9 @@ def output_lock(out):
         lock.close();raise ValueError('another preparation owns this output')
     return lock
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--stream',action='store_true');p.add_argument('--summary-control',action='store_true');a=p.parse_args()
-    if a.summary_control and not a.stream:p.error('summary control requires stream harness')
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--stream',action='store_true');p.add_argument('--summary-control',action='store_true');p.add_argument('--fold-control',action='store_true');a=p.parse_args()
+    if (a.summary_control or a.fold_control) and not a.stream:p.error('cache control requires stream harness')
+    if a.summary_control and a.fold_control:p.error('one cache control per experiment')
     out=a.output.resolve();deps=a.deps.resolve()
     if subprocess.run(['git','diff','--quiet','HEAD','--','src','build.zig','build.zig.zon','web'],cwd=ROOT).returncode:p.error('product source must match HEAD')
     if out==ROOT or (out.exists() and not a.resume) or ROOT in out.parents or not deps.is_dir():p.error('new external output and existing dependencies required')
@@ -28,6 +29,7 @@ def main():
         prior=json.loads((out/'source.json').read_text())
         assert prior.get('harness','closed-loop-v1')==('independent-target-ascii-v1' if a.stream else 'closed-loop-v1'), 'harness changed'
         assert prior.get('summary_control',False)==a.summary_control, 'summary control changed'
+        assert prior.get('fold_control',False)==a.fold_control, 'fold control changed'
         assert prior['head']==subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(), 'HEAD changed'
         assert all(sha(ROOT/n)==h for n,h in prior['original'].items()), 'original source drift'
         assert all(sha(src/n)==h for n,h in prior['instrumented'].items()), 'private source drift'
@@ -43,7 +45,7 @@ def main():
     if (out/'build.log').exists():shutil.copy2(out/'build.log',out/('build-history-'+str(len(list(out.glob('build-history-*'))))+'.log'))
     names=['src/platform/macos/'+x for x in ['app_session.zig','app_session/debug_fixtures.zig','app_host_abi.zig','MaruAppHost.swift','maru_metal_renderer.m']]
     if a.stream:names.append('src/platform/macos/app_session/agent.zig')
-    if a.summary_control:names.append('src/platform/macos/app_session/editor/parse/worker.zig')
+    if a.summary_control or a.fold_control:names.append('src/platform/macos/app_session/editor/parse/worker.zig')
     original={n:sha(src/n) for n in names}
     def patch(n,fn):
         path=src/'src/platform/macos'/n;path.write_text(fn(path.read_text()))
@@ -68,6 +70,11 @@ def main():
         sys.path.insert(0,str(stream_dir))
         import summary_control
         patch('app_session/editor/parse/worker.zig',lambda s:summary_control.worker(s,once))
+    if a.fold_control:
+        import sys
+        sys.path.insert(0,str(stream_dir))
+        import fold_control
+        patch('app_session/editor/parse/worker.zig',lambda s:fold_control.worker(s,once))
     abi=(HERE/'abi.zig.inc').read_text().replace('session_mod.debug_fixtures','@import("app_session/debug_fixtures.zig")')
     if a.stream:
         abi=abi.replace('[0..7]','[0..8]')
@@ -76,8 +83,10 @@ def main():
         abi+="\npub export fn maru_stream_prepare(s: *AppSession, count: u64) bool { return count <= 36 and @import(\"app_session/debug_fixtures.zig\").streamStart(s, @intCast(count)); }\npub export fn maru_stream_valid(s: *AppSession) bool { return @import(\"app_session/debug_fixtures.zig\").streamFinalValid(s); }\n"
     if a.stream:abi+='\npub export fn maru_stream_tail(out: [*]u8) void { @import("app_session/debug_fixtures.zig").streamTail(out[0..32]); }\n'
     if a.summary_control:abi+=summary_control.abi()
+    if a.fold_control:abi+=fold_control.abi()
     driver_text=snippet('driver.swift.inc')
     if a.summary_control:driver_text=summary_control.driver(driver_text,once)
+    if a.fold_control:driver_text=fold_control.driver(driver_text,once)
     present=snippet('present.m.inc')
     if a.stream:present+='\n#include <sys/resource.h>'+ (HERE/'present.m.inc').read_text().split('#include <sys/resource.h>',1)[1]
     width='8' if a.stream else '7'
@@ -88,7 +97,7 @@ def main():
     patch('app_host_abi.zig',lambda s:s+'\n'+abi)
     patch('maru_metal_renderer.m',lambda s:once(once(s,'#include <string.h>','#include <string.h>\n'+present),'    // 두 drawable을 같은 command buffer에 present','    latency_arm(terminal_drawable);\n    // 두 drawable을 같은 command buffer에 present'))
     patch('MaruAppHost.swift',lambda s:once(once(once(once(s,'        if isEditorIMESmokeMode {\n            guard let driver = EditorIMESmokeDriver()', '        if isEditorIMESmokeMode && ProcessInfo.processInfo.environment["MARU_LATENCY_OUTPUT"] == nil {\n            guard let driver = EditorIMESmokeDriver()'),'        maybeRunEditorIMESmoke()\n','        maybeRunEditorIMESmoke()\n        maybeRun'+driver+'()\n'),'    override func keyDown(with event: NSEvent) {','    override func keyDown(with event: NSEvent) {\n        '+key), '        let drew = maru_metal_renderer_draw(', '        var latencyStamp=[UInt64](repeating:0,count:'+width+')\n        latencyFrame(frame.generation,&latencyStamp)\n        latencyMark(latencyStamp)\n        let drew = maru_metal_renderer_draw(')+'\n'+driver_text)
-    manifest=dict(summary_control=a.summary_control,harness='independent-target-ascii-v1' if a.stream else 'closed-loop-v1',optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
+    manifest=dict(fold_control=a.fold_control,summary_control=a.summary_control,harness='independent-target-ascii-v1' if a.stream else 'closed-loop-v1',optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
     if a.stream:
         manifest['tools'].update({'stream/'+x.name:sha(x) for x in stream_dir.iterdir() if x.is_file()})
         (out/'producer.swift').write_text(protocol.expand((stream_dir/'producer.swift').read_text()))

@@ -146,9 +146,9 @@ def main():
                     raise RuntimeError('semantic fault survived: '+name)
             elif result.returncode or (text.count('All 6 tests passed.')!=1 or text.count('All 12 tests passed.')!=1) or 'PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1' not in text:
                 raise RuntimeError('normal control failed: '+name)
-            if args.scope == 'leases' and name.startswith('control') and (text.count('All 21 tests passed.') != 1 or 'retained_result=1' not in text):
+            if args.scope == 'leases' and name.startswith('control') and (text.count('All 23 tests passed.') != 1 or 'retained_result=1' not in text):
                 raise RuntimeError('missing retained-result control: '+name)
-            if args.scope == 'view' and name.startswith('control') and (text.count('All 5 tests passed.') != 1 or text.count('All 35 tests passed.') != 1 or 'installed_view=1' not in text):
+            if args.scope == 'view' and name.startswith('control') and (text.count('All 6 tests passed.') != 1 or text.count('All 35 tests passed.') != 1 or 'installed_view=1' not in text):
                 raise RuntimeError('missing actual view executions: '+name)
             if args.scope == 'input' and name.startswith('control') and text.count('All 10 tests passed.') != 1:
                 raise RuntimeError('missing actual input executions: '+name)

@@ -7,6 +7,11 @@ pub const Span = struct { start_row: u32, end_row: u32 };
 const change_ranges = @import("changes.zig");
 pub const Change = change_ranges.Range;
 pub const Changes = change_ranges.Batch;
+const NeverStop = struct {
+    pub fn isRequested(_: @This()) bool {
+        return false;
+    }
+};
 
 pub fn hasKind(kinds: []const []const u8, raw: [*c]const u8) bool {
     const name = std.mem.span(raw);
@@ -27,11 +32,27 @@ pub const Cache = struct {
     const Record = struct { lo: u32, hi: u32 };
     /// 처리하지 않은 편집이 없는 byte 후보만 새 뷰의 parser·세대에 묶는다.
     pub fn copyMatched(self: *const Cache, a: std.mem.Allocator, source_parser: *c.TSParser, source_gen: u64, target_parser: *c.TSParser, target_gen: u64) error{OutOfMemory}!?Cache {
-        if (self.tree == null or self.parser != source_parser or self.synced_gen != source_gen or self.edits != 0 or self.dirty != null) return null;
-        const items = try a.dupe(Record, self.records.items);
-        errdefer a.free(items);
+        var result: Cache = .{};
+        errdefer result.deinit(a);
+        if (!try self.copyMatchedInto(a, source_parser, source_gen, target_parser, target_gen, &result)) return null;
+        return result;
+    }
+    /// 기존 버퍼를 재사용하되 source와 대상의 native 참조는 분리한다. 실패는 대상을 바꾸지 않는다.
+    pub fn copyMatchedInto(self: *const Cache, a: std.mem.Allocator, source_parser: *c.TSParser, source_gen: u64, target_parser: *c.TSParser, target_gen: u64, target: *Cache) error{OutOfMemory}!bool {
+        std.debug.assert(self != target);
+        if (self.tree == null or self.parser != source_parser or self.synced_gen != source_gen or self.edits != 0 or self.dirty != null) return false;
         const tree = c.ts_tree_copy(self.tree.?) orelse return error.OutOfMemory;
-        return .{ .records = .fromOwnedSlice(items), .tree = tree, .synced_gen = target_gen, .parser = target_parser };
+        errdefer c.ts_tree_delete(tree);
+        try target.records.ensureTotalCapacity(a, self.records.items.len);
+        if (target.tree) |old| c.ts_tree_delete(old);
+        target.records.clearRetainingCapacity();
+        target.records.appendSliceAssumeCapacity(self.records.items);
+        target.tree = tree;
+        target.synced_gen = target_gen;
+        target.parser = target_parser;
+        target.dirty = null;
+        target.edits = 0;
+        return true;
     }
 
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator) void {
@@ -110,10 +131,11 @@ pub const Cache = struct {
         hint.* = value.row;
         return .{ .value = value, .linear_steps = steps };
     }
-    fn visit(self: *Cache, current: *c.TSTree, kinds: []const []const u8, a: std.mem.Allocator, lo: u32, hi: u32, full: bool) !void {
+    fn visit(self: *Cache, current: *c.TSTree, kinds: []const []const u8, a: std.mem.Allocator, lo: u32, hi: u32, full: bool, stop: anytype) !void {
         var cur = c.ts_tree_cursor_new(c.ts_tree_root_node(current));
         defer c.ts_tree_cursor_delete(&cur);
         while (true) {
+            if (stop.isRequested()) return error.Cancelled;
             const node = c.ts_tree_cursor_current_node(&cur);
             self.nodes +|= 1;
             if (full or (c.ts_node_start_byte(node) <= hi and c.ts_node_end_byte(node) >= lo)) {
@@ -121,6 +143,7 @@ pub const Cache = struct {
                 if (if (full or lo == 0) c.ts_tree_cursor_goto_first_child(&cur) else c.ts_tree_cursor_goto_first_child_for_byte(&cur, lo - 1) >= 0) continue;
             }
             while (true) {
+                if (stop.isRequested()) return error.Cancelled;
                 if (c.ts_tree_cursor_goto_next_sibling(&cur)) {
                     if (full or c.ts_node_start_byte(c.ts_tree_cursor_current_node(&cur)) <= hi) break;
                 }
@@ -157,23 +180,17 @@ pub const Cache = struct {
         }
         std.mem.sort(Record, items, {}, orderLess);
     }
-    pub fn query(self: *Cache, a: std.mem.Allocator, parser: *c.TSParser, tree: ?*c.TSTree, generation: u64, changes: ?Changes, kinds: []const []const u8, lines: anytype, out: *std.ArrayList(Span)) error{OutOfMemory}!void {
-        out.clearRetainingCapacity();
+    /// byte 후보 준비와 행 투영을 분리한다. 워커는 문서/뷰의 줄 배열을 빌리지 않는다.
+    /// 취소·OOM 뒤 부분 후보를 현재 판으로 공개하지 않고 다음 조회가 다시 구축한다.
+    pub fn prepare(self: *Cache, a: std.mem.Allocator, parser: *c.TSParser, tree: ?*c.TSTree, generation: u64, changes: ?Changes, kinds: []const []const u8, stop: anytype) error{ OutOfMemory, Cancelled }!void {
+        if (stop.isRequested()) return error.Cancelled;
         const current = tree orelse {
             self.invalidate();
             return;
         };
-        // 편집 통지를 놓쳤거나 다른 provider로 바뀌면 이전 좌표를 신뢰하지 않는다.
         if (self.parser != parser or generation != self.synced_gen +| self.edits) self.invalidate();
-        errdefer {
-            self.invalidate();
-            out.clearRetainingCapacity();
-        }
-
-        if (lines.len == 0) {
-            self.invalidate();
-            return;
-        }
+        errdefer self.invalidate();
+        if (self.tree != null and self.parser == parser and self.synced_gen == generation and self.edits == 0 and self.dirty == null) return;
         var ordered_prefix: ?usize = null;
         if (self.tree) |previous| {
             var count: u32 = 0;
@@ -195,6 +212,7 @@ pub const Cache = struct {
                 const hi = if (i < range_count) (if (shared) |items| items[i].hi else ranges[i].end_byte) else self.dirty.?.hi;
                 var n: usize = 0;
                 for (self.records.items) |r| {
+                    if (stop.isRequested()) return error.Cancelled;
                     self.scanned_records +|= 1;
                     if (r.lo <= hi and r.hi >= lo) continue;
                     self.records.items[n] = r;
@@ -202,11 +220,11 @@ pub const Cache = struct {
                 }
                 self.records.items.len = n;
                 if (range_count == 0) ordered_prefix = n;
-                try self.visit(current, kinds, a, lo, hi, false);
+                try self.visit(current, kinds, a, lo, hi, false, stop);
             }
         } else {
             self.records.clearRetainingCapacity();
-            try self.visit(current, kinds, a, 0, std.math.maxInt(u32), true);
+            try self.visit(current, kinds, a, 0, std.math.maxInt(u32), true, stop);
         }
         orderRecords(self.records.items, ordered_prefix);
         var n: usize = 0;
@@ -216,6 +234,31 @@ pub const Cache = struct {
             n += 1;
         }
         self.records.items.len = n;
+        if (stop.isRequested()) return error.Cancelled;
+        const next = c.ts_tree_copy(current) orelse return error.OutOfMemory;
+        if (self.tree) |previous| c.ts_tree_delete(previous);
+        self.tree = next;
+        self.dirty = null;
+        self.synced_gen = generation;
+        self.edits = 0;
+        self.parser = parser;
+    }
+
+    pub fn query(self: *Cache, a: std.mem.Allocator, parser: *c.TSParser, tree: ?*c.TSTree, generation: u64, changes: ?Changes, kinds: []const []const u8, lines: anytype, out: *std.ArrayList(Span)) error{OutOfMemory}!void {
+        out.clearRetainingCapacity();
+        errdefer {
+            self.invalidate();
+            out.clearRetainingCapacity();
+        }
+        if (lines.len == 0) {
+            self.invalidate();
+            return;
+        }
+        self.prepare(a, parser, tree, generation, changes, kinds, NeverStop{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Cancelled => unreachable,
+        };
+        if (self.tree == null) return;
         var start_hint: usize = 0;
         var end_hint: usize = 0;
         for (self.records.items) |r| {
@@ -227,13 +270,6 @@ pub const Cache = struct {
                 out.items[out.items.len - 1].end_row = @max(out.items[out.items.len - 1].end_row, ep);
             } else try out.append(a, .{ .start_row = start.row, .end_row = ep });
         }
-        const next = c.ts_tree_copy(current) orelse return error.OutOfMemory;
-        if (self.tree) |previous| c.ts_tree_delete(previous);
-        self.tree = next;
-        self.dirty = null;
-        self.synced_gen = generation;
-        self.edits = 0;
-        self.parser = parser;
     }
 };
 

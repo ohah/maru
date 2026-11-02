@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+다시 읽기와 Undo/Redo 중 자동완성: `test-editor-completion-history`는 실제 디스크 다시 읽기와
+history 명령 전후의 지연 positive/null, 본문·선택·이력 보존 및 새 확정/Undo를 대조한다.
+[검증 범위](plans/lsp-completion-history-reload.md)는 native controller와 fake LSP이며 HID/픽셀 증거가 아니다.
+
 Save As와 자동완성 수명: `test-editor-completion-save-as`는 실제 파일 쓰기/대상 적용과
 새 URI의 같은 primary 재결합 뒤 이전 결과를 검사한다. [계획](plans/lsp-completion-save-as.md)의
 공유 뷰·실패·격리/혼합 대기 범위이며 native panel/HID/SDK/픽셀 증거는 아니다.

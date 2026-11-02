@@ -25,7 +25,7 @@ Linux에서는 macOS 전용 익명 초기화 3개가 빠져 총 3개를 수집�
 
 현재 증거는 `/Users/yoonhb/.cache/maru-agent-artifacts/parse-runtime-review-1/`이다.
 다섯 결함 모두 실행 중 거절됐고 정상 전후 대조는 통과했다.
-기존 worker 19개·요청 Gate 36개도 별도 회귀 target을 유지한다.
+기존 worker 21개·요청 Gate 36개도 별도 회귀 target을 유지한다.
 
 일반 편집기의 입력·렌더 경로는 아직 전환하지 않았다. 뷰별 캐시 설치·실제 GUI/IME·입력 지연·
 race detector·C malloc 실패 전수 검증은 이 결과에 포함하지 않는다.
@@ -64,7 +64,7 @@ python3 tools/editor-parse-runtime/review.py --scope leases --output /tmp/new-pa
 ```
 
 Job 참조 증가 누락·전체 참조 증가 누락·마지막 반환 전 퇴역·종료 가드 제거·현재 입력 검사 없는
-acquire의 다섯 실제 결함을 컴파일·실행한다. runtime 12개·host 6개·worker 19개와 실제 Apple
+acquire의 다섯 실제 결함을 컴파일·실행한다. runtime 12개·host 6개·worker 21개와 실제 Apple
 전달을 요구한다. worker C 장벽 아래에서 큐 게시를 검사하고, 잘못된 참조 수와 조기 게시를 주입한
 경우에도 테스트 cleanup만 복구해 assertion 결과와 별개 누수/이중 해제를 섞지 않는다.
 Apple probe의 `retained_result=1`은 실제 메인 큐 수락 후 보유 중 종료 거절·반환 후 종료 증거다.
@@ -125,7 +125,7 @@ Outcome을 유지하며 이유는 null이다. 새 시도에서 옛 이유를 지
 python3 tools/editor-parse-runtime/review.py --scope reasons --output /tmp/new-parse-reasons --deps /path/to/deps --cache /path/to/cache
 ```
 
-워커 19개·Runtime 12개·호스트 6개와 실제 메인 큐 probe를 실행한다. 미지원 문법·크기 제한·
+워커 21개·Runtime 12개·호스트 6개와 실제 메인 큐 probe를 실행한다. 미지원 문법·크기 제한·
 progress 중단의 오분류, Runtime 원인 누락, 취소 뒤 옛 원인 노출의 실제 결함을 각각
 컴파일·실행하고 정상 전후 대조군을 요구한다. C allocator 고갈을 직접 재현한 증거는 아니다.
 

@@ -96,6 +96,9 @@ const Job = struct {
             state.recordNative(true);
             complete = bytes.len == 0 or parsed.tree != null;
         }
+        // 파싱 완료만 복사하면 각 뷰의 첫 조회가 메인에서 전체 심볼을 다시 센다.
+        // 요약은 선택적 캐시다. OOM은 기존 조회의 재구축으로, 취소는 아래의 기존 반환 경로로 간다.
+        if (complete and !self.cancellation.isRequested()) parsed.prepareStickySummary(allocator, &self.cancellation) catch {};
         if (builtin.is_test) if (state.options.audit) |audit| {
             if (self.cancellation.isRequested() and parsed.tree != null)
                 _ = audit.cancelled_with_tree.fetchAdd(1, .monotonic);

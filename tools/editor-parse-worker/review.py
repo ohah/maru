@@ -77,7 +77,7 @@ def main():
             with (out / (name + '.log')).open('xb') as log:
                 result = subprocess.run(command, cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=600)
             text = (out / (name + '.log')).read_text()
-            binaries = re.findall(r'info\(verbose\): (\S+/test) --maru-expect-tests=19', text)
+            binaries = re.findall(r'info\(verbose\): (\S+/test) --maru-expect-tests=21', text)
             if not binaries:
                 raise RuntimeError('no actual test execution: ' + name)
             binary = Path(binaries[-1])
@@ -87,7 +87,7 @@ def main():
             if name in mutants:
                 if result.returncode == 0 or not re.search(r'FAIL \(Test(?:UnexpectedResult|ExpectedEqual)\)', text):
                     raise RuntimeError('semantic fault not detected: ' + name)
-            elif result.returncode or 'All 19 tests passed.' not in text:
+            elif result.returncode or 'All 21 tests passed.' not in text:
                 raise RuntimeError('normal control failed: ' + name)
             results.append({'name': name, 'returncode': result.returncode, 'source_sha256': sha(leaf),
                             'native_sha256': sha(native), 'binary_sha256': sha(archive), 'log_sha256': sha(out / (name + '.log'))})

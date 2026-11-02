@@ -6969,6 +6969,12 @@ pub fn build(b: *std.Build) void {
     run_sticky_snapshot.addArg("--maru-expect-passed=4");
     test_step.dependOn(&run_sticky_snapshot.step);
     b.step("test-editor-sticky-snapshot", "Verify independently owned copied sticky summaries").dependOn(&run_sticky_snapshot.step);
+    const sticky_preparation_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"sticky preparation"} });
+    const run_sticky_preparation = b.addRunArtifact(sticky_preparation_tests);
+    run_sticky_preparation.addArg("--maru-expect-tests=6");
+    run_sticky_preparation.addArg("--maru-expect-passed=6");
+    test_step.dependOn(&run_sticky_preparation.step);
+    b.step("test-editor-sticky-preparation", "Verify cancellable worker summary preparation and independent view reuse").dependOn(&run_sticky_preparation.step);
     const bracket_cursor_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{ "bracket range cursor native", "SYN47 ", "SYN48 ", "SYN49 " } });
     const run_bracket_cursor = b.addRunArtifact(bracket_cursor_tests);
     run_bracket_cursor.addArg("--maru-expect-tests=7");
@@ -7358,8 +7364,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
         }), .filters = &.{"parse worker"} });
         const run_parse_worker = b.addRunArtifact(parse_worker_tests);
-        run_parse_worker.addArg("--maru-expect-tests=19");
-        run_parse_worker.addArg("--maru-expect-passed=19");
+        run_parse_worker.addArg("--maru-expect-tests=21");
+        run_parse_worker.addArg("--maru-expect-passed=21");
         b.step("test-editor-parse-worker", "Verify native parse queue ownership and cancellation").dependOn(&run_parse_worker.step);
         test_step.dependOn(&run_parse_worker.step);
         macos_only_test_step.dependOn(&run_parse_worker.step);

@@ -131,7 +131,7 @@ def main():
             with log.open('xb') as stream:
                 result = subprocess.run(command,cwd=source,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=900)
             text = log.read_text()
-            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:5|6|10|12|19|35)',text)))
+            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:5|6|10|12|21|35)',text)))
             natives = re.findall(r'info\(verbose\): (\S+/maru-parse-main-queue)\s*$',text,re.M)
             if len(tests)!=(4 if args.scope == 'view' else 3 if args.scope in ('leases', 'reasons', 'input') else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
             archived = {}
@@ -146,7 +146,7 @@ def main():
                     raise RuntimeError('semantic fault survived: '+name)
             elif result.returncode or (text.count('All 6 tests passed.')!=1 or text.count('All 12 tests passed.')!=1) or 'PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1' not in text:
                 raise RuntimeError('normal control failed: '+name)
-            if args.scope == 'leases' and name.startswith('control') and (text.count('All 19 tests passed.') != 1 or 'retained_result=1' not in text):
+            if args.scope == 'leases' and name.startswith('control') and (text.count('All 21 tests passed.') != 1 or 'retained_result=1' not in text):
                 raise RuntimeError('missing retained-result control: '+name)
             if args.scope == 'view' and name.startswith('control') and (text.count('All 5 tests passed.') != 1 or text.count('All 35 tests passed.') != 1 or 'installed_view=1' not in text):
                 raise RuntimeError('missing actual view executions: '+name)

@@ -491,6 +491,7 @@ pub const Cancellation = struct {
         entered: std.atomic.Value(bool) = .init(false),
         released: std.atomic.Value(bool) = .init(false),
         abort: bool = false,
+        stage: enum { parse, summary } = .parse,
         pub fn release(self: *TestGate) void {
             self.released.store(true, .release);
         }
@@ -768,8 +769,10 @@ pub const Provider = struct {
         const ctx: *ParseCtx = @ptrCast(@alignCast(st.*.payload.?));
         if (ctx.cancellation) |token| {
             if (@import("builtin").is_test) if (token.gate) |gate| {
-                gate.wait();
-                if (gate.abort) return true;
+                if (gate.stage == .parse) {
+                    gate.wait();
+                    if (gate.abort) return true;
+                }
             };
             if (token.isRequested()) return true;
         }
@@ -1002,46 +1005,55 @@ pub const Provider = struct {
         return name;
     }
 
+    const StickyAdapter = struct {
+        provider: *Provider,
+        pub const depth_limit = symbol_depth_limit;
+        pub fn symbol(ctx: @This(), node: c.TSNode) ?Symbol {
+            return ctx.provider.symbolForNode(node, 0);
+        }
+        pub fn isSymbol(ctx: @This(), node: c.TSNode) bool {
+            return ctx.provider.symbolName(node) != null;
+        }
+        pub fn inGap(ctx: @This(), node: c.TSNode, offset: u32) ?c.TSNode {
+            const next = c.ts_node_first_named_child_for_byte(node, offset);
+            if (c.ts_node_is_null(next) or c.ts_node_start_byte(next) <= offset) return null;
+            return ctx.extended(next);
+        }
+        pub fn extended(ctx: @This(), node: c.TSNode) ?c.TSNode {
+            if (!std.mem.eql(u8, std.mem.span(c.ts_node_type(node)), "function_body")) return null;
+            const previous = c.ts_node_prev_named_sibling(node);
+            if (c.ts_node_is_null(previous)) return null;
+            if (ctx.symbol(previous) != null) return previous;
+            if (!std.mem.eql(u8, std.mem.span(c.ts_node_type(previous)), "method_signature")) return null;
+            const count = c.ts_node_named_child_count(previous);
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                ctx.provider.sticky_work.ancestor_nodes +|= 1;
+                const child = c.ts_node_named_child(previous, i);
+                if (ctx.symbol(child) != null) return child;
+            }
+            return null;
+        }
+    };
+
     /// 창 위쪽 몇 줄의 끝점에서 고정 머리줄 후보만 모은다. 반환값은 파일 전체의 심볼 존재 여부다.
     /// 결과가 비어도 파일 다른 곳에 심볼이 있으면 참이다. 그래야 접힘 출처로 잘못 내려가지 않는다.
     /// 후보의 순서는 보장하지 않으며, 호출자가 문서 줄의 스코프로 바꿔 정렬한다.
     pub fn stickySymbols(self: *Provider, allocator: std.mem.Allocator, offsets: []const u32, out: *std.ArrayList(Symbol)) error{OutOfMemory}!bool {
         out.clearRetainingCapacity();
         errdefer out.clearRetainingCapacity();
-        const Adapter = struct {
-            provider: *Provider,
-            pub const depth_limit = symbol_depth_limit;
-            pub fn symbol(ctx: @This(), node: c.TSNode) ?Symbol {
-                return ctx.provider.symbolForNode(node, 0);
-            }
-            pub fn isSymbol(ctx: @This(), node: c.TSNode) bool {
-                return ctx.provider.symbolName(node) != null;
-            }
-            pub fn inGap(ctx: @This(), node: c.TSNode, offset: u32) ?c.TSNode {
-                const next = c.ts_node_first_named_child_for_byte(node, offset);
-                if (c.ts_node_is_null(next) or c.ts_node_start_byte(next) <= offset) return null;
-                return ctx.extended(next);
-            }
-            pub fn extended(ctx: @This(), node: c.TSNode) ?c.TSNode {
-                if (!std.mem.eql(u8, std.mem.span(c.ts_node_type(node)), "function_body")) return null;
-                const previous = c.ts_node_prev_named_sibling(node);
-                if (c.ts_node_is_null(previous)) return null;
-                if (ctx.symbol(previous) != null) return previous;
-                if (!std.mem.eql(u8, std.mem.span(c.ts_node_type(previous)), "method_signature")) return null;
-                const count = c.ts_node_named_child_count(previous);
-                var i: u32 = 0;
-                while (i < count) : (i += 1) {
-                    ctx.provider.sticky_work.ancestor_nodes +|= 1;
-                    const child = c.ts_node_named_child(previous, i);
-                    if (ctx.symbol(child) != null) return child;
-                }
-                return null;
-            }
-        };
-        const adapter: Adapter = .{ .provider = self };
+        const adapter: StickyAdapter = .{ .provider = self };
         if (!try self.sticky_summary.hasSymbols(allocator, self.tree, self.tree_gen, self.slot.symbol_kinds.len > 0, adapter, &self.sticky_work, self.retainedChanges())) return false;
         try symbol_windows.ancestors(allocator, self.tree.?, offsets, adapter, &self.sticky_work, out);
         return true;
+    }
+
+    /// 완료를 공개하기 전에 워커가 요약을 준비한다. copyReady가 각 뷰에 독립 참조를 전달한다.
+    pub fn prepareStickySummary(self: *Provider, allocator: std.mem.Allocator, token: *const Cancellation) error{ OutOfMemory, Cancelled }!void {
+        if (@import("builtin").is_test) if (token.gate) |gate| {
+            if (gate.stage == .summary) gate.wait();
+        };
+        _ = try self.sticky_summary.hasSymbolsCancellable(allocator, self.tree, self.tree_gen, self.slot.symbol_kinds.len > 0, StickyAdapter{ .provider = self }, &self.sticky_work, self.retainedChanges(), token);
     }
 
     /// 도크처럼 오래 보여 주는 목록은 일부만 수집한 결과를 완전한 목록으로 발행하면 안 된다.
@@ -5586,4 +5598,97 @@ test "SYN incremental 중단은 이전 트리가 남아도 pending이다" {
     const edit: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = @intCast(prefix), .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 3000, .column = 0 } };
     try std.testing.expectEqual(Provider.ParseStatus.pending, moved.onEditCancellable(source.items, edit, &token));
     try std.testing.expect(moved.tree != null);
+}
+
+// 준비 실패는 캐시만 미완료로 남긴다. 현재 트리·이전 집계를 훼손하지 않는 대조다.
+test "sticky preparation 완료 요약 복사와 원본 종료 뒤 첫 조회는 전체를 재구축하지 않는다" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "fn f() void {}\r\nfn g() void {}\r\n", "// 가 😀\n" }) |source| {
+        var donor = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+        var live = true;
+        defer if (live) donor.deinit();
+        var token: Cancellation = .{};
+        try donor.prepareStickySummary(a, &token);
+        try std.testing.expect(donor.sticky_summary.tree != null);
+        var copy = donor.copyReady(.zig) orelse return error.NoSnapshot;
+        defer copy.deinit();
+        try std.testing.expect(copy.sticky_summary.tree != donor.sticky_summary.tree);
+        try std.testing.expect(copy.sticky_summary.tree != copy.tree);
+        donor.deinit();
+        live = false;
+        try stickyAncestorJudge(&copy, source);
+        try std.testing.expectEqual(@as(u64, 0), copy.sticky_work.rebuild_nodes);
+    }
+}
+
+test "sticky preparation 시작 전 취소는 집계를 만들지 않고 다음 정상 준비는 성공한다" {
+    var p = Provider.init("fn f() void {}\n", .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var stopped: Cancellation = .{};
+    stopped.request();
+    try std.testing.expectError(error.Cancelled, p.prepareStickySummary(std.testing.allocator, &stopped));
+    try std.testing.expect(p.sticky_summary.tree == null);
+    try std.testing.expectEqual(@as(u64, 0), p.sticky_work.rebuild_nodes);
+    var normal: Cancellation = .{};
+    try p.prepareStickySummary(std.testing.allocator, &normal);
+    try std.testing.expectEqual(@as(usize, 1), p.sticky_summary.count);
+}
+
+const SummaryStopJudge = struct {
+    work: *const Provider.StickyWork,
+    cold: bool,
+    limit: u64,
+    pub fn isRequested(self: @This()) bool {
+        return (if (self.cold) self.work.rebuild_nodes else self.work.summary_nodes) >= self.limit;
+    }
+};
+
+test "sticky preparation 전체 순회 중 취소는 부분 개수를 공개하지 않는다" {
+    var p = Provider.init("fn f() void { const x = 1; _ = x; }\nfn g() void {}\n", .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    const stop: SummaryStopJudge = .{ .work = &p.sticky_work, .cold = true, .limit = 3 };
+    try std.testing.expectError(error.Cancelled, p.sticky_summary.hasSymbolsCancellable(std.testing.allocator, p.tree, p.tree_gen, true, Provider.StickyAdapter{ .provider = &p }, &p.sticky_work, p.retainedChanges(), stop));
+    try std.testing.expect(p.sticky_summary.tree == null);
+    try std.testing.expectEqual(@as(usize, 0), p.sticky_summary.count);
+    try std.testing.expectEqual(@as(u64, 3), p.sticky_work.rebuild_nodes);
+    var token: Cancellation = .{};
+    try p.prepareStickySummary(std.testing.allocator, &token);
+    try std.testing.expectEqual(@as(usize, 2), p.sticky_summary.count);
+}
+
+fn summaryFailureJudge(cancel: bool) !void {
+    const before = "fn f() void {}\nfn g() void {}\n";
+    const after = "fn renamed() void {}\nfn g() void {}\nfn h() void {}\n";
+    var p = Provider.init(before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var token: Cancellation = .{};
+    try p.prepareStickySummary(std.testing.allocator, &token);
+    const generation = p.sticky_summary.generation;
+    const old_summary = p.sticky_summary.tree;
+    p.onEditBudgeted(after, .{ .start_byte = 3, .old_end_byte = @intCast(before.len), .new_end_byte = @intCast(after.len), .start_point = pointAt(before, 3), .old_end_point = pointAt(before, before.len), .new_end_point = pointAt(after, after.len) }, 0);
+    if (cancel) {
+        const stop: SummaryStopJudge = .{ .work = &p.sticky_work, .cold = false, .limit = 3 };
+        try std.testing.expectError(error.Cancelled, p.sticky_summary.hasSymbolsCancellable(std.testing.allocator, p.tree, p.tree_gen, true, Provider.StickyAdapter{ .provider = &p }, &p.sticky_work, p.retainedChanges(), stop));
+    } else {
+        var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        try std.testing.expectError(error.OutOfMemory, p.prepareStickySummary(fail.allocator(), &token));
+    }
+    try std.testing.expectEqual(generation, p.sticky_summary.generation);
+    try std.testing.expectEqual(old_summary, p.sticky_summary.tree);
+    try std.testing.expectEqual(@as(usize, 2), p.sticky_summary.count);
+    // 실패한 요약을 현재 트리의 준비된 값으로 복사하지 않는다.
+    var copy = p.copyReady(.zig) orelse return error.NoSnapshot;
+    defer copy.deinit();
+    try std.testing.expect(copy.sticky_summary.tree == null);
+    try p.prepareStickySummary(std.testing.allocator, &token);
+    try std.testing.expectEqual(@as(usize, 3), p.sticky_summary.count);
+    try std.testing.expectEqual(p.tree_gen, p.sticky_summary.generation);
+    try stickyAncestorJudge(&copy, after);
+}
+
+test "sticky preparation 증분 순회 중 취소는 이전 집계와 트리를 보존한다" {
+    try summaryFailureJudge(true);
+}
+test "sticky preparation 증분 집계 OOM은 이전 집계와 정상 후속 조회를 보존한다" {
+    try summaryFailureJudge(false);
 }

@@ -85,6 +85,16 @@ native 도착 지연을 원시 시각으로 검증한다. 인위적 정지 결�
 
 ## 증거와 한계
 
+### 심볼 요약 준비 대조
+
+`prepare.py --stream --summary-control` 사본은 제품에 없는 스위치로 worker 요약 준비만 끄는
+동일 바이너리 대조를 제공한다. `python3 tools/editor-input-stream/summary_study.py --build <사본> --output <새 외부 경로>`는
+끔/켬을 인접 실행하고 반복 순서를 교대한다. 실행 파일·생산자는 같아야 하며 프로파일러는 붙이지 않는다.
+실제 worker 시도/준비/우회 및 마지막 뷰의 재구축 계수로 분기를 검증한다. 요청한 이름만 믿지 않는다.
+원시 `summary_stats`는 `[attempted, ready, bypassed, current_view_rebuild_nodes, current_view_summary_nodes]`다.
+각 하위 묶음에 `summary_control` 표식을 남겨 섞이지 않게 하고 일반 CLI는 이 사본을 실수로 사용하지 못한다.
+이 대조는 기존 GUI 실험의 한계와 동일한 입력·표시·설정 보존 판정을 적용한다.
+
 앱·생산자·외부 계측 소스의 해시, fixture·raw JSON·log·입력 소스 기록의 해시와 독립 프로세스
 PID를 보관한다. `verify.py`는 저장한 요약을 믿지 않고 원시 파일에서 다시 계산한다.
 테스트는 누락·중복·순서·문서 손상·callback 미완료·지각·포커스 손실과 기록 변조를 거절하고

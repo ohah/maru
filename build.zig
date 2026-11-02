@@ -6752,6 +6752,16 @@ pub fn build(b: *std.Build) void {
         run_feature_stop.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_feature_stop.step);
     }
+    const tooltip_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.TTLSAVE"} });
+    const run_tooltip_save = b.addRunArtifact(tooltip_save_tests);
+    run_tooltip_save.setCwd(b.path("."));
+    run_tooltip_save.addArg("--maru-expect-tests=9");
+    run_tooltip_save.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-tooltip-save-as", "Verify hover and signature lifetime across actual Save As").dependOn(&run_tooltip_save.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_tooltip_save.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_tooltip_save.step);
+    }
     const completion_peer_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CMPPEER", ".test.CMPOTHER" } });
     const run_completion_peer = b.addRunArtifact(completion_peer_tests);
     run_completion_peer.setCwd(b.path("."));

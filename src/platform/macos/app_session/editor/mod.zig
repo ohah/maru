@@ -75682,6 +75682,190 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 // Prepare a genuinely installed list, then change focus without a render tick.
 // Keys can arrive in this interval, including with A still visible in a split.
 // Phases use real requests: 0=list wait, 1=resolved display, 2=prefetch, 3=pending Enter.
+const tooltip_save_source = "add( // SIGSTALL MUTEHOVER\n";
+const TooltipSaveProbe = struct { term: *Term, owner: *lsp_client.Client, seq: u32, signature: bool };
+fn prepareTooltipSaveForTest(fx: *PaneFixture, term: *Term, signature: bool, shown: bool) !TooltipSaveProbe {
+    const s = fx.session;
+    try testing.expect(term_ops.activateSurfaceById(s, term.surface.id));
+    term.rt.editor_selection = editor_selection.Selection.at(if (signature) 4 else 1);
+    var frame = appendPaneFrame(s, activeLeafRectForTest(s).?, term) orelse return error.EditorPaneDidNotDraw;
+    frame.dl.deinit(testing.allocator);
+    if (signature) try testing.expect(signature_client.triggerManual(s)) else try testing.expect(hover_client.showAtCaret(s));
+    const probe: TooltipSaveProbe = .{ .term = term, .owner = lsp_client.readyClientFor(s, term).?, .seq = if (signature) s.editor_signature.waiting_seq else s.editor_hover.waiting_seq, .signature = signature };
+    if (shown) {
+        deliverTooltipSaveForTest(s, probe, false);
+        try testing.expect(s.chrome_host.hover_box.open);
+        try testing.expect(if (signature) signature_client.refresh(s) else hover_client.refresh(s));
+    }
+    return probe;
+}
+fn deliverTooltipSaveForTest(s: *AppSession, probe: TooltipSaveProbe, empty: bool) void {
+    if (probe.signature) signature_client.onClientResponse(s, probe.owner, probe.seq, if (empty) null else .{ .label = "old_target()", .index = 0, .count = 1 }) else hover_client.onClientResponse(s, probe.owner, probe.seq, if (empty) null else "old target hover", null);
+}
+fn shownTooltipSaveForTest(signature: bool) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |shared| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", tooltip_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const term = if (shared) try pane_ops.splitSharedEditorPane(s, .horizontal, false) else f.term;
+        const probe = try prepareTooltipSaveForTest(&f.fx, term, signature, true);
+        const epoch = term.rt.editorDocument().save_target_epoch;
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch + 1, term.rt.editorDocument().save_target_epoch);
+        var frame = appendPaneFrame(s, activeLeafRectForTest(s).?, term) orelse return error.EditorPaneDidNotDraw;
+        frame.dl.deinit(testing.allocator);
+        _ = if (signature) signature_client.refresh(s) else hover_client.refresh(s);
+        try testing.expect(!s.chrome_host.hover_box.open);
+        try testing.expect(!s.editor_signature.active);
+        deliverTooltipSaveForTest(s, probe, false);
+        deliverTooltipSaveForTest(s, probe, true);
+        try testing.expect(!s.chrome_host.hover_box.open);
+        try testing.expectEqualStrings(tooltip_save_source, term.rt.editorDocument().opened.?.file.content);
+        try freshTooltipAfterSaveForTest(&f, probe);
+        try batchApplyDisk(&f.fx, "before.c", tooltip_save_source);
+        try batchApplyDisk(&f.fx, "after.c", tooltip_save_source);
+    }
+}
+test "TTLSAVE1 shown hover retires after actual Save As" {
+    try shownTooltipSaveForTest(false);
+}
+test "TTLSAVE2 shown signature retires after actual Save As" {
+    try shownTooltipSaveForTest(true);
+}
+
+fn freshTooltipAfterSaveForTest(f: *SmtFixture, probe: TooltipSaveProbe) !void {
+    const Ctx = struct { s: *AppSession, t: *Term, owner: *lsp_client.Client };
+    try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = f.fx.session, .t = probe.term, .owner = probe.owner }, struct {
+        fn ready(c: Ctx) bool {
+            const owner = lsp_client.readyClientFor(c.s, c.t) orelse return false;
+            return owner == c.owner and std.mem.endsWith(u8, owner.findDoc(c.t).?.uri, "after.c");
+        }
+    }.ready));
+    const fresh = try prepareTooltipSaveForTest(&f.fx, probe.term, probe.signature, false);
+    try testing.expect(fresh.seq != probe.seq);
+    deliverTooltipSaveForTest(f.fx.session, probe, false);
+    try testing.expect(if (probe.signature) f.fx.session.editor_signature.waiting else f.fx.session.editor_hover.waiting);
+    deliverTooltipSaveForTest(f.fx.session, fresh, false);
+    try testing.expect(f.fx.session.chrome_host.hover_box.open);
+}
+
+test "TTLSAVE3 cancel conflict and other-document adoption preserve valid displays" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |signature| for ([_]bool{ false, true }) |shared| for (0..3) |mode| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", tooltip_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        var actor = f.term;
+        const term = if (shared or mode == 2) try pane_ops.splitSharedEditorPane(s, .horizontal, false) else f.term;
+        if (mode == 2) {
+            try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = tooltip_save_source });
+            const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "other.c" });
+            defer testing.allocator.free(path);
+            actor = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+        }
+        const probe = try prepareTooltipSaveForTest(&f.fx, term, signature, true);
+        const epoch = term.rt.editorDocument().save_target_epoch;
+        const undo = term.rt.editorDocument().history.undo_len;
+        const selection = term.rt.editor_selection;
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer gate.set();
+        _ = try saveAsSelectForTest(&f.fx, actor, if (mode == 0) "" else target);
+        if (mode == 1) {
+            @import("save/as.zig").setGateForTests(&gate);
+            @import("save/as.zig").poll();
+            try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "after.c", .data = "external\n" });
+            gate.set();
+        }
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch, term.rt.editorDocument().save_target_epoch);
+        try testing.expect(s.chrome_host.hover_box.open);
+        try testing.expect(if (signature) s.editor_signature.active else !s.editor_signature.active);
+        try testing.expectEqualDeep(selection, term.rt.editor_selection);
+        try testing.expectEqual(undo, term.rt.editorDocument().history.undo_len);
+        try testing.expectEqualStrings(tooltip_save_source, term.rt.editorDocument().opened.?.file.content);
+        deliverTooltipSaveForTest(s, probe, true); // Duplicate settled response must not close it.
+        try testing.expect(s.chrome_host.hover_box.open);
+        try batchApplyDisk(&f.fx, "before.c", tooltip_save_source);
+        if (mode == 1) try batchApplyDisk(&f.fx, "after.c", "external\n");
+        if (mode == 2) {
+            try batchApplyDisk(&f.fx, "other.c", tooltip_save_source);
+            try batchApplyDisk(&f.fx, "after.c", tooltip_save_source);
+        }
+    };
+}
+
+test "TTLSAVE4 waiting callbacks remain stale after adoption and fresh requests still open" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |signature| for ([_]bool{ false, true }) |shared| for ([_]bool{ false, true }) |empty| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", tooltip_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const term = if (shared) try pane_ops.splitSharedEditorPane(s, .horizontal, false) else f.term;
+        const probe = try prepareTooltipSaveForTest(&f.fx, term, signature, false);
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        try awaitSaveAsForTest();
+        deliverTooltipSaveForTest(s, probe, empty);
+        try testing.expect(!s.chrome_host.hover_box.open);
+        try testing.expect(if (signature) !s.editor_signature.waiting else !s.editor_hover.waiting);
+        try freshTooltipAfterSaveForTest(&f, probe);
+        try batchApplyDisk(&f.fx, "before.c", tooltip_save_source);
+        try batchApplyDisk(&f.fx, "after.c", tooltip_save_source);
+    };
+}
+
+test "TTLSAVE5 retiring one signature owner preserves another owner's display or wait" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |save_waiting| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", tooltip_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        _ = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = tooltip_save_source });
+        const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "other.c" });
+        defer testing.allocator.free(path);
+        const other = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+        try testing.expect(pumpLspUntil(&f.fx, 3000, other, struct {
+            fn ready(t: *Term) bool {
+                return t.rt.editor_diagnostics.lsp.items.len > 0;
+            }
+        }.ready));
+        _ = try prepareTooltipSaveForTest(&f.fx, f.term, true, true);
+        const waiting = try prepareTooltipSaveForTest(&f.fx, other, true, false);
+        try testing.expect(s.editor_signature.active and s.editor_signature.waiting);
+        try testing.expectEqual(f.term.surface.id, s.editor_signature.shown_surface);
+        try testing.expectEqual(other.surface.id, s.editor_signature.waiting_surface);
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, if (save_waiting) other else f.term, target);
+        try awaitSaveAsForTest();
+        try testing.expectEqual(save_waiting, s.editor_signature.active);
+        try testing.expectEqual(!save_waiting, s.editor_signature.waiting);
+        try testing.expectEqual(save_waiting, s.chrome_host.hover_box.open);
+        deliverTooltipSaveForTest(s, waiting, false);
+        try testing.expect(s.editor_signature.active and s.chrome_host.hover_box.open);
+        try testing.expectEqual(if (save_waiting) f.term.surface.id else other.surface.id, s.editor_signature.shown_surface);
+        try batchApplyDisk(&f.fx, "before.c", tooltip_save_source);
+        try batchApplyDisk(&f.fx, "other.c", tooltip_save_source);
+        try batchApplyDisk(&f.fx, "after.c", tooltip_save_source);
+    }
+}
+
 const CompletionSaveProbe = struct { term: *Term, owner: *lsp_client.Client, phase: u8, list_seq: u32, resolve_seq: u32 };
 const completion_save_source = "pr // COMPSTALL RESOLVESTALL\n";
 

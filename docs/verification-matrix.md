@@ -1,5 +1,10 @@
 # 검증 매트릭스
 
+Save As 중 호버/시그니처: `test-editor-tooltip-save-as`는 이미 표시된 상자와 대기를
+실제 Save As actor/worker로 검사한다. 같은/공유 view·취소·충돌·다른 문서·혼합 원본과
+새 URI의 같은 primary 재결합을 [계획](plans/lsp-tooltip-save-as.md)의 26조건으로 대조한다.
+native controller와 파일 증거이며 직접 callback을 OS/HID/픽셀 증거로 확대하지 않는다.
+
 공유 peer/다른 문서 자동완성: `test-editor-completion-shared-history`는 같은 창의 공유
 분할 뷰와 독립 문서에서 실제 다시 읽기·Undo·Redo를 실행한다. 각각 24조건의 이전
 positive/null, 원본 확정/Undo와 상대 문서 보존을 [계획](plans/lsp-completion-shared-history.md)에 따라

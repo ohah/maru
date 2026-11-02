@@ -311,10 +311,27 @@ pub fn refresh(self: *AppSession) bool {
     return true;
 }
 
+/// Adoption changes signature meaning even when text and view stay the same.
+/// The visible source and a newer request may differ, so retire them separately.
+pub fn onSaveTargetChanged(self: *AppSession, term: *Term) void {
+    const st = &self.editor_signature;
+    const sourceMatches = maru.session.editor.completion_ops.sourceMatches;
+    if (sourceMatches(st.waiting_surface, term.surfaceId())) {
+        st.waiting = false;
+        st.dirty = false;
+    }
+    if (sourceMatches(st.shown_surface, term.surfaceId())) hideDisplay(self);
+}
+
 pub fn hide(self: *AppSession) void {
     const st = &self.editor_signature;
     st.waiting = false;
     st.dirty = false;
+    hideDisplay(self);
+}
+
+fn hideDisplay(self: *AppSession) void {
+    const st = &self.editor_signature;
     if (!st.active) return;
     st.active = false;
     st.clearLines(self.allocator);

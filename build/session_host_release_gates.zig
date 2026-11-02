@@ -4729,16 +4729,23 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .target = target,
             .optimize = process_optimize,
         });
+        const probe = b.addExecutable(.{
+            .name = b.fmt("bounded-process-probe-{s}", .{@tagName(process_optimize)}),
+            .root_module = b.createModule(.{ .target = target, .optimize = process_optimize, .link_libc = true }),
+        });
+        probe.root_module.addCSourceFile(.{ .file = b.path("tests/fixtures/bounded_process_probe.c"), .flags = &.{} });
+        const probe_options = b.addOptions();
+        probe_options.addOptionPath("path", probe.getEmittedBin());
         const bounded_process_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_bounded_process.zig"),
                 .target = target,
                 .optimize = process_optimize,
-                .imports = &.{.{ .name = "bounded_process", .module = bounded_process_mod }},
+                .imports = &.{ .{ .name = "bounded_process", .module = bounded_process_mod }, .{ .name = "bounded_process_probe", .module = probe_options.createModule() } },
             }),
         });
         const run_bounded_process_tests = b.addRunArtifact(bounded_process_tests);
-        run_bounded_process_tests.addArg("--maru-expect-tests=24");
+        run_bounded_process_tests.addArg("--maru-expect-tests=38");
         run_bounded_process_tests.setCwd(b.path("."));
         session_host_bounded_process_step.dependOn(&run_bounded_process_tests.step);
         if (process_optimize == optimize) session_host_step.dependOn(&run_bounded_process_tests.step); // test-session-host 는 잡의 -Doptimize 모드만

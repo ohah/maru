@@ -13,7 +13,7 @@ const shell: [:0]const u8 = "/bin/sh";
 
 /// 「끝까지 돈다」를 재는 판정자들의 예산.
 ///
-/// 여기서 도는 것은 **실제 자식 프로세스**(`fork + exec /bin/sh + 파이프 + wait`)다. 그 왕복 비용은
+/// 여기서 도는 것은 **실제 자식 프로세스**(`posix_spawn /bin/sh + 파이프 + wait`)다. 그 왕복 비용은
 /// 기계가 바쁘면 크게 튄다 — 실측(2026-09-14, 같은 모듈을 쓰는 판정자를 8중 병렬로): 중앙값 2.7 s ·
 /// 최대 **3.0 s**. 그래서 1 초는 **한가할 때만** 넉넉한 값이고, 넘기면 `TimedOut` 이 「자식이 틀렸다」
 /// 처럼 읽힌다(그 뭉갬이 CI 를 한 번 태웠다 — PR #3687).
@@ -77,7 +77,7 @@ test "bounded process rejects nonzero and signaled terminal status" {
     const missing: [:0]const u8 = "/definitely/missing/maru-bounded-process";
     const missing_argv = [_:null]?[*:0]const u8{missing.ptr};
     try std.testing.expectError(
-        error.ChildFailed,
+        error.SpawnFailed,
         process.runCapture(std.testing.io, missing, &missing_argv, &output, run_budget_ns),
     );
     const empty_output: [0]u8 = .{};
@@ -271,29 +271,22 @@ fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0
     return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..root_len], leaf }, 0);
 }
 
-test "bounded process treats a child that exits before setpgid as grouped" {
-    // ACCES: the child reached exec first. SRCH: the child already exited.
-    // Both mean the group the child established for itself is in place. Only the
-    // classifier is judged here: reaching SRCH from a live spawn needs a low
-    // `RLIMIT_NOFILE` (7 of 300 at 256, none at this harness's 1048576), and the
-    // runner's limit is not this test's to set.
-    try std.testing.expectEqual(process.GroupOutcome.established, process.classifyGroupErrno(.ACCES));
-    try std.testing.expectEqual(process.GroupOutcome.established, process.classifyGroupErrno(.SRCH));
-    try std.testing.expectEqual(process.GroupOutcome.retry, process.classifyGroupErrno(.INTR));
-    try std.testing.expectEqual(process.GroupOutcome.failed, process.classifyGroupErrno(.PERM));
-    try std.testing.expectEqual(process.GroupOutcome.failed, process.classifyGroupErrno(.INVAL));
+test "bounded process creates its group before the program starts" {
+    std.debug.print("bounded_process_test_mode mode={s}\n", .{@tagName(builtin.mode)});
+    var output: [64]u8 = undefined;
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf '%s|' \"$$\"; /bin/ps -o pgid= -p $$" };
+    const bytes = try process.runCapture(std.testing.io, shell, &argv, &output, run_budget_ns);
+    var fields = std.mem.splitScalar(u8, bytes, '|');
+    const pid = try std.fmt.parseInt(c.pid_t, fields.next().?, 10);
+    const pgid = try std.fmt.parseInt(c.pid_t, std.mem.trim(u8, fields.next().?, " \n\r"), 10);
+    try std.testing.expectEqual(pid, pgid);
 }
 
-test "bounded process keeps the child status when a low descriptor limit opens the setpgid race" {
-    // `childExec` closes every descriptor up to `getdtablesize()` before exec, so
-    // how long the child lives before it can die — and therefore whether the
-    // parent's `setpgid` finds a zombie — is set by RLIMIT_NOFILE. The harness
-    // shell runs at 1048576 and never opens the race; `launchctl limit maxfiles`
-    // is 256, so the GUI app runs where it does open. This test spawns at 256.
-    var saved: posix.rlimit = undefined;
-    saved = posix.getrlimit(.NOFILE) catch return;
-    if (saved.cur <= 256) return;
-    posix.setrlimit(.NOFILE, .{ .cur = 256, .max = saved.max }) catch return;
+test "bounded process reports creation failure under the GUI descriptor limit" {
+    // Group ownership no longer depends on parent/child scheduling. Exercise the
+    // GUI's ordinary soft limit repeatedly while retaining exact failure class.
+    const saved = try posix.getrlimit(.NOFILE);
+    try posix.setrlimit(.NOFILE, .{ .cur = @min(saved.cur, 256), .max = saved.max });
     defer posix.setrlimit(.NOFILE, saved) catch {};
 
     var output: [16]u8 = undefined;
@@ -302,7 +295,7 @@ test "bounded process keeps the child status when a low descriptor limit opens t
     var attempt: usize = 0;
     while (attempt < 300) : (attempt += 1) {
         try std.testing.expectError(
-            error.ChildFailed,
+            error.SpawnFailed,
             process.runCapture(std.testing.io, missing, &argv, &output, run_budget_ns),
         );
     }
@@ -446,7 +439,7 @@ test "bounded observation drains both pipes under concurrent backpressure" {
     try std.testing.expect(std.mem.allEqual(u8, result.stderr, 'e'));
 }
 
-test "bounded observation preserves signal and child-side exec failure" {
+test "bounded observation separates signal from native creation failure" {
     var stdout: [8]u8 = undefined;
     var stderr: [8]u8 = undefined;
     const environment = [_:null]?[*:0]const u8{};
@@ -466,7 +459,7 @@ test "bounded observation preserves signal and child-side exec failure" {
 
     const missing: [:0]const u8 = "/definitely/missing/maru-bounded-observation";
     const missing_argv = [_:null]?[*:0]const u8{missing.ptr};
-    const exec_result = try process.runObserveEnvironment(
+    try std.testing.expectError(error.SpawnFailed, process.runObserveEnvironment(
         std.testing.io,
         missing,
         &missing_argv,
@@ -474,8 +467,7 @@ test "bounded observation preserves signal and child-side exec failure" {
         &stdout,
         &stderr,
         run_budget_ns,
-    );
-    try std.testing.expectEqual(process.Termination{ .exited = 126 }, exec_result.termination);
+    ));
 }
 
 test "bounded observation rejects either stream cap plus one" {
@@ -604,4 +596,232 @@ fn countOpenFds() !usize {
     var count: usize = 0;
     while (try iterator.next(std.testing.io)) |_| count += 1;
     return count;
+}
+
+// Actual subprocess regressions for FD collisions, explicit inheritance and native failures.
+fn boundedSaveStdio(fd: c.fd_t) !c.fd_t {
+    // Keep fd 3 free so closing stdin forces the inherited source to alias fd 3 itself.
+    const saved = c.fcntl(fd, c.F.DUPFD_CLOEXEC, @as(c_int, 64));
+    try std.testing.expect(saved >= 64);
+    try std.testing.expectEqual(@as(c_int, 0), c.close(fd));
+    return saved;
+}
+
+fn boundedRestoreStdio(saved: c.fd_t, fd: c.fd_t) void {
+    _ = c.dup2(saved, fd);
+    _ = c.close(saved);
+}
+
+fn boundedClosedCapture(fd: c.fd_t) !void {
+    const saved = try boundedSaveStdio(fd);
+    defer boundedRestoreStdio(saved, fd);
+    var probe_storage: [4096]u8 = undefined;
+    const probe = try boundedProbe(&probe_storage);
+    const argv = [_:null]?[*:0]const u8{ probe.ptr, "echo", "ok" };
+    const environment = [_:null]?[*:0]const u8{};
+    var output: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("ok\n", try process.runCaptureEnvironmentStdout(std.testing.io, probe, &argv, &environment, &output, run_budget_ns));
+}
+
+test "bounded closed stdin does not corrupt capture mappings" {
+    try boundedClosedCapture(0);
+}
+test "bounded closed stdout does not corrupt capture mappings" {
+    try boundedClosedCapture(1);
+}
+test "bounded closed stderr does not corrupt capture mappings" {
+    try boundedClosedCapture(2);
+}
+
+test "bounded inherited receipt source aliases fd 3 when stdin is closed" {
+    const saved = try boundedSaveStdio(0);
+    defer boundedRestoreStdio(saved, 0);
+    try std.testing.expectEqual(@as(c_int, -1), c.fcntl(3, c.F.GETFD));
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf ok >&3" };
+    const environment = [_:null]?[*:0]const u8{};
+    var child: process.InheritedPipeChild = .{};
+    try process.spawnEnvironmentInheritedPipe(shell, &argv, &environment, &child);
+    defer child.terminate() catch {};
+    try std.testing.expectEqual(@as(c.fd_t, 0), child.read_fd);
+    var output: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("ok", try child.readReceipt(std.testing.io, &output, run_budget_ns));
+}
+
+test "bounded inherited socket source aliases fd 3 when stdin is closed" {
+    const saved = try boundedSaveStdio(0);
+    defer boundedRestoreStdio(saved, 0);
+    try std.testing.expectEqual(@as(c_int, -1), c.fcntl(3, c.F.GETFD));
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf '\\000\\000\\000\\002ok' >&3" };
+    const environment = [_:null]?[*:0]const u8{};
+    var child: process.InheritedSocketChild = .{};
+    try process.spawnEnvironmentInheritedSocket(shell, &argv, &environment, &child);
+    defer child.terminate() catch {};
+    try std.testing.expectEqual(@as(c.fd_t, 0), child.fd);
+    var output: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("ok", try child.readFrame(std.testing.io, &output, run_budget_ns));
+}
+
+test "bounded real program exit 126 remains an observed child exit" {
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "exit 126" };
+    const environment = [_:null]?[*:0]const u8{};
+    var stdout: [16]u8 = undefined;
+    var stderr: [16]u8 = undefined;
+    const observed = try process.runObserveEnvironment(std.testing.io, shell, &argv, &environment, &stdout, &stderr, run_budget_ns);
+    try std.testing.expectEqual(process.Termination{ .exited = 126 }, observed.termination);
+}
+
+test "bounded partial source pinning failure preserves FD ownership" {
+    const saved = try std.posix.getrlimit(.NOFILE);
+    try std.posix.setrlimit(.NOFILE, .{ .cur = 128, .max = saved.max });
+    defer std.posix.setrlimit(.NOFILE, saved) catch {};
+    var held: [128]c.fd_t = undefined;
+    var count: usize = 0;
+    defer for (held[0..count]) |fd| {
+        _ = c.close(fd);
+    };
+    while (count < held.len) {
+        const fd = c.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(c.mode_t, 0));
+        if (fd < 0) break;
+        held[count] = fd;
+        count += 1;
+    }
+    try std.testing.expect(count > 3);
+    for (0..4) |_| {
+        count -= 1;
+        _ = c.close(held[count]);
+    }
+    const before = boundedCountFds();
+    var probe_storage: [4096]u8 = undefined;
+    const probe = try boundedProbe(&probe_storage);
+    const argv = [_:null]?[*:0]const u8{ probe.ptr, "echo", "ok" };
+    const environment = [_:null]?[*:0]const u8{};
+    var output: [16]u8 = undefined;
+    try std.testing.expectError(error.SpawnSetupFailed, process.runCaptureEnvironmentStdout(std.testing.io, probe, &argv, &environment, &output, run_budget_ns));
+    try std.testing.expectEqual(before, boundedCountFds());
+}
+
+fn boundedCountFds() usize {
+    var count: usize = 0;
+    for (0..128) |fd| if (c.fcntl(@intCast(fd), c.F.GETFD) >= 0) {
+        count += 1;
+    };
+    return count;
+}
+
+test "bounded non-CLOEXEC descriptor above a lowered soft limit is not inherited" {
+    var probe_storage: [4096]u8 = undefined;
+    const probe = try boundedProbe(&probe_storage);
+    const original = c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(c.mode_t, 0));
+    try std.testing.expect(original >= 0);
+    defer _ = c.close(original);
+    const high = c.fcntl(original, c.F.DUPFD, @as(c_int, 512));
+    try std.testing.expect(high >= 512);
+    defer _ = c.close(high);
+    try std.testing.expectEqual(@as(c_int, 0), c.fcntl(high, c.F.SETFD, @as(c_int, 0)));
+    const saved = try std.posix.getrlimit(.NOFILE);
+    try std.posix.setrlimit(.NOFILE, .{ .cur = 256, .max = saved.max });
+    defer std.posix.setrlimit(.NOFILE, saved) catch {};
+    var number_storage: [32]u8 = undefined;
+    const number = try std.fmt.bufPrintSentinel(&number_storage, "{d}", .{high}, 0);
+    const argv = [_:null]?[*:0]const u8{ probe.ptr, "fd", number.ptr };
+    const environment = [_:null]?[*:0]const u8{};
+    var output: [32]u8 = undefined;
+    const bytes = try process.runCaptureEnvironmentStdout(std.testing.io, probe, &argv, &environment, &output, run_budget_ns);
+    try std.testing.expectEqualStrings("closed\n", bytes);
+}
+
+test "bounded capture handles all three closed stdio slots together" {
+    var saved: [3]c.fd_t = undefined;
+    for (&saved, 0..) |*fd, index| {
+        fd.* = c.fcntl(@intCast(index), c.F.DUPFD_CLOEXEC, @as(c_int, 64));
+        try std.testing.expect(fd.* >= 64);
+    }
+    defer for (saved, 0..) |fd, index| boundedRestoreStdio(fd, @intCast(index));
+    for (0..3) |fd| _ = c.close(@intCast(fd));
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf out; printf err >&2" };
+    var output: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("outerr", try process.runCapture(std.testing.io, shell, &argv, &output, run_budget_ns));
+}
+
+test "bounded expired launch budget never publishes successful output" {
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf ok" };
+    const environment = [_:null]?[*:0]const u8{};
+    const before = try countOpenFds();
+    var output: [8]u8 = undefined;
+    var stderr: [8]u8 = undefined;
+    try std.testing.expectError(error.TimedOut, process.runCapture(std.testing.io, shell, &argv, &output, 1));
+    try std.testing.expectError(error.TimedOut, process.runObserveEnvironment(std.testing.io, shell, &argv, &environment, &output, &stderr, 1));
+    try std.testing.expectError(error.TimedOut, process.runDigestEnvironmentStdout(std.testing.io, shell, &argv, &environment, 2, 1));
+    try std.testing.expectEqual(before, try countOpenFds());
+}
+
+test "bounded inherited creation failure publishes no child owner or descriptor" {
+    const missing: [:0]const u8 = "/definitely/missing/maru-bounded-inherited";
+    const argv = [_:null]?[*:0]const u8{missing.ptr};
+    const environment = [_:null]?[*:0]const u8{};
+    const before = try countOpenFds();
+    var pipe: process.InheritedPipeChild = .{};
+    var socket: process.InheritedSocketChild = .{};
+    try std.testing.expectError(error.SpawnFailed, process.spawnEnvironmentInheritedPipe(missing, &argv, &environment, &pipe));
+    try std.testing.expectError(error.SpawnFailed, process.spawnEnvironmentInheritedSocket(missing, &argv, &environment, &socket));
+    try std.testing.expect(pipe.owner == null and pipe.pid == -1 and pipe.read_fd == -1);
+    try std.testing.expect(socket.owner == null and socket.pid == -1 and socket.fd == -1);
+    try std.testing.expectEqual(before, try countOpenFds());
+}
+
+fn boundedProbe(storage: *[4096]u8) ![:0]const u8 {
+    const n = try std.Io.Dir.cwd().realPathFile(std.testing.io, @import("bounded_process_probe").path, storage[0 .. storage.len - 1]);
+    storage[n] = 0;
+    return storage[0..n :0];
+}
+
+test "bounded receipt survives a source overwritten by closed stdin and stdout" {
+    const stdin = try boundedSaveStdio(0);
+    defer boundedRestoreStdio(stdin, 0);
+    const stdout = try boundedSaveStdio(1);
+    defer boundedRestoreStdio(stdout, 1);
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf ok >&3" };
+    const environment = [_:null]?[*:0]const u8{};
+    var child: process.InheritedPipeChild = .{};
+    try process.spawnEnvironmentInheritedPipe(shell, &argv, &environment, &child);
+    defer child.terminate() catch {};
+    var output: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("ok", try child.readReceipt(std.testing.io, &output, run_budget_ns));
+}
+
+test "bounded socket survives a source overwritten by closed stdin and stdout" {
+    const stdin = try boundedSaveStdio(0);
+    defer boundedRestoreStdio(stdin, 0);
+    const stdout = try boundedSaveStdio(1);
+    defer boundedRestoreStdio(stdout, 1);
+    const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf '\\000\\000\\000\\002ok' >&3" };
+    const environment = [_:null]?[*:0]const u8{};
+    var child: process.InheritedSocketChild = .{};
+    try process.spawnEnvironmentInheritedSocket(shell, &argv, &environment, &child);
+    defer child.terminate() catch {};
+    var output: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("ok", try child.readFrame(std.testing.io, &output, run_budget_ns));
+}
+
+test "bounded creation rejects executable permission denial and a missing interpreter" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cases = [_]struct { leaf: []const u8, body: []const u8, mode: c.mode_t }{
+        .{ .leaf = "denied", .body = "#!/bin/sh\nexit 0\n", .mode = 0o600 },
+        .{ .leaf = "bad-interpreter", .body = "#!/definitely/missing/maru-interpreter\n", .mode = 0o700 },
+    };
+    const environment = [_:null]?[*:0]const u8{};
+    const before = try countOpenFds();
+    for (cases) |case| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = case.leaf, .data = case.body });
+        var storage: [std.fs.max_path_bytes:0]u8 = undefined;
+        const path = try temporaryPath(&tmp, case.leaf, &storage);
+        try std.testing.expectEqual(@as(c_int, 0), c.chmod(path.ptr, case.mode));
+        const argv = [_:null]?[*:0]const u8{path.ptr};
+        var output: [8]u8 = undefined;
+        var stderr: [8]u8 = undefined;
+        try std.testing.expectError(error.SpawnFailed, process.runCapture(std.testing.io, path, &argv, &output, run_budget_ns));
+        try std.testing.expectError(error.SpawnFailed, process.runObserveEnvironment(std.testing.io, path, &argv, &environment, &output, &stderr, run_budget_ns));
+    }
+    try std.testing.expectEqual(before, try countOpenFds());
 }

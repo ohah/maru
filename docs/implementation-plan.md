@@ -149,6 +149,7 @@ macOS 로컬 shell 1개 surface
 - [SSH 클라이언트 구현 계획](plans/ssh-client.md)
 - [maru-term 라이브러리 구현 계획](plans/maru-term-library.md)
 - [Session host kernel cwd parity 구현 계획](plans/session-host-kernel-cwd.md)
+- [Bounded process 생성 경쟁 제거](plans/bounded-process-spawn.md)
 - [Session host 이미지 채널 구현 계획](plans/session-host-image-channel.md)
 
 설계 **계약**은 계획 문서가 아니라 각 영역의 설계 문서가 소유한다([AGENTS.md](../AGENTS.md) 참조).

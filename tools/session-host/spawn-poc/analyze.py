@@ -36,6 +36,11 @@ def summarize(root):
     for name, variant in original["variants"].items():
         bounded = next((row for row in variant["runs"] if row["label"] == "bounded"), None)
         observed = cases((root / bounded["log"]).read_text(errors="replace")) if bounded else []
+        launch = []
+        if bounded:
+            for line in (root / bounded["log"]).read_text(errors="replace").splitlines():
+                if "poc_group_launch mode=" in line:
+                    launch.append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
         groups = {}
         for label, supplement in [("existing_contracts", False), ("poc_supplements", True)]:
             selected = [row for row in observed if (".test.PoC " in row["name"]) == supplement]
@@ -57,7 +62,7 @@ def summarize(root):
                     bucket["samples"] += int(measure["samples_per_profile"])
         for bucket in timings.values():
             bucket["median_of_round_medians_ns"] = statistics.median(bucket["round_medians_ns"])
-        result["variants"][name] = {**groups, "bounded_exit": bounded["exit"] if bounded else None,
+        result["variants"][name] = {**groups, "launch_measurements": launch, "bounded_exit": bounded["exit"] if bounded else None,
             "fence_runs": len(fence_runs), "fence_successes": sum(row["exit"] == 0 for row in fence_runs),
             "timings": timings}
     (root / "comparison.json").write_text(json.dumps(result, indent=2) + "\n")

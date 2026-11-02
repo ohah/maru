@@ -114,6 +114,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--only", choices=VARIANTS, action="append")
     parser.add_argument("--skip-race-control", action="store_true")
+    parser.add_argument("--bounded-only", action="store_true")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -143,7 +144,8 @@ def main():
         records = []
         report["variants"][variant] = {**hashes, "runs": records}
         targets = [("bounded", "test-session-host-bounded-process")]
-        targets += [(f"fence-{round_id}", "test-session-host-release-adapter-profile-authored-attestation-fence") for round_id in range(args.rounds + 1)]
+        if not args.bounded_only:
+            targets += [(f"fence-{round_id}", "test-session-host-release-adapter-profile-authored-attestation-fence") for round_id in range(args.rounds + 1)]
         for label, target in targets:
             command = [zig, "build", target, "-Doptimize=Debug", "-j1"]
             row = execute(command, tree, output / f"{variant}-{label}.log")

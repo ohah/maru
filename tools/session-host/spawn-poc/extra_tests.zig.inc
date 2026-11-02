@@ -4,15 +4,22 @@ test "PoC every launched child already leads its own process group" {
     const probe: [:0]const u8 = POC_PROBE_LITERAL;
     const environment = [_:null]?[*:0]const u8{};
     const argv = [_:null]?[*:0]const u8{ probe.ptr, "group" };
-    for (0..30) |_| {
+    var elapsed: [30]u64 = undefined;
+    for (&elapsed) |*sample| {
         var output: [64]u8 = undefined;
+        const started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         const bytes = try process.runCaptureEnvironmentStdout(std.testing.io, probe, &argv, &environment, &output, run_budget_ns);
+        sample.* = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - started);
         var values = std.mem.tokenizeAny(u8, bytes, " \n");
         const pid = try std.fmt.parseInt(i32, values.next() orelse return error.MissingPid, 10);
         const group = try std.fmt.parseInt(i32, values.next() orelse return error.MissingGroup, 10);
         try std.testing.expectEqual(pid, group);
         try std.testing.expect(values.next() == null);
     }
+    std.mem.sort(u64, &elapsed, {}, std.sort.asc(u64));
+    std.debug.print("poc_group_launch mode={s} samples={d} median_ns={d} p95_ns={d} max_ns={d}\n", .{
+        @tagName(@import("builtin").mode), elapsed.len, elapsed[elapsed.len / 2], elapsed[(elapsed.len * 95 - 1) / 100], elapsed[elapsed.len - 1],
+    });
 }
 
 test "PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited" {

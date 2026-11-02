@@ -50,6 +50,7 @@ def driver(source,once):
 def validate(app,meta,require):
     # 분기 계수의 형식/배타성과 최종 뷰 순회 0 규칙은 두 실험에서 같은 계약이다.
     summary_control.validate({'summary_stats':app.get('bracket_stats',[])},{'summary_control':meta.get('bracket_control')},require)
+    if meta.get('bracket_control') is not None:require(app['bracket_stats'][1]<=app['bracket_stats'][0],'ready exceeds attempted')
 
 
 def present(source,once):
@@ -70,7 +71,7 @@ def stages(app,producer,meta,require):
         require(type(row) is list and len(row)==3 and all(type(x) is int and 0<x<2**64 for x in row),'syntax row shape')
         at,gen,prefix=row
         require(key[6]<=at<=header[4] and key[7]<=gen<=header[5] and i+1<=prefix<=n,'syntax presentation order')
-        if key[9]:require(row==[key[6],key[7],key[8]],'ready first frame differs')
+        if key[9] or gen==key[7]:require(key[9]==1 and row==[key[6],key[7],key[8]],'ready first frame differs')
         if i:require(rows[i-1][0]<=at and rows[i-1][1]<=gen,'syntax row order')
     for row in rows:require(rows[row[2]-1]==row,'syntax coalesced prefix')
     require(stage==rows[-1][:2],'last syntax row differs')

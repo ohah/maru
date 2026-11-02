@@ -75962,7 +75962,7 @@ test "CMPSAVEAS6 retiring one visible list preserves a newer request owned by an
 
 // Real disk/history edits must invalidate pre-edit resolve without inventing
 // revision or document identity. Fake responses control ordering, not OS input.
-fn completionHistoryReloadForTest(mode: u8) !void {
+fn completionHistoryReloadForTest(mode: u8, shared: bool) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     for (0..4) |phase| for (0..2) |empty| {
         var f = (try SmtFixture.openRepo(testing.allocator, "history.c", completion_save_source)) orelse return error.SkipZigTest;
@@ -75970,11 +75970,12 @@ fn completionHistoryReloadForTest(mode: u8) !void {
         try testing.expect(f.ready());
         const s = f.fx.session;
         const term = f.term;
+        const actor = if (shared) try pane_ops.splitSharedEditorPane(s, .horizontal, false) else term;
         if (mode != 0) {
-            term.rt.editor_selection = editor_selection.Selection.at(2);
-            try testing.expect(insertText(s, term, "x"));
-            breakUndoGroup(term);
-            if (mode == 2) try testing.expect(undoEdit(s, term));
+            actor.rt.editor_selection = editor_selection.Selection.at(2);
+            try testing.expect(insertText(s, actor, "x"));
+            breakUndoGroup(actor);
+            if (mode == 2) try testing.expect(undoEdit(s, actor));
         }
         const probe = try prepareCompletionSaveForTest(&f.fx, term, @intCast(phase));
         const accepted = s.editor_completion.accepted;
@@ -75982,10 +75983,10 @@ fn completionHistoryReloadForTest(mode: u8) !void {
         switch (mode) {
             0 => {
                 try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "history.c", .data = "prx // COMPSTALL RESOLVESTALL\n" });
-                app_session_mod.editor_conflict_ops.confirmReload(s, term.surface.id);
+                app_session_mod.editor_conflict_ops.confirmReload(s, actor.surface.id);
             },
-            1 => try testing.expect(undoEdit(s, term)),
-            2 => try testing.expect(redoEdit(s, term)),
+            1 => try testing.expect(undoEdit(s, actor)),
+            2 => try testing.expect(redoEdit(s, actor)),
             else => unreachable,
         }
         const expected = if (mode == 1) completion_save_source else "prx // COMPSTALL RESOLVESTALL\n";
@@ -76030,13 +76031,100 @@ fn completionHistoryReloadForTest(mode: u8) !void {
 }
 
 test "CMPHISTORY1 actual disk reload isolates old completion results" {
-    try completionHistoryReloadForTest(0);
+    try completionHistoryReloadForTest(0, false);
 }
 test "CMPHISTORY2 actual Undo isolates old completion results" {
-    try completionHistoryReloadForTest(1);
+    try completionHistoryReloadForTest(1, false);
 }
 test "CMPHISTORY3 actual Redo isolates old completion results" {
-    try completionHistoryReloadForTest(2);
+    try completionHistoryReloadForTest(2, false);
+}
+
+test "CMPPEER1 peer reload invalidates the shared document completion" {
+    try completionHistoryReloadForTest(0, true);
+}
+test "CMPPEER2 peer Undo invalidates the shared document completion" {
+    try completionHistoryReloadForTest(1, true);
+}
+test "CMPPEER3 peer Redo invalidates the shared document completion" {
+    try completionHistoryReloadForTest(2, true);
+}
+
+// Editing B must leave A's transaction intact, including a pending Enter.
+// Positive callbacks still apply; null callbacks retain their normal semantics.
+fn completionOtherHistoryForTest(mode: u8) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..4) |phase| for (0..2) |empty| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "source.c", completion_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        _ = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = completion_save_source });
+        const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "other.c" });
+        defer testing.allocator.free(path);
+        const other = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+        try testing.expect(pumpLspUntil(&f.fx, 3000, other, struct {
+            fn ready(t: *Term) bool {
+                return t.rt.editor_diagnostics.lsp.items.len > 0;
+            }
+        }.ready));
+        if (mode != 0) {
+            other.rt.editor_selection = editor_selection.Selection.at(2);
+            try testing.expect(insertText(s, other, "x"));
+            breakUndoGroup(other);
+            if (mode == 2) try testing.expect(undoEdit(s, other));
+        }
+        const probe = try prepareCompletionSaveForTest(&f.fx, f.term, @intCast(phase));
+        const waiting = s.editor_completion.waiting;
+        const active = s.editor_completion.active;
+        const resolving = s.editor_completion.resolve_waiting;
+        const pending = s.editor_completion.pending_accept;
+        const seq = s.editor_completion.waiting_seq;
+        const resolve_seq = s.editor_completion.resolve_seq;
+        switch (mode) {
+            0 => {
+                try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = "prx // COMPSTALL RESOLVESTALL\n" });
+                app_session_mod.editor_conflict_ops.confirmReload(s, other.surface.id);
+            },
+            1 => try testing.expect(undoEdit(s, other)),
+            2 => try testing.expect(redoEdit(s, other)),
+            else => unreachable,
+        }
+        try testing.expectEqual(waiting, s.editor_completion.waiting);
+        try testing.expectEqual(active, s.editor_completion.active);
+        try testing.expectEqual(resolving, s.editor_completion.resolve_waiting);
+        try testing.expectEqual(pending, s.editor_completion.pending_accept);
+        try testing.expectEqual(seq, s.editor_completion.waiting_seq);
+        try testing.expectEqual(resolve_seq, s.editor_completion.resolve_seq);
+        const expected = if (mode == 1) completion_save_source else "prx // COMPSTALL RESOLVESTALL\n";
+        const selection = other.rt.editor_selection;
+        const undo = other.rt.editorDocument().history.undo_len;
+        const redo = other.rt.editorDocument().history.redo_len;
+        try testing.expectEqualStrings(expected, other.rt.editorDocument().opened.?.file.content);
+        if (empty == 1) {
+            try deliverCompletionSaveForTest(s, probe, true);
+            try testing.expectEqualStrings(completion_save_source, f.term.rt.editorDocument().opened.?.file.content);
+            try pressKey(&f.fx, .escape, .{});
+            const fresh = try prepareCompletionSaveForTest(&f.fx, f.term, @intCast(phase));
+            try acceptPreservedCompletionForTest(&f.fx, fresh);
+        } else try acceptPreservedCompletionForTest(&f.fx, probe);
+        try testing.expectEqualStrings(expected, other.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(selection, other.rt.editor_selection);
+        try testing.expectEqual(undo, other.rt.editorDocument().history.undo_len);
+        try testing.expectEqual(redo, other.rt.editorDocument().history.redo_len);
+        try batchApplyDisk(&f.fx, "source.c", completion_save_source);
+        try batchApplyDisk(&f.fx, "other.c", if (mode == 0) "prx // COMPSTALL RESOLVESTALL\n" else completion_save_source);
+    };
+}
+test "CMPOTHER1 foreign reload preserves completion and edits" {
+    try completionOtherHistoryForTest(0);
+}
+test "CMPOTHER2 foreign Undo preserves completion and edits" {
+    try completionOtherHistoryForTest(1);
+}
+test "CMPOTHER3 foreign Redo preserves completion and edits" {
+    try completionOtherHistoryForTest(2);
 }
 
 const FocusedCompletionPhase = enum { resolved, prefetch, pending };

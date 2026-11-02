@@ -6752,6 +6752,16 @@ pub fn build(b: *std.Build) void {
         run_feature_stop.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_feature_stop.step);
     }
+    const completion_peer_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CMPPEER", ".test.CMPOTHER" } });
+    const run_completion_peer = b.addRunArtifact(completion_peer_tests);
+    run_completion_peer.setCwd(b.path("."));
+    run_completion_peer.addArg("--maru-expect-tests=10");
+    run_completion_peer.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-completion-shared-history", "Verify shared and unrelated document completion history isolation").dependOn(&run_completion_peer.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_completion_peer.addArg("--maru-expect-passed=10");
+        macos_only_test_step.dependOn(&run_completion_peer.step);
+    }
     const completion_history_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPHISTORY"} });
     const run_completion_history = b.addRunArtifact(completion_history_tests);
     run_completion_history.setCwd(b.path("."));
@@ -6837,7 +6847,7 @@ pub fn build(b: *std.Build) void {
     const completion_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CMP", ".test.RLC1 " } });
     const run_completion = b.addRunArtifact(completion_tests);
     run_completion.setCwd(b.path("."));
-    run_completion.addArg("--maru-expect-tests=52");
+    run_completion.addArg("--maru-expect-tests=58");
     run_completion.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-completion", "Run editor completion product regressions").dependOn(&run_completion.step);
     const save_conflict_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.C0a", ".test.C1a-", ".test.C1b-" } });

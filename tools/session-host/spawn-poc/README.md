@@ -6,6 +6,7 @@ product files and its existing 24 bounded-process test expectations remain uncha
 
 ```sh
 python3 tools/session-host/spawn-poc/run.py --output /absolute/new/directory --rounds 3
+python3 tools/session-host/spawn-poc/analyze.py /absolute/new/directory
 ```
 
 The directory must not already exist. Sources are linked read-only by convention; files modified

@@ -95,6 +95,8 @@ def execute(command, cwd, path, timeout=600):
                 cases[-1]["status"] = "passed"
             elif tail == "SKIP":
                 cases[-1]["status"] = "skipped"
+            elif tail.startswith("FAIL ("):
+                cases[-1]["status"] = "failed"
         elif cases and line == "OK":
             cases[-1]["status"] = "passed"
         if cases and line.startswith("FAIL ("):

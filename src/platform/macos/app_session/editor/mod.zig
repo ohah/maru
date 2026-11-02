@@ -75682,6 +75682,230 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 // Prepare a genuinely installed list, then change focus without a render tick.
 // Keys can arrive in this interval, including with A still visible in a split.
 // Phases use real requests: 0=list wait, 1=resolved display, 2=prefetch, 3=pending Enter.
+const action_save_source = "int a; // CASTALL\n";
+const ActionSaveProbe = struct { term: *Term, owner: *lsp_client.Client, seq: u32, phase: u8, uri_buf: [std.fs.max_path_bytes + 16]u8 = undefined, uri_len: usize = 0 };
+fn actionSaveReplyForTest(probe: ActionSaveProbe) ![]u8 {
+    const uri = probe.uri_buf[0..probe.uri_len];
+    if (probe.phase >= 2) return std.json.Stringify.valueAlloc(testing.allocator, .{.{ .title = "prior_target", .data = .{ .uri = uri } }}, .{});
+    return std.json.Stringify.valueAlloc(testing.allocator, .{.{ .title = "prior_target", .edit = .{ .documentChanges = .{.{ .textDocument = .{ .uri = uri, .version = @as(?u32, null) }, .edits = .{.{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .newText = "FIXED" }} }} } }}, .{});
+}
+fn prepareActionSaveForTest(fx: *PaneFixture, term: *Term, phase: u8) !ActionSaveProbe {
+    const s = fx.session;
+    try testing.expect(term_ops.activateSurfaceById(s, term.surface.id));
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    var frame = appendPaneFrame(s, activeLeafRectForTest(s).?, term) orelse return error.EditorPaneDidNotDraw;
+    frame.dl.deinit(testing.allocator);
+    try testing.expect(code_action_client.quickFix(s));
+    var probe: ActionSaveProbe = .{ .term = term, .owner = lsp_client.readyClientFor(s, term).?, .seq = s.editor_code_action.waits[0].seq, .phase = phase };
+    const uri = probe.owner.findDoc(term).?.uri;
+    try testing.expect(uri.len <= probe.uri_buf.len);
+    @memcpy(probe.uri_buf[0..uri.len], uri);
+    probe.uri_len = uri.len;
+    if (phase != 0) {
+        const raw = try actionSaveReplyForTest(probe);
+        defer testing.allocator.free(raw);
+        var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+        defer result.deinit();
+        code_action_client.onResponse(s, probe.owner, probe.seq, result.value, false, null);
+        try testing.expect(s.code_action_menu and s.chrome_host.context_menu.open);
+        if (phase == 3) {
+            settings_ops.acceptContextMenu(s);
+            try testing.expect(s.editor_code_action.resolve_waiting);
+            probe.seq = s.editor_code_action.resolve_seq;
+        }
+    }
+    return probe;
+}
+fn deliverActionSaveForTest(s: *AppSession, probe: ActionSaveProbe, response: u8) !void {
+    var edit_probe = probe;
+    edit_probe.phase = 1;
+    const raw = try actionSaveReplyForTest(edit_probe);
+    defer testing.allocator.free(raw);
+    var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+    defer result.deinit();
+    const payload: ?std.json.Value = if (response == 0) result.value else null;
+    if (probe.phase == 3) code_action_client.onResolveResponse(s, probe.owner, probe.seq, if (payload) |p| p.array.items[0] else null, response == 2, "old target error") else code_action_client.onResponse(s, probe.owner, probe.seq, payload, response == 2, "old target error");
+}
+
+fn acceptActionSaveForTest(fx: *PaneFixture, probe: ActionSaveProbe) !void {
+    const s = fx.session;
+    const undo = probe.term.rt.editorDocument().history.undo_len;
+    const applied = s.editor_code_action.applied;
+    if (probe.phase == 0 or probe.phase == 3) {
+        try deliverActionSaveForTest(s, probe, 0);
+    }
+    if (probe.phase != 3) {
+        settings_ops.closeContextMenu(s);
+        code_action_client.accept(s, 0);
+        if (probe.phase == 2) {
+            var resolving = probe;
+            resolving.phase = 3;
+            resolving.seq = s.editor_code_action.resolve_seq;
+            try testing.expect(s.editor_code_action.resolve_waiting);
+            try deliverActionSaveForTest(s, resolving, 0);
+        }
+    }
+    try testing.expectEqual(applied + 1, s.editor_code_action.applied);
+    try testing.expectEqualStrings("FIXED a; // CASTALL\n", probe.term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(undo + 1, probe.term.rt.editorDocument().history.undo_len);
+    s.chrome_host.notice.dismiss();
+    try testing.expect(undoEdit(s, probe.term));
+    try testing.expectEqualStrings(action_save_source, probe.term.rt.editorDocument().opened.?.file.content);
+}
+
+fn actionSaveSuccessForTest(phase: u8) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |shared| for ([_]u8{ 0, 1, 2 }) |response| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", action_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const term = if (shared) try pane_ops.splitSharedEditorPane(s, .horizontal, false) else f.term;
+        const probe = try prepareActionSaveForTest(&f.fx, term, phase);
+        const state = term.rt.editorDocument();
+        const epoch = state.save_target_epoch;
+        const selection = term.rt.editor_selection;
+        const undo = state.history.undo_len;
+        const redo = state.history.redo_len;
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch + 1, state.save_target_epoch);
+        try testing.expect(!s.code_action_menu and !s.chrome_host.context_menu.open);
+        try testing.expect(!s.editor_code_action.waiting and !s.editor_code_action.resolve_waiting);
+        code_action_client.accept(s, 0); // A queued selection cannot use retired items.
+        try testing.expectEqual(@as(u64, 0), s.editor_code_action.applied);
+        const Bound = struct { s: *AppSession, t: *Term, owner: *lsp_client.Client };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Bound{ .s = s, .t = term, .owner = probe.owner }, struct {
+            fn ready(c: Bound) bool {
+                const owner = lsp_client.readyClientFor(c.s, c.t) orelse return false;
+                return owner == c.owner and std.mem.endsWith(u8, owner.findDoc(c.t).?.uri, "after.c");
+            }
+        }.ready));
+        const none = s.editor_code_action.notified_none;
+        const errors = s.editor_code_action.notified_error;
+        try deliverActionSaveForTest(s, probe, response);
+        try testing.expect(!s.code_action_menu and !s.chrome_host.context_menu.open);
+        try testing.expect(!s.editor_code_action.waiting and !s.editor_code_action.resolve_waiting);
+        try testing.expectEqual(none, s.editor_code_action.notified_none);
+        try testing.expectEqual(errors, s.editor_code_action.notified_error);
+        try testing.expectEqualStrings(action_save_source, state.opened.?.file.content);
+        try testing.expectEqualDeep(selection, term.rt.editor_selection);
+        try testing.expectEqual(undo, state.history.undo_len);
+        try testing.expectEqual(redo, state.history.redo_len);
+        try batchApplyDisk(&f.fx, "before.c", action_save_source);
+        try batchApplyDisk(&f.fx, "after.c", action_save_source);
+        const fresh = try prepareActionSaveForTest(&f.fx, term, 0);
+        try testing.expect(fresh.seq != probe.seq);
+        try deliverActionSaveForTest(s, probe, response);
+        try testing.expect(s.editor_code_action.waiting);
+        try acceptActionSaveForTest(&f.fx, fresh);
+        try batchApplyDisk(&f.fx, "before.c", action_save_source);
+        try batchApplyDisk(&f.fx, "after.c", action_save_source);
+    };
+}
+test "CASAVE1 ready-edit menu retires after actual Save As" {
+    try actionSaveSuccessForTest(1);
+}
+test "CASAVE2 lazy menu retires after actual Save As" {
+    try actionSaveSuccessForTest(2);
+}
+test "CASAVE3 old listing callbacks cannot target the adopted file" {
+    try actionSaveSuccessForTest(0);
+}
+test "CASAVE4 old resolving actions cannot target the adopted file" {
+    try actionSaveSuccessForTest(3);
+}
+
+test "CASAVE5 cancellation worker conflict and other-document save preserve valid actions" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]u8{ 0, 1, 2, 3 }) |phase| for (0..3) |mode| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", action_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        var actor = f.term;
+        if (mode == 2) {
+            _ = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+            try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = action_save_source });
+            const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "other.c" });
+            defer testing.allocator.free(path);
+            actor = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+        }
+        const probe = try prepareActionSaveForTest(&f.fx, f.term, phase);
+        const epoch = f.term.rt.editorDocument().save_target_epoch;
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer gate.set();
+        _ = try saveAsSelectForTest(&f.fx, actor, if (mode == 0) "" else target);
+        if (mode == 1) {
+            @import("save/as.zig").setGateForTests(&gate);
+            @import("save/as.zig").poll();
+            try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "after.c", .data = "external\n" });
+            gate.set();
+        }
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch, f.term.rt.editorDocument().save_target_epoch);
+        try testing.expectEqual(phase == 0, s.editor_code_action.waiting);
+        try testing.expectEqual(phase == 3, s.editor_code_action.resolve_waiting);
+        try testing.expectEqual(@as(usize, if (phase == 0) 0 else 1), s.editor_code_action.items.items.len);
+        s.chrome_host.notice.dismiss();
+        try acceptActionSaveForTest(&f.fx, probe);
+        try batchApplyDisk(&f.fx, "before.c", action_save_source);
+        if (mode == 1) try batchApplyDisk(&f.fx, "after.c", "external\n");
+        if (mode == 2) {
+            try batchApplyDisk(&f.fx, "other.c", action_save_source);
+            try batchApplyDisk(&f.fx, "after.c", action_save_source);
+        }
+    };
+}
+
+test "CASAVE6 retiring a shown or waiting owner preserves the other transaction" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |save_waiting| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", action_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        _ = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = action_save_source });
+        const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "other.c" });
+        defer testing.allocator.free(path);
+        const other = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+        try testing.expect(pumpLspUntil(&f.fx, 3000, other, struct {
+            fn ready(t: *Term) bool {
+                return t.rt.editor_diagnostics.lsp.items.len > 0;
+            }
+        }.ready));
+        const shown = try prepareActionSaveForTest(&f.fx, f.term, 1);
+        const waiting = try prepareActionSaveForTest(&f.fx, other, 0);
+        try testing.expect(s.code_action_menu and s.editor_code_action.waiting);
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, if (save_waiting) other else f.term, target);
+        try awaitSaveAsForTest();
+        try testing.expectEqual(save_waiting, s.code_action_menu);
+        try testing.expectEqual(!save_waiting, s.editor_code_action.waiting);
+        if (save_waiting) {
+            try deliverActionSaveForTest(s, waiting, 0);
+            try testing.expect(s.code_action_menu and !s.editor_code_action.waiting);
+            try acceptActionSaveForTest(&f.fx, shown);
+        } else {
+            try deliverActionSaveForTest(s, shown, 0);
+            try testing.expect(s.editor_code_action.waiting);
+            try acceptActionSaveForTest(&f.fx, waiting);
+        }
+        try batchApplyDisk(&f.fx, "before.c", action_save_source);
+        try batchApplyDisk(&f.fx, "other.c", action_save_source);
+        try batchApplyDisk(&f.fx, "after.c", action_save_source);
+    }
+}
+
 const tooltip_save_source = "add( // SIGSTALL MUTEHOVER\n";
 const TooltipSaveProbe = struct { term: *Term, owner: *lsp_client.Client, seq: u32, signature: bool };
 fn prepareTooltipSaveForTest(fx: *PaneFixture, term: *Term, signature: bool, shown: bool) !TooltipSaveProbe {

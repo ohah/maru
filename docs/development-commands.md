@@ -1864,6 +1864,11 @@ Save As를 검사한다. 검색용 `--physical-ime`와 함께 쓰지 않는다. 
 
 ### 자동완성 확정의 Undo 보존
 
+`mise exec -- zig build test-editor-code-action-save-as -j2`와 `-Doptimize=ReleaseFast`는
+실제 Save As 뒤 코드 액션 목록·메뉴·resolve를 38조건으로 대조하고 이전 경로의
+디스크 보존과 새 적용/Undo를 확인한다. 행동 6개와 초기화 4개(총 10개)이며
+[검증 범위](plans/lsp-code-action-save-as.md)를 따른다.
+
 `mise exec -- zig build test-editor-tooltip-save-as -j2`와 `-Doptimize=ReleaseFast`는
 Save As 전의 호버·시그니처 표시/대기와 취소·충돌·혼합 원본을 26조건으로 대조한다.
 행동 5개와 초기화 4개(총 9개)이며 [검증 범위](plans/lsp-tooltip-save-as.md)를 따른다.

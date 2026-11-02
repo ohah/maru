@@ -6752,6 +6752,16 @@ pub fn build(b: *std.Build) void {
         run_feature_stop.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_feature_stop.step);
     }
+    const action_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CASAVE"} });
+    const run_action_save = b.addRunArtifact(action_save_tests);
+    run_action_save.setCwd(b.path("."));
+    run_action_save.addArg("--maru-expect-tests=10");
+    run_action_save.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-code-action-save-as", "Verify code action target lifetime across actual Save As").dependOn(&run_action_save.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_action_save.addArg("--maru-expect-passed=10");
+        macos_only_test_step.dependOn(&run_action_save.step);
+    }
     const tooltip_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.TTLSAVE"} });
     const run_tooltip_save = b.addRunArtifact(tooltip_save_tests);
     run_tooltip_save.setCwd(b.path("."));

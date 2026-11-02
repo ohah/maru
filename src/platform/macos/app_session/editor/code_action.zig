@@ -110,6 +110,28 @@ pub fn deinit(self: *AppSession) void {
     self.editor_code_action.deinit(self.allocator);
 }
 
+/// Old items still contain the previous URI after adoption. Retire each source
+/// independently: a visible menu, a newer listing and a resolve can differ.
+pub fn onSaveTargetChanged(self: *AppSession, term: *Term) void {
+    const st = &self.editor_code_action;
+    const sourceMatches = maru.session.editor.completion_ops.sourceMatches;
+    if (st.waiting and sourceMatches(st.waiting_surface, term.surfaceId())) {
+        st.waiting = false;
+        st.clearPending(self.allocator);
+    }
+    if (st.resolve_owner) |owner| if (sourceMatches(owner.surface, term.surfaceId())) {
+        st.resolve_waiting = false;
+        st.resolve_owner = null;
+        st.resolve_snaps_len = 0;
+    };
+    if (sourceMatches(st.surface_id, term.surfaceId())) {
+        // The context menu borrows titles from items; close it before freeing.
+        if (self.code_action_menu) settings_ops.closeContextMenu(self);
+        st.clearItems(self.allocator);
+        st.surface_id = 0;
+    }
+}
+
 /// `quick_fix` 명령·`⌘.` — 활성 편집기의 선택(없으면 caret)에서. 보냈으면 true.
 pub fn quickFix(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();

@@ -6,13 +6,15 @@ HERE = Path(__file__).resolve().parent
 
 
 def replace_once(text, old, new):
-    assert text.count(old) == 1, old[:100]
+    if text.count(old) != 1:
+        raise ValueError("source contract changed: " + old[:100])
     return text.replace(old, new)
 
 
 def remove_parent_group_calls(text):
     marker = "    if (!establishProcessGroup(pid)) {"
-    assert text.count(marker) == 6
+    if text.count(marker) != 6:
+        raise ValueError("expected six parent group checks")
     while marker in text:
         begin = text.index(marker)
         end = text.index("\n    }", begin) + len("\n    }")
@@ -20,17 +22,21 @@ def remove_parent_group_calls(text):
     return text
 
 
-def make_variant(text, name):
+def make_variant(text, name, templates=None):
+    if name not in {"baseline", "parent-gate", "posix-spawn"}:
+        raise ValueError("unknown variant")
+    templates = templates or {name: (HERE / name).read_text() for name in ["parent_gate.zig.inc", "posix_spawn.zig.inc"]}
     if name == "baseline":
         return text
     text = remove_parent_group_calls(text)
     if name == "parent-gate":
-        assert text.count("const pid = c.fork();") == 3
+        if text.count("const pid = c.fork();") != 3:
+            raise ValueError("expected three fork sites")
         text = text.replace("const pid = c.fork();", "const pid = try pocForkGrouped();")
-        assert text.count("c.setpgid(0, 0) != 0 or") == 3
+        if text.count("c.setpgid(0, 0) != 0 or") != 3:
+            raise ValueError("expected three child group checks")
         text = text.replace("c.setpgid(0, 0) != 0 or", "")
-        return text + "\n" + (HERE / "parent_gate.zig.inc").read_text()
-    assert name == "posix-spawn"
+        return text + "\n" + templates["parent_gate.zig.inc"]
     begin = text.index("    const max_fd = getdtablesize();", text.index("fn spawnChild("))
     end = text.index("\n}\n\nfn childExec(", begin)
     text = text[:begin] + """    return pocSpawnGrouped(executable, argv, environment, directory_fd, input_fd, .{
@@ -48,4 +54,4 @@ def make_variant(text, name):
         end = text.index(end_marker, begin) + len(end_marker)
         replacement = f"    const pid = try pocSpawnGrouped(executable, argv, environment, null, null, .{{ dev_null, dev_null, dev_null, {descriptors}[1] }});"
         text = text[:begin] + replacement + text[end:]
-    return text + "\n" + (HERE / "posix_spawn.zig.inc").read_text()
+    return text + "\n" + templates["posix_spawn.zig.inc"]

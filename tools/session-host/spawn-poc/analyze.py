@@ -7,38 +7,63 @@ import statistics
 import sys
 
 
+from log_results import parse, performance_eligible
+import hashlib
+
+
 def cases(raw):
-    found = []
-    for line in raw.splitlines():
-        match = re.match(r"^(\d+)/(\d+) (.+)\.\.\.(.*)$", line)
-        if match:
-            found.append({"name": match[3], "compiled": int(match[2]), "status": "unknown"})
-            if match[4] == "OK":
-                found[-1]["status"] = "passed"
-            elif match[4] == "SKIP":
-                found[-1]["status"] = "skipped"
-            elif match[4].startswith("FAIL ("):
-                found[-1]["status"] = "failed"
-        elif found and line == "OK":
-            found[-1]["status"] = "passed"
-        if found and line.startswith("FAIL ("):
-            found[-1]["status"] = "failed"
-    return found
+    return parse(raw)["case_results"]
+
+
+def read_payload(root, row):
+    name = row.get("log", "")
+    if not name or Path(name).name != name or "\\" in name:
+        return b"", "invalid log path"
+    try:
+        payload = (root / name).read_bytes()
+    except OSError:
+        return b"", "missing log"
+    if row.get("log_sha256") and hashlib.sha256(payload).hexdigest() != row["log_sha256"]:
+        return b"", "log digest mismatch"
+    return payload, None
+
+
+def read_record(root, row, expected=26):
+    payload, error = read_payload(root, row)
+    if error:
+        return parse("", expected), error
+    expected_names = row.get("expected_names")
+    parsed = parse(payload.decode(errors="replace"), len(expected_names) if expected_names else expected,
+                   expected_names=expected_names, required_modes=any(name.startswith("PoC ") for name in expected_names or []))
+    if row["exit"] == 0 and any(summary["failed"] for summary in parsed["test_summaries"]):
+        parsed["validation"]["complete"] = False
+        parsed["validation"]["errors"].append("zero exit contradicts failures")
+    return parsed, None
 
 
 def summarize(root):
     original = json.loads((root / "results.json").read_text())
-    result = {"head": original["head"], "platform": original["platform"], "race_controls": [], "variants": {}}
+    result = {"head": original["head"], "platform": original["platform"], "race_controls": [], "variants": {}, "evidence_complete": True}
     for row in original["race_controls"]:
-        for line in (root / row["log"]).read_text().splitlines():
+        payload, error = read_payload(root, row)
+        controls = []
+        for line in payload.decode(errors="replace").splitlines():
             if line.startswith("summary "):
-                result["race_controls"].append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
+                controls.append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
+        if error or row["exit"] != 0 or len(controls) != 1:
+            result["evidence_complete"] = False
+        result["race_controls"].extend(controls)
+    if original.get("schema") == "maru.spawn-strategy-poc.v2" and not original.get("skip_race_control"):
+        if {record.get("mode") for record in result["race_controls"]} != {"overlap", "parent-first", "child-first", "child-only"}:
+            result["evidence_complete"] = False
     for name, variant in original["variants"].items():
         bounded = next((row for row in variant["runs"] if row["label"] == "bounded"), None)
-        observed = cases((root / bounded["log"]).read_text(errors="replace")) if bounded else []
+        parsed, bounded_error = read_record(root, bounded) if bounded else (parse(""), "missing bounded run")
+        observed = parsed["case_results"]
+        complete = parsed["validation"]["complete"] and bounded_error is None and not bounded.get("leaked_processes") if bounded else False
         launch = []
         if bounded:
-            for line in (root / bounded["log"]).read_text(errors="replace").splitlines():
+            for line in (root / bounded["log"]).read_text(errors="replace").splitlines() if bounded_error is None else []:
                 if "poc_group_launch mode=" in line:
                     launch.append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
         groups = {}
@@ -47,13 +72,24 @@ def summarize(root):
             groups[label] = {"observed_cases": len(selected), "passed": sum(row["status"] == "passed" for row in selected),
                              "failed": sum(row["status"] == "failed" for row in selected),
                              "unknown": sum(row["status"] == "unknown" for row in selected),
+                             "skipped": sum(row["status"] == "skipped" for row in selected),
                              "failures": [row["name"] for row in selected if row["status"] == "failed"]}
         timings = {}
         fence_runs = [row for row in variant["runs"] if row["label"].startswith("fence-")]
+        accepted = []
+        valid_runs = []
         for row in fence_runs:
-            if row["warmup"]:
+            fence_parsed, fence_error = read_record(root, row, 15)
+            valid = fence_error is None and performance_eligible(row, fence_parsed)
+            complete = complete and fence_parsed["validation"]["complete"] and fence_error is None
+            if row["exit"] == 0 and not valid:
+                complete = False
+            if valid:
+                valid_runs.append(row["label"])
+            if not valid or row["warmup"]:
                 continue
-            for measure in row["fence_measurements"]:
+            accepted.append(row["label"])
+            for measure in fence_parsed["fence_measurements"]:
                 mode = measure["mode"]
                 for profile in ["baseline", "upgrade"]:
                     bucket = timings.setdefault(f"{mode}/{profile}", {"round_medians_ns": [], "round_p95_ns": [], "samples": 0})
@@ -62,9 +98,15 @@ def summarize(root):
                     bucket["samples"] += int(measure["samples_per_profile"])
         for bucket in timings.values():
             bucket["median_of_round_medians_ns"] = statistics.median(bucket["round_medians_ns"])
-        result["variants"][name] = {**groups, "launch_measurements": launch, "bounded_exit": bounded["exit"] if bounded else None,
-            "fence_runs": len(fence_runs), "fence_successes": sum(row["exit"] == 0 for row in fence_runs),
+        expected_runs = 0 if original.get("bounded_only") else original["rounds"] + 1
+        complete = complete and len(fence_runs) == expected_runs
+        result["evidence_complete"] = result["evidence_complete"] and complete
+        result["variants"][name] = {"evidence_complete": complete, "bounded_evidence_error": bounded_error,
+            "bounded_validation": parsed["validation"], "accepted_timing_runs": accepted, **groups, "launch_measurements": launch, "bounded_exit": bounded["exit"] if bounded else None,
+            "fence_runs": len(fence_runs), "fence_successes": len(valid_runs),
             "timings": timings}
+    requested = original.get("requested_variants", list(original["variants"]))
+    result["evidence_complete"] = result["evidence_complete"] and bool(requested) and set(requested) == set(original["variants"])
     (root / "comparison.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
 

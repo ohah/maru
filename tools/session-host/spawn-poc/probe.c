@@ -6,6 +6,10 @@
 #include <unistd.h>
 
 int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "echo")) {
+        puts(argv[2]);
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "group")) {
         printf("%d %d\n", getpid(), getpgrp());
         return 0;

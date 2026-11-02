@@ -1163,14 +1163,27 @@ jobs:
           cache_save: false
       - name: Prime vendored Zig packages
         run: sh tools/ci/prime-zig-packages.sh
+      - name: Adversarial PoC driver checks
+        run: |
+          set -o pipefail
+          python3 tools/session-host/spawn-poc/test_adversarial.py 2>&1 | tee "$RUNNER_TEMP/spawn-poc-adversarial.log"
       - name: Compare isolated launch prototypes
         run: python3 tools/session-host/spawn-poc/run.py --output "$RUNNER_TEMP/maru-spawn-poc" --rounds 3
+      - name: Verify comparison completeness
+        run: |
+          python3 tools/session-host/spawn-poc/analyze.py "$RUNNER_TEMP/maru-spawn-poc"
+          python3 - "$RUNNER_TEMP/maru-spawn-poc/comparison.json" <<'PY'
+          import json, sys
+          if not json.load(open(sys.argv[1]))['evidence_complete']:
+              raise SystemExit('incomplete comparison evidence')
+          PY
       - name: Upload comparison evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: spawn-strategy-poc-macos15
           path: |
+            ${{ runner.temp }}/spawn-poc-adversarial.log
             ${{ runner.temp }}/maru-spawn-poc/*.json
             ${{ runner.temp }}/maru-spawn-poc/*.log
           if-no-files-found: error

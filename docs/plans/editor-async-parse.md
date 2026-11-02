@@ -572,3 +572,11 @@ python3 tools/editor-parse-runtime/review.py --scope recovery \
 실제 제품 Metal 960×600 캡처에서 지원 문법의 색·접힘을 확인했다. 원본 로그·PNG·실행 파일
 해시는 저장소 밖 `~/.cache/maru-agent-artifacts/parse-input-gui/`에 두고 이미지는 PR 본문에 첨부한다.
 이 결과는 OS 후보창의 위치·PNG 검증이나 GUI 입력 지연 개선량의 증거가 아니다.
+
+## 완료 심볼 요약 준비
+
+[후속 구현](editor-async-sticky-preparation.md)은 워커가 완료를 공개하기 전에 기존 심볼 요약을
+준비한다. `copyReady`의 독립 참조 복제를 사용하며 수신 뷰의 첫 전체 집계를 줄인다.
+준비 순회는 협력적 취소를 확인하고 부분 집계를 발행하지 않는다. 선택적 요약 OOM은 파싱 실패와
+구분해 정상 파싱을 유지하며, 해당 뷰의 기존 첫 조회 집계를 허용한다. 이는 메인 동기 **파싱**으로
+되돌아가는 정책이 아니다. 접힘 캐시의 소유권·준비는 이 후속의 범위에 포함하지 않는다.

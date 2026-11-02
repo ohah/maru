@@ -91,7 +91,7 @@ macOS 로컬 shell 1개 surface
 - [일반 편집의 파싱 예산 비교](plans/editor-edit-parse-budget.md) — 제품 변경 전 첫 호출·재개·완료 뒤 조회 비용과 입력 판·공유 뷰 정확성을 비교한다.
 - [구문 파싱 비동기화](plans/editor-async-parse.md) — 승인한 실패 중단·명시적 복구 정책으로 일반 입력과 완료 표시를 연결했다. 비교·병합은 기존 동기 경로를 유지한다. GUI 지연 개선량은 별도 실측 범위다.
 - [비동기 파싱의 실제 입력 표시 지연](plans/editor-input-latency.md) — 외부 고정 주기 48프로세스·1,440입력에 이어 준비 뒤 6프로세스의 주소·스택을 조사했다. 비동기 메인에서 접힘·심볼 트리 순회가 반복 관측됐다. 준비 실패·훅 경로 복구 확인·환경 허용 목록을 별도 기록한다.
-- [비동기 완료의 심볼 요약 준비](plans/editor-async-sticky-preparation.md) — 실제 두 뷰의 첫 조회 재구축을 재현하고 워커 준비·취소·선택적 OOM 보존을 구현했다. Native 집중 검증 완료, 동일 바이너리 GUI 대조 준비 중이다. 접힘 캐시 소유권 변경은 포함하지 않는다.
+- [비동기 완료의 심볼 요약 준비](plans/editor-async-sticky-preparation.md) — 실제 두 뷰의 첫 조회 재구축을 재현하고 워커 준비·취소·선택적 OOM 보존을 구현했다. Native 집중 검증 및 동일 바이너리 GUI 대조 48회/1,440입력을 완료했다. 접힘 캐시 소유권 변경은 포함하지 않는다.
 - [캐시 경로의 원격 커밋 검증](plans/editor-scm-cache-path-test.md) — 정상 캐시 저장소를 허용하면서 실제 로컬 메시지 경로 유출을 거절한다.
 - [pane 프레임 준비 비용 귀속](plans/editor-pane-frame-attribution.md) — 편집과 프레임을 분리해 기하·표식·장식·고정 머리줄의 중첩 비용을 관측한다.
 - [구문 Provider 편집 비용 귀속](plans/editor-provider-edit-attribution.md) — 파싱·변경 범위·트리 이동과 실제 뷰별 호출 수를 분리해 다음 개선의 근거를 만든다.

@@ -467,6 +467,7 @@ pub fn poll() void {
                 // Only adoption commits a new target. Earlier cancellation or
                 // failure must not discard valid requests for the old URI.
                 editor.completion_client.onSaveTargetChanged(session, term);
+                editor.signature_client.onSaveTargetChanged(session, term);
                 for (op.paths.items) |*item| if (item.surface == term.surface.id and item.created != null and term.file_entry == null) {
                     releaseEntrySlot(item);
                     term.file_entry = item.created;

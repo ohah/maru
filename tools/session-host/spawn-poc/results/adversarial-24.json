@@ -1,0 +1,1020 @@
+{
+  "local-macos26": {
+    "head": "f65a197d87b5af6c491cda22116d73153f6883bb",
+    "rounds": [
+      {
+        "round": 1,
+        "hypothesis": "Merged stdout and stderr at exact cap",
+        "repro": "Child writes ab to stdout and cd to stderr; cap=4",
+        "test": "bounded process captures merged stdout and stderr at the exact byte cap",
+        "expected": "Exact abcd bytes",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 2,
+        "hypothesis": "Protocol stderr separation",
+        "repro": "Child writes json to stdout and warning to stderr",
+        "test": "bounded process stdout-only capture never admits stderr into protocol bytes",
+        "expected": "Only json reaches stdout-only protocol",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 3,
+        "hypothesis": "Overflow publication",
+        "repro": "Child writes five bytes with a four-byte cap",
+        "test": "bounded process rejects cap plus one without publishing a prefix",
+        "expected": "OutputTooLarge; no accepted partial output",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 4,
+        "hypothesis": "Invalid executable and terminal failure",
+        "repro": "Relative executable, missing executable, zero budget, exit 7, SIGTERM",
+        "test": "bounded process rejects nonzero and signaled terminal status",
+        "expected": "Preserve distinct existing rejection expectations",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "failed",
+            "failed"
+          ]
+        }
+      },
+      {
+        "round": 5,
+        "hypothesis": "Descendant-held pipe after leader exit",
+        "repro": "Child starts a TERM-ignoring descendant and closes leader output",
+        "test": "bounded process timeout kills a descendant that retains the capture pipe",
+        "expected": "TimedOut and bounded process-group cleanup",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 6,
+        "hypothesis": "Ambient environment injection",
+        "repro": "Replace environment with the test allowlist",
+        "test": "bounded process can replace inherited environment exactly",
+        "expected": "Only supplied environment appears",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 7,
+        "hypothesis": "Ambient low FD leak",
+        "repro": "Create a non-CLOEXEC ambient descriptor",
+        "test": "bounded process closes ambient descriptors when no inheritance is requested",
+        "expected": "Child cannot observe it",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 8,
+        "hypothesis": "Working directory authority",
+        "repro": "Execute from an open directory descriptor",
+        "test": "bounded process binds one directory as child cwd without mutating parent authority",
+        "expected": "Child cwd matches held directory; parent authority unchanged",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 9,
+        "hypothesis": "Path replacement of executable ancestor",
+        "repro": "Rename or replace pathname ancestor after holding directory",
+        "test": "bounded process executes a leaf from the held directory after pathname ancestor replacement",
+        "expected": "Held executable leaf still executes",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 10,
+        "hypothesis": "Stdin identity and position",
+        "repro": "Provide one open regular file as stdin",
+        "test": "bounded process streams one held regular fd as exact child stdin",
+        "expected": "Child receives exact intended input",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 11,
+        "hypothesis": "Fast exit errno classification",
+        "repro": "Classify ACCES, SRCH, INTR, PERM and INVAL",
+        "test": "bounded process treats a child that exits before setpgid as grouped",
+        "expected": "Keep established/retry/failure distinctions; pure classifier control",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 12,
+        "hypothesis": "Low-limit failed exec classification",
+        "repro": "Lower NOFILE to 256 and attempt missing child execution",
+        "test": "bounded process keeps the child status when a low descriptor limit opens the setpgid race",
+        "expected": "Existing ChildFailed contract retained",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "failed",
+            "failed"
+          ]
+        }
+      },
+      {
+        "round": 13,
+        "hypothesis": "Receipt before GUI child termination",
+        "repro": "Child emits receipt and remains alive",
+        "test": "bounded inherited pipe reads a receipt before terminating a still-live GUI child",
+        "expected": "Read exact receipt before explicit terminate and reap",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 14,
+        "hypothesis": "Cleanup authority after receipt error",
+        "repro": "Receipt timeout and overflow",
+        "test": "bounded inherited pipe preserves cleanup authority after timeout and overflow",
+        "expected": "Retain authority to terminate and close descriptor",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 15,
+        "hypothesis": "Copied owner and extra FD",
+        "repro": "Use copied inherited-pipe owner and ambient descriptors",
+        "test": "bounded inherited pipe rejects copied owners and closes every ambient descriptor",
+        "expected": "Reject copied owner; no unintended inheritance",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 16,
+        "hypothesis": "Framed socket lifecycle",
+        "repro": "Exchange receipt and cleanup over inherited fd 3",
+        "test": "bounded inherited socket exchanges framed receipt and cleanup before graceful exit",
+        "expected": "Exact framed protocol and graceful exit",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 17,
+        "hypothesis": "Hostile framed socket input",
+        "repro": "Copied socket owner and invalid/oversized frame",
+        "test": "bounded inherited socket rejects copied owner and retains cleanup after hostile frame",
+        "expected": "Reject invalid operation while preserving cleanup",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 18,
+        "hypothesis": "Nonzero exit with two streams",
+        "repro": "Child writes distinct stdout/stderr and exits nonzero",
+        "test": "bounded observation separates stdout and stderr and preserves nonzero exit",
+        "expected": "Observe both streams and actual nonzero exit",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 19,
+        "hypothesis": "Concurrent pipe backpressure",
+        "repro": "Child produces 20000 bytes on both stdout and stderr",
+        "test": "bounded observation drains both pipes under concurrent backpressure",
+        "expected": "Drain both streams without deadlock or loss",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 20,
+        "hypothesis": "Signal versus pre-exec failure",
+        "repro": "SIGTERM child and nonexistent executable",
+        "test": "bounded observation preserves signal and child-side exec failure",
+        "expected": "Preserve signal status and existing exec-failure observation",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "failed",
+            "failed"
+          ]
+        }
+      },
+      {
+        "round": 21,
+        "hypothesis": "Independent stream overflow",
+        "repro": "Exceed stdout cap or stderr cap separately",
+        "test": "bounded observation rejects either stream cap plus one",
+        "expected": "Reject either stream overflow",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 22,
+        "hypothesis": "Descendant retains either stream",
+        "repro": "Descendant keeps stdout or stderr pipe open",
+        "test": "bounded observation timeout kills descendants retaining either pipe",
+        "expected": "Bounded timeout with descendant cleanup",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 23,
+        "hypothesis": "Observation environment and descriptor isolation",
+        "repro": "Closed environment plus ambient descriptor",
+        "test": "bounded observation replaces environment and closes ambient descriptors",
+        "expected": "Only allowed environment and descriptors survive",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 24,
+        "hypothesis": "Aliased buffers and repeated descriptor use",
+        "repro": "Overlapping output buffers then repeated valid observations",
+        "test": "bounded observation rejects aliased buffers and repeated runs leak no descriptors",
+        "expected": "Reject aliasing; repeated valid calls do not leak descriptors",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      }
+    ]
+  },
+  "ci-macos15": {
+    "head": "644148c54bb026b3c0cbe9b30843217143999956",
+    "rounds": [
+      {
+        "round": 1,
+        "hypothesis": "Merged stdout and stderr at exact cap",
+        "repro": "Child writes ab to stdout and cd to stderr; cap=4",
+        "test": "bounded process captures merged stdout and stderr at the exact byte cap",
+        "expected": "Exact abcd bytes",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 2,
+        "hypothesis": "Protocol stderr separation",
+        "repro": "Child writes json to stdout and warning to stderr",
+        "test": "bounded process stdout-only capture never admits stderr into protocol bytes",
+        "expected": "Only json reaches stdout-only protocol",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 3,
+        "hypothesis": "Overflow publication",
+        "repro": "Child writes five bytes with a four-byte cap",
+        "test": "bounded process rejects cap plus one without publishing a prefix",
+        "expected": "OutputTooLarge; no accepted partial output",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 4,
+        "hypothesis": "Invalid executable and terminal failure",
+        "repro": "Relative executable, missing executable, zero budget, exit 7, SIGTERM",
+        "test": "bounded process rejects nonzero and signaled terminal status",
+        "expected": "Preserve distinct existing rejection expectations",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "failed",
+            "failed"
+          ]
+        }
+      },
+      {
+        "round": 5,
+        "hypothesis": "Descendant-held pipe after leader exit",
+        "repro": "Child starts a TERM-ignoring descendant and closes leader output",
+        "test": "bounded process timeout kills a descendant that retains the capture pipe",
+        "expected": "TimedOut and bounded process-group cleanup",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 6,
+        "hypothesis": "Ambient environment injection",
+        "repro": "Replace environment with the test allowlist",
+        "test": "bounded process can replace inherited environment exactly",
+        "expected": "Only supplied environment appears",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 7,
+        "hypothesis": "Ambient low FD leak",
+        "repro": "Create a non-CLOEXEC ambient descriptor",
+        "test": "bounded process closes ambient descriptors when no inheritance is requested",
+        "expected": "Child cannot observe it",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 8,
+        "hypothesis": "Working directory authority",
+        "repro": "Execute from an open directory descriptor",
+        "test": "bounded process binds one directory as child cwd without mutating parent authority",
+        "expected": "Child cwd matches held directory; parent authority unchanged",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 9,
+        "hypothesis": "Path replacement of executable ancestor",
+        "repro": "Rename or replace pathname ancestor after holding directory",
+        "test": "bounded process executes a leaf from the held directory after pathname ancestor replacement",
+        "expected": "Held executable leaf still executes",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 10,
+        "hypothesis": "Stdin identity and position",
+        "repro": "Provide one open regular file as stdin",
+        "test": "bounded process streams one held regular fd as exact child stdin",
+        "expected": "Child receives exact intended input",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 11,
+        "hypothesis": "Fast exit errno classification",
+        "repro": "Classify ACCES, SRCH, INTR, PERM and INVAL",
+        "test": "bounded process treats a child that exits before setpgid as grouped",
+        "expected": "Keep established/retry/failure distinctions; pure classifier control",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 12,
+        "hypothesis": "Low-limit failed exec classification",
+        "repro": "Lower NOFILE to 256 and attempt missing child execution",
+        "test": "bounded process keeps the child status when a low descriptor limit opens the setpgid race",
+        "expected": "Existing ChildFailed contract retained",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "failed",
+            "failed"
+          ]
+        }
+      },
+      {
+        "round": 13,
+        "hypothesis": "Receipt before GUI child termination",
+        "repro": "Child emits receipt and remains alive",
+        "test": "bounded inherited pipe reads a receipt before terminating a still-live GUI child",
+        "expected": "Read exact receipt before explicit terminate and reap",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 14,
+        "hypothesis": "Cleanup authority after receipt error",
+        "repro": "Receipt timeout and overflow",
+        "test": "bounded inherited pipe preserves cleanup authority after timeout and overflow",
+        "expected": "Retain authority to terminate and close descriptor",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 15,
+        "hypothesis": "Copied owner and extra FD",
+        "repro": "Use copied inherited-pipe owner and ambient descriptors",
+        "test": "bounded inherited pipe rejects copied owners and closes every ambient descriptor",
+        "expected": "Reject copied owner; no unintended inheritance",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 16,
+        "hypothesis": "Framed socket lifecycle",
+        "repro": "Exchange receipt and cleanup over inherited fd 3",
+        "test": "bounded inherited socket exchanges framed receipt and cleanup before graceful exit",
+        "expected": "Exact framed protocol and graceful exit",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 17,
+        "hypothesis": "Hostile framed socket input",
+        "repro": "Copied socket owner and invalid/oversized frame",
+        "test": "bounded inherited socket rejects copied owner and retains cleanup after hostile frame",
+        "expected": "Reject invalid operation while preserving cleanup",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 18,
+        "hypothesis": "Nonzero exit with two streams",
+        "repro": "Child writes distinct stdout/stderr and exits nonzero",
+        "test": "bounded observation separates stdout and stderr and preserves nonzero exit",
+        "expected": "Observe both streams and actual nonzero exit",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 19,
+        "hypothesis": "Concurrent pipe backpressure",
+        "repro": "Child produces 20000 bytes on both stdout and stderr",
+        "test": "bounded observation drains both pipes under concurrent backpressure",
+        "expected": "Drain both streams without deadlock or loss",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 20,
+        "hypothesis": "Signal versus pre-exec failure",
+        "repro": "SIGTERM child and nonexistent executable",
+        "test": "bounded observation preserves signal and child-side exec failure",
+        "expected": "Preserve signal status and existing exec-failure observation",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "failed",
+            "failed"
+          ]
+        }
+      },
+      {
+        "round": 21,
+        "hypothesis": "Independent stream overflow",
+        "repro": "Exceed stdout cap or stderr cap separately",
+        "test": "bounded observation rejects either stream cap plus one",
+        "expected": "Reject either stream overflow",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 22,
+        "hypothesis": "Descendant retains either stream",
+        "repro": "Descendant keeps stdout or stderr pipe open",
+        "test": "bounded observation timeout kills descendants retaining either pipe",
+        "expected": "Bounded timeout with descendant cleanup",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 23,
+        "hypothesis": "Observation environment and descriptor isolation",
+        "repro": "Closed environment plus ambient descriptor",
+        "test": "bounded observation replaces environment and closes ambient descriptors",
+        "expected": "Only allowed environment and descriptors survive",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      },
+      {
+        "round": 24,
+        "hypothesis": "Aliased buffers and repeated descriptor use",
+        "repro": "Overlapping output buffers then repeated valid observations",
+        "test": "bounded observation rejects aliased buffers and repeated runs leak no descriptors",
+        "expected": "Reject aliasing; repeated valid calls do not leak descriptors",
+        "actual_two_optimization_modes": {
+          "baseline": [
+            "passed",
+            "passed"
+          ],
+          "parent-gate": [
+            "passed",
+            "passed"
+          ],
+          "posix-spawn": [
+            "passed",
+            "passed"
+          ]
+        }
+      }
+    ]
+  }
+}

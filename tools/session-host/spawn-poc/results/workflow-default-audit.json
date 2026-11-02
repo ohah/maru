@@ -1,0 +1,6 @@
+{
+  "baseline": "f65a197d8",
+  "normal_job_bodies_and_original_predicates": "byte-identical after removing the opt-in gate",
+  "opt_in_default": false,
+  "gated_original_jobs": 13
+}

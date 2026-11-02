@@ -12,6 +12,11 @@ on:
   # 다른 잡들도 함께 도는데, `changes` 가 base/head 없이 fail-safe 로 전 영역을 켜기 때문이다
   # (릴리스 전 전수 검증이 목적이라 그 편이 맞다).
   workflow_dispatch:
+    inputs:
+      spawn_poc:
+        description: Experimental isolated spawn comparison; not product validation
+        type: boolean
+        default: false
 
 # 같은 ref 에서 새 푸시가 오면: **PR 은 진행 중인 실행을 취소**하고(낡은 head 의 결과는 쓸모가 없다), **main 은 취소하지
 # 않는다.** main 에서 취소하면 연속 머지마다 앞 run 이 잘려 캐시 저장(main 만 저장한다)과 main 전용 게이트(session host
@@ -44,6 +49,7 @@ jobs:
   # 로 fail-safe 실행되므로, 판정이 없을 때 게이트가 조용히 열리지 않는다.
   changes:
     name: changed areas
+    if: ${{ !inputs.spawn_poc }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # main push 의 「PR 에서 증명됨」 판정이 머지된 PR 과 그 head 의 check run 을 읽는다.
@@ -96,7 +102,7 @@ jobs:
   check:
     name: check
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() }}
+    if: ${{ !inputs.spawn_poc && (github.event.pull_request.draft != true && !cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -242,7 +248,7 @@ jobs:
     # 이름 `check-boundaries` 는 아래 집계 잡이 유지한다. 샤드가 어느 하나라도 실패·취소되면 집계가 실패한다.
     name: check-boundaries (${{ matrix.shard }}/4)
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() }}
+    if: ${{ !inputs.spawn_poc && (github.event.pull_request.draft != true && !cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
@@ -312,7 +318,7 @@ jobs:
     # 전체와 같은지 다시 센다 — 인덱스 mod n 은 구조상 빠짐이 없지만, 배선이 바뀌어도 여기서 한 번 더 걸린다.
     name: check-boundaries
     needs: [changes, check-boundaries-shard]
-    if: ${{ !cancelled() && github.event.pull_request.draft != true }}
+    if: ${{ !inputs.spawn_poc && (!cancelled() && github.event.pull_request.draft != true) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -346,7 +352,7 @@ jobs:
   file-explorer-macos:
     name: file explorer macOS product path
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_file_explorer != 'true' }}
+    if: ${{ !inputs.spawn_poc && (github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_file_explorer != 'true') }}
     runs-on: macos-15
     # 15 → 25. AppSession 전수 스위트(아래 "Run the macOS AppSession test suite")가 붙으면서 늘렸다.
     # 실측은 웜 캐시 로컬에서 2분 29초이고, 콜드 러너는 이 모듈을 필터 없이 처음 컴파일하므로 더 든다.
@@ -496,7 +502,7 @@ jobs:
     #
     # 캐시는 자기 그룹(`macos-only`)을 쓴다. file explorer 캐시를 빌려 읽기만 하면, 그쪽이 더는 이 바이너리들을
     # 컴파일하지 않으므로 여기가 영영 콜드가 된다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_macos_only != 'true' }}
+    if: ${{ !inputs.spawn_poc && (github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_macos_only != 'true') }}
     runs-on: macos-15
     # PR #4523의 콜드 실행은 테스트가 진행 중인데 30분 제한으로 취소됐다.
     # 컴파일을 포함한 콜드 실행을 수용한다. 개별 테스트의 timeout과 단언은 유지한다.
@@ -621,7 +627,7 @@ jobs:
     # main 에서 돌므로 회귀는 몇 시간 안에 드러나고, 그때도 **다른 PR 을 막지 않는다**(필수가 아니다).
     #
     # 되돌리려면 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다.
-    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ !inputs.spawn_poc && (github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true')) }}
     runs-on: macos-15
     # 전수 스위트가 커지면서 2026-08-31 PR #2938 콜드 러너에서 출력된 테스트는 전부 통과했지만
     # job이 20분 18초에 취소됐다. PR 캐시는 restore-only라 재실행으로 같은 구조를 고칠 수 없다.
@@ -682,7 +688,7 @@ jobs:
     # main 에서 돌므로 회귀는 몇 시간 안에 드러나고, 그때도 **다른 PR 을 막지 않는다**(필수가 아니다).
     #
     # 되돌리려면 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다.
-    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ !inputs.spawn_poc && (github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true')) }}
     runs-on: macos-15
     # P5d 게이트는 `macos_app_bundle_command` 에 의존해 **ReleaseFast 앱 번들을 빌드**한다
     # (build.zig `run_session_host_p5d.step.dependOn`). 그래서 `app_host_abi.zig` 처럼 앱 루트에
@@ -754,7 +760,7 @@ jobs:
     #     둘을 볼 수 없다 — 하나는 AppKit 키 배달이고 하나는 디스크의 사실이다.
     #   · 헤더 hover 판 골든(2026-10-13) — 사이드바 헤더·접힌 ◧·도크 토글 hover 판을 실제 앱으로 1x·2x 찍어 픽셀 비교한다.
     #     Chrome Lab 은 app_session 을 타지 않아 판의 자리 계산을 못 본다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_appkit != 'true' }}
+    if: ${{ !inputs.spawn_poc && (github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_appkit != 'true') }}
     runs-on: macos-15
     # 세 잡이 각 20분이었다. 합친 실측 예상은 11~12분(콜드 번들 빌드 한 번 + 스모크 합)이라 30분이면
     # 여유가 있고, hang 은 계속 유한하게 닫는다.
@@ -890,7 +896,7 @@ jobs:
     # 실행되지 않으면 PR이 영영 pending으로 막히므로, 다시 필수로 올리려면 실행 조건부터 되돌려야 한다.
     # draft 가드는 달지 않는다 — 수동 실행에는 `github.event.pull_request`가 없어 늘 참이고,
     # 없는 게이팅을 있는 것처럼 보이게 한다.
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+    if: ${{ !inputs.spawn_poc && (!cancelled() && github.event_name == 'workflow_dispatch') }}
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -953,7 +959,7 @@ jobs:
     #
     # **되돌리려면** 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다 — 그때는 PR 마다
     # 찬 캐시 재빌드를 치른다(PR 은 캐시를 읽기만 하고 저장하지 않는다).
-    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ !inputs.spawn_poc && (github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true')) }}
     runs-on: macos-15
     # 실측(로컬 M-series, 웜 캐시): Debug 87s · ReleaseFast 97s. 콜드 러너는 그보다 훨씬 크므로
     # 이웃 macOS 잡들과 같은 여유를 둔다.
@@ -1007,7 +1013,7 @@ jobs:
     # main 에서 돌므로 회귀는 몇 시간 안에 드러나고, 그때도 **다른 PR 을 막지 않는다**(필수가 아니다).
     #
     # 되돌리려면 이 조건에서 `github.event_name != 'pull_request'` 를 빼면 된다.
-    if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ !inputs.spawn_poc && (github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true')) }}
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -1080,7 +1086,7 @@ jobs:
   oracles:
     name: external oracles (libvterm, Alacritty)
     needs: changes
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ !inputs.spawn_poc && (github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -1140,3 +1146,45 @@ jobs:
             ~/.cargo/git
             tests/oracle/alacritty-dumper/target
           key: zig-v2-${{ runner.os }}-oracles-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+
+  spawn-strategy-poc:
+    name: Spawn strategy PoC macOS 15
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.spawn_poc }}
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7
+          cache_save: false
+      - name: Prime vendored Zig packages
+        run: sh tools/ci/prime-zig-packages.sh
+      - name: Adversarial PoC driver checks
+        run: |
+          set -o pipefail
+          python3 tools/session-host/spawn-poc/test_adversarial.py 2>&1 | tee "$RUNNER_TEMP/spawn-poc-adversarial.log"
+      - name: Compare isolated launch prototypes
+        run: python3 tools/session-host/spawn-poc/run.py --output "$RUNNER_TEMP/maru-spawn-poc" --rounds 3
+      - name: Verify comparison completeness
+        run: |
+          python3 tools/session-host/spawn-poc/analyze.py "$RUNNER_TEMP/maru-spawn-poc"
+          python3 - "$RUNNER_TEMP/maru-spawn-poc/comparison.json" <<'PY'
+          import json, sys
+          if not json.load(open(sys.argv[1]))['evidence_complete']:
+              raise SystemExit('incomplete comparison evidence')
+          PY
+      - name: Upload comparison evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: spawn-strategy-poc-macos15
+          path: |
+            ${{ runner.temp }}/spawn-poc-adversarial.log
+            ${{ runner.temp }}/maru-spawn-poc/*.json
+            ${{ runner.temp }}/maru-spawn-poc/*.log
+          if-no-files-found: error
+          retention-days: 14

@@ -844,6 +844,11 @@ split에서 다른 pane에 focus가 있어도 명시적으로 클릭한 보이�
 별도의 pane focus 이동은 추가하지 않는다. 숨겨지거나 닫힌 원본의 오래된 행은 취소한다.
 키보드는 계속 현재 활성 원본을 검사한다.
 
+Save As가 새 저장 대상을 실제 adopt한 뒤에는 같은 surface와 primary라도 이전 URI의
+자동완성 transaction을 종료한다. save/as의 성공한 문서별 적용 loop가 모든 공유 view/window에
+onSaveTargetChanged를 전달한다. 같은 원본의 목록 대기만 해제하고 같은 표시/resolve만 hide해
+다른 문서의 새 대기를 보존한다. 취소나 쓰기 실패, adopt 전에는 종료하지 않는다.
+
 같은 원본의 상세 정보 요청(resolve)도 주 서버 종료 시 대기를 해제한다. 미리 읽기 항목은
 미해결 상태를 유지해 다음 Enter에서 재요청하며, 이미 Enter로 확정을 기다리던 항목은
 기존 cancel로 입력·이력을 바꾸지 않고 취소한다. 서버 종료나 재시작은 import 없는 부분

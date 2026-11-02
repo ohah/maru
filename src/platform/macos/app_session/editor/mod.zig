@@ -75681,6 +75681,285 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 
 // Prepare a genuinely installed list, then change focus without a render tick.
 // Keys can arrive in this interval, including with A still visible in a split.
+// Phases use real requests: 0=list wait, 1=resolved display, 2=prefetch, 3=pending Enter.
+const CompletionSaveProbe = struct { term: *Term, owner: *lsp_client.Client, phase: u8, list_seq: u32, resolve_seq: u32 };
+const completion_save_source = "pr // COMPSTALL RESOLVESTALL\n";
+
+fn prepareCompletionSaveForTest(fx: *PaneFixture, term: *Term, phase: u8) !CompletionSaveProbe {
+    const s = fx.session;
+    try testing.expect(term_ops.activateSurfaceById(s, term.surface.id));
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(completion_client.triggerManual(s));
+    const owner = lsp_client.readyClientFor(s, term).?;
+    const seq = s.editor_completion.waiting_seq;
+    if (phase != 0) {
+        const raw = if (phase >= 2)
+            try std.json.Stringify.valueAlloc(testing.allocator, .{.{ .label = "prior_target", .data = .{ .uri = owner.findDoc(term).?.uri } }}, .{})
+        else
+            try testing.allocator.dupe(u8, "[{\"label\":\"prior_target\",\"additionalTextEdits\":[]}]");
+        defer testing.allocator.free(raw);
+        var list = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+        defer list.deinit();
+        completion_client.onResponse(s, owner, seq, list.value);
+        if (phase == 1) try testing.expect(pumpLspUntil(fx, 1500, s, struct {
+            fn ready(ss: *AppSession) bool {
+                return !ss.editor_completion.resolve_waiting;
+            }
+        }.ready));
+        const leaf = activeLeafRectForTest(s) orelse return error.NoEditorLeaf;
+        var frame = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        frame.dl.deinit(testing.allocator);
+        try testing.expect(completion_client.refresh(s));
+        if (phase == 3) {
+            try pressKey(fx, .enter, .{});
+            try testing.expect(s.editor_completion.pending_accept);
+        }
+        if (phase >= 2) try testing.expect(s.editor_completion.resolve_waiting);
+    }
+    return .{ .term = term, .owner = owner, .phase = phase, .list_seq = seq, .resolve_seq = s.editor_completion.resolve_seq };
+}
+
+fn deliverCompletionSaveForTest(s: *AppSession, probe: CompletionSaveProbe, empty: bool) !void {
+    const raw = if (probe.phase == 0) "[{\"label\":\"prior_target\",\"additionalTextEdits\":[]}]" else "{\"label\":\"prior_target\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"old_import\\n\"}]}";
+    var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+    defer result.deinit();
+    if (probe.phase == 0) completion_client.onResponse(s, probe.owner, probe.list_seq, if (empty) null else result.value) else completion_client.onResolveResponse(s, probe.owner, probe.resolve_seq, if (empty) null else result.value);
+}
+
+fn acceptPreservedCompletionForTest(fx: *PaneFixture, probe: CompletionSaveProbe) !void {
+    const s = fx.session;
+    try testing.expect(term_ops.activateSurfaceById(s, probe.term.surface.id));
+    s.chrome_host.notice.dismiss();
+    // Isolate target lifetime from the unrelated timeout policy. No identity,
+    // revision, epoch or selection is fabricated by this explicit clock seam.
+    if (s.editor_completion.pending_snapshot) |*snap| {
+        snap.started_ms = s.awakeMs();
+        s.editor_completion.pending_since_ms = snap.started_ms;
+    }
+    const accepted = s.editor_completion.accepted;
+    const undo = probe.term.rt.editorDocument().history.undo_len;
+    if (probe.phase != 1) try deliverCompletionSaveForTest(s, probe, false);
+    if (probe.phase != 3) {
+        const leaf = activeLeafRectForTest(s) orelse return error.NoEditorLeaf;
+        var frame = appendPaneFrame(s, leaf, probe.term) orelse return error.EditorPaneDidNotDraw;
+        frame.dl.deinit(testing.allocator);
+        try testing.expect(completion_client.refresh(s));
+        try pressKey(fx, .enter, .{});
+    }
+    const Ctx = struct { s: *AppSession, accepted: u64 };
+    try testing.expect(pumpLspUntil(fx, 1500, Ctx{ .s = s, .accepted = accepted }, struct {
+        fn done(c: Ctx) bool {
+            return c.s.editor_completion.accepted > c.accepted;
+        }
+    }.done));
+    try testing.expectEqualStrings(if (probe.phase >= 2) "old_import\nprior_target // COMPSTALL RESOLVESTALL\n" else "prior_target // COMPSTALL RESOLVESTALL\n", probe.term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(undo + 1, probe.term.rt.editorDocument().history.undo_len);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings(completion_save_source, probe.term.rt.editorDocument().opened.?.file.content);
+}
+
+fn ownCompletionSaveAsForTest(phase: u8, empty: bool, shared: bool) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var f = (try SmtFixture.openRepo(testing.allocator, "before.c", completion_save_source)) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    defer saveAsCleanupForTest();
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    const term = if (shared) try pane_ops.splitSharedEditorPane(s, .horizontal, false) else f.term;
+    const probe = try prepareCompletionSaveForTest(&f.fx, term, phase);
+    const doc = term.rt.editorDocument();
+    const epoch = doc.save_target_epoch;
+    const undo = doc.history.undo_len;
+    const redo = doc.history.redo_len;
+    const selection = term.rt.editor_selection.?;
+    const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+    defer testing.allocator.free(target);
+    _ = try saveAsSelectForTest(&f.fx, f.term, target); // Another view publishes the shared target when requested.
+    try awaitSaveAsForTest();
+    try testing.expectEqual(epoch + 1, doc.save_target_epoch);
+    try testing.expectEqualStrings(target, doc.path.?);
+    try testing.expectEqualStrings(target, f.term.rt.editorDocument().path.?);
+    try testing.expect(!s.editor_completion.waiting and !s.editor_completion.active and !s.editor_completion.resolve_waiting and !s.editor_completion.pending_accept);
+    try testing.expectEqualDeep(selection, term.rt.editor_selection.?);
+    try testing.expectEqual(undo, doc.history.undo_len);
+    try testing.expectEqual(redo, doc.history.redo_len);
+    const revision = doc.opened.?.file.revision;
+    const Ctx = struct { s: *AppSession, t: *Term, owner: *lsp_client.Client };
+    try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = s, .t = term, .owner = probe.owner }, struct {
+        fn ready(c: Ctx) bool {
+            const current = lsp_client.readyClientFor(c.s, c.t) orelse return false;
+            return current == c.owner and std.mem.endsWith(u8, current.findDoc(c.t).?.uri, "after.c");
+        }
+    }.ready));
+    try deliverCompletionSaveForTest(s, probe, empty);
+    try testing.expect(!s.editor_completion.active and !s.editor_completion.waiting and !s.editor_completion.pending_accept);
+    try testing.expectEqualStrings(completion_save_source, doc.opened.?.file.content);
+    try testing.expectEqual(revision, doc.opened.?.file.revision);
+    try testing.expectEqual(undo, doc.history.undo_len);
+    try testing.expect(term_ops.activateSurfaceById(s, term.surface.id));
+    const sent = s.editor_lsp.sent_completions;
+    try testing.expect(completion_client.triggerManual(s));
+    try testing.expectEqual(sent + 1, s.editor_lsp.sent_completions);
+    try testing.expect(s.editor_completion.waiting_seq != probe.list_seq);
+    try deliverCompletionSaveForTest(s, probe, empty); // Old response cannot release the fresh wait.
+    try testing.expect(s.editor_completion.waiting);
+    var fresh = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[{\"label\":\"print_new\",\"additionalTextEdits\":[]}]", .{});
+    defer fresh.deinit();
+    completion_client.onResponse(s, probe.owner, s.editor_completion.waiting_seq, fresh.value);
+    var frame = appendPaneFrame(s, activeLeafRectForTest(s).?, term) orelse return error.EditorPaneDidNotDraw;
+    frame.dl.deinit(testing.allocator);
+    try testing.expect(completion_client.refresh(s));
+    try pressKey(&f.fx, .enter, .{});
+    try testing.expect(pumpLspUntil(&f.fx, 1500, s, struct {
+        fn accepted(ss: *AppSession) bool {
+            return ss.editor_completion.accepted > 0;
+        }
+    }.accepted));
+    try testing.expectEqualStrings("print_new // COMPSTALL RESOLVESTALL\n", doc.opened.?.file.content);
+    try testing.expectEqual(undo + 1, doc.history.undo_len);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings(completion_save_source, doc.opened.?.file.content);
+    try batchApplyDisk(&f.fx, "before.c", completion_save_source);
+    try batchApplyDisk(&f.fx, "after.c", completion_save_source);
+}
+
+test "CMPSAVEAS1 actual Save As invalidates an old completion list response" {
+    for ([_]bool{ false, true }) |empty| try ownCompletionSaveAsForTest(0, empty, false);
+}
+test "CMPSAVEAS2 displayed prefetch and pending completion retire with the saved target" {
+    for ([_]u8{ 1, 2, 3 }) |phase| for ([_]bool{ false, true }) |empty| try ownCompletionSaveAsForTest(phase, empty, false);
+}
+test "CMPSAVEAS3 target publication through another shared view retires its completion" {
+    for ([_]u8{ 0, 1, 2, 3 }) |phase| try ownCompletionSaveAsForTest(phase, false, true);
+}
+
+test "CMPSAVEAS4 cancellation and actual worker conflict preserve the old completion" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]u8{ 0, 1, 2, 3 }) |phase| for ([_]bool{ false, true }) |failure| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", completion_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const probe = try prepareCompletionSaveForTest(&f.fx, f.term, phase);
+        const epoch = f.term.rt.editorDocument().save_target_epoch;
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer gate.set();
+        _ = try saveAsSelectForTest(&f.fx, f.term, if (failure) target else "");
+        if (failure) {
+            @import("save/as.zig").setGateForTests(&gate);
+            @import("save/as.zig").poll();
+            try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "after.c", .data = "external\n" });
+            gate.set();
+        }
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch, f.term.rt.editorDocument().save_target_epoch);
+        try testing.expectEqualStrings(f.path, f.term.rt.editorDocument().path.?);
+        try testing.expectEqual(phase == 0, s.editor_completion.waiting);
+        try testing.expectEqual(phase != 0, s.editor_completion.active);
+        try testing.expectEqual(phase >= 2, s.editor_completion.resolve_waiting);
+        try testing.expectEqual(phase == 3, s.editor_completion.pending_accept);
+        try acceptPreservedCompletionForTest(&f.fx, probe);
+        try batchApplyDisk(&f.fx, "before.c", completion_save_source);
+        if (failure) try batchApplyDisk(&f.fx, "after.c", "external\n") else try testing.expectError(error.FileNotFound, f.fx.dir.dir.access(testing.io, "after.c", .{}));
+    };
+}
+
+test "CMPSAVEAS5 saving another document preserves every completion phase" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]u8{ 0, 1, 2, 3 }) |phase| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", completion_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = completion_save_source });
+        const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "other.c" });
+        defer testing.allocator.free(path);
+        const other = (try pane_ops.openFileTermInActivePane(f.fx.session, path, .text)).term;
+        try testing.expect(pumpLspUntil(&f.fx, 3000, other, struct {
+            fn ready(t: *Term) bool {
+                return t.rt.editor_diagnostics.lsp.items.len > 0;
+            }
+        }.ready));
+        const probe = try prepareCompletionSaveForTest(&f.fx, other, phase);
+        const epoch = other.rt.editorDocument().save_target_epoch;
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch, other.rt.editorDocument().save_target_epoch);
+        try testing.expectEqualStrings(path, other.rt.editorDocument().path.?);
+        try testing.expectEqual(phase == 0, f.fx.session.editor_completion.waiting);
+        try testing.expectEqual(phase != 0, f.fx.session.editor_completion.active);
+        try testing.expectEqual(phase == 3, f.fx.session.editor_completion.pending_accept);
+        try acceptPreservedCompletionForTest(&f.fx, probe);
+        try batchApplyDisk(&f.fx, "before.c", completion_save_source);
+        try batchApplyDisk(&f.fx, "after.c", completion_save_source);
+        try batchApplyDisk(&f.fx, "other.c", completion_save_source);
+    }
+}
+
+test "CMPSAVEAS6 retiring one visible list preserves a newer request owned by another document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var f = (try SmtFixture.openRepo(testing.allocator, "before.c", completion_save_source)) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    defer saveAsCleanupForTest();
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    _ = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = completion_save_source });
+    const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "other.c" });
+    defer testing.allocator.free(path);
+    const other = (try pane_ops.openFileTermInActivePane(s, path, .text)).term;
+    try testing.expect(pumpLspUntil(&f.fx, 3000, other, struct {
+        fn ready(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len > 0;
+        }
+    }.ready));
+    const old = try prepareCompletionSaveForTest(&f.fx, f.term, 1);
+    try testing.expect(term_ops.activateSurfaceById(s, other.surface.id));
+    other.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(insertText(s, other, "p")); // Real text-input path, without a synthetic keyboard focus admission.
+    try testing.expect(s.editor_completion.active and s.editor_completion.waiting);
+    try testing.expectEqual(f.term.surface.id, s.editor_completion.surface_id);
+    try testing.expectEqual(other.surface.id, s.editor_completion.waiting_surface);
+    const seq = s.editor_completion.waiting_seq;
+    const owner = lsp_client.readyClientFor(s, other).?;
+    const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+    defer testing.allocator.free(target);
+    _ = try saveAsSelectForTest(&f.fx, f.term, target);
+    try awaitSaveAsForTest();
+    try testing.expect(!s.editor_completion.active and s.editor_completion.waiting);
+    try testing.expectEqual(seq, s.editor_completion.waiting_seq);
+    try testing.expectEqual(other.surface.id, s.editor_completion.waiting_surface);
+    try deliverCompletionSaveForTest(s, old, false);
+    try testing.expect(s.editor_completion.waiting);
+    var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[{\"label\":\"prp_new\",\"additionalTextEdits\":[]}]", .{});
+    defer result.deinit();
+    completion_client.onResponse(s, owner, seq, result.value);
+    try testing.expect(s.editor_completion.active and !s.editor_completion.waiting);
+    try testing.expectEqual(other.surface.id, s.editor_completion.surface_id);
+    try testing.expect(term_ops.activateSurfaceById(s, other.surface.id));
+    var frame = appendPaneFrame(s, activeLeafRectForTest(s).?, other) orelse return error.EditorPaneDidNotDraw;
+    frame.dl.deinit(testing.allocator);
+    try testing.expect(completion_client.refresh(s));
+    try pressKey(&f.fx, .enter, .{});
+    try testing.expect(pumpLspUntil(&f.fx, 1500, s, struct {
+        fn done(ss: *AppSession) bool {
+            return ss.editor_completion.accepted > 0;
+        }
+    }.done));
+    try testing.expectEqualStrings("prp_new // COMPSTALL RESOLVESTALL\n", other.rt.editorDocument().opened.?.file.content);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings("prp // COMPSTALL RESOLVESTALL\n", other.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings(completion_save_source, f.term.rt.editorDocument().opened.?.file.content);
+    try batchApplyDisk(&f.fx, "before.c", completion_save_source);
+    try batchApplyDisk(&f.fx, "after.c", completion_save_source);
+    try batchApplyDisk(&f.fx, "other.c", completion_save_source);
+}
+
 const FocusedCompletionPhase = enum { resolved, prefetch, pending };
 
 fn focusedCompletionFixtureForTest(f: *SmtFixture, split: bool, show: bool, phase: FocusedCompletionPhase) !*Term {

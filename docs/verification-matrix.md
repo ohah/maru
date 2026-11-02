@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+Save As와 자동완성 수명: `test-editor-completion-save-as`는 실제 파일 쓰기/대상 적용과
+새 URI의 같은 primary 재결합 뒤 이전 결과를 검사한다. [계획](plans/lsp-completion-save-as.md)의
+공유 뷰·실패·격리/혼합 대기 범위이며 native panel/HID/SDK/픽셀 증거는 아니다.
+
 자동완성 행 클릭: `test-editor-completion-pointer-source`는 실제 제품 frame과 overlay draw
 receipt 뒤 native mouse()를 실행한다. [계획](plans/lsp-completion-pointer-source.md)의
 원본/패널/resolve/Undo 범위이며 잘못된 좌표만 component 직접 호출로 검사한다.

@@ -10,8 +10,9 @@ for mode in ("Debug", "ReleaseFast"):
         "zig", "test", "-lc", "-O", mode,
         "--dep", "ssh_upload", "-Mroot=tests/ssh_pipe_cleanup.zig",
         "--dep", "maru", "-Mssh_upload=src/platform/macos/ssh_upload.zig",
-        "--dep", "maru_terminfo", "-Mmaru=src/maru.zig",
+        "--dep", "macos_spawn", "--dep", "maru_terminfo", "-Mmaru=src/maru.zig",
         "-Mmaru_terminfo=terminfo/maru.terminfo",
+        "-Mmacos_spawn=src/pty/macos_spawn.zig",
     ]
     result = subprocess.run(command, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(f"=== {mode} ===\n{result.stdout}", flush=True)

@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='maru-search-fd-mutants-') as temporary:
             raise SystemExit(f'{name}: invalid control or unexpected result\n{result.stdout[-2500:]}')
 
     def behavior(name, mode, healthy):
-        command = [zig, 'test', '-lc', '-O', mode, '--test-filter', 'EDPSFD', '--dep', 'maru', f'-Mroot={judges}', '--dep', 'maru_terminfo', f'-Mmaru={private / "src/maru.zig"}', f'-Mmaru_terminfo={repo / "terminfo/maru.terminfo"}']
+        command = [zig, 'test', '-lc', '-O', mode, '--test-filter', 'EDPSFD', '--dep', 'maru', f'-Mroot={judges}', '--dep', 'macos_spawn', '--dep', 'maru_terminfo', f'-Mmaru={private / "src/maru.zig"}', f'-Mmaru_terminfo={repo / "terminfo/maru.terminfo"}', f'-Mmacos_spawn={private / "src/pty/macos_spawn.zig"}']
         markers = ['All 20 tests passed.'] + [f'EDPSFD case={n} passed=true ' for n in range(1, 21)] if healthy else ['16 passed; 0 skipped; 4 failed.', 'FAIL (TestExpectedEqual)', 'inherited']
         execute(name, command, healthy, markers)
 

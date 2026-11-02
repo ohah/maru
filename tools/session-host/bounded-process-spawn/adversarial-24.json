@@ -1,0 +1,379 @@
+{
+  "base": "7fd75894cf1a76e2555ce7c3dc2352666ba99ef5",
+  "count": 24,
+  "simple_repetitions_counted_as_distinct": false,
+  "log_sha256": "2c5983999409190082ede029378da772a8e3f0e3a00fcc1d93dfb2a12af536a8",
+  "hypotheses": [
+    {
+      "id": 1,
+      "test": "bounded process rejects cap plus one without publishing a prefix",
+      "condition": "cap+1 stdout",
+      "expected": "OutputTooLarge; no successful prefix",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 2,
+      "test": "bounded process rejects nonzero and signaled terminal status",
+      "condition": "nonzero and SIGTERM",
+      "expected": "ChildFailed; missing executable separately SpawnFailed",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 3,
+      "test": "bounded process timeout kills a descendant that retains the capture pipe",
+      "condition": "descendant retains output pipe",
+      "expected": "TimedOut before child sleep completes",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 4,
+      "test": "bounded process closes ambient descriptors when no inheritance is requested",
+      "condition": "ambient descriptor without explicit mapping",
+      "expected": "child cannot access descriptor",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 5,
+      "test": "bounded process executes a leaf from the held directory after pathname ancestor replacement",
+      "condition": "replace ancestor pathname",
+      "expected": "held vnode still selects original executable",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 6,
+      "test": "bounded process streams one held regular fd as exact child stdin",
+      "condition": "held input advanced from offset zero",
+      "expected": "child reads complete original bytes",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 7,
+      "test": "bounded process reports creation failure under the GUI descriptor limit",
+      "condition": "NOFILE=256; missing executable 300 attempts",
+      "expected": "SpawnFailed every attempt",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 8,
+      "test": "bounded inherited pipe rejects copied owners and closes every ambient descriptor",
+      "condition": "copy receipt owner and open ambient descriptor",
+      "expected": "InvalidOwner for copy; ambient descriptor absent",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 9,
+      "test": "bounded inherited socket rejects copied owner and retains cleanup after hostile frame",
+      "condition": "copied owner and hostile frame",
+      "expected": "reject copy/frame; original owner can terminate",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 10,
+      "test": "bounded observation drains both pipes under concurrent backpressure",
+      "condition": "concurrent stdout and stderr beyond one pipe capacity",
+      "expected": "both streams exact; no deadlock",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 11,
+      "test": "bounded observation rejects aliased buffers and repeated runs leak no descriptors",
+      "condition": "overlapping buffers; repeated observation",
+      "expected": "AliasedOutput; final FD count unchanged",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 12,
+      "test": "bounded closed stdin does not corrupt capture mappings",
+      "condition": "close fd 0",
+      "expected": "exact child output",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 13,
+      "test": "bounded closed stdout does not corrupt capture mappings",
+      "condition": "close fd 1",
+      "expected": "exact child output",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 14,
+      "test": "bounded closed stderr does not corrupt capture mappings",
+      "condition": "close fd 2",
+      "expected": "exact child output",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 15,
+      "test": "bounded inherited receipt source aliases fd 3 when stdin is closed",
+      "condition": "source=target=3; receipt read endpoint=0",
+      "expected": "exact receipt bytes",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 16,
+      "test": "bounded inherited socket source aliases fd 3 when stdin is closed",
+      "condition": "source=target=3; socket parent endpoint=0",
+      "expected": "exact framed receipt",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 17,
+      "test": "bounded real program exit 126 remains an observed child exit",
+      "condition": "program deliberately exits 126",
+      "expected": "Termination.exited=126",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 18,
+      "test": "bounded partial source pinning failure preserves FD ownership",
+      "condition": "FD exhaustion; four slots released; partial pin then failure",
+      "expected": "SpawnSetupFailed; FD count unchanged",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 19,
+      "test": "bounded non-CLOEXEC descriptor above a lowered soft limit is not inherited",
+      "condition": "non-CLOEXEC fd>=512; lower NOFILE to 256",
+      "expected": "C oracle observes closed",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 20,
+      "test": "bounded capture handles all three closed stdio slots together",
+      "condition": "close fd 0,1,2",
+      "expected": "exact merged outerr bytes",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 21,
+      "test": "bounded expired launch budget never publishes successful output",
+      "condition": "1ns capture/observation/digest budget",
+      "expected": "TimedOut; FD count unchanged",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 22,
+      "test": "bounded inherited creation failure publishes no child owner or descriptor",
+      "condition": "missing executable for pipe and socket",
+      "expected": "SpawnFailed; owners remain pristine; FD count unchanged",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 23,
+      "test": "bounded receipt survives a source overwritten by closed stdin and stdout",
+      "condition": "close fd 0,1; later source aliases earlier destination",
+      "expected": "exact receipt bytes",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    },
+    {
+      "id": 24,
+      "test": "bounded socket survives a source overwritten by closed stdin and stdout",
+      "condition": "close fd 0,1; later source aliases earlier destination",
+      "expected": "exact framed receipt",
+      "actual": {
+        "debug": "passed",
+        "fast": "passed"
+      }
+    }
+  ],
+  "mutations": {
+    "results": [
+      {
+        "mode": "Debug",
+        "name": "group-disabled",
+        "expected_pass": false,
+        "verified": true,
+        "exit": 1,
+        "sha256": "4f333472bd3e8b1674e97c73b2ce6801353aac453b7f164f00d06a817a441638"
+      },
+      {
+        "mode": "Debug",
+        "name": "cloexec-disabled",
+        "expected_pass": false,
+        "verified": true,
+        "exit": 1,
+        "sha256": "f34825be7e71daf59ebb008918823655ee6853a2ec6da5629e690c06d364388d"
+      },
+      {
+        "mode": "Debug",
+        "name": "unpinned-sources",
+        "expected_pass": false,
+        "verified": true,
+        "exit": 1,
+        "sha256": "33ad0cdb734262214e1c751dd41e0595092bf47aab7e66eec7238ec0f3714e2f"
+      },
+      {
+        "mode": "Debug",
+        "name": "equivalent-pin-floor",
+        "expected_pass": true,
+        "verified": true,
+        "exit": 0,
+        "sha256": "aff09ece499084aac20b820ad8cc722b3fa0b1303a4c100b4d0d672fcd71204d"
+      },
+      {
+        "mode": "ReleaseFast",
+        "name": "group-disabled",
+        "expected_pass": false,
+        "verified": true,
+        "exit": 1,
+        "sha256": "4f333472bd3e8b1674e97c73b2ce6801353aac453b7f164f00d06a817a441638"
+      },
+      {
+        "mode": "ReleaseFast",
+        "name": "cloexec-disabled",
+        "expected_pass": false,
+        "verified": true,
+        "exit": 1,
+        "sha256": "f34825be7e71daf59ebb008918823655ee6853a2ec6da5629e690c06d364388d"
+      },
+      {
+        "mode": "ReleaseFast",
+        "name": "unpinned-sources",
+        "expected_pass": false,
+        "verified": true,
+        "exit": 1,
+        "sha256": "33ad0cdb734262214e1c751dd41e0595092bf47aab7e66eec7238ec0f3714e2f"
+      },
+      {
+        "mode": "ReleaseFast",
+        "name": "equivalent-pin-floor",
+        "expected_pass": true,
+        "verified": true,
+        "exit": 0,
+        "sha256": "aff09ece499084aac20b820ad8cc722b3fa0b1303a4c100b4d0d672fcd71204d"
+      }
+    ]
+  },
+  "source_sha256": {
+    "src/pty/macos_spawn.zig": "684af30117ea9746adf475c94fa4c028d4bab48982cb48b33c6572cfe2d37b8f",
+    "src/platform/macos/session_host/bounded_process.zig": "e0cdaeaa732789ec6e567051bf78a406ad67b49bee25a25f3c1d41f88d15f2d9",
+    "tests/session_host_bounded_process.zig": "2687c3de718ef579cc44ba7f1975b9399e1e3ad3e232bdfb067aade7965fe616",
+    "tests/fixtures/bounded_process_probe.c": "44fdfdca6f815ceaf90fb10cb24c65b0c40a97d9e0560f066e10daa8f8174184",
+    "src/platform/macos/session_host/bounded_process_fork.zig": "9f742f6dd8c058e374ac579685b3b216a0d37a53993d86a342b598b288caa17e",
+    "tests/session_host_release_adapter_live_workflow_aggregate_child.zig": "a4f83bcf1cd53b1ea401bd9880a35de0594d3fb189c5798a5fbb25aa88294c04"
+  },
+  "limits": [
+    "Local macOS evidence; product macOS 15 CI pending.",
+    "PoC CI is not reused as product CI.",
+    "Not a claim that all fork call sites have migrated."
+  ],
+  "focused_gate": {
+    "tests_per_mode": 38,
+    "modes": [
+      "debug",
+      "fast"
+    ],
+    "all_passed": true,
+    "fence_tests_per_mode": 15,
+    "aggregate_child_gate_passed": true
+  },
+  "local_environment": {
+    "macOS": "26.5.1",
+    "arch": "arm64",
+    "zig": "0.17.0"
+  },
+  "cross_linux_compile_controls": [
+    {
+      "mode": "debug",
+      "variant": "after",
+      "exit": 0,
+      "verified": true,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "mode": "debug",
+      "variant": "before",
+      "exit": 1,
+      "verified": true,
+      "log_sha256": "715e60602bf511175f288cd32dcc918e2c12ea05d86ebcbe0a0d6d824a6ef802"
+    },
+    {
+      "mode": "fast",
+      "variant": "after",
+      "exit": 0,
+      "verified": true,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "mode": "fast",
+      "variant": "before",
+      "exit": 1,
+      "verified": true,
+      "log_sha256": "715e60602bf511175f288cd32dcc918e2c12ea05d86ebcbe0a0d6d824a6ef802"
+    }
+  ],
+  "portability": {
+    "linux_runtime": "legacy fork/exec observations preserved; actual Linux CI pending",
+    "macOS": "native grouped spawn; no parent or child setpgid",
+    "initial_product_ci": "41405864928 check failed on Darwin-only API analysis; preserved and superseded"
+  }
+}

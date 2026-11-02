@@ -1,15 +1,15 @@
 //! macOS 외부 관측 명령의 단일 bounded process 실행 경계.
 //!
-//! Release adapter와 upgrade codesign은 같은 fork/exec, bounded capture, monotonic deadline,
+//! Release adapter와 upgrade codesign은 bounded capture, monotonic deadline을 공유하며 macOS에서는 atomic group spawn,
 //! process-group kill 규율을 공유한다. 성공은 exact exit 0과 pipe EOF를 모두 관측한 뒤에만 반환한다.
 
 const std = @import("std");
 const c = std.c;
 const posix = std.posix;
 
-extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
-extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
-extern "c" fn getdtablesize() c_int;
+const builtin = @import("builtin");
+const macos_spawn = if (builtin.os.tag == .macos) @import("macos_spawn") else struct {};
+const fork_backend = @import("bounded_process_fork.zig");
 
 const poll_quantum_ms: c_int = 50;
 const CaptureMode = enum { merged, stdout_only };
@@ -182,18 +182,19 @@ pub fn spawnEnvironmentInheritedSocket(
     const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
     if (dev_null < 0) return error.SpawnSetupFailed;
     defer _ = c.close(dev_null);
-    const max_fd = getdtablesize();
-    if (max_fd <= 4) return error.SpawnSetupFailed;
-    const pid = c.fork();
-    if (pid < 0) return error.SpawnFailed;
-    if (pid == 0) childExecInheritedSocket(executable, argv, environment, sockets, dev_null, max_fd);
+    const pid = if (builtin.os.tag == .macos)
+        try macos_spawn.spawnGrouped(executable.ptr, argv, environment, .{ dev_null, dev_null, dev_null, sockets[1] }, null)
+    else
+        try fork_backend.spawnInherited(executable, argv, environment, sockets, dev_null);
     _ = c.close(sockets[1]);
     sockets[1] = -1;
-    if (!establishProcessGroup(pid)) {
+
+    if (builtin.os.tag != .macos and !fork_backend.establishGroup(pid)) {
         terminateGroup(pid);
         _ = reapChild(pid, null);
         return error.ProcessGroupFailed;
     }
+
     result.* = .{ .owner = result, .pid = pid, .fd = sockets[0] };
     sockets[0] = -1;
 }
@@ -216,18 +217,19 @@ pub fn spawnEnvironmentInheritedPipe(
     const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
     if (dev_null < 0) return error.SpawnSetupFailed;
     defer _ = c.close(dev_null);
-    const max_fd = getdtablesize();
-    if (max_fd <= 4) return error.SpawnSetupFailed;
-    const pid = c.fork();
-    if (pid < 0) return error.SpawnFailed;
-    if (pid == 0) childExecInheritedPipe(executable, argv, environment, receipt_pipe, dev_null, max_fd);
+    const pid = if (builtin.os.tag == .macos)
+        try macos_spawn.spawnGrouped(executable.ptr, argv, environment, .{ dev_null, dev_null, dev_null, receipt_pipe[1] }, null)
+    else
+        try fork_backend.spawnInherited(executable, argv, environment, receipt_pipe, dev_null);
     _ = c.close(receipt_pipe[1]);
     receipt_pipe[1] = -1;
-    if (!establishProcessGroup(pid)) {
+
+    if (builtin.os.tag != .macos and !fork_backend.establishGroup(pid)) {
         terminateGroup(pid);
         _ = reapChild(pid, null);
         return error.ProcessGroupFailed;
     }
+
     result.* = .{ .owner = result, .pid = pid, .read_fd = receipt_pipe[0] };
     receipt_pipe[0] = -1;
 }
@@ -264,6 +266,8 @@ pub fn runObserveEnvironment(
         return error.InvalidBudget;
     if (rangesOverlap(stdout_buffer, stderr_buffer)) return error.AliasedOutput;
 
+    // The single operation budget includes pipe preparation and native creation.
+    const deadline = deadlineAfter(io, budget_ns);
     var stdout_pipe: [2]c.fd_t = undefined;
     if (!openPipe(&stdout_pipe)) return error.PipeFailed;
     errdefer closePipe(&stdout_pipe);
@@ -282,7 +286,7 @@ pub fn runObserveEnvironment(
     _ = c.close(stderr_pipe[1]);
     stderr_pipe[1] = -1;
 
-    if (!establishProcessGroup(pid)) {
+    if (builtin.os.tag != .macos and !fork_backend.establishGroup(pid)) {
         terminateGroup(pid);
         _ = reapChild(pid, null);
         return error.ProcessGroupFailed;
@@ -294,11 +298,13 @@ pub fn runObserveEnvironment(
     var stderr_eof = false;
     var child_reaped = false;
     var status: c_int = 0;
-    const start = std.Io.Clock.awake.now(io).nanoseconds;
-    const deadline = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
     var failure: ?Error = null;
 
     while (!(stdout_eof and stderr_eof and child_reaped)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) {
+            failure = error.TimedOut;
+            break;
+        }
         if (!child_reaped) switch (pollChild(pid, &status)) {
             .running => {},
             .reaped => child_reaped = true,
@@ -386,7 +392,7 @@ pub fn runCaptureEnvironmentStdout(
 }
 
 /// Runs with exactly `environment`, streams one already-held regular file as stdin, and captures
-/// bounded stdout. The child seeks its inherited stdin to byte zero before exec.
+/// bounded stdout. The held file description is reset to byte zero before spawn.
 pub fn runCaptureEnvironmentStdoutInputFd(
     io: std.Io,
     executable: [:0]const u8,
@@ -415,6 +421,8 @@ pub fn runDigestEnvironmentStdout(
     if (expected_size == 0 or expected_size > std.math.maxInt(usize)) return error.InvalidExpectedSize;
     if (budget_ns <= 0) return error.InvalidBudget;
 
+    // The single operation budget includes pipe preparation and native creation.
+    const deadline = deadlineAfter(io, budget_ns);
     var pipe_fds: [2]c.fd_t = undefined;
     if (c.pipe(&pipe_fds) != 0) return error.PipeFailed;
     if (!setCloseOnExec(pipe_fds[0]) or !setCloseOnExec(pipe_fds[1])) {
@@ -436,7 +444,8 @@ pub fn runDigestEnvironmentStdout(
     };
     _ = c.close(dev_null);
     _ = c.close(pipe_fds[1]);
-    if (!establishProcessGroup(pid)) {
+
+    if (builtin.os.tag != .macos and !fork_backend.establishGroup(pid)) {
         terminateGroup(pid);
         _ = reapChild(pid, null);
         _ = c.close(pipe_fds[0]);
@@ -448,10 +457,12 @@ pub fn runDigestEnvironmentStdout(
     var eof = false;
     var child_reaped = false;
     var status: c_int = 0;
-    const start = std.Io.Clock.awake.now(io).nanoseconds;
-    const deadline = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
     var failure: ?Error = null;
     while (!(eof and child_reaped)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) {
+            failure = error.TimedOut;
+            break;
+        }
         if (!child_reaped) switch (pollChild(pid, &status)) {
             .running => {},
             .reaped => child_reaped = true,
@@ -529,6 +540,8 @@ pub fn runWriteEnvironmentStdout(
     if (expected_size == 0 or expected_size > std.math.maxInt(usize)) return error.InvalidExpectedSize;
     if (budget_ns <= 0) return error.InvalidBudget;
 
+    // The single operation budget includes pipe preparation and native creation.
+    const expires = deadlineAfter(io, budget_ns);
     var pipe_fds: [2]c.fd_t = undefined;
     if (c.pipe(&pipe_fds) != 0) return error.PipeFailed;
     if (!setCloseOnExec(pipe_fds[0]) or !setCloseOnExec(pipe_fds[1])) {
@@ -550,7 +563,8 @@ pub fn runWriteEnvironmentStdout(
     };
     _ = c.close(dev_null);
     _ = c.close(pipe_fds[1]);
-    if (!establishProcessGroup(pid)) {
+
+    if (builtin.os.tag != .macos and !fork_backend.establishGroup(pid)) {
         terminateGroup(pid);
         _ = reapChild(pid, null);
         _ = c.close(pipe_fds[0]);
@@ -562,10 +576,12 @@ pub fn runWriteEnvironmentStdout(
     var eof = false;
     var child_reaped = false;
     var status: c_int = 0;
-    const start = std.Io.Clock.awake.now(io).nanoseconds;
-    const expires = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
     var failure: ?Error = null;
     while (!(eof and child_reaped)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= expires) {
+            failure = error.TimedOut;
+            break;
+        }
         if (!child_reaped) switch (pollChild(pid, &status)) {
             .running => {},
             .reaped => child_reaped = true,
@@ -652,8 +668,7 @@ pub fn runCaptureEnvironmentStdoutDirectory(
     return runCaptureOptionalEnvironment(io, executable, argv, environment, directory_fd, null, output, budget_ns, .stdout_only);
 }
 
-/// Executes one exact `./leaf` below a held directory vnode. The fork child performs only
-/// async-signal-safe descriptor/process operations before execve.
+/// Executes one exact `./leaf` below a held directory vnode using a child cwd file action.
 pub fn runCaptureEnvironmentStdoutHeldExecutable(
     io: std.Io,
     relative_executable: [:0]const u8,
@@ -710,6 +725,8 @@ fn runCaptureCommon(
     if (budget_ns <= 0 or output.len == 0) return error.InvalidBudget;
     if (directory_fd) |fd| if (!validDirectoryFd(fd)) return error.InvalidDirectoryFd;
     if (input_fd) |fd| if (!validInputFd(io, fd)) return error.InvalidInputFd;
+    // The single operation budget includes pipe preparation and native creation.
+    const deadline = deadlineAfter(io, budget_ns);
     var pipe_fds: [2]c.fd_t = undefined;
     if (c.pipe(&pipe_fds) != 0) return error.PipeFailed;
     if (!setCloseOnExec(pipe_fds[0]) or !setCloseOnExec(pipe_fds[1])) {
@@ -733,7 +750,8 @@ fn runCaptureCommon(
 
     _ = c.close(dev_null);
     _ = c.close(pipe_fds[1]);
-    if (!establishProcessGroup(pid)) {
+
+    if (builtin.os.tag != .macos and !fork_backend.establishGroup(pid)) {
         terminateGroup(pid);
         _ = reapChild(pid, null);
         _ = c.close(pipe_fds[0]);
@@ -744,11 +762,13 @@ fn runCaptureCommon(
     var eof = false;
     var child_reaped = false;
     var status: c_int = 0;
-    const start = std.Io.Clock.awake.now(io).nanoseconds;
-    const deadline = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
     var failure: ?Error = null;
 
     while (!(eof and child_reaped)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) {
+            failure = error.TimedOut;
+            break;
+        }
         if (!child_reaped) switch (pollChild(pid, &status)) {
             .running => {},
             .reaped => child_reaped = true,
@@ -822,78 +842,17 @@ fn spawnChild(
     dev_null: c.fd_t,
     capture_mode: CaptureMode,
 ) Error!c.pid_t {
-    const max_fd = getdtablesize();
-    if (max_fd <= 3) return error.SpawnSetupFailed;
-    const pid = c.fork();
-    if (pid < 0) return error.SpawnFailed;
-    if (pid == 0) childExec(executable, argv, environment, directory_fd, input_fd, pipe_fds, stderr_pipe_fds, dev_null, capture_mode, max_fd);
-    return pid;
-}
-
-fn childExec(
-    executable: [:0]const u8,
-    argv: [*:null]const ?[*:0]const u8,
-    environment: ?[*:null]const ?[*:0]const u8,
-    directory_fd: ?c.fd_t,
-    input_fd: ?c.fd_t,
-    pipe_fds: [2]c.fd_t,
-    stderr_pipe_fds: ?[2]c.fd_t,
-    dev_null: c.fd_t,
-    capture_mode: CaptureMode,
-    max_fd: c_int,
-) noreturn {
-    const stdin_fd = input_fd orelse dev_null;
-    if (c.setpgid(0, 0) != 0 or c.dup2(stdin_fd, 0) < 0 or
-        c.dup2(pipe_fds[1], 1) < 0 or
-        c.dup2(if (stderr_pipe_fds) |fds| fds[1] else if (capture_mode == .merged) pipe_fds[1] else dev_null, 2) < 0) c._exit(126);
-    if (input_fd != null and c.lseek(0, 0, c.SEEK.SET) < 0) c._exit(126);
-    if (directory_fd) |fd| if (c.fchdir(fd) != 0) c._exit(126);
-    var inherited_fd: c_int = 3;
-    while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
-    if (environment) |envp| {
-        _ = execve(executable.ptr, argv, envp);
-    } else {
-        _ = execv(executable.ptr, argv);
-    }
-    c._exit(126);
-}
-
-fn childExecInheritedPipe(
-    executable: [:0]const u8,
-    argv: [*:null]const ?[*:0]const u8,
-    environment: [*:null]const ?[*:0]const u8,
-    receipt_pipe: [2]c.fd_t,
-    dev_null: c.fd_t,
-    max_fd: c_int,
-) noreturn {
-    const receipt_fd: c.fd_t = 3;
-    if (c.setpgid(0, 0) != 0 or
-        c.dup2(dev_null, 0) < 0 or c.dup2(dev_null, 1) < 0 or c.dup2(dev_null, 2) < 0 or
-        c.dup2(receipt_pipe[1], receipt_fd) < 0 or
-        c.fcntl(receipt_fd, c.F.SETFD, @as(c_int, 0)) != 0) c._exit(126);
-    var inherited_fd: c_int = 4;
-    while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
-    _ = execve(executable.ptr, argv, environment);
-    c._exit(126);
-}
-
-fn childExecInheritedSocket(
-    executable: [:0]const u8,
-    argv: [*:null]const ?[*:0]const u8,
-    environment: [*:null]const ?[*:0]const u8,
-    sockets: [2]c.fd_t,
-    dev_null: c.fd_t,
-    max_fd: c_int,
-) noreturn {
-    const protocol_fd: c.fd_t = 3;
-    if (c.setpgid(0, 0) != 0 or
-        c.dup2(dev_null, 0) < 0 or c.dup2(dev_null, 1) < 0 or c.dup2(dev_null, 2) < 0 or
-        c.dup2(sockets[1], protocol_fd) < 0 or
-        c.fcntl(protocol_fd, c.F.SETFD, @as(c_int, 0)) != 0) c._exit(126);
-    var inherited_fd: c_int = 4;
-    while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
-    _ = execve(executable.ptr, argv, environment);
-    c._exit(126);
+    if (builtin.os.tag != .macos)
+        return fork_backend.spawnCapture(executable, argv, environment, directory_fd, input_fd, pipe_fds, stderr_pipe_fds, dev_null, capture_mode == .merged);
+    // Both fork and spawn share the held file description's offset. Reset only
+    // after validation; callers retain ownership and must serialize access.
+    if (input_fd) |fd| if (c.lseek(fd, 0, c.SEEK.SET) < 0) return error.SpawnSetupFailed;
+    return macos_spawn.spawnGrouped(executable.ptr, argv, environment orelse c.environ, .{
+        input_fd orelse dev_null,
+        pipe_fds[1],
+        if (stderr_pipe_fds) |fds| fds[1] else if (capture_mode == .merged) pipe_fds[1] else dev_null,
+        null,
+    }, directory_fd);
 }
 
 fn deadlineAfter(io: std.Io, budget_ns: i128) i128 {
@@ -947,44 +906,6 @@ fn writeSocketExactUntil(io: std.Io, fd: c.fd_t, payload: []const u8, deadline: 
         }
         if (count == 0) return error.CaptureFailed;
         used += @intCast(count);
-    }
-}
-
-/// What the parent should do after `setpgid` on the freshly forked child failed.
-pub const GroupOutcome = enum { established, retry, failed };
-
-/// The child sets its own group before exec, so two errno values still mean the
-/// group is in place and only the parent's redundant call lost a race:
-///   ACCES  the child reached exec first;
-///   SRCH   the child already exited, so nothing is left to place in a group.
-/// Treating SRCH as failure replaces the child's real exit status with
-/// ProcessGroupFailed. How often that happens is decided by `RLIMIT_NOFILE`:
-/// `childExec` below closes every descriptor up to `getdtablesize()` before exec,
-/// so a high limit buys the parent enough time to always win, and a low one does
-/// not. Measured on macOS with an exec that fails into `_exit(126)`, 300 spawns
-/// each:
-///   ulimit -n 1048576 / 65536 / 4096   0 ProcessGroupFailed
-///   ulimit -n 256                      7 ProcessGroupFailed
-///   ulimit -n 64                       8 ProcessGroupFailed
-/// 256 is not a corner: it is what `launchctl limit maxfiles` reports, so it is
-/// the soft limit the GUI app inherits. Tests run from a shell whose limit is
-/// 1048576, which is why the harness never saw this.
-pub fn classifyGroupErrno(err: posix.E) GroupOutcome {
-    return switch (err) {
-        .INTR => .retry,
-        .ACCES, .SRCH => .established,
-        else => .failed,
-    };
-}
-
-fn establishProcessGroup(pid: c.pid_t) bool {
-    while (true) {
-        if (c.setpgid(pid, pid) == 0) return true;
-        switch (classifyGroupErrno(posix.errno(-1))) {
-            .retry => continue,
-            .established => return true,
-            .failed => return false,
-        }
     }
 }
 

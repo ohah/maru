@@ -1499,7 +1499,7 @@ const MacosLogin = struct {
 
 // `/bin/sh -c <cmd>`를 돌려 기다린다 — `system()` 대신 CLOEXEC_DEFAULT 헬퍼로(앱 안 폴백 PTY 경로라 이미지 세그먼트 fd 를
 // 물려주지 않게, docs/session-host-image-channel.md §7).
-const macos_spawn = @import("macos_spawn.zig");
+const macos_spawn = @import("macos_spawn");
 
 const ResolvedTerm = struct { term: []const u8, terminfo_dir: ?[]const u8 };
 

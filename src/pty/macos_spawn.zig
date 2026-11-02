@@ -125,8 +125,57 @@ fn spawnImpl(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:n
             }
         }
     }
+    return nativeSpawn(path, argv, envp, &actions, &attr);
+}
+
+/// Creates an isolated group as part of spawn, before any program instruction runs.
+/// Unlike shell launches, this preserves the caller's signal disposition/mask, matching
+/// bounded_process's former exec contract. CLOEXEC_DEFAULT applies to both APIs.
+pub fn spawnGrouped(
+    path: [*:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+    sources: [4]?c.fd_t,
+    directory_fd: ?c.fd_t,
+) error{ SpawnSetupFailed, SpawnFailed }!c.pid_t {
+    var attr: c.posix_spawnattr_t = undefined;
+    if (c.posix_spawnattr_init(&attr) != 0) return error.SpawnSetupFailed;
+    defer _ = c.posix_spawnattr_destroy(&attr);
+    // Apple posix_spawnattr_setpgroup(3): group 0 + SETPGROUP creates a group
+    // whose ID is the child's PID. Neither parent nor child needs setpgid.
+    if (c.posix_spawnattr_setpgroup(&attr, 0) != 0 or
+        c.posix_spawnattr_setflags(&attr, .{ .SETPGROUP = true, .CLOEXEC_DEFAULT = true }) != 0)
+        return error.SpawnSetupFailed;
+    var actions: c.posix_spawn_file_actions_t = undefined;
+    if (c.posix_spawn_file_actions_init(&actions) != 0) return error.SpawnSetupFailed;
+    defer _ = c.posix_spawn_file_actions_destroy(&actions);
+    if (directory_fd) |fd| if (c.posix_spawn_file_actions_addfchdir_np(&actions, fd) != 0)
+        return error.SpawnSetupFailed;
+
+    // Pin sources above all destinations. Closed stdio can otherwise allocate a pipe
+    // endpoint at 0..3, and an earlier dup2 would overwrite a later action's source.
+    // Parent duplicates are CLOEXEC from birth and always revoked on return.
+    var pinned: [4]c.fd_t = @splat(-1);
+    defer for (pinned) |fd| {
+        if (fd >= 0) _ = c.close(fd);
+    };
+    for (sources, 0..) |source, index| if (source) |fd| {
+        if (fd < 0) return error.SpawnSetupFailed;
+        const copy = c.fcntl(fd, c.F.DUPFD_CLOEXEC, @as(c_int, 4));
+        if (copy < 0) return error.SpawnSetupFailed;
+        pinned[index] = copy;
+        if (c.posix_spawn_file_actions_adddup2(&actions, copy, @intCast(index)) != 0)
+            return error.SpawnSetupFailed;
+    };
+    for (pinned) |fd| if (fd >= 0 and c.posix_spawn_file_actions_addclose(&actions, fd) != 0)
+        return error.SpawnSetupFailed;
+    return nativeSpawn(path, argv, envp, &actions, &attr);
+}
+
+/// Keep the native creation call in one place; every caller prepares CLOEXEC_DEFAULT.
+fn nativeSpawn(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8, actions: *const c.posix_spawn_file_actions_t, attr: *const c.posix_spawnattr_t) SpawnError!c.pid_t {
     var pid: c.pid_t = 0;
-    if (c.posix_spawn(&pid, path, &actions, &attr, argv, envp) != 0) return error.SpawnFailed;
+    if (c.posix_spawn(&pid, path, actions, attr, argv, envp) != 0) return error.SpawnFailed;
     return pid;
 }
 

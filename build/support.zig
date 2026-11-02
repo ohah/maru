@@ -10,6 +10,11 @@ const test_selection_env = @import("../tools/test_runner_selection_env.zig");
 
 var array_repeat_module: ?*std.Build.Module = null;
 var type_info_fields_module: ?*std.Build.Module = null;
+var macos_spawn_module: ?*std.Build.Module = null;
+
+pub fn setMacosSpawnModule(module: *std.Build.Module) void {
+    macos_spawn_module = module;
+}
 
 pub fn setArrayRepeatModule(module: *std.Build.Module) void {
     array_repeat_module = module;
@@ -33,18 +38,21 @@ fn collectModules(
     }
 }
 
-/// Makes the Zig 0.17 compatibility helper visible from every module in one compile graph.
+/// Shares compatibility helpers and the native spawn boundary across one compile graph.
 /// Multiple source modules in a single graph must share one imported module for a source file;
 /// relative imports of the helper would otherwise claim the same file from several modules.
 pub fn attachArrayRepeatImports(b: *std.Build, root: *std.Build.Module) void {
     const repeat_module = array_repeat_module;
     const type_fields_module = type_info_fields_module;
-    if (repeat_module == null and type_fields_module == null) return;
+    if (repeat_module == null and type_fields_module == null and macos_spawn_module == null) return;
     var modules: std.array_hash_map.Auto(*std.Build.Module, void) = .empty;
     collectModules(b, root, repeat_module, type_fields_module, &modules);
     for (modules.keys()) |module| {
         if (repeat_module) |repeat| module.addImport("array_repeat", repeat);
         if (type_fields_module) |type_fields| module.addImport("type_info_fields", type_fields);
+        // One owner avoids duplicate-file modules when a focused bounded-process
+        // test and the full Maru facade both use the native spawn boundary.
+        if (macos_spawn_module) |spawn_module| if (module != spawn_module) module.addImport("macos_spawn", spawn_module);
     }
 }
 

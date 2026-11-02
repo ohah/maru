@@ -48,8 +48,9 @@ echo "macOS 제품 경로를 $target 로 타입 검사한다(링크 없음)"
 "$zig" test -fno-emit-bin --test-no-exec -target "$target" \
   --dep maru --dep build_options \
   -Mroot=src/platform/macos/app_host_abi.zig \
-  --dep shutdown_wire_contract --dep maru_terminfo --dep config_doc_md \
+  --dep macos_spawn --dep shutdown_wire_contract --dep maru_terminfo --dep config_doc_md \
   -Mmaru=src/maru.zig \
+  -Mmacos_spawn=src/pty/macos_spawn.zig \
   -Mshutdown_wire_contract=src/shutdown_wire_contract.zig \
   -Mmaru_terminfo=terminfo/maru.terminfo \
   -Mconfig_doc_md=docs/configuration.md \

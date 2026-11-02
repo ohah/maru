@@ -17,8 +17,9 @@ for mode in ("Debug", "ReleaseFast"):
         str(pathlib.Path(subprocess.check_output(["which", "zig"], text=True).strip())), "test", "-lc", "-O", mode,
         "--dep", "ssh_upload", "-Mroot=tests/ssh_fd_isolation.zig",
         "--dep", "maru", "-Mssh_upload=src/platform/macos/ssh_upload.zig",
-        "--dep", "maru_terminfo", "-Mmaru=src/maru.zig",
+        "--dep", "macos_spawn", "--dep", "maru_terminfo", "-Mmaru=src/maru.zig",
         "-Mmaru_terminfo=terminfo/maru.terminfo",
+        "-Mmacos_spawn=src/pty/macos_spawn.zig",
     ]
     result = subprocess.run(command, cwd=root, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
     print(f"=== {mode} ===\n{result.stdout}", flush=True)

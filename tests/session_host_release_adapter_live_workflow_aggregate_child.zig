@@ -120,7 +120,10 @@ test "signal framing drift and both stream failures conservatively terminate red
     var environment_storage: EnvironmentStorage = undefined;
     const environment = try trustedEnvironment("v1.2.0", &environment_storage);
     const missing: [:0]const u8 = "/definitely/missing/maru-aggregate-child";
-    try std.testing.expectEqual(child.RunResult.observed, try child.runAndApply(
+    // Darwin native creation failure is not an observed synthetic exit 126.
+    // Legacy POSIX hosts retain their prior observation; both require an audit.
+    const expected_creation_failure: child.RunResult = if (@import("builtin").os.tag == .macos) .observation_failed else .observed;
+    try std.testing.expectEqual(expected_creation_failure, try child.runAndApply(
         std.testing.io,
         &state,
         missing,

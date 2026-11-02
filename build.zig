@@ -285,6 +285,9 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     // Zig 0.17 removed `value ** count`; sources use this named compatibility module
     // so the same file is not imported as a relative source by several module roots.
+    support.setMacosSpawnModule(b.createModule(.{
+        .root_source_file = b.path("src/pty/macos_spawn.zig"),
+    }));
     support.setArrayRepeatModule(b.createModule(.{
         .root_source_file = b.path("src/compat/array_repeat.zig"),
     }));

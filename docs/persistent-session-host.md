@@ -7,6 +7,7 @@
 이 문서는 Maru GUI가 종료되어도 terminal Term의 PTY·자식 프로세스·화면 상태를 유지하고, 다시 실행한 Maru 또는
 다른 터미널의 `maru attach` 클라이언트가 재접속하는 기능의 단일 출처다. 탭/split UI, workspace restore,
 control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID·종료 의미·복구·검증 단계를 정한다.
+외부 검증 명령의 생성·FD·실패·deadline 계약은 [bounded process 실행 경계](session-host-bounded-process.md)가 소유한다.
 
 현재 구현·검증 상태는 [실제 구현 계획](implementation-plan.md)과
 [검증 매트릭스](verification-matrix.md)가 소유한다. 이 문서의 날짜·체크 표식은 당시의 구현 근거를 보존하는

@@ -1,0 +1,379 @@
+{
+  "head": "205d3790a62205b2fcb9cc2549ef55546c783d19",
+  "platform": "24.6.0",
+  "race_controls": [
+    {
+      "mode": "overlap",
+      "iterations": "6000",
+      "parent_failures": "2443",
+      "child_failures": "1887",
+      "wrong_group": "0",
+      "changed_session": "0",
+      "other_errno": "0"
+    },
+    {
+      "mode": "parent-first",
+      "iterations": "6000",
+      "parent_failures": "0",
+      "child_failures": "0",
+      "wrong_group": "0",
+      "changed_session": "0",
+      "other_errno": "0"
+    },
+    {
+      "mode": "child-first",
+      "iterations": "6000",
+      "parent_failures": "0",
+      "child_failures": "0",
+      "wrong_group": "0",
+      "changed_session": "0",
+      "other_errno": "0"
+    },
+    {
+      "mode": "child-only",
+      "iterations": "6000",
+      "parent_failures": "0",
+      "child_failures": "0",
+      "wrong_group": "0",
+      "changed_session": "0",
+      "other_errno": "0"
+    }
+  ],
+  "variants": {
+    "baseline": {
+      "evidence_complete": true,
+      "bounded_evidence_error": null,
+      "bounded_validation": {
+        "complete": true,
+        "errors": [],
+        "expected_compiled": 33
+      },
+      "accepted_timing_runs": [
+        "fence-1",
+        "fence-2",
+        "fence-3"
+      ],
+      "existing_contracts": {
+        "observed_cases": 48,
+        "passed": 48,
+        "failed": 0,
+        "unknown": 0,
+        "skipped": 0,
+        "failures": []
+      },
+      "poc_supplements": {
+        "observed_cases": 18,
+        "passed": 16,
+        "failed": 2,
+        "unknown": 0,
+        "skipped": 0,
+        "failures": [
+          "session_host_bounded_process.test.PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited",
+          "session_host_bounded_process.test.PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited"
+        ]
+      },
+      "launch_measurements": [
+        {
+          "mode": "debug",
+          "samples": "30",
+          "median_ns": "5253542",
+          "p95_ns": "60306000",
+          "max_ns": "61206875"
+        },
+        {
+          "mode": "fast",
+          "samples": "30",
+          "median_ns": "56395375",
+          "p95_ns": "66727167",
+          "max_ns": "79551792"
+        }
+      ],
+      "bounded_exit": 1,
+      "fence_runs": 4,
+      "fence_successes": 4,
+      "timings": {
+        "fast/baseline": {
+          "round_medians_ns": [
+            110520000,
+            94061000,
+            39196000
+          ],
+          "round_p95_ns": [
+            155782000,
+            148126000,
+            49918000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 94061000
+        },
+        "fast/upgrade": {
+          "round_medians_ns": [
+            119487000,
+            129942000,
+            50037000
+          ],
+          "round_p95_ns": [
+            185895000,
+            219581000,
+            104959000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 119487000
+        },
+        "debug/baseline": {
+          "round_medians_ns": [
+            309406000,
+            292559000,
+            209159000
+          ],
+          "round_p95_ns": [
+            379132000,
+            374266000,
+            270796000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 292559000
+        },
+        "debug/upgrade": {
+          "round_medians_ns": [
+            448844000,
+            413448000,
+            279424000
+          ],
+          "round_p95_ns": [
+            491866000,
+            455632000,
+            343630000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 413448000
+        }
+      }
+    },
+    "parent-gate": {
+      "evidence_complete": true,
+      "bounded_evidence_error": null,
+      "bounded_validation": {
+        "complete": true,
+        "errors": [],
+        "expected_compiled": 33
+      },
+      "accepted_timing_runs": [
+        "fence-1",
+        "fence-2",
+        "fence-3"
+      ],
+      "existing_contracts": {
+        "observed_cases": 48,
+        "passed": 48,
+        "failed": 0,
+        "unknown": 0,
+        "skipped": 0,
+        "failures": []
+      },
+      "poc_supplements": {
+        "observed_cases": 18,
+        "passed": 16,
+        "failed": 2,
+        "unknown": 0,
+        "skipped": 0,
+        "failures": [
+          "session_host_bounded_process.test.PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited",
+          "session_host_bounded_process.test.PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited"
+        ]
+      },
+      "launch_measurements": [
+        {
+          "mode": "debug",
+          "samples": "30",
+          "median_ns": "10263083",
+          "p95_ns": "61318041",
+          "max_ns": "63378417"
+        },
+        {
+          "mode": "fast",
+          "samples": "30",
+          "median_ns": "8077125",
+          "p95_ns": "60029708",
+          "max_ns": "63543042"
+        }
+      ],
+      "bounded_exit": 1,
+      "fence_runs": 4,
+      "fence_successes": 4,
+      "timings": {
+        "fast/baseline": {
+          "round_medians_ns": [
+            35939000,
+            35212000,
+            35883000
+          ],
+          "round_p95_ns": [
+            90400000,
+            94410000,
+            92615000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 35883000
+        },
+        "fast/upgrade": {
+          "round_medians_ns": [
+            59423000,
+            49472000,
+            49665000
+          ],
+          "round_p95_ns": [
+            167590000,
+            52579000,
+            104654000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 49665000
+        },
+        "debug/baseline": {
+          "round_medians_ns": [
+            188726000,
+            191689000,
+            189723000
+          ],
+          "round_p95_ns": [
+            242009000,
+            249563000,
+            264304000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 189723000
+        },
+        "debug/upgrade": {
+          "round_medians_ns": [
+            252401000,
+            255927000,
+            254762000
+          ],
+          "round_p95_ns": [
+            279770000,
+            312629000,
+            293438000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 254762000
+        }
+      }
+    },
+    "posix-spawn": {
+      "evidence_complete": true,
+      "bounded_evidence_error": null,
+      "bounded_validation": {
+        "complete": true,
+        "errors": [],
+        "expected_compiled": 33
+      },
+      "accepted_timing_runs": [
+        "fence-1",
+        "fence-2",
+        "fence-3"
+      ],
+      "existing_contracts": {
+        "observed_cases": 48,
+        "passed": 42,
+        "failed": 6,
+        "unknown": 0,
+        "skipped": 0,
+        "failures": [
+          "session_host_bounded_process.test.bounded process rejects nonzero and signaled terminal status",
+          "session_host_bounded_process.test.bounded process keeps the child status when a low descriptor limit opens the setpgid race",
+          "session_host_bounded_process.test.bounded observation preserves signal and child-side exec failure",
+          "session_host_bounded_process.test.bounded process rejects nonzero and signaled terminal status",
+          "session_host_bounded_process.test.bounded process keeps the child status when a low descriptor limit opens the setpgid race",
+          "session_host_bounded_process.test.bounded observation preserves signal and child-side exec failure"
+        ]
+      },
+      "poc_supplements": {
+        "observed_cases": 18,
+        "passed": 18,
+        "failed": 0,
+        "unknown": 0,
+        "skipped": 0,
+        "failures": []
+      },
+      "launch_measurements": [
+        {
+          "mode": "debug",
+          "samples": "30",
+          "median_ns": "17345834",
+          "p95_ns": "59557833",
+          "max_ns": "61618584"
+        },
+        {
+          "mode": "fast",
+          "samples": "30",
+          "median_ns": "2158792",
+          "p95_ns": "56083750",
+          "max_ns": "56651000"
+        }
+      ],
+      "bounded_exit": 1,
+      "fence_runs": 4,
+      "fence_successes": 4,
+      "timings": {
+        "debug/baseline": {
+          "round_medians_ns": [
+            182486000,
+            191900000,
+            185466000
+          ],
+          "round_p95_ns": [
+            194217000,
+            322558000,
+            230755000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 185466000
+        },
+        "debug/upgrade": {
+          "round_medians_ns": [
+            257697000,
+            256752000,
+            248714000
+          ],
+          "round_p95_ns": [
+            332457000,
+            323884000,
+            306704000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 256752000
+        },
+        "fast/baseline": {
+          "round_medians_ns": [
+            26971000,
+            31955000,
+            30749000
+          ],
+          "round_p95_ns": [
+            79464000,
+            84283000,
+            103539000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 30749000
+        },
+        "fast/upgrade": {
+          "round_medians_ns": [
+            41268000,
+            51598000,
+            40928000
+          ],
+          "round_p95_ns": [
+            99109000,
+            105386000,
+            145140000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 41268000
+        }
+      }
+    }
+  },
+  "evidence_complete": true
+}

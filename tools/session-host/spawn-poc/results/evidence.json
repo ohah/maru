@@ -1,0 +1,35 @@
+{
+  "purpose": "PoC decision evidence; no product repair applied",
+  "baseline_main": "f65a197d8",
+  "ci_run": 41370668795,
+  "ci_head": "644148c54bb026b3c0cbe9b30843217143999956",
+  "analysis_tools_head": "dc1fcec053a44ca4739a3555cd1712840e6e7ec6",
+  "ci_url": "https://github.com/ohah/maru/actions/runs/41370668795",
+  "platform": "macOS 15.8.2 24H232 / runner image 20261028.0489.1",
+  "scope": "Existing 24 contracts unchanged, two supplemental contracts, exact fence gate in both optimization modes",
+  "backend_source_hashes_match_local_and_ci": true,
+  "backend_hashes": {
+    "baseline": {
+      "baseline_sha256": "3a15583da4f305547c4ddd43090b96d6349a2a82ea9b7a921748d66a02d52fa2",
+      "variant_sha256": "3a15583da4f305547c4ddd43090b96d6349a2a82ea9b7a921748d66a02d52fa2"
+    },
+    "parent-gate": {
+      "baseline_sha256": "3a15583da4f305547c4ddd43090b96d6349a2a82ea9b7a921748d66a02d52fa2",
+      "variant_sha256": "96437465c738d89f62c434a9c0db4cdfa34b7b77009a073b6111d86a1fc566a9"
+    },
+    "posix-spawn": {
+      "baseline_sha256": "3a15583da4f305547c4ddd43090b96d6349a2a82ea9b7a921748d66a02d52fa2",
+      "variant_sha256": "307e1eaff3e2300208806252ad9732dde441ba155ab2bc6bf2102883765c43cd"
+    }
+  },
+  "driver_success_does_not_mean_candidate_success": true,
+  "case_parser_note": "comparison.json reparses raw test logs, including inline FAIL messages; test outcomes are unchanged.",
+  "recommendation": "Prefer posix_spawn for the product integration, explicitly resolving exec-never-started error semantics, deadline accounting, and facade integration. Parent-gate remains a smaller compatibility-preserving alternative but retains the high-FD inheritance counterexample.",
+  "performance_conclusion": "No universal speed ordering claimed: capture/reap includes a 50 ms poll quantum, fixed variant ordering, and visible CI variance.",
+  "not_proven": [
+    "Production facade integration",
+    "Whole project required CI",
+    "Exhaustive startup failure and cancellation timing",
+    "Universal performance ranking"
+  ]
+}

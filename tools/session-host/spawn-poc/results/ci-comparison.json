@@ -1,0 +1,291 @@
+{
+  "head": "644148c54bb026b3c0cbe9b30843217143999956",
+  "platform": "24.6.0",
+  "race_controls": [
+    {
+      "mode": "overlap",
+      "iterations": "6000",
+      "parent_failures": "3206",
+      "child_failures": "1211",
+      "wrong_group": "0",
+      "changed_session": "0",
+      "other_errno": "0"
+    },
+    {
+      "mode": "parent-first",
+      "iterations": "6000",
+      "parent_failures": "0",
+      "child_failures": "0",
+      "wrong_group": "0",
+      "changed_session": "0",
+      "other_errno": "0"
+    },
+    {
+      "mode": "child-first",
+      "iterations": "6000",
+      "parent_failures": "0",
+      "child_failures": "0",
+      "wrong_group": "0",
+      "changed_session": "0",
+      "other_errno": "0"
+    },
+    {
+      "mode": "child-only",
+      "iterations": "6000",
+      "parent_failures": "0",
+      "child_failures": "0",
+      "wrong_group": "0",
+      "changed_session": "0",
+      "other_errno": "0"
+    }
+  ],
+  "variants": {
+    "baseline": {
+      "existing_contracts": {
+        "observed_cases": 48,
+        "passed": 48,
+        "failed": 0,
+        "unknown": 0,
+        "failures": []
+      },
+      "poc_supplements": {
+        "observed_cases": 4,
+        "passed": 2,
+        "failed": 2,
+        "unknown": 0,
+        "failures": [
+          "session_host_bounded_process.test.PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited",
+          "session_host_bounded_process.test.PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited"
+        ]
+      },
+      "launch_measurements": [],
+      "bounded_exit": 1,
+      "fence_runs": 4,
+      "fence_successes": 4,
+      "timings": {
+        "fast/baseline": {
+          "round_medians_ns": [
+            31164000,
+            31396000,
+            75547000
+          ],
+          "round_p95_ns": [
+            89170000,
+            89473000,
+            144154000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 31396000
+        },
+        "fast/upgrade": {
+          "round_medians_ns": [
+            103514000,
+            43885000,
+            96415000
+          ],
+          "round_p95_ns": [
+            205676000,
+            101706000,
+            215358000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 96415000
+        },
+        "debug/baseline": {
+          "round_medians_ns": [
+            229044000,
+            183805000,
+            284581000
+          ],
+          "round_p95_ns": [
+            282716000,
+            226328000,
+            317176000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 229044000
+        },
+        "debug/upgrade": {
+          "round_medians_ns": [
+            281405000,
+            289347000,
+            384465000
+          ],
+          "round_p95_ns": [
+            307481000,
+            402540000,
+            442152000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 289347000
+        }
+      }
+    },
+    "parent-gate": {
+      "existing_contracts": {
+        "observed_cases": 48,
+        "passed": 48,
+        "failed": 0,
+        "unknown": 0,
+        "failures": []
+      },
+      "poc_supplements": {
+        "observed_cases": 4,
+        "passed": 2,
+        "failed": 2,
+        "unknown": 0,
+        "failures": [
+          "session_host_bounded_process.test.PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited",
+          "session_host_bounded_process.test.PoC non-CLOEXEC descriptor above a lowered soft limit is not inherited"
+        ]
+      },
+      "launch_measurements": [],
+      "bounded_exit": 1,
+      "fence_runs": 4,
+      "fence_successes": 4,
+      "timings": {
+        "debug/baseline": {
+          "round_medians_ns": [
+            272120000,
+            255363000,
+            287851000
+          ],
+          "round_p95_ns": [
+            309882000,
+            300837000,
+            360307000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 272120000
+        },
+        "debug/upgrade": {
+          "round_medians_ns": [
+            371204000,
+            319395000,
+            350088000
+          ],
+          "round_p95_ns": [
+            447538000,
+            446049000,
+            414268000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 350088000
+        },
+        "fast/baseline": {
+          "round_medians_ns": [
+            45422000,
+            94964000,
+            99062000
+          ],
+          "round_p95_ns": [
+            113258000,
+            165174000,
+            146778000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 94964000
+        },
+        "fast/upgrade": {
+          "round_medians_ns": [
+            99668000,
+            146680000,
+            171039000
+          ],
+          "round_p95_ns": [
+            185017000,
+            207834000,
+            226395000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 146680000
+        }
+      }
+    },
+    "posix-spawn": {
+      "existing_contracts": {
+        "observed_cases": 48,
+        "passed": 42,
+        "failed": 6,
+        "unknown": 0,
+        "failures": [
+          "session_host_bounded_process.test.bounded process rejects nonzero and signaled terminal status",
+          "session_host_bounded_process.test.bounded process keeps the child status when a low descriptor limit opens the setpgid race",
+          "session_host_bounded_process.test.bounded observation preserves signal and child-side exec failure",
+          "session_host_bounded_process.test.bounded process rejects nonzero and signaled terminal status",
+          "session_host_bounded_process.test.bounded process keeps the child status when a low descriptor limit opens the setpgid race",
+          "session_host_bounded_process.test.bounded observation preserves signal and child-side exec failure"
+        ]
+      },
+      "poc_supplements": {
+        "observed_cases": 4,
+        "passed": 4,
+        "failed": 0,
+        "unknown": 0,
+        "failures": []
+      },
+      "launch_measurements": [],
+      "bounded_exit": 1,
+      "fence_runs": 4,
+      "fence_successes": 4,
+      "timings": {
+        "fast/baseline": {
+          "round_medians_ns": [
+            37064000,
+            40534000,
+            57378000
+          ],
+          "round_p95_ns": [
+            99136000,
+            149441000,
+            95823000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 40534000
+        },
+        "fast/upgrade": {
+          "round_medians_ns": [
+            96904000,
+            56430000,
+            44965000
+          ],
+          "round_p95_ns": [
+            157356000,
+            157270000,
+            102060000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 56430000
+        },
+        "debug/baseline": {
+          "round_medians_ns": [
+            222574000,
+            224135000,
+            188883000
+          ],
+          "round_p95_ns": [
+            271662000,
+            286011000,
+            291407000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 222574000
+        },
+        "debug/upgrade": {
+          "round_medians_ns": [
+            301944000,
+            306125000,
+            337796000
+          ],
+          "round_p95_ns": [
+            375302000,
+            368081000,
+            435666000
+          ],
+          "samples": 60,
+          "median_of_round_medians_ns": 306125000
+        }
+      }
+    }
+  }
+}

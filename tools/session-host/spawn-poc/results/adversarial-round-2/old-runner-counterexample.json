@@ -1,0 +1,6 @@
+{
+  "old_exit": 0,
+  "unreported_live_workers": 1,
+  "old_report_has_leak_field": false,
+  "live_after_cleanup": 0
+}

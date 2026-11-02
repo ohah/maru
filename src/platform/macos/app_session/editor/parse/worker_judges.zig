@@ -350,6 +350,11 @@ fn expectTree(result: *const Completion, source: []const u8, language: syntax.La
     var cold = syntax.Provider.init(source, language, 0) orelse return error.NoProvider;
     defer cold.deinit();
     try std.testing.expect(syntax.testing.equal(cold.tree.?, result.provider().?.tree.?) != null);
+    var token: syntax.Cancellation = .{};
+    try cold.prepareStickySummary(std.testing.allocator, &token);
+    try std.testing.expect(result.provider().?.sticky_summary.tree != null);
+    try std.testing.expectEqual(cold.sticky_summary.count, result.provider().?.sticky_summary.count);
+    try std.testing.expectEqual(result.provider().?.tree_gen, result.provider().?.sticky_summary.generation);
 }
 
 test "parse worker 증분과 같은 본문 재사용은 cold 전체 노드와 같고 원본은 불변이다" {
@@ -694,4 +699,70 @@ test "parse worker 종료는 미전달 완료를 회수하고 추가 통지를 �
     try std.testing.expectEqual(@as(usize, 1), notice_count.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), audit.reclaimed.load(.acquire));
     try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
+}
+
+test "parse worker 요약 준비 중 취소는 완료를 수락하지 않고 native 자원을 회수한다" {
+    const a = std.testing.allocator;
+    var text = try buffer.Buffer.init(a, "pub fn first() void {}\n");
+    defer text.deinit();
+    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
+    {
+        var service = try Service.init(a, .{ .audit = &audit });
+        defer service.deinit() catch unreachable;
+        var gate: request.Gate = .{};
+        var pause: syntax.Cancellation.TestGate = .{ .stage = .summary };
+        defer pause.release();
+        _ = try testQueue(&service, &gate, test_input, text, &pause);
+        try waitEntered(&pause);
+        service.cancelDocument(test_input.document);
+        pause.release();
+        var result = testTake(&service);
+        defer result.release();
+        try std.testing.expectEqual(Outcome.cancelled, result.outcome());
+        try std.testing.expect(!result.accept(&gate));
+    }
+    try std.testing.expectEqual(@as(usize, 1), audit.cancelled_with_tree.load(.acquire));
+    try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
+    try std.testing.expect(!audit.wrong_thread.load(.acquire));
+}
+
+test "parse worker 선택적 요약 OOM은 준비된 파싱과 기존 조회 재구축을 보존한다" {
+    const a = std.testing.allocator;
+    var before = try buffer.Buffer.init(a, "pub fn first() void {}\n");
+    defer before.deinit();
+    var after = try buffer.Buffer.init(a, "pub fn renamed() void {}\npub fn tail() void {}\n");
+    defer after.deinit();
+    var copies = std.testing.FailingAllocator.init(std.heap.page_allocator, .{});
+    {
+        var service = try Service.init(a, .{ .copy_allocator = copies.allocator() });
+        defer service.deinit() catch unreachable;
+        var gate: request.Gate = .{};
+        _ = try testQueue(&service, &gate, test_input, before, null);
+        var first = testTake(&service);
+        defer first.release();
+        try std.testing.expect(first.accept(&gate));
+        try std.testing.expect(first.provider().?.sticky_summary.tree != null);
+        var pause: syntax.Cancellation.TestGate = .{ .stage = .summary };
+        defer pause.release();
+        var input = test_input;
+        input.revision += 1;
+        _ = try testQueueFrom(&service, &gate, input, after, &first, &pause);
+        try waitEntered(&pause);
+        copies.fail_index = copies.alloc_index;
+        pause.release();
+        var next = testTake(&service);
+        defer next.release();
+        try std.testing.expectEqual(Outcome.ready, next.outcome());
+        try std.testing.expect(next.accept(&gate));
+        try std.testing.expectEqual(Mode.incremental, next.mode());
+        var view = next.provider().?.copyReady(.zig) orelse return error.NoSnapshot;
+        defer view.deinit();
+        try std.testing.expect(view.sticky_summary.tree == null);
+        var symbols: std.ArrayList(syntax.Provider.Symbol) = .empty;
+        defer symbols.deinit(a);
+        try std.testing.expect(try view.stickySymbols(a, &.{0}, &symbols));
+        try std.testing.expectEqual(@as(usize, 2), view.sticky_summary.count);
+        try std.testing.expect(view.sticky_work.rebuild_nodes > 0);
+    }
+    try std.testing.expectEqual(copies.allocated_bytes, copies.freed_bytes);
 }

@@ -23,6 +23,11 @@ const NodeContext = struct {
     }
 };
 const Nodes = std.HashMapUnmanaged(c.TSNode, void, NodeContext, 80);
+const NeverStop = struct {
+    pub fn isRequested(_: @This()) bool {
+        return false;
+    }
+};
 
 /// 이전 분류의 트리를 참조 계수 사본으로 보존한다. 편집은 이 사본에도 같은 좌표 변환을 적용한다.
 /// 노드 종류와 이름 유무는 옛 분류 그대로이므로 새 트리와 다른 범위의 개수만 빼고 더할 수 있다.
@@ -61,6 +66,15 @@ pub const Summary = struct {
     }
 
     pub fn hasSymbols(self: *Summary, allocator: std.mem.Allocator, current: ?*c.TSTree, generation: u64, supported: bool, adapter: anytype, work: *Work, changes: ?change_ranges.Batch) error{OutOfMemory}!bool {
+        return self.hasSymbolsCancellable(allocator, current, generation, supported, adapter, work, changes, NeverStop{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Cancelled => unreachable,
+        };
+    }
+
+    /// 워커의 준비도 기존 증분 집계를 사용한다. 중간 취소 때는 새 판을 발행하지 않는다.
+    pub fn hasSymbolsCancellable(self: *Summary, allocator: std.mem.Allocator, current: ?*c.TSTree, generation: u64, supported: bool, adapter: anytype, work: *Work, changes: ?change_ranges.Batch, stop: anytype) error{ OutOfMemory, Cancelled }!bool {
+        if (stop.isRequested()) return error.Cancelled;
         const tree = current orelse {
             self.invalidate();
             return false;
@@ -86,16 +100,17 @@ pub const Summary = struct {
             for (0..range_count) |i| {
                 const lo = if (shared) |items| items[i].lo else ranges[i].start_byte;
                 const hi = if (shared) |items| items[i].hi else ranges[i].end_byte;
-                try touched(allocator, previous, lo, hi, adapter, work, &before);
-                try touched(allocator, tree, lo, hi, adapter, work, &after);
+                try touched(allocator, previous, lo, hi, adapter, work, &before, stop);
+                try touched(allocator, tree, lo, hi, adapter, work, &after, stop);
             }
             if (self.edited) |r| {
-                try touched(allocator, previous, r.lo, r.hi, adapter, work, &before);
-                try touched(allocator, tree, r.lo, r.hi, adapter, work, &after);
+                try touched(allocator, previous, r.lo, r.hi, adapter, work, &before, stop);
+                try touched(allocator, tree, r.lo, r.hi, adapter, work, &after, stop);
             }
             // 이전 집계와 맞지 않으면 다시 센다. 정상 편집 판정자는 재구축이 없다는 것도 확인한다.
-            count = if (before.count() <= self.count) self.count - before.count() + after.count() else fullCount(tree, adapter, work);
-        } else count = fullCount(tree, adapter, work);
+            count = if (before.count() <= self.count) self.count - before.count() + after.count() else try fullCount(tree, adapter, work, stop);
+        } else count = try fullCount(tree, adapter, work, stop);
+        if (stop.isRequested()) return error.Cancelled;
         // 새 참조를 확보한 뒤 옛 참조를 놓아 실패 시 기존 집계를 보존한다.
         const next = c.ts_tree_copy(tree) orelse return error.OutOfMemory;
         if (self.tree) |previous| c.ts_tree_delete(previous);
@@ -108,15 +123,17 @@ pub const Summary = struct {
     }
 };
 
-fn fullCount(tree: *c.TSTree, adapter: anytype, work: *Work) usize {
+fn fullCount(tree: *c.TSTree, adapter: anytype, work: *Work, stop: anytype) error{Cancelled}!usize {
     var cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(tree));
     defer c.ts_tree_cursor_delete(&cursor);
     var count: usize = 0;
     while (true) {
+        if (stop.isRequested()) return error.Cancelled;
         work.rebuild_nodes +|= 1;
         if (adapter.isSymbol(c.ts_tree_cursor_current_node(&cursor))) count += 1;
         if (c.ts_tree_cursor_goto_first_child(&cursor)) continue;
         while (true) {
+            if (stop.isRequested()) return error.Cancelled;
             if (c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
             if (!c.ts_tree_cursor_goto_parent(&cursor)) return count;
         }
@@ -125,10 +142,11 @@ fn fullCount(tree: *c.TSTree, adapter: anytype, work: *Work) usize {
 
 /// 경계에 닿는 0폭 노드도 포함한다. 삭제된 옛 선언은 편집 후 같은 byte로 접히기 때문이다.
 /// 자식 위치 검색으로 앞의 형제를 건너뛰며, 재귀 대신 커서로 문서 깊이와 호출 스택을 분리한다.
-fn touched(allocator: std.mem.Allocator, tree: *c.TSTree, lo: u32, hi: u32, adapter: anytype, work: *Work, out: *Nodes) error{OutOfMemory}!void {
+fn touched(allocator: std.mem.Allocator, tree: *c.TSTree, lo: u32, hi: u32, adapter: anytype, work: *Work, out: *Nodes, stop: anytype) error{ OutOfMemory, Cancelled }!void {
     var cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(tree));
     defer c.ts_tree_cursor_delete(&cursor);
     while (true) {
+        if (stop.isRequested()) return error.Cancelled;
         const node = c.ts_tree_cursor_current_node(&cursor);
         work.summary_nodes +|= 1;
         if (c.ts_node_end_byte(node) >= lo and c.ts_node_start_byte(node) <= hi) {
@@ -137,6 +155,7 @@ fn touched(allocator: std.mem.Allocator, tree: *c.TSTree, lo: u32, hi: u32, adap
             if (child) continue;
         }
         while (true) {
+            if (stop.isRequested()) return error.Cancelled;
             if (c.ts_tree_cursor_goto_next_sibling(&cursor)) {
                 if (c.ts_node_start_byte(c.ts_tree_cursor_current_node(&cursor)) <= hi) break;
             }

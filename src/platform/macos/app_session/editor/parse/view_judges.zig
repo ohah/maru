@@ -112,6 +112,13 @@ test "parse view install 공유 뷰의 색과 트리 조회는 cold 결과와 �
     try ready(&owner, first);
     try install(&owner, &left, first);
     try install(&owner, &right, second);
+    // 완료를 설치한 각 뷰의 첫 조회가 전체 트리를 다시 세면 메인 입력을 막는다.
+    for ([_]*colors.State{ &left, &right }) |state| {
+        var symbols: std.ArrayList(syntax.Provider.Symbol) = .empty;
+        defer symbols.deinit(a);
+        try std.testing.expect(try state.provider.?.stickySymbols(a, &.{0}, &symbols));
+        try std.testing.expectEqual(@as(u64, 0), state.provider.?.sticky_work.rebuild_nodes);
+    }
     try std.testing.expect(left.provider.?.parser != right.provider.?.parser);
     try std.testing.expect(left.provider.?.tree != right.provider.?.tree);
     try std.testing.expect(colors.matchesInput(&left, docs.identity(first).?, 0));

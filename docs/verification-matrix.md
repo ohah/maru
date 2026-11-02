@@ -5435,6 +5435,13 @@ macOS에서는 제품 6개와 초기화 4개, 다른 플랫폼에서는 7개 수
 SDK 재내보내기·main thread ID·Mach-O/dSYM/atos를 대조하고 프로파일 시각을 정상 성능에 섞지 않는다.
 대상/recorder 환경은 허용 목록만 전달하고 TOC에 알 수 없는 환경 키가 있으면 채택하지 않는다.
 
+비동기 완료의 [심볼 요약 준비](plans/editor-async-sticky-preparation.md)는 워커에서 현재 요약을
+만들고 기존 독립 참조 복제로 뷰에 전달한다. `test-editor-sticky-preparation`은 시작 전·cold/증분
+순회 중 취소, 선택적 OOM, 원본 종료 뒤 복제 조회를 검사한다. `test-editor-parse-worker`는
+준비 장벽의 실제 취소와 OOM 뒤 파싱 보존을, `test-editor-parse-view`는 두 뷰의 첫 조회
+재구축 0을 확인한다. [검증 결과](../tools/editor-input-stream/summary-results.md)는 경계 조건과
+같은 실행 파일의 준비 끔/켬 대조를 구분한다. 접힘 캐시와 물리 IME는 이번 변경 범위가 아니다.
+
 ## Chromium role 로케이터 테스트 응답 수명
 
 긴 접근성 이름 fixture는 콜백 반환 후 `Op.feed`가 소비할 때까지 JSON 바이트가 유효해야 한다.

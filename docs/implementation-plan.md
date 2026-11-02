@@ -1792,3 +1792,4 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [자동완성 행 클릭의 원본](plans/lsp-completion-pointer-source.md): 명시적인 행 클릭은 보이는 행의 원본으로 확정하며 키보드 입력 검사와 분리한다.
 - [Save As 중 자동완성 원본 수명](plans/lsp-completion-save-as.md): 실제 대상 적용 뒤 이전 URI의 transaction을 종료하고 취소/실패와 다른 문서의 요청은 보존한다.
 - [다시 읽기와 Undo/Redo 중 자동완성](plans/lsp-completion-history-reload.md): 실제 디스크·이력 편집 후 이전 응답 격리와 새 확정/Undo를 대조한다.
+- [공유 뷰와 다른 문서의 자동완성 편집 격리](plans/lsp-completion-shared-history.md): 공유 peer의 편집 알림과 별도 문서 요청 보존을 실제 다시 읽기·이력 경로로 대조한다.

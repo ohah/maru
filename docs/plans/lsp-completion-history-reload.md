@@ -36,3 +36,6 @@ Enter를 구분한다. 디스크를 바꾸고 실제 confirmReload를 호출하�
 Debug/ReleaseFast 집중 7개·전체 자동완성 52개가 통과했다. Debug의 전체 경계·문서
 링크·좌표 검사도 통과했다. 선행 PR 머지 후 최신 main에 리베이스하고 같은 검사를
 모두 재실행해 통과했다. 원격 CI·머지와 로컬 결과는 구분한다.
+
+단일 뷰 검사의 후속인 [공유 peer·다른 문서 검증](lsp-completion-shared-history.md)은
+별도 조건과 결과로 기록한다. 이 문서의 24조건에 합산하지 않는다.

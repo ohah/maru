@@ -1,5 +1,10 @@
 # 검증 매트릭스
 
+공유 peer/다른 문서 자동완성: `test-editor-completion-shared-history`는 같은 창의 공유
+분할 뷰와 독립 문서에서 실제 다시 읽기·Undo·Redo를 실행한다. 각각 24조건의 이전
+positive/null, 원본 확정/Undo와 상대 문서 보존을 [계획](plans/lsp-completion-shared-history.md)에 따라
+검사한다. native controller/fake LSP 범위이며 OS/HID/픽셀 검증은 아니다.
+
 다시 읽기와 Undo/Redo 중 자동완성: `test-editor-completion-history`는 실제 디스크 다시 읽기와
 history 명령 전후의 지연 positive/null, 본문·선택·이력 보존 및 새 확정/Undo를 대조한다.
 [검증 범위](plans/lsp-completion-history-reload.md)는 native controller와 fake LSP이며 HID/픽셀 증거가 아니다.

@@ -274,6 +274,21 @@ pub fn wordStart(content: []const u8, caret: usize) usize {
     return s;
 }
 
+/// A successful Save As changes request meaning even when view and client stay
+/// the same. Settle only this target's waits; an unrelated document can have a
+/// newer listing request while an old visible list is being retired.
+pub fn onSaveTargetChanged(self: *AppSession, term: *Term) void {
+    const st = &self.editor_completion;
+    if (completion_ops.sourceMatches(st.waiting_surface, term.surfaceId())) {
+        st.waiting = false;
+        st.dirty = false;
+    }
+    if (completion_ops.sourceMatches(st.surface_id, term.surfaceId())) {
+        if (st.pending_accept) st.cancelled_pending += 1;
+        hide(self);
+    }
+}
+
 /// A shared document does not make its auxiliary connection the completion owner.
 /// Shutdown has already detached proc, so use the surviving document binding.
 pub fn onClientStopped(self: *AppSession, origin: *editor_lsp.Client, term: *Term) void {

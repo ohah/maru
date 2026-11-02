@@ -34,6 +34,10 @@ pub const Prepared = struct {
             const source = held.provider().?;
             _ = ready.copyMatchedInto(self.allocator, source.parser, source.tree_gen, p.parser, p.tree_gen, &target.folds) catch false;
         };
+        if (target.provider) |p| if (held.preparedBrackets()) |ready| {
+            const source = held.provider().?;
+            _ = target.brackets.replaceMatched(self.allocator, ready, source.parser, source.tree_gen, p.parser, p.tree_gen) catch false;
+        };
         return true;
     }
 };

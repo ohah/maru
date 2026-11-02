@@ -121,3 +121,16 @@ ASCII 1키=1편집인 한정된 workload다. IME·물리 키보드·광학 표�
 접힘 준비 대조는 `--fixture flat`(기본, 한 줄 함수·접힘 후보 없음)과 `--fixture multiline`
 (여러 줄 함수·접힘 후보 있음)을 구분한다. 후자는 동일 앱에 다른 원문을 입력하므로 앱 재빌드가
 필요 없다. 종류·bytes를 정확히 검사하고 두 모집단은 섞지 않는다. [접힘 준비 결과](fold-results.md)를 따른다.
+
+
+### 괄호 잎 준비 대조
+
+`prepare.py --stream --bracket-control`로 만들고 `summary_study.py --cache bracket`을 실행한다.
+`--fixture flat/multiline`은 그대로 쓴다. 실제 worker 시도/준비/우회와 뷰 재수집/부분 갱신은
+`bracket_stats` 다섯 정수로 기록한다. 색 풀 판정과 탐색 인덱스는 기존 뷰에서 만든다.
+
+이 사본만 `syntax_presentations`에 입력별 첫 구문 준비 표시의 `[ns, generation, prefix_count]`를
+기록한다. `syntax_presentation`은 마지막 행의 앞 두 값이다. 각 행의 본문 표시→구문 표시→
+최종 색, 접두부·세대·합쳐진 프레임 동일성과 누락을 검사한다. 마지막 게시→구문 표시와
+구문→최종 색을 분리하며, 다음 키 게시 전에 표시된 횟수도 기록한다. 메인 타이머의 완료 통지와
+GPU presentedTime을 혼동하지 않는다. 세대나 시각이 없는 자료는 0ms로 채우지 않는다.

@@ -48,6 +48,7 @@ const Job = struct {
     provider: ?syntax.Provider = null,
     basis: ?Basis = null,
     folds: syntax.FoldCache = .{},
+    brackets: syntax.BracketIndex = .{},
     mode: Mode = .cold,
     fn execute(self: *Job, state: *State) void {
         const allocator = state.options.copy_allocator;
@@ -102,6 +103,8 @@ const Job = struct {
         if (complete and !self.cancellation.isRequested()) parsed.prepareStickySummary(allocator, &self.cancellation) catch {};
         // 완료의 불변 byte 후보를 한 번 준비한다. 각 뷰는 독립 복사 뒤 자기 줄로 투영한다.
         if (complete and !self.cancellation.isRequested()) parsed.prepareFoldCache(allocator, &self.folds, &self.cancellation) catch {};
+        // 첫 괄호 잎 순회를 프레임 수에 묶지 않는다. 선택적 OOM은 기존 뷰 수집을 유지한다.
+        if (complete and !self.cancellation.isRequested()) parsed.prepareBracketIndex(allocator, &self.brackets, bytes, &self.cancellation) catch {};
         if (builtin.is_test) if (state.options.audit) |audit| {
             if (self.cancellation.isRequested() and parsed.tree != null)
                 _ = audit.cancelled_with_tree.fetchAdd(1, .monotonic);
@@ -196,6 +199,7 @@ const State = struct {
         while (true) {
             if (self.retiring.pop()) |job| {
                 self.mutex.unlock(io_value);
+                job.brackets.deinit(self.options.copy_allocator);
                 job.folds.deinit(self.options.copy_allocator);
                 if (job.provider) |*provider| {
                     provider.deinit();
@@ -261,6 +265,11 @@ pub const Completion = struct {
     pub fn preparedFolds(self: Completion) ?*const syntax.FoldCache {
         if (self.outcome() != .ready or self.job.folds.tree == null) return null;
         return &self.job.folds;
+    }
+    /// 보유 참조가 살아 있는 동안만 빌리는 현재 트리의 불변 잎 목록이다.
+    pub fn preparedBrackets(self: Completion) ?*const syntax.BracketIndex {
+        if (self.outcome() != .ready or !self.job.brackets.ready) return null;
+        return &self.job.brackets;
     }
     pub fn accept(self: Completion, gate: *request.Gate) bool {
         if (self.job.outcome != .ready) {

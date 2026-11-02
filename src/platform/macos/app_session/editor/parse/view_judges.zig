@@ -125,6 +125,8 @@ test "parse view install 공유 뷰의 색과 트리 조회는 cold 결과와 �
     try std.testing.expect(view.matches(&left, &owner, docs.identity(first).?, grammar, .zig));
     try warm(&left, first);
     try warm(&right, second);
+    try std.testing.expectEqual(@as(u64, 0), left.brackets.rebuilds);
+    try std.testing.expectEqual(@as(u64, 0), right.brackets.rebuilds);
     try std.testing.expectEqual(@as(u64, 0), left.folds.nodes);
     try std.testing.expectEqual(@as(u64, 0), right.folds.nodes);
     var cold = colors.openParsedBudgeted(original, .zig, 0);
@@ -135,6 +137,14 @@ test "parse view install 공유 뷰의 색과 트리 조회는 cold 결과와 �
     try std.testing.expectEqualDeep(expected, actual);
     try std.testing.expect(syntax.testing.equal(cold.provider.?.tree.?, left.provider.?.tree.?) != null);
     try std.testing.expectEqual(@as(usize, 3), owner.service.heldCount());
+    // 완료 잎을 공유해도 풀 옵션의 판정과 탐색은 각 뷰가 독립적으로 만든다.
+    _ = colors.advanceBrackets(&right, a, file.content, true);
+    try colors.finishBrackets(&cold, a, file.content);
+    _ = colors.advanceBrackets(&cold, a, file.content, true);
+    try std.testing.expectEqualDeep(colors.bracketMarks(&cold), colors.bracketMarks(&right));
+    try std.testing.expect(!left.bracket_resolved.?.independent and right.bracket_resolved.?.independent);
+    _ = colors.advanceBrackets(&cold, a, file.content, false);
+    try std.testing.expectEqualDeep(colors.bracketMarks(&cold), colors.bracketMarks(&left));
     const split = colors.prepareSharedSnapshot(&left, a, .zig) orelse return error.NoSharedSnapshot;
     var split_live = true;
     defer {
@@ -256,7 +266,10 @@ test "parse view install 교체는 이전 캐시를 비우고 최신 판을 독�
     try std.testing.expect(state.folds.tree != null and state.folds.records.items.len == 0);
     try std.testing.expectEqual(state.provider.?.tree_gen, state.folds.synced_gen);
     try std.testing.expectEqual(state.provider.?.parser, state.folds.parser.?);
-    try std.testing.expect(!state.brackets.ready and state.brackets.leaves.items.len == 0);
+    try std.testing.expect(state.brackets.ready and !state.brackets.walking);
+    try std.testing.expectEqual(state.provider.?.tree_gen, state.brackets.synced_gen);
+    try std.testing.expectEqual(state.provider.?.parser, state.brackets.synced_parser.?);
+    try std.testing.expect(colors.bracketSource(&state) == null);
     try std.testing.expect(state.bracket_resolved == null and state.bracket_navigation.entries.items.len == 0);
     try std.testing.expect(state.symbols.items.len == 0 and state.crumb.items.len == 0);
     try std.testing.expectEqual(folds_capacity, state.folds.records.capacity);
@@ -307,4 +320,36 @@ test "parse view install 접힘 복사 OOM은 정상 트리와 본문을 보존�
     try warm(&state, lease);
     try std.testing.expect(state.folds.nodes > 0);
     try std.testing.expect(colors.matchesInput(&state, docs.identity(lease).?, 0));
+}
+
+test "parse view install 괄호 복사 OOM은 낡은 판정을 숨기고 기존 수집으로 복구한다" {
+    var docs: registry.Registry = .{ .allocator = a };
+    defer docs.deinit() catch unreachable;
+    const lease = try document(&docs, original);
+    defer _ = docs.release(lease) catch unreachable;
+    var owner = try Runtime.init(a, .{});
+    defer owner.deinit() catch unreachable;
+    var state: colors.State = .{};
+    defer cleanupState(&state, &owner);
+    try ready(&owner, lease);
+    try install(&owner, &state, lease);
+    try warm(&state, lease);
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(a);
+    for (0..300) |_| try source.appendSlice(a, "const x = f([1], .{2});\n");
+    try replaceText(&docs, lease, source.items);
+    try ready(&owner, lease);
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var prepared = (try view.prepare(fail.allocator(), &owner, docs.identity(lease).?, grammar, .zig)).?;
+    defer prepared.deinit();
+    try std.testing.expect(try prepared.install(&owner, &state, lease, grammar, .zig));
+    try std.testing.expect(fail.has_induced_failure);
+    try std.testing.expect(state.provider != null and state.parse_result != null and !state.brackets.ready);
+    try std.testing.expect(colors.bracketSource(&state) == null);
+    try colors.finishBrackets(&state, a, source.items);
+    var cold = colors.openParsedBudgeted(source.items, .zig, 0);
+    defer cold.deinit(a);
+    try colors.finishBrackets(&cold, a, source.items);
+    try std.testing.expectEqualDeep(colors.bracketMarks(&cold), colors.bracketMarks(&state));
+    try std.testing.expect(colors.matchesInput(&state, docs.identity(lease).?, 1));
 }

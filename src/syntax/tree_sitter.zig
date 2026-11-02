@@ -491,7 +491,7 @@ pub const Cancellation = struct {
         entered: std.atomic.Value(bool) = .init(false),
         released: std.atomic.Value(bool) = .init(false),
         abort: bool = false,
-        stage: enum { parse, summary, folds } = .parse,
+        stage: enum { parse, summary, folds, brackets } = .parse,
         pub fn release(self: *TestGate) void {
             self.released.store(true, .release);
         }
@@ -1334,6 +1334,14 @@ pub const Provider = struct {
         return .{ .before = before_gen, .after = before_gen + 1, .ranges = self.fold_changes[0..self.fold_changes_len] };
     }
 
+    /// 완료가 소유한 괄호 잎만 준비한다. 뷰 설정의 색/탐색 판정은 만들지 않는다.
+    pub fn prepareBracketIndex(self: *Provider, allocator: std.mem.Allocator, index: *BracketIndex, source: []const u8, token: *const Cancellation) error{ OutOfMemory, Cancelled }!void {
+        if (@import("builtin").is_test) if (token.gate) |gate| {
+            if (gate.stage == .brackets) gate.wait();
+        };
+        try index.prepareCancellable(allocator, self, source, token);
+    }
+
     /// 완료가 소유한 byte 후보만 준비한다. 뷰의 행·접힌 상태는 여기서 다루지 않는다.
     pub fn prepareFoldCache(self: *const Provider, allocator: std.mem.Allocator, cache: *FoldCache, token: *const Cancellation) error{ OutOfMemory, Cancelled }!void {
         if (@import("builtin").is_test) if (token.gate) |gate| {
@@ -1625,8 +1633,35 @@ pub const BracketIndex = struct {
         return true;
     }
 
+    const NeverStop = struct {
+        pub fn isRequested(_: @This()) bool {
+            return false;
+        }
+    };
+    /// 워커의 독립 목록을 준비한다. 취소·OOM의 부분 목록과 순회 자원은 공개하지 않는다.
+    /// 색/짝/탐색 판정은 복사한 뷰가 자기 설정으로 수행한다.
+    pub fn prepareCancellable(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, stop: anytype) error{ OutOfMemory, Cancelled }!void {
+        errdefer {
+            self.invalidate();
+            self.leaves.clearRetainingCapacity();
+        }
+        // 현재 완료 목록만 재사용한다. 다른 문맥의 미완료 순회도 먼저 닫는다.
+        if (!self.ready or self.synced_parser != prov.parser or self.synced_gen != prov.tree_gen) self.invalidate();
+        while (!try self.stepWithStop(allocator, prov, source, 0, stop)) {
+            if (prov.tree == null) return;
+        }
+        if (stop.isRequested()) return error.Cancelled;
+    }
+
     /// 예산을 든 처음 훑기(한 프레임 몫). 목록이 맞으면(`ready`) 곧바로 참. 트리가 없으면 거짓(아직 못 만든다).
     pub fn step(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, budget_ns: u64) error{OutOfMemory}!bool {
+        return self.stepWithStop(allocator, prov, source, budget_ns, NeverStop{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Cancelled => unreachable,
+        };
+    }
+    fn stepWithStop(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, budget_ns: u64, stop: anytype) error{ OutOfMemory, Cancelled }!bool {
+        if (stop.isRequested()) return error.Cancelled;
         if (self.ready and self.synced_gen == prov.tree_gen) return true;
         if (self.ready) self.invalidate(); // 파싱을 놓쳤다 — 부분만 고칠 수 없다
         if (!self.walking) {
@@ -1634,7 +1669,10 @@ pub const BracketIndex = struct {
             self.leaves.clearRetainingCapacity();
             self.walk_text = try allocator.dupe(u8, source);
             self.walk_alloc = allocator;
-            self.walk_tree = c.ts_tree_copy(tree);
+            self.walk_tree = c.ts_tree_copy(tree) orelse {
+                self.stopWalk();
+                return error.OutOfMemory;
+            };
             self.cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(self.walk_tree.?));
             self.walking = true;
             self.walk_seen_gen = prov.tree_gen;
@@ -1643,15 +1681,17 @@ pub const BracketIndex = struct {
         var visited: usize = 0;
         const rule = bracketRuleFor(prov.slot.lang);
         while (true) {
+            if (stop.isRequested()) return error.Cancelled;
             const node = c.ts_tree_cursor_current_node(&self.cursor);
             if (c.ts_node_child_count(node) == 0) {
                 try leafBrackets(allocator, node, self.walk_text, prov.slot, &self.leaves);
             } else if (!skips(node, rule) and c.ts_tree_cursor_goto_first_child(&self.cursor)) continue;
             while (!c.ts_tree_cursor_goto_next_sibling(&self.cursor)) {
+                if (stop.isRequested()) return error.Cancelled;
                 if (!c.ts_tree_cursor_goto_parent(&self.cursor)) return self.finishWalk(allocator, prov, source);
             }
             visited += 1;
-            if (visited % 512 == 0 and Provider.monotonicNs() >= deadline) return false;
+            if (budget_ns != 0 and visited % 512 == 0 and Provider.monotonicNs() >= deadline) return false;
         }
     }
 
@@ -5835,4 +5875,135 @@ test "fold preparation 기존 대상의 복사 OOM과 잘못된 원본 거절은
     try std.testing.expect(!try prepared.copyMatchedInto(a, source.parser, source.tree_gen, source.parser, source.tree_gen, &target));
     try std.testing.expectEqual(capacity, target.records.capacity);
     try foldCacheJudge(&source, &target, text.items);
+}
+
+const StopAfterBracketLeaf = struct {
+    index: *const BracketIndex,
+    observed: *bool,
+    pub fn isRequested(self: @This()) bool {
+        if (self.index.walking and self.index.leaves.items.len > 0) {
+            self.observed.* = true;
+            return true;
+        }
+        return false;
+    }
+};
+
+test "bracket preparation 언어별 완료 잎은 기존 전체 수집과 같고 복제 뒤 원본 종료에도 유효하다" {
+    const a = std.testing.allocator;
+    const samples = [_]struct { lang: Language, text: []const u8 }{
+        .{ .lang = .zig, .text = "fn f() void {\r\n _ = .{1, 2}; // 가 😀\r\n}\r\n" },
+        .{ .lang = .javascript, .text = "const a = `${f([1, 2])}`;\n" },
+        .{ .lang = .typescript, .text = "const a: Map<A,B> = f([1]);\n" },
+        .{ .lang = .css, .text = "a { x: url(\"a(b)\"); y: foo(\"[x]\"); }\n" },
+        .{ .lang = .ruby, .text = "x = %Q([a]); y = [1, 2]\n" },
+        .{ .lang = .markdown, .text = "[a](b) and (c)\n" },
+    };
+    for (samples) |sample| {
+        var p = Provider.init(sample.text, sample.lang, 0) orelse return error.NoProvider;
+        var live = true;
+        defer if (live) p.deinit();
+        var index: BracketIndex = .{};
+        defer index.deinit(a);
+        var token: Cancellation = .{};
+        try p.prepareBracketIndex(a, &index, sample.text, &token);
+        var cold = try fullIndexForTest(a, &p, sample.text);
+        defer cold.deinit(a);
+        try std.testing.expectEqualDeep(cold.leaves.items, index.leaves.items);
+        var peer = p.copyReady(sample.lang) orelse return error.NoSnapshot;
+        defer peer.deinit();
+        var copy = (try index.copyMatched(a, p.parser, p.tree_gen, peer.parser, peer.tree_gen)).?;
+        defer copy.deinit(a);
+        p.deinit();
+        live = false;
+        try std.testing.expect(try copy.step(a, &peer, sample.text, 1));
+        try std.testing.expectEqual(@as(u64, 0), copy.rebuilds);
+        try std.testing.expectEqualDeep(cold.leaves.items, copy.leaves.items);
+        try std.testing.expect(!copy.walking and copy.walk_tree == null and copy.walk_text.len == 0);
+    }
+}
+
+test "bracket preparation 빈 목록도 완료로 복사하며 Markdown 색 정책은 바꾸지 않는다" {
+    const a = std.testing.allocator;
+    var p = Provider.init("// no brackets\n", .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var index: BracketIndex = .{};
+    defer index.deinit(a);
+    var token: Cancellation = .{};
+    try p.prepareBracketIndex(a, &index, "// no brackets\n", &token);
+    try std.testing.expect(index.ready and index.leaves.items.len == 0);
+    var copied = (try index.copyMatched(a, p.parser, p.tree_gen, p.parser, p.tree_gen)).?;
+    defer copied.deinit(a);
+    try std.testing.expect(copied.ready and copied.leaves.items.len == 0);
+    try std.testing.expect(!bracketRuleFor(.markdown).paint);
+}
+
+test "bracket preparation 시작 전 취소와 순회 중 취소는 사본과 부분 잎을 회수한다" {
+    const a = std.testing.allocator;
+    const text = "fn f() void { _ = [1]u8{1}; }\n";
+    var p = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var index: BracketIndex = .{};
+    defer index.deinit(a);
+    var token: Cancellation = .{};
+    token.request();
+    try std.testing.expectError(error.Cancelled, p.prepareBracketIndex(a, &index, text, &token));
+    try std.testing.expect(!index.ready and !index.walking and index.walk_tree == null);
+    var observed = false;
+    const stop: StopAfterBracketLeaf = .{ .index = &index, .observed = &observed };
+    try std.testing.expectError(error.Cancelled, index.prepareCancellable(a, &p, text, stop));
+    try std.testing.expect(observed);
+    try std.testing.expect(!index.ready and !index.walking and index.walk_tree == null and index.walk_alloc == null);
+    try std.testing.expectEqual(@as(usize, 0), index.leaves.items.len);
+    var normal: Cancellation = .{};
+    try p.prepareBracketIndex(a, &index, text, &normal);
+    var cold = try fullIndexForTest(a, &p, text);
+    defer cold.deinit(a);
+    try std.testing.expectEqualDeep(cold.leaves.items, index.leaves.items);
+}
+
+fn bracketPreparationAllocationJudge(a: std.mem.Allocator) !void {
+    const text = "fn f() void { _ = [1]u8{1}; }\n";
+    var p = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var index: BracketIndex = .{};
+    defer index.deinit(a);
+    var token: Cancellation = .{};
+    try p.prepareBracketIndex(a, &index, text, &token);
+    var target: BracketIndex = .{};
+    defer target.deinit(a);
+    try std.testing.expect(try target.replaceMatched(a, &index, p.parser, p.tree_gen, p.parser, p.tree_gen));
+    try std.testing.expect(target.leaves.items.ptr != index.leaves.items.ptr);
+    try std.testing.expectEqualDeep(index.leaves.items, target.leaves.items);
+}
+test "bracket preparation 준비와 인계의 모든 Zig 할당 실패는 자원을 회수한다" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, bracketPreparationAllocationJudge, .{});
+}
+
+test "bracket preparation 같은 세대의 다른 parser와 진행 중 옛 순회는 새 입력으로 바뀐다" {
+    const a = std.testing.allocator;
+    var old = Provider.init("fn f() void {}\n", .zig, 0) orelse return error.NoProvider;
+    defer old.deinit();
+    var current = Provider.init("const x = [2]u8{1, 2};\n", .zig, 0) orelse return error.NoProvider;
+    defer current.deinit();
+    try std.testing.expectEqual(old.tree_gen, current.tree_gen);
+    var index: BracketIndex = .{};
+    defer index.deinit(a);
+    var token: Cancellation = .{};
+    try old.prepareBracketIndex(a, &index, "fn f() void {}\n", &token);
+    try current.prepareBracketIndex(a, &index, "const x = [2]u8{1, 2};\n", &token);
+    var cold = try fullIndexForTest(a, &current, "const x = [2]u8{1, 2};\n");
+    defer cold.deinit(a);
+    try std.testing.expectEqualDeep(cold.leaves.items, index.leaves.items);
+    try std.testing.expectEqual(current.parser, index.synced_parser.?);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..600) |_| try text.appendSlice(a, "const x = f([1], .{2});\n");
+    old.setSource(text.items);
+    index.invalidate();
+    try std.testing.expect(!try index.step(a, &old, text.items, 1));
+    try std.testing.expect(index.walking);
+    try current.prepareBracketIndex(a, &index, "const x = [2]u8{1, 2};\n", &token);
+    try std.testing.expectEqualDeep(cold.leaves.items, index.leaves.items);
+    try std.testing.expect(!index.walking and index.walk_alloc == null);
 }

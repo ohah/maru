@@ -5453,6 +5453,12 @@ SDK 재내보내기·main thread ID·Mach-O/dSYM/atos를 대조하고 프로파�
 [실측](../tools/editor-input-stream/fold-results.md)은 같은 실행 파일의 준비 끔/켬을 후보 없음/있음 각각 48회/1,440입력으로 확인하며
 작은 단일 뷰의 p95·색 완료 최대 증가도 보존한다. 전체 PR 전후나 물리 IME의 개선으로 해석하지 않는다.
 
+[괄호 잎 준비](plans/editor-async-bracket-preparation.md)는 worker의 독립 완료 잎만 뷰에 복사한다.
+`test-editor-bracket-preparation`은 언어별 기존 수집·소유권·취소·Zig OOM·parser 경계를,
+worker/view 게이트는 실제 취소/OOM·두 뷰 재수집 0·개별 색 풀·낡은 판정 차단을 검사한다.
+`test-editor-bracket-continuation`은 캐시 부재의 다음 프레임 요청과 현재 판의 최종 색/탐색을 대조한다.
+실제 입력 대조는 구문 준비 표시와 최종 색을 나누며 native 검사를 OS IME 검증으로 해석하지 않는다.
+
 ## Chromium role 로케이터 테스트 응답 수명
 
 긴 접근성 이름 fixture는 콜백 반환 후 `Op.feed`가 소비할 때까지 JSON 바이트가 유효해야 한다.

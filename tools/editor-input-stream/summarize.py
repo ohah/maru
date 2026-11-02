@@ -24,6 +24,9 @@ def summarize(root):
             values = sorted(v for run,_ in runs for v in run[metric])
             row[metric] = dict(count=len(values), median=statistics.median(values),
                                p95=values[math.ceil(len(values)*.95)-1], maximum=max(values))
+        if proof['bracket_control'] is not None:
+            for metric in ['last_post_to_syntax_present_ms','syntax_to_full_color_ms','syntax_ready_before_next_post','syntax_ready_on_first_present_count','full_ready_on_first_present_count']:
+                row[metric]=[run[metric] for run,_ in runs]
         row['coalesced_keys'] = sum(run['coalesced_keys'] for run,_ in runs)
         row['final_color_after_last_post_ms'] = [run['final_color_after_last_post_ms'] for run,_ in runs]
         row['max_producer_lateness_ms'] = max(run['max_producer_lateness_ms'] for run,_ in runs)
@@ -31,7 +34,7 @@ def summarize(root):
         rows.append(row)
     return dict(schema=1, protocol=proof['protocol'], root=str(pathlib.Path(root).resolve()),
                 head=proof['head'], app_sha256=proof['app_sha256'], producer_sha256=proof['producer_sha256'],
-                fixture_kind=proof['fixture_kind'],summary_control=proof['summary_control'],fold_control=proof['fold_control'],
+                fixture_kind=proof['fixture_kind'],summary_control=proof['summary_control'],fold_control=proof['fold_control'],bracket_control=proof['bracket_control'],
                 manifest_sha256=verify.sha(pathlib.Path(root)/'manifest.json'),verifier_sha256=proof['verifier_sha256'],
                 summary_tool_sha256=verify.sha(__file__),host=manifest.get('host'),processes=len(proof['runs']),
                 inputs=sum(row['post_to_present_ms']['count'] for row in rows),

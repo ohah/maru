@@ -5,6 +5,7 @@ import pathlib
 import protocol
 import summary_control
 import fold_control
+import bracket_control
 
 
 def require(ok, reason):
@@ -96,7 +97,10 @@ def classify(app, producer, meta):
         require(meta['producer_exit'] == 0, 'producer exit')
         summary_control.validate(app,meta,require)
         fold_control.validate(app,meta,require)
-        return validate(app, producer, meta)
+        bracket_control.validate(app,meta,require)
+        result=validate(app, producer, meta)
+        result.update(bracket_control.stages(app,producer,meta,require))
+        return result
     n = protocol.count(meta['count'])
     require(app['pid'] == meta['app_pid'] and producer['pid'] == meta['producer_pid'] and producer['target_pid'] == app['pid'] and app['pid'] != producer['pid'], 'control identity')
     require(type(app['schema']) is type(producer['schema']) is int and app['schema'] == producer['schema'] == 1 and app['protocol'] == producer['protocol'] == protocol.NAME, 'control schema')
@@ -158,6 +162,9 @@ def read(root):
         record = json.loads((path/'record.json').read_text())
         require(record.get('diagnostic',False) is False, 'diagnostic cohort is not baseline performance')
         require(record.get('fixture_kind','flat')==fixture_kind,'fixture cohort differs')
+        require(record.get('bracket_control')==manifest.get('bracket_control'),'bracket experiment label differs')
+        require(bool(record.get('bracket_control'))==bool(source.get('bracket_control')),'bracket experiment source differs')
+        require(sum(bool(record.get(x+'_control')) for x in ['bracket','fold','summary'])<=1,'mixed cache experiments')
         require(record.get('fold_control')==manifest.get('fold_control'),'fold experiment label differs')
         require(bool(record.get('fold_control'))==bool(source.get('fold_control')),'fold experiment source differs')
         require(not (record.get('summary_control') and record.get('fold_control')),'mixed cache experiments')
@@ -183,7 +190,7 @@ def read(root):
         results.append({'path':entry['path'],'identity':list(identity),'metrics':result,'app_sha256':record['app.json_sha256'],'posts_sha256':record['posts.json_sha256']})
     require(found == expected, 'missing matrix member')
     return {'schema':1,'protocol':protocol.NAME,'kind':manifest['kind'],'head':source['head'],'app_sha256':source['app_sha256'],
-            'fixture_kind':fixture_kind,'summary_control':manifest.get('summary_control'),'fold_control':manifest.get('fold_control'),
+            'fixture_kind':fixture_kind,'summary_control':manifest.get('summary_control'),'fold_control':manifest.get('fold_control'),'bracket_control':manifest.get('bracket_control'),
             'producer_sha256':source['producer_sha256'],'verifier_sha256':sha(__file__),'runs':results}
 
 

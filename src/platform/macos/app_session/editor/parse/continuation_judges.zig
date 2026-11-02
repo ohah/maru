@@ -86,7 +86,8 @@ pub fn exercise(comptime Fixture: type, comptime open: anytype, which: Case) !vo
             try wait(term);
             changed = true;
         }
-        if (term.rt.editor_syntax.brackets.ready and (peer == null or peer.?.rt.editor_syntax.brackets.ready)) break;
+        // 완료 설치가 잎만 준비할 수 있다. 현재 판의 색/탐색까지 준비된 공개 조건을 기다린다.
+        if (colors.bracketSource(&term.rt.editor_syntax) != null and (peer == null or colors.bracketSource(&peer.?.rt.editor_syntax) != null)) break;
         // 외부 입력/수동 dirty 설정으로 작업을 밀어 주지 않는다.
         try std.testing.expect(fx.session.metal_dirty);
     }

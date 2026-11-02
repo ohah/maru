@@ -1,5 +1,10 @@
 # 검증 매트릭스
 
+Save As 중 코드 액션: `test-editor-code-action-save-as`는 실제 대상 적용과 이전 경로의
+디스크 bytes, 목록/메뉴/resolve와 새 URI 재결합 뒤 적용/Undo를 검사한다.
+[계획](plans/lsp-code-action-save-as.md)의 38조건이며 실제 파일/native controller와 직접
+callback을 구분한다. OS 패널·HID·픽셀 증거는 아니다.
+
 Save As 중 호버/시그니처: `test-editor-tooltip-save-as`는 이미 표시된 상자와 대기를
 실제 Save As actor/worker로 검사한다. 같은/공유 view·취소·충돌·다른 문서·혼합 원본과
 새 URI의 같은 primary 재결합을 [계획](plans/lsp-tooltip-save-as.md)의 26조건으로 대조한다.

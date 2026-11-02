@@ -1,0 +1,479 @@
+{
+  "head": "205d3790a62205b2fcb9cc2549ef55546c783d19",
+  "distinct_cases": 39,
+  "passed": 39,
+  "failures": 0,
+  "errors": 0,
+  "cases": [
+    {
+      "test": "test_adversarial.Evidence.test_complete_control",
+      "attack": "complete control",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_complete_control"
+      ],
+      "assertions_and_conditions": "def test_complete_control(self): self.assertTrue(parse(log(), 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_digest_corruption",
+      "attack": "digest corruption",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_digest_corruption"
+      ],
+      "assertions_and_conditions": "def test_digest_corruption(self):\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory); path = root / \"log.txt\"; path.write_text(log())\n            row = {\"log\": \"log.txt\", \"exit\": 0, \"log_sha256\": hashlib.sha256(path.read_bytes()).hexdigest()}\n            path.write_text(log() + \"corruption\")\n            self.assertEqual(read_record(root, row, 2)[1], \"log digest mismatch\")",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_duplicate_modes",
+      "attack": "duplicate modes",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_duplicate_modes"
+      ],
+      "assertions_and_conditions": "def test_duplicate_modes(self): self.assertFalse(parse(log() + \"\\npoc_test_mode mode=debug\\npoc_test_mode mode=debug\", 2, required_modes=True)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_duplicate_name",
+      "attack": "duplicate name",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_duplicate_name"
+      ],
+      "assertions_and_conditions": "def test_duplicate_name(self): self.assertFalse(parse(log().replace(\"test.t2\", \"test.t1\"), 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_duplicate_ordinal",
+      "attack": "duplicate ordinal",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_duplicate_ordinal"
+      ],
+      "assertions_and_conditions": "def test_duplicate_ordinal(self): self.assertFalse(parse(log().replace(\"2/2\", \"1/2\"), 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_duplicate_perf_mode",
+      "attack": "duplicate perf mode",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_duplicate_perf_mode"
+      ],
+      "assertions_and_conditions": "def test_duplicate_perf_mode(self): self.assertFalse(performance_eligible({\"exit\": 0}, parse(perf().replace(\"mode=fast\", \"mode=debug\"), 15)))",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_empty",
+      "attack": "empty",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_empty"
+      ],
+      "assertions_and_conditions": "def test_empty(self): self.assertFalse(parse(\"\", 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_failed_fence_is_excluded_by_actual_aggregator",
+      "attack": "failed fence is excluded by actual aggregator",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_failed_fence_is_excluded_by_actual_aggregator"
+      ],
+      "assertions_and_conditions": "def test_failed_fence_is_excluded_by_actual_aggregator(self):\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory)\n            (root / \"bounded.log\").write_text(log(26))\n            (root / \"warm.log\").write_text(perf())\n            (root / \"failed.log\").write_text(perf())\n            rows = [{\"label\": \"bounded\", \"log\": \"bounded.log\", \"exit\": 0},\n                    {\"label\": \"fence-0\", \"log\": \"warm.log\", \"exit\": 0, \"warmup\": True},\n                    {\"label\": \"fence-1\", \"log\": \"failed.log\", \"exit\": 1, \"warmup\": False}]\n            report = {\"head\": \"fixture\", \"platform\": \"fixture\", \"race_controls\": [], \"rounds\": 1,\n                      \"variants\": {\"baseline\": {\"runs\": rows}}}\n            (root / \"results.json\").write_text(json.dumps(report))\n            with contextlib.redirect_stdout(io.StringIO()): summarize(root)\n            result = json.loads((root / \"comparison.json\").read_text())[\"variants\"][\"baseline\"]\n            self.assertEqual(result[\"timings\"], {})\n            rows[-1][\"exit\"] = 0\n            (root / \"results.json\").write_text(json.dumps(report))\n            with contextlib.redirect_stdout(io.StringIO()): summarize(root)\n            self.assertTrue(json.loads((root / \"comparison.json\").read_text())[\"variants\"][\"baseline\"][\"timings\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_failed_run_timing",
+      "attack": "failed run timing",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_failed_run_timing"
+      ],
+      "assertions_and_conditions": "def test_failed_run_timing(self): self.assertFalse(performance_eligible({\"exit\": 1}, parse(perf(), 15)))",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_false_summary",
+      "attack": "false summary",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_false_summary"
+      ],
+      "assertions_and_conditions": "def test_false_summary(self): self.assertFalse(parse(log().replace(\"All 2\", \"All 3\"), 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_filtered",
+      "attack": "filtered",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_filtered"
+      ],
+      "assertions_and_conditions": "def test_filtered(self): self.assertFalse(parse(log().replace(\"...OK\", \"...FILTERED\"), 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_inline_failure",
+      "attack": "inline failure",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_inline_failure"
+      ],
+      "assertions_and_conditions": "def test_inline_failure(self):\n        text = log().replace(\"test.t2...OK\", \"test.t2...FAIL (SpawnFailed)\").replace(\"All 2 tests passed.\", \"1 passed; 0 skipped; 1 failed.\")\n        parsed = parse(text, 2)\n        self.assertTrue(parsed[\"validation\"][\"complete\"])\n        self.assertEqual(sum(x[\"status\"] == \"failed\" for x in parsed[\"case_results\"]), 2)",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_invalid_percentile",
+      "attack": "invalid percentile",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_invalid_percentile"
+      ],
+      "assertions_and_conditions": "def test_invalid_percentile(self): self.assertFalse(performance_eligible({\"exit\": 0}, parse(perf().replace(\"baseline_p95_ns=20\", \"baseline_p95_ns=1\"), 15)))",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_invalid_schema",
+      "attack": "invalid schema",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_invalid_schema"
+      ],
+      "assertions_and_conditions": "def test_invalid_schema(self): self.assertFalse(performance_eligible({\"exit\": 0}, parse(perf().replace(\"perf.v1\", \"perf.v9\"), 15)))",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_inventory",
+      "attack": "inventory",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_inventory"
+      ],
+      "assertions_and_conditions": "def test_inventory(self): self.assertFalse(parse(log(), 2, expected_names=[\"other\", \"t2\"])[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_leaked_run_timing",
+      "attack": "leaked run timing",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_leaked_run_timing"
+      ],
+      "assertions_and_conditions": "def test_leaked_run_timing(self): self.assertFalse(performance_eligible({\"exit\": 0, \"leaked_processes\": [1]}, parse(perf(), 15)))",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_missing_log",
+      "attack": "missing log",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_missing_log"
+      ],
+      "assertions_and_conditions": "def test_missing_log(self):\n        with tempfile.TemporaryDirectory() as directory:\n            self.assertEqual(read_record(Path(directory), {\"log\": \"absent\"}, 2)[1], \"missing log\")",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_missing_mode",
+      "attack": "missing mode",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_missing_mode"
+      ],
+      "assertions_and_conditions": "def test_missing_mode(self): self.assertFalse(parse(log().split(\"All 2 tests passed.\")[0], 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_missing_modes",
+      "attack": "missing modes",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_missing_modes"
+      ],
+      "assertions_and_conditions": "def test_missing_modes(self): self.assertFalse(parse(log(), 2, required_modes=True)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_missing_perf_field",
+      "attack": "missing perf field",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_missing_perf_field"
+      ],
+      "assertions_and_conditions": "def test_missing_perf_field(self): self.assertFalse(performance_eligible({\"exit\": 0}, parse(perf().replace(\"failures=0\", \"\"), 15)))",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_modes_present",
+      "attack": "modes present",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_modes_present"
+      ],
+      "assertions_and_conditions": "def test_modes_present(self): self.assertTrue(parse(log() + \"\\npoc_test_mode mode=debug\\npoc_test_mode mode=fast\", 2, required_modes=True)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_negative_rounds",
+      "attack": "negative rounds",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_negative_rounds"
+      ],
+      "assertions_and_conditions": "def test_negative_rounds(self):\n        with tempfile.TemporaryDirectory() as directory:\n            output = Path(directory) / \"not-created\"\n            result = subprocess.run([sys.executable, str(Path(__file__).with_name(\"run.py\")), \"--output\", str(output), \"--rounds\", \"-1\"], capture_output=True)\n            self.assertEqual(result.returncode, 2); self.assertFalse(output.exists())",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_path_escape",
+      "attack": "path escape",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_path_escape"
+      ],
+      "assertions_and_conditions": "def test_path_escape(self): self.assertEqual(read_record(Path(\".\"), {\"log\": \"../secret\"}, 2)[1], \"invalid log path\")",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_perf_positive",
+      "attack": "perf positive",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_perf_positive"
+      ],
+      "assertions_and_conditions": "def test_perf_positive(self): self.assertTrue(performance_eligible({\"exit\": 0}, parse(perf(), 15)))",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_skipped_not_passed",
+      "attack": "skipped not passed",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_skipped_not_passed"
+      ],
+      "assertions_and_conditions": "def test_skipped_not_passed(self):\n        text = log().replace(\"test.t2...OK\", \"test.t2...SKIP\").replace(\"All 2 tests passed.\", \"1 passed; 1 skipped; 0 failed.\")\n        parsed = parse(text, 2)\n        self.assertTrue(parsed[\"validation\"][\"complete\"])\n        self.assertEqual(sum(x[\"status\"] == \"passed\" for x in parsed[\"case_results\"]), 2)",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_source_drift",
+      "attack": "source drift",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_source_drift"
+      ],
+      "assertions_and_conditions": "def test_source_drift(self):\n        with self.assertRaises(ValueError): make_variant(\"\", \"parent-gate\")",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_truncated",
+      "attack": "truncated",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_truncated"
+      ],
+      "assertions_and_conditions": "def test_truncated(self): self.assertFalse(parse(log().rsplit(\"\\n\", 2)[0], 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_unknown_status",
+      "attack": "unknown status",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_unknown_status"
+      ],
+      "assertions_and_conditions": "def test_unknown_status(self): self.assertFalse(parse(log().replace(\"...OK\", \"...\"), 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_unknown_variant",
+      "attack": "unknown variant",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_unknown_variant"
+      ],
+      "assertions_and_conditions": "def test_unknown_variant(self):\n        with self.assertRaises(ValueError): make_variant(\"\", \"typo\")",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_verifier_bypass",
+      "attack": "verifier bypass",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_verifier_bypass"
+      ],
+      "assertions_and_conditions": "def test_verifier_bypass(self): self.assertFalse(performance_eligible({\"exit\": 0}, parse(perf().replace(\"baseline_verifications=2\", \"baseline_verifications=0\"), 15)))",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_wrong_compiled_count",
+      "attack": "wrong compiled count",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_wrong_compiled_count"
+      ],
+      "assertions_and_conditions": "def test_wrong_compiled_count(self): self.assertFalse(parse(log().replace(\"/2 \", \"/3 \"), 2)[\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Evidence.test_zero_exit_cannot_hide_failure",
+      "attack": "zero exit cannot hide failure",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Evidence.test_zero_exit_cannot_hide_failure"
+      ],
+      "assertions_and_conditions": "def test_zero_exit_cannot_hide_failure(self):\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory)\n            fake = log().replace(\"test.t2...OK\", \"test.t2...FAIL (Wrong)\").replace(\"All 2 tests passed.\", \"1 passed; 0 skipped; 1 failed.\")\n            row = execute([sys.executable, \"-c\", \"print(\" + repr(fake) + \")\"], root, root / \"false-green.log\", expected_names=[\"t1\", \"t2\"])\n            self.assertFalse(row[\"validation\"][\"complete\"])\n            self.assertFalse(read_record(root, row, 2)[0][\"validation\"][\"complete\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Ownership.test_cleanup_cannot_report_success_with_survivors",
+      "attack": "cleanup cannot report success with survivors",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Ownership.test_cleanup_cannot_report_success_with_survivors"
+      ],
+      "assertions_and_conditions": "def test_cleanup_cannot_report_success_with_survivors(self):\n        with mock.patch.object(process_cleanup, \"live_session\", return_value={100: 1}), \\\n             mock.patch.object(process_cleanup, \"LIBC\", types.SimpleNamespace(getsid=lambda pid: 999)), \\\n             mock.patch.object(process_cleanup, \"send\"), \\\n             mock.patch.object(process_cleanup.time, \"monotonic\", side_effect=[0, 2]):\n            with self.assertRaises(RuntimeError): process_cleanup.cleanup(999)",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Ownership.test_committed_snapshot_and_independent_copies",
+      "attack": "committed snapshot and independent copies",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Ownership.test_committed_snapshot_and_independent_copies"
+      ],
+      "assertions_and_conditions": "def test_committed_snapshot_and_independent_copies(self):\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory); repo = root / \"repo\"; repo.mkdir()\n            def git(*args): return subprocess.check_output([\"git\", \"-c\", \"commit.gpgsign=false\", \"-c\", \"core.hooksPath=/dev/null\", \"-c\", \"user.name=PoC\", \"-c\", \"user.email=poc@example.invalid\", *args], cwd=repo)\n            git(\"init\", \"-q\"); (repo / \"value\").write_text(\"committed\"); git(\"add\", \"value\"); git(\"commit\", \"-qm\", \"test\")\n            head = git(\"rev-parse\", \"HEAD\").decode().strip()\n            snapshot = root / \"snapshot\"; freeze(repo, snapshot, head)\n            (repo / \"value\").write_text(\"concurrent worktree edit\")\n            candidate = root / \"candidate\"; copy(snapshot, candidate)\n            self.assertEqual((candidate / \"value\").read_text(), \"committed\")\n            (candidate / \"value\").write_text(\"variant mutation\")\n            self.assertEqual((snapshot / \"value\").read_text(), \"committed\")\n            self.assertEqual((repo / \"value\").read_text(), \"concurrent worktree edit\")",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Ownership.test_kill_order_is_ancestry_not_pid_order",
+      "attack": "kill order is ancestry not pid order",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Ownership.test_kill_order_is_ancestry_not_pid_order"
+      ],
+      "assertions_and_conditions": "def test_kill_order_is_ancestry_not_pid_order(self):\n        graph = {100: 1, 50: 100, 200: 50}\n        calls = []\n        with mock.patch.object(process_cleanup, \"live_session\", side_effect=[graph, {}, {}]), \\\n             mock.patch.object(process_cleanup, \"LIBC\", types.SimpleNamespace(getsid=lambda pid: 999)), \\\n             mock.patch.object(process_cleanup, \"send\", side_effect=lambda pid, sig: calls.append((pid, sig))):\n            process_cleanup.cleanup(999)\n        self.assertEqual([pid for pid, sig in calls if sig == signal.SIGKILL], [200, 50, 100])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Ownership.test_reparented_group_cleanup_after_normal_exit",
+      "attack": "reparented group cleanup after normal exit",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Ownership.test_reparented_group_cleanup_after_normal_exit"
+      ],
+      "assertions_and_conditions": "def test_reparented_group_cleanup_after_normal_exit(self):\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory)\n            code = \"import os,time; r,w=os.pipe(); p=os.fork();\\nif p==0:\\n os.setpgid(0,0); os.write(w,b'x'); time.sleep(30)\\nelse:\\n os.read(r,1); os._exit(0)\"\n            row = execute([sys.executable, \"-c\", code], root, root / \"normal.log\", timeout=2)\n            self.assertEqual(row[\"exit\"], 0); self.assertTrue(row[\"leaked_processes\"])",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Ownership.test_reused_pid_outside_session_is_never_signaled",
+      "attack": "reused pid outside session is never signaled",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Ownership.test_reused_pid_outside_session_is_never_signaled"
+      ],
+      "assertions_and_conditions": "def test_reused_pid_outside_session_is_never_signaled(self):\n        with mock.patch.object(process_cleanup, \"live_session\", side_effect=[{100: 1}, {}, {}]), \\\n             mock.patch.object(process_cleanup, \"LIBC\", types.SimpleNamespace(getsid=lambda pid: 555)), \\\n             mock.patch.object(process_cleanup, \"send\") as send:\n            process_cleanup.cleanup(999)\n        send.assert_not_called()",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Ownership.test_timeout_cleans_separate_process_group",
+      "attack": "timeout cleans separate process group",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Ownership.test_timeout_cleans_separate_process_group"
+      ],
+      "assertions_and_conditions": "def test_timeout_cleans_separate_process_group(self):\n        with tempfile.TemporaryDirectory() as directory:\n            root = Path(directory)\n            code = \"import os,time; p=os.fork();\\nif p==0: os.setpgid(0,0)\\ntime.sleep(30)\"\n            row = execute([sys.executable, \"-c\", code], root, root / \"timeout.log\", timeout=0.5)\n            self.assertEqual(row[\"exit\"], \"timeout\")",
+      "actual": "passed",
+      "ci_actual": "passed"
+    },
+    {
+      "test": "test_adversarial.Ownership.test_worker_appearing_during_cleanup_is_also_killed",
+      "attack": "worker appearing during cleanup is also killed",
+      "repro": [
+        "python3",
+        "tools/session-host/spawn-poc/test_adversarial.py",
+        "Ownership.test_worker_appearing_during_cleanup_is_also_killed"
+      ],
+      "assertions_and_conditions": "def test_worker_appearing_during_cleanup_is_also_killed(self):\n        calls = []\n        with mock.patch.object(process_cleanup, \"live_session\", side_effect=[{100: 1}, {}, {50: 1}, {}]), \\\n             mock.patch.object(process_cleanup, \"LIBC\", types.SimpleNamespace(getsid=lambda pid: 999)), \\\n             mock.patch.object(process_cleanup, \"send\", side_effect=lambda pid, sig: calls.append((pid, sig))):\n            found = process_cleanup.cleanup(999)\n        self.assertEqual(found, [50, 100])\n        self.assertIn((50, signal.SIGKILL), calls)",
+      "actual": "passed",
+      "ci_actual": "passed"
+    }
+  ],
+  "ci_run": 41389079492,
+  "ci_log_sha256": "70d355186049becadea4903a03d8453539651ae31c6c6d3956c18a030cf4dbf3"
+}

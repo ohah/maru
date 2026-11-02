@@ -1,0 +1,12 @@
+{
+  "baseline_before": "3a15583da4f305547c4ddd43090b96d6349a2a82ea9b7a921748d66a02d52fa2",
+  "baseline_after": "3a15583da4f305547c4ddd43090b96d6349a2a82ea9b7a921748d66a02d52fa2",
+  "before_input": "7dc5f23742151e02398af329e6dcfb3e163b7c99ca0e3c82c255ce3865e8e409",
+  "after_input": "623e3cc3d43b111b97525cb105cbb679ff6bcee4d393f6834f6286bc24e42f45",
+  "after_matches_final_commit": "205d3790a",
+  "before_extra_passed": 14,
+  "before_extra_failed": 4,
+  "after_extra_passed": 18,
+  "after_extra_failed": 0,
+  "original_contract_gaps_per_mode": 3
+}

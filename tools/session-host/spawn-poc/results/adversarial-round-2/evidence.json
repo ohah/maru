@@ -1,0 +1,31 @@
+{
+  "purpose": "additional adversarial verification of Draft PR 4671",
+  "runtime_head": "205d3790a62205b2fcb9cc2549ef55546c783d19",
+  "ci_run": 41389079492,
+  "ci_url": "https://github.com/ohah/maru/actions/runs/41389079492",
+  "ci_driver_conclusion": "success",
+  "evidence_complete": true,
+  "harness_distinct_attacks": 39,
+  "harness_passed": 39,
+  "new_backend_scenarios": 7,
+  "new_backend_executions": 42,
+  "new_backend_passed": 42,
+  "poc_posix_same_fd_bug": "Fixed by explicit addinherit_np when source equals target; before 4 supplementary failures across two modes, after 0.",
+  "other_fixes": [
+    "Committed HEAD snapshot and independent candidate copies",
+    "Log digest, exact test inventory, optimization-mode and summary validation; failed runs excluded from timings",
+    "Private-session worker cleanup including reparenting, ancestry order, SID recheck and survivor detection"
+  ],
+  "unchanged_known_differences": {
+    "baseline_and_parent_gate": "one high-FD counterexample per optimization mode",
+    "posix_spawn": "three exec-never-started contract differences per optimization mode"
+  },
+  "backend_hashes_reproduced_locally": true,
+  "candidate_worker_leaks": 0,
+  "product_source_changed": false,
+  "merged": false,
+  "limits": [
+    "This is PoC verification, not full required product CI.",
+    "Native spawn failure contract and whole-operation deadline integration remain product decisions."
+  ]
+}

@@ -75960,6 +75960,85 @@ test "CMPSAVEAS6 retiring one visible list preserves a newer request owned by an
     try batchApplyDisk(&f.fx, "other.c", completion_save_source);
 }
 
+// Real disk/history edits must invalidate pre-edit resolve without inventing
+// revision or document identity. Fake responses control ordering, not OS input.
+fn completionHistoryReloadForTest(mode: u8) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..4) |phase| for (0..2) |empty| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "history.c", completion_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const term = f.term;
+        if (mode != 0) {
+            term.rt.editor_selection = editor_selection.Selection.at(2);
+            try testing.expect(insertText(s, term, "x"));
+            breakUndoGroup(term);
+            if (mode == 2) try testing.expect(undoEdit(s, term));
+        }
+        const probe = try prepareCompletionSaveForTest(&f.fx, term, @intCast(phase));
+        const accepted = s.editor_completion.accepted;
+        const epoch = term.rt.editorDocument().save_target_epoch;
+        switch (mode) {
+            0 => {
+                try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "history.c", .data = "prx // COMPSTALL RESOLVESTALL\n" });
+                app_session_mod.editor_conflict_ops.confirmReload(s, term.surface.id);
+            },
+            1 => try testing.expect(undoEdit(s, term)),
+            2 => try testing.expect(redoEdit(s, term)),
+            else => unreachable,
+        }
+        const expected = if (mode == 1) completion_save_source else "prx // COMPSTALL RESOLVESTALL\n";
+        try testing.expectEqualStrings(expected, term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(epoch, term.rt.editorDocument().save_target_epoch);
+        const selection = term.rt.editor_selection;
+        const undo = term.rt.editorDocument().history.undo_len;
+        const redo = term.rt.editorDocument().history.redo_len;
+        if (phase >= 2) try testing.expect(!s.editor_completion.resolve_waiting and !s.editor_completion.pending_accept);
+        try deliverCompletionSaveForTest(s, probe, empty == 1);
+        try testing.expectEqual(accepted, s.editor_completion.accepted);
+        try testing.expectEqualStrings(expected, term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(selection, term.rt.editor_selection);
+        try testing.expectEqual(undo, term.rt.editorDocument().history.undo_len);
+        try testing.expectEqual(redo, term.rt.editorDocument().history.redo_len);
+        // Explicitly dismiss any surviving ordinary list before a fresh request.
+        try pressKey(&f.fx, .escape, .{});
+        term.rt.editor_selection = editor_selection.Selection.at(if (mode == 1) 2 else 3);
+        try testing.expect(completion_client.triggerManual(s));
+        const seq = s.editor_completion.waiting_seq;
+        try testing.expect(seq != probe.list_seq);
+        const owner = lsp_client.readyClientFor(s, term).?;
+        var reply = try std.json.parseFromSlice(std.json.Value, testing.allocator, if (mode == 1) "[{\"label\":\"pr_new\",\"additionalTextEdits\":[]}]" else "[{\"label\":\"prx_new\",\"additionalTextEdits\":[]}]", .{});
+        defer reply.deinit();
+        completion_client.onResponse(s, owner, seq, reply.value);
+        var frame = appendPaneFrame(s, activeLeafRectForTest(s).?, term) orelse return error.EditorPaneDidNotDraw;
+        frame.dl.deinit(testing.allocator);
+        try testing.expect(completion_client.refresh(s));
+        try pressKey(&f.fx, .enter, .{});
+        const Ctx = struct { s: *AppSession, accepted: u64 };
+        try testing.expect(pumpLspUntil(&f.fx, 1500, Ctx{ .s = s, .accepted = accepted }, struct {
+            fn done(c: Ctx) bool {
+                return c.s.editor_completion.accepted > c.accepted;
+            }
+        }.done));
+        try testing.expectEqualStrings(if (mode == 1) "pr_new // COMPSTALL RESOLVESTALL\n" else "prx_new // COMPSTALL RESOLVESTALL\n", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(undo + 1, term.rt.editorDocument().history.undo_len);
+        try testing.expect(undoEdit(s, term));
+        try testing.expectEqualStrings(expected, term.rt.editorDocument().opened.?.file.content);
+        try batchApplyDisk(&f.fx, "history.c", if (mode == 0) "prx // COMPSTALL RESOLVESTALL\n" else completion_save_source);
+    };
+}
+
+test "CMPHISTORY1 actual disk reload isolates old completion results" {
+    try completionHistoryReloadForTest(0);
+}
+test "CMPHISTORY2 actual Undo isolates old completion results" {
+    try completionHistoryReloadForTest(1);
+}
+test "CMPHISTORY3 actual Redo isolates old completion results" {
+    try completionHistoryReloadForTest(2);
+}
+
 const FocusedCompletionPhase = enum { resolved, prefetch, pending };
 
 fn focusedCompletionFixtureForTest(f: *SmtFixture, split: bool, show: bool, phase: FocusedCompletionPhase) !*Term {

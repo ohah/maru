@@ -138,6 +138,8 @@ def read(root):
     require(all(xs and len(xs)==len(set(xs)) for xs in [manifest['sizes'],manifest['periods'],manifest['flows'],manifest['modes']]), 'matrix dimensions')
     require(all(type(x) is int and x in (3000,50000) for x in manifest['sizes']) and all(type(x) is int and 20<=x<=200 for x in manifest['periods']), 'matrix size/period')
     require(set(manifest['flows'])<={'typing','shared'} and set(manifest['modes'])<={'sync','async'}, 'matrix mode/flow')
+    fixture_kind=manifest.get('fixture_kind','flat')
+    require(type(fixture_kind) is str and fixture_kind in ('flat','multiline'),'fixture kind')
     source = manifest['source']
     require(source['harness'] == protocol.NAME and source['optimize'] == 'ReleaseFast', 'source harness')
     build = pathlib.Path(manifest['build'])
@@ -155,6 +157,7 @@ def read(root):
         require(sha(path/'record.json') == entry['record_sha256'], 'record drift')
         record = json.loads((path/'record.json').read_text())
         require(record.get('diagnostic',False) is False, 'diagnostic cohort is not baseline performance')
+        require(record.get('fixture_kind','flat')==fixture_kind,'fixture cohort differs')
         require(record.get('fold_control')==manifest.get('fold_control'),'fold experiment label differs')
         require(bool(record.get('fold_control'))==bool(source.get('fold_control')),'fold experiment source differs')
         require(not (record.get('summary_control') and record.get('fold_control')),'mixed cache experiments')
@@ -168,7 +171,7 @@ def read(root):
             require(sha(path/name) == record[name+'_sha256'], 'receipt drift: '+name)
         document = (path/'document.zig').read_bytes()
         require(hashlib.sha256(document).hexdigest() == record['fixture_sha256'] and len(document) == record['fixture_bytes'] and hashlib.sha256(document[3:]).hexdigest() == record['fixture_tail_sha256'], 'fixture drift')
-        require(document==protocol.fixture(record['size']), 'fixture workload')
+        require(document==protocol.fixture(record['size'],fixture_kind), 'fixture workload')
         ready=json.loads((path/'ready.json').read_text());origin=json.loads((path/'source-record.json').read_text());recovery=json.loads((path/'source-recovery.json').read_text())
         require(ready['pid']==origin['pid']==record['app_pid'] and ready['count']==record['count'] and ready['initial_tail_sha256']==record['fixture_tail_sha256'] and ready['source']==origin['selected']=='com.apple.keylayout.ABC', 'ready/source identity')
         require(type(recovery['exit']) is int and recovery['exit']==0, 'source recovery failure')
@@ -180,7 +183,7 @@ def read(root):
         results.append({'path':entry['path'],'identity':list(identity),'metrics':result,'app_sha256':record['app.json_sha256'],'posts_sha256':record['posts.json_sha256']})
     require(found == expected, 'missing matrix member')
     return {'schema':1,'protocol':protocol.NAME,'kind':manifest['kind'],'head':source['head'],'app_sha256':source['app_sha256'],
-            'summary_control':manifest.get('summary_control'),'fold_control':manifest.get('fold_control'),
+            'fixture_kind':fixture_kind,'summary_control':manifest.get('summary_control'),'fold_control':manifest.get('fold_control'),
             'producer_sha256':source['producer_sha256'],'verifier_sha256':sha(__file__),'runs':results}
 
 

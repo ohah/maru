@@ -1,0 +1,1318 @@
+{
+  "schema": 1,
+  "kind": "worker-cache-study",
+  "cache": "fold",
+  "app_sha256": "3d598d30d44dd5def4ed97e2d67f67f5a54e1f2447a0c7b84e970ac4e8d54c1c",
+  "head": "4ff11c72e8c489eba98970417e0c2d696db23cb4",
+  "raw_root": "~/.cache/maru-agent-artifacts/async-fold-multiline-study-1",
+  "raw_files_sha256": {
+    "study.json": "610f483d8795672ec26414ef6264778d8d49dca29a4e15e1f881029b120dd31f",
+    "comparison.json": "30a33d1043ef1f8840fb8f7737845061b5305fa3eb36b8048b5831cc6bab87d7",
+    "disabled/manifest.json": "3ef2cba5e7989df0a6c1883b271598b6ea3ca377bef4bf8ed3f3ee484eb64245",
+    "prepared/manifest.json": "cc0f8caa22937586e41fc9bbc08bbdcec03c7ea8d3be869853f6222f7c1f8123"
+  },
+  "before": {
+    "schema": 1,
+    "protocol": "independent-target-ascii-v1",
+    "head": "4ff11c72e8c489eba98970417e0c2d696db23cb4",
+    "app_sha256": "3d598d30d44dd5def4ed97e2d67f67f5a54e1f2447a0c7b84e970ac4e8d54c1c",
+    "producer_sha256": "383c0d0e97c4d87b3ed5992d5147e8a30d4bbc2921c313fe94d484672a039763",
+    "fixture_kind": "multiline",
+    "summary_control": null,
+    "fold_control": "disabled",
+    "manifest_sha256": "3ef2cba5e7989df0a6c1883b271598b6ea3ca377bef4bf8ed3f3ee484eb64245",
+    "verifier_sha256": "e4c78546293dee8a5f9d217dcc4f1f554d21e85530e5e2b7593719eeeadc2142",
+    "summary_tool_sha256": "87ec313e7a773276b78c1a8e4a02c7efd3d42dbe2113c801c1e9be6e0c4e2b51",
+    "processes": 24,
+    "inputs": 720,
+    "aggregation": "all keys including first; pooled median and nearest-rank p95; no trimming",
+    "conditions": [
+      {
+        "size": 3000,
+        "period_ms": 50,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 46.974771000000004,
+          "p95": 55.434208,
+          "maximum": 64.422791
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 2.534917,
+          "p95": 6.791167,
+          "maximum": 13.107167
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 44.714187499999994,
+          "p95": 51.749917,
+          "maximum": 58.909709
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          65.708334,
+          67.92025,
+          78.861292
+        ],
+        "max_producer_lateness_ms": 5.128167,
+        "memory_per_process_bytes": [
+          {
+            "peak": 145129472,
+            "baseline_resident": 136478720,
+            "final_resident": 143982592
+          },
+          {
+            "peak": 144883712,
+            "baseline_resident": 136478720,
+            "final_resident": 143687680
+          },
+          {
+            "peak": 149979136,
+            "baseline_resident": 136527872,
+            "final_resident": 148668416
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 50,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 38.3570415,
+          "p95": 45.994209,
+          "maximum": 47.012167
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6316255,
+          "p95": 6.073875,
+          "maximum": 16.12475
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 35.2186255,
+          "p95": 44.992042,
+          "maximum": 46.367833
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          52.807625,
+          45.928041,
+          50.375875
+        ],
+        "max_producer_lateness_ms": 5.675334,
+        "memory_per_process_bytes": [
+          {
+            "peak": 146358272,
+            "baseline_resident": 134873088,
+            "final_resident": 145293312
+          },
+          {
+            "peak": 143310848,
+            "baseline_resident": 134807552,
+            "final_resident": 141115392
+          },
+          {
+            "peak": 146604032,
+            "baseline_resident": 134905856,
+            "final_resident": 144375808
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 45.8333755,
+          "p95": 57.885042,
+          "maximum": 59.984958
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.7807295,
+          "p95": 5.347917,
+          "maximum": 14.426875
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 44.188458499999996,
+          "p95": 57.384625,
+          "maximum": 58.93875
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          70.825959,
+          73.0125,
+          78.071209
+        ],
+        "max_producer_lateness_ms": 5.665167,
+        "memory_per_process_bytes": [
+          {
+            "peak": 148373504,
+            "baseline_resident": 136593408,
+            "final_resident": 146800640
+          },
+          {
+            "peak": 146407424,
+            "baseline_resident": 136331264,
+            "final_resident": 145211392
+          },
+          {
+            "peak": 146489344,
+            "baseline_resident": 136691712,
+            "final_resident": 145342464
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 37.3620005,
+          "p95": 46.990708,
+          "maximum": 50.998042
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6262289999999999,
+          "p95": 2.428542,
+          "maximum": 17.664792
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 36.726771,
+          "p95": 45.5985,
+          "maximum": 49.1845
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          58.3325,
+          59.644084,
+          60.378583
+        ],
+        "max_producer_lateness_ms": 5.662375,
+        "memory_per_process_bytes": [
+          {
+            "peak": 143622144,
+            "baseline_resident": 135217152,
+            "final_resident": 142376960
+          },
+          {
+            "peak": 143540224,
+            "baseline_resident": 135184384,
+            "final_resident": 142229504
+          },
+          {
+            "peak": 143392768,
+            "baseline_resident": 135036928,
+            "final_resident": 142065664
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 50,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 45.630667,
+          "p95": 217.5405,
+          "maximum": 237.623917
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 7.529875499999999,
+          "p95": 164.17325,
+          "maximum": 171.249458
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 35.470333,
+          "p95": 56.834959,
+          "maximum": 70.420959
+        },
+        "coalesced_keys": 30,
+        "final_color_after_last_post_ms": [
+          679.607792,
+          827.352417,
+          788.236709
+        ],
+        "max_producer_lateness_ms": 5.557833,
+        "memory_per_process_bytes": [
+          {
+            "peak": 360513536,
+            "baseline_resident": 326844416,
+            "final_resident": 339247104
+          },
+          {
+            "peak": 362086400,
+            "baseline_resident": 326090752,
+            "final_resident": 340639744
+          },
+          {
+            "peak": 361119744,
+            "baseline_resident": 326582272,
+            "final_resident": 341540864
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 50,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 41.510895500000004,
+          "p95": 119.39475,
+          "maximum": 128.427083
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 4.4885835,
+          "p95": 82.620667,
+          "maximum": 87.279125
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 32.830375000000004,
+          "p95": 43.73475,
+          "maximum": 45.053541
+        },
+        "coalesced_keys": 18,
+        "final_color_after_last_post_ms": [
+          620.587709,
+          599.570167,
+          654.286791
+        ],
+        "max_producer_lateness_ms": 5.572792,
+        "memory_per_process_bytes": [
+          {
+            "peak": 337969152,
+            "baseline_resident": 308264960,
+            "final_resident": 318750720
+          },
+          {
+            "peak": 337821696,
+            "baseline_resident": 308035584,
+            "final_resident": 319553536
+          },
+          {
+            "peak": 338165760,
+            "baseline_resident": 308264960,
+            "final_resident": 322650112
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 93.4622295,
+          "p95": 204.025834,
+          "maximum": 215.771208
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 61.255042,
+          "p95": 159.336708,
+          "maximum": 169.761
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 36.9297505,
+          "p95": 46.504292,
+          "maximum": 48.197792
+        },
+        "coalesced_keys": 34,
+        "final_color_after_last_post_ms": [
+          764.8365,
+          754.374291,
+          722.158042
+        ],
+        "max_producer_lateness_ms": 5.613875,
+        "memory_per_process_bytes": [
+          {
+            "peak": 359923712,
+            "baseline_resident": 326467584,
+            "final_resident": 342261760
+          },
+          {
+            "peak": 361775104,
+            "baseline_resident": 327057408,
+            "final_resident": 341229568
+          },
+          {
+            "peak": 360415232,
+            "baseline_resident": 326287360,
+            "final_resident": 343015424
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 75.161479,
+          "p95": 116.714292,
+          "maximum": 130.09725
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 37.815604,
+          "p95": 79.110708,
+          "maximum": 86.069208
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 35.3197715,
+          "p95": 45.170667,
+          "maximum": 46.469666
+        },
+        "coalesced_keys": 3,
+        "final_color_after_last_post_ms": [
+          663.479083,
+          645.655625,
+          662.828334
+        ],
+        "max_producer_lateness_ms": 5.579292,
+        "memory_per_process_bytes": [
+          {
+            "peak": 337559552,
+            "baseline_resident": 308068352,
+            "final_resident": 318930944
+          },
+          {
+            "peak": 337297408,
+            "baseline_resident": 308133888,
+            "final_resident": 318734336
+          },
+          {
+            "peak": 337739776,
+            "baseline_resident": 308314112,
+            "final_resident": 319045632
+          }
+        ]
+      }
+    ],
+    "worker_proof": [
+      {
+        "path": "3000-100-shared-0-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          4650124,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-shared-1-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          4650124,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-shared-2-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          4650124,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-0-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          2325062,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-1-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          2325062,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-2-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          2325062,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-0-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          4650124,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-1-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          4650124,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-2-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          4650124,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-0-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          2325062,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-1-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          2325062,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-2-async",
+        "fold_stats": [
+          0,
+          0,
+          31,
+          2325062,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-0-async",
+        "fold_stats": [
+          0,
+          0,
+          16,
+          35000056,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-1-async",
+        "fold_stats": [
+          0,
+          0,
+          17,
+          35000056,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-2-async",
+        "fold_stats": [
+          0,
+          0,
+          16,
+          35000056,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-0-async",
+        "fold_stats": [
+          0,
+          0,
+          23,
+          27500044,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-1-async",
+        "fold_stats": [
+          0,
+          0,
+          26,
+          27500044,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-2-async",
+        "fold_stats": [
+          0,
+          0,
+          24,
+          26250042,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-0-async",
+        "fold_stats": [
+          0,
+          0,
+          14,
+          12500020,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-1-async",
+        "fold_stats": [
+          0,
+          0,
+          21,
+          12500020,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-2-async",
+        "fold_stats": [
+          0,
+          0,
+          14,
+          17500028,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-0-async",
+        "fold_stats": [
+          0,
+          0,
+          20,
+          7500012,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-1-async",
+        "fold_stats": [
+          0,
+          0,
+          16,
+          10000016,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-2-async",
+        "fold_stats": [
+          0,
+          0,
+          16,
+          12500020,
+          0
+        ]
+      }
+    ]
+  },
+  "after": {
+    "schema": 1,
+    "protocol": "independent-target-ascii-v1",
+    "head": "4ff11c72e8c489eba98970417e0c2d696db23cb4",
+    "app_sha256": "3d598d30d44dd5def4ed97e2d67f67f5a54e1f2447a0c7b84e970ac4e8d54c1c",
+    "producer_sha256": "383c0d0e97c4d87b3ed5992d5147e8a30d4bbc2921c313fe94d484672a039763",
+    "fixture_kind": "multiline",
+    "summary_control": null,
+    "fold_control": "prepared",
+    "manifest_sha256": "cc0f8caa22937586e41fc9bbc08bbdcec03c7ea8d3be869853f6222f7c1f8123",
+    "verifier_sha256": "e4c78546293dee8a5f9d217dcc4f1f554d21e85530e5e2b7593719eeeadc2142",
+    "summary_tool_sha256": "87ec313e7a773276b78c1a8e4a02c7efd3d42dbe2113c801c1e9be6e0c4e2b51",
+    "processes": 24,
+    "inputs": 720,
+    "aggregation": "all keys including first; pooled median and nearest-rank p95; no trimming",
+    "conditions": [
+      {
+        "size": 3000,
+        "period_ms": 50,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 37.860979,
+          "p95": 45.87375,
+          "maximum": 49.261083
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 1.4884795,
+          "p95": 5.127,
+          "maximum": 19.469125
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.449104500000004,
+          "p95": 44.394834,
+          "maximum": 47.333666
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          61.872416,
+          53.772417,
+          58.388375
+        ],
+        "max_producer_lateness_ms": 5.496292,
+        "memory_per_process_bytes": [
+          {
+            "peak": 148094976,
+            "baseline_resident": 136265728,
+            "final_resident": 147144704
+          },
+          {
+            "peak": 147505152,
+            "baseline_resident": 136560640,
+            "final_resident": 146440192
+          },
+          {
+            "peak": 148226048,
+            "baseline_resident": 136282112,
+            "final_resident": 146964480
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 50,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 33.528208500000005,
+          "p95": 46.056584,
+          "maximum": 50.530666
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.79575,
+          "p95": 6.703208,
+          "maximum": 14.269458
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 32.547438,
+          "p95": 45.42225,
+          "maximum": 45.615958
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          49.477792,
+          52.657167,
+          57.472709
+        ],
+        "max_producer_lateness_ms": 6.825958,
+        "memory_per_process_bytes": [
+          {
+            "peak": 146259968,
+            "baseline_resident": 134938624,
+            "final_resident": 144949248
+          },
+          {
+            "peak": 140410880,
+            "baseline_resident": 135020544,
+            "final_resident": 138231808
+          },
+          {
+            "peak": 146931712,
+            "baseline_resident": 135135232,
+            "final_resident": 145735680
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 38.213896000000005,
+          "p95": 46.097,
+          "maximum": 50.604041
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.7231875,
+          "p95": 4.590542,
+          "maximum": 13.923458
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 37.0962085,
+          "p95": 45.183375,
+          "maximum": 45.516166
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          55.620375,
+          56.908583,
+          59.818083
+        ],
+        "max_producer_lateness_ms": 5.654584,
+        "memory_per_process_bytes": [
+          {
+            "peak": 148635648,
+            "baseline_resident": 136429568,
+            "final_resident": 147488768
+          },
+          {
+            "peak": 148029440,
+            "baseline_resident": 136216576,
+            "final_resident": 146866176
+          },
+          {
+            "peak": 149061632,
+            "baseline_resident": 136347648,
+            "final_resident": 147816448
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 33.0696245,
+          "p95": 42.861416,
+          "maximum": 51.396166
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6181045000000001,
+          "p95": 2.44025,
+          "maximum": 16.728875
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 31.9645,
+          "p95": 39.013667,
+          "maximum": 43.644166
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          46.921208,
+          58.318958,
+          42.363542
+        ],
+        "max_producer_lateness_ms": 5.616,
+        "memory_per_process_bytes": [
+          {
+            "peak": 145817600,
+            "baseline_resident": 135266304,
+            "final_resident": 144605184
+          },
+          {
+            "peak": 146849792,
+            "baseline_resident": 134922240,
+            "final_resident": 145719296
+          },
+          {
+            "peak": 143425536,
+            "baseline_resident": 135282688,
+            "final_resident": 142114816
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 50,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 34.295729,
+          "p95": 41.046917,
+          "maximum": 49.036458
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.623458,
+          "p95": 6.12275,
+          "maximum": 12.964583
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.315166500000004,
+          "p95": 39.639916,
+          "maximum": 42.908459
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          602.827959,
+          590.409875,
+          592.417666
+        ],
+        "max_producer_lateness_ms": 5.533375,
+        "memory_per_process_bytes": [
+          {
+            "peak": 354877440,
+            "baseline_resident": 328957952,
+            "final_resident": 339197952
+          },
+          {
+            "peak": 355647488,
+            "baseline_resident": 328646656,
+            "final_resident": 340393984
+          },
+          {
+            "peak": 354975744,
+            "baseline_resident": 328630272,
+            "final_resident": 341671936
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 50,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 35.422292,
+          "p95": 42.375917,
+          "maximum": 49.2025
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.626167,
+          "p95": 4.69075,
+          "maximum": 12.089666
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.721312,
+          "p95": 39.81175,
+          "maximum": 42.246417
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          601.635917,
+          585.50375,
+          585.757
+        ],
+        "max_producer_lateness_ms": 5.521,
+        "memory_per_process_bytes": [
+          {
+            "peak": 335233024,
+            "baseline_resident": 305594368,
+            "final_resident": 321847296
+          },
+          {
+            "peak": 333250560,
+            "baseline_resident": 305659904,
+            "final_resident": 320339968
+          },
+          {
+            "peak": 331710464,
+            "baseline_resident": 305709056,
+            "final_resident": 316637184
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 33.845208,
+          "p95": 39.897459,
+          "maximum": 49.09875
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6671670000000001,
+          "p95": 5.513459,
+          "maximum": 12.829667
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.234437,
+          "p95": 39.10425,
+          "maximum": 39.504041
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          605.483792,
+          595.488583,
+          601.934417
+        ],
+        "max_producer_lateness_ms": 5.653333,
+        "memory_per_process_bytes": [
+          {
+            "peak": 356876288,
+            "baseline_resident": 328548352,
+            "final_resident": 343425024
+          },
+          {
+            "peak": 358088704,
+            "baseline_resident": 329089024,
+            "final_resident": 342474752
+          },
+          {
+            "peak": 355794944,
+            "baseline_resident": 329105408,
+            "final_resident": 341491712
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 34.7746245,
+          "p95": 42.563709,
+          "maximum": 49.431584
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6476040000000001,
+          "p95": 5.421625,
+          "maximum": 11.612833
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.868770999999995,
+          "p95": 39.949375,
+          "maximum": 44.365458
+        },
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          604.35475,
+          589.428291,
+          602.769
+        ],
+        "max_producer_lateness_ms": 5.583042,
+        "memory_per_process_bytes": [
+          {
+            "peak": 332333056,
+            "baseline_resident": 305610752,
+            "final_resident": 316637184
+          },
+          {
+            "peak": 333037568,
+            "baseline_resident": 305643520,
+            "final_resident": 317177856
+          },
+          {
+            "peak": 333103104,
+            "baseline_resident": 305512448,
+            "final_resident": 318668800
+          }
+        ]
+      }
+    ],
+    "worker_proof": [
+      {
+        "path": "3000-100-shared-0-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-shared-1-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-shared-2-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-0-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-1-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-100-typing-2-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-0-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-1-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-shared-2-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-0-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-1-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "3000-50-typing-2-async",
+        "fold_stats": [
+          31,
+          31,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-0-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-1-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-shared-2-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-0-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-1-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-100-typing-2-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-0-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-1-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-shared-2-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-0-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-1-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "path": "50000-50-typing-2-async",
+        "fold_stats": [
+          31,
+          2,
+          0,
+          0,
+          0
+        ]
+      }
+    ]
+  }
+}

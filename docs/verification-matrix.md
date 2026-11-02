@@ -5446,6 +5446,8 @@ SDK 재내보내기·main thread ID·Mach-O/dSYM/atos를 대조하고 프로파�
 `test-editor-fold-preparation`은 준비·독립 복사·취소·할당 실패를, worker/view 게이트는
 실제 준비 취소/OOM과 두 뷰의 첫 조회 재순회 0 및 복사 실패 뒤 정상 파싱 보존을 검사한다.
 기존 접힘 좌표·정렬·캐시와 제품 입력 검사는 표시 상태·LSP 우선순위 회귀를 별도로 확인한다.
+[실측](../tools/editor-input-stream/fold-results.md)은 같은 실행 파일의 준비 끔/켬을 후보 없음/있음 각각 48회/1,440입력으로 확인하며
+작은 단일 뷰의 p95·색 완료 최대 증가도 보존한다. 전체 PR 전후나 물리 IME의 개선으로 해석하지 않는다.
 
 ## Chromium role 로케이터 테스트 응답 수명
 

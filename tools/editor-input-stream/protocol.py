@@ -13,9 +13,13 @@ def count(value):
     return value
 
 
-def fixture(size):
+def fixture(size,kind="flat"):
     if type(size) is not int or size not in (3000, 50000):
         raise ValueError('fixed fixture size')
+    if kind not in ('flat','multiline'):
+        raise ValueError('fixed fixture kind')
+    if kind=='multiline':
+        return ('// \n'+''.join('pub fn f%d() void {\n    const value: u64 = %d;\n    _ = value;\n}\n'%(i,i) for i in range(size))).encode()
     return ('// \n'+''.join('pub fn f%d() void { const value: u64 = %d; _ = value; }\n'%(i,i) for i in range(size))).encode()
 
 

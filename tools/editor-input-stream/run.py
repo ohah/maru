@@ -24,10 +24,10 @@ def provider_fingerprints():
     return {str(p):verify.sha(p) if p.is_file() else None for p in paths}
 
 
-def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None):
+def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None, fixture_kind="flat"):
     target.mkdir(mode=0o700)
     (target/'profile').mkdir();(target/'host').mkdir(mode=0o700)
-    data = protocol.fixture(size)
+    data = protocol.fixture(size,fixture_kind)
     (target/'document.zig').write_bytes(data)
     (target/'config').write_text('session.keep-alive-after-quit = false\nlsp.enabled = false\neditor.wrap = false\n')
     state = json.loads((build/'source.json').read_text())
@@ -57,7 +57,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     meta = {'count':count,'mode':mode,'flow':flow,'size':size,'repeat':rep,'shared':flow=='shared','period_ns':period*1_000_000,'lateness_ns':20_000_000,
             'kind':kind,'fixture_bytes':len(data),'fixture_sha256':hashlib.sha256(data).hexdigest(),
             'fixture_tail_sha256':hashlib.sha256(data[3:]).hexdigest(),'load_before':os.getloadavg(),
-            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'summary_control':summary_control,'fold_control':fold_control}
+            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind}
     child = sender = None
     failure = None
     with (target/'app.log').open('w') as log, (target/'producer.log').open('w') as sender_log:

@@ -134,3 +134,15 @@ fixture 종류는 manifest·record·요약에 표시하고 원시 파일을 종�
 앱은 제품 소스 `4ff11c72e8c489eba98970417e0c2d696db23cb4`에서 만들었다.
 여러 줄 fixture는 이후 도구만 확장해 같은 앱에 입력했으며 해당 도구의 실제 해시·사본은
 두 번째 study의 tool snapshot에 보존했다. 측정 후 앱을 다시 빌드하지 않았다.
+
+
+측정 설정은 LSP·workspace 복원·자동 줄바꿈을 끄고 접기를 실행하지 않은 뷰의 ASCII 입력이다.
+LSP가 접힘 소스를 제공하거나 이미 접힌 상태의 실제 GUI 지연은 이번 실측 범위 밖이다.
+LSP 우선순위·접힌 상태의 보존은 앞의 native/제품 회귀 범위와 구분한다. worker는 뷰의 LSP
+상태를 받지 않으므로 해당 뷰가 구문 후보를 소비하지 않아도 후보 준비 비용이 생긴다.
+
+
+로컬 최종 `zig build check-boundaries check-doc-links check-doc-line-refs check-config-docs -j2`가
+exit 0으로 통과했다. 마지막 문서 갱신 뒤 문서/config 검사도 다시 통과했다.
+`async-fold-validation-1/logs.json`과 `postverify.json`에 로그 해시와 최종 reader의 네 묶음
+재검증 결과를 보존한다. 이는 CI 완료·머지를 대신하는 기록이 아니다.

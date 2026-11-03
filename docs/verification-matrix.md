@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+위치 결과의 종류: `test-editor-location-result-kind`는 실제 닫힌 파일을 삭제하고 native
+Enter로 선택해 기존 결과의 실패 안내와 새 요청 보존을 검사한다. [계획](plans/lsp-location-result-kind.md)의
+64조건과 새 단일 결과의 정상/실패 탐색 대조이며, 직접 callback을 OS/HID/픽셀 증거로 확대하지 않는다.
+
 Save As와 참조/구현/타입 정의/선언: `test-editor-location-picker-save-as`는 실제 두 서버의
 UTF-8/UTF-16 협상과 실제 Save As 뒤 native Enter의 경로·byte 위치·파일 보존을 대조한다.
 [계획](plans/lsp-location-picker-save-as.md)의 64조건이며 직접 callback은 응답 순서 제어다.

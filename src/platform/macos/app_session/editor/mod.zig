@@ -75682,6 +75682,116 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 // Prepare a genuinely installed list, then change focus without a render tick.
 // Keys can arrive in this interval, including with A still visible in a split.
 // Phases use real requests: 0=list wait, 1=resolved display, 2=prefetch, 3=pending Enter.
+const LocationKindCaseForTest = struct { kind: maru.session.editor.lsp.rpc.LocationKind, notice_key: maru.i18n.Key };
+const location_kind_cases_for_test = [_]LocationKindCaseForTest{
+    .{ .kind = .references, .notice_key = .ref_none },
+    .{ .kind = .implementation, .notice_key = .impl_none },
+    .{ .kind = .type_definition, .notice_key = .typedef_none },
+    .{ .kind = .declaration, .notice_key = .decl_none },
+};
+fn locationKindRawForTest(uri: []const u8, two: bool) ![]u8 {
+    const first = .{ .uri = uri, .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 1 } } };
+    const second = .{ .uri = uri, .range = .{ .start = .{ .line = 0, .character = 4 }, .end = .{ .line = 0, .character = 5 } } };
+    if (two) return std.json.Stringify.valueAlloc(testing.allocator, .{ first, second }, .{});
+    return std.json.Stringify.valueAlloc(testing.allocator, .{second}, .{});
+}
+fn publishLocationKindForTest(fx: *PaneFixture, source: *Term, kind: maru.session.editor.lsp.rpc.LocationKind, uri: []const u8, two: bool) !void {
+    const s = fx.session;
+    try testing.expect(term_ops.activateSurfaceById(s, source.surface.id));
+    source.rt.editor_selection = editor_selection.Selection.at(1);
+    try testing.expect(references_client.gotoLocationsAtCaret(s, kind));
+    const owner = lsp_client.readyClientFor(s, source).?;
+    const raw = try locationKindRawForTest(uri, two);
+    defer testing.allocator.free(raw);
+    var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+    defer result.deinit();
+    references_client.onClientResponse(s, owner, kind, s.editor_references.waiting_seq, result.value, false);
+}
+fn locationResultKindForTest(shown: LocationKindCaseForTest) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_DECLCAP");
+    for (location_kind_cases_for_test) |next| for (0..4) |mode| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "source.c", "int source; // REFSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "gone.c", .data = "int gone;\n" });
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "valid.c", .data = "int valid;\n" });
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "later.c", .data = "int later;\n" });
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "keep.c", .data = "int keep;\n" });
+        const gone = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "gone.c" });
+        defer testing.allocator.free(gone);
+        const valid = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "valid.c" });
+        defer testing.allocator.free(valid);
+        const later = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "later.c" });
+        defer testing.allocator.free(later);
+        const uri = try maru.session.editor.lsp.rpc.fileUri(testing.allocator, gone);
+        defer testing.allocator.free(uri);
+        const valid_uri = try maru.session.editor.lsp.rpc.fileUri(testing.allocator, valid);
+        defer testing.allocator.free(valid_uri);
+        const later_uri = try maru.session.editor.lsp.rpc.fileUri(testing.allocator, later);
+        defer testing.allocator.free(later_uri);
+        try publishLocationKindForTest(&f.fx, f.term, shown.kind, uri, true);
+        try testing.expect(s.chrome_host.reference_picker.open);
+        try testing.expectEqual(@as(usize, 2), s.reference_picker_rows.all.items.len);
+        const generation = s.reference_picker_rows.result_generation;
+        try testing.expect(references_client.gotoLocationsAtCaret(s, next.kind));
+        const seq = s.editor_references.waiting_seq;
+        const owner = lsp_client.readyClientFor(s, f.term).?;
+        const raw = try locationKindRawForTest(uri, true);
+        defer testing.allocator.free(raw);
+        var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+        defer result.deinit();
+        if (mode != 0) references_client.onClientResponse(s, owner, next.kind, seq, if (mode == 1) result.value else null, mode == 3);
+        try testing.expectEqual(generation, s.reference_picker_rows.result_generation);
+        try testing.expect(s.chrome_host.reference_picker.open);
+        try f.fx.dir.dir.deleteFile(testing.io, "gone.c");
+        s.chrome_host.reference_picker.selected = 0;
+        try pressKey(&f.fx, .enter, .{});
+        try testing.expect(s.chrome_host.notice.open);
+        try testing.expectEqualStrings(maru.i18n.t(shown.notice_key), s.chrome_host.notice.message);
+        try testing.expectEqual(@as(u64, 1), s.editor_references.notified_none);
+        try testing.expectEqual(mode == 0, s.editor_references.waiting);
+        try testing.expectEqual(next.kind, s.editor_references.waiting_kind);
+        try testing.expectEqual(mode == 3, s.editor_references.retry_at_ms != 0);
+        try testing.expectEqual(@as(u64, 0), s.editor_references.navigated);
+        s.chrome_host.notice.dismiss();
+        // A valid single result still navigates normally, without a picker.
+        try publishLocationKindForTest(&f.fx, f.term, next.kind, valid_uri, false);
+        const active = pane_ops.activePane(s).activeTerm();
+        try testing.expectEqualStrings(valid, active.rt.editorDocument().path.?);
+        try testing.expectEqual(@as(usize, 4), active.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(u64, 1), s.editor_references.navigated);
+        try testing.expectEqual(@as(usize, 0), active.rt.editorDocument().history.undo_len);
+        // Missing single results use their own new kind too, before immediate navigation.
+        try f.fx.dir.dir.deleteFile(testing.io, "later.c");
+        try publishLocationKindForTest(&f.fx, f.term, next.kind, later_uri, false);
+        try testing.expect(s.chrome_host.notice.open);
+        try testing.expectEqualStrings(maru.i18n.t(next.notice_key), s.chrome_host.notice.message);
+        try testing.expectEqual(@as(u64, 2), s.editor_references.notified_none);
+        try testing.expect(!s.editor_references.waiting and s.editor_references.retry_at_ms == 0);
+        try testing.expectEqual(@as(usize, 0), f.term.rt.editorDocument().history.undo_len);
+        try batchApplyDisk(&f.fx, "source.c", "int source; // REFSTALL\n");
+        try batchApplyDisk(&f.fx, "valid.c", "int valid;\n");
+        try batchApplyDisk(&f.fx, "keep.c", "int keep;\n");
+        try testing.expectError(error.FileNotFound, f.fx.dir.dir.access(testing.io, "gone.c", .{}));
+        try testing.expectError(error.FileNotFound, f.fx.dir.dir.access(testing.io, "later.c", .{}));
+    };
+}
+test "LOCKIND1 published references retain their failure notice kind" {
+    try locationResultKindForTest(location_kind_cases_for_test[0]);
+}
+test "LOCKIND2 published implementations retain their failure notice kind" {
+    try locationResultKindForTest(location_kind_cases_for_test[1]);
+}
+test "LOCKIND3 published type definitions retain their failure notice kind" {
+    try locationResultKindForTest(location_kind_cases_for_test[2]);
+}
+test "LOCKIND4 published declarations retain their failure notice kind" {
+    try locationResultKindForTest(location_kind_cases_for_test[3]);
+}
+
 // Test document bytes for UTF-8/UTF-16 position decoding, not localized UI text.
 const location_save_source = "한😀target\nint x; // REFSTALL\n";
 const location_second_source = "한😀other\nint b; // REFSTALL\n";

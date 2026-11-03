@@ -35,6 +35,8 @@ pub const State = struct {
     retries: u8 = 0,
     /// Published result encoding. A newer request must not reinterpret these rows.
     enc: lsp.rpc.PositionEncoding = .utf16,
+    /// Failure notices belong to the published rows, not a newer pending query.
+    result_kind: lsp.rpc.LocationKind = .references,
     /// 판정자 관측.
     opened: u64 = 0,
     retried: u64 = 0,
@@ -236,6 +238,7 @@ pub fn onLocationsResponse(self: *AppSession, kind: lsp.rpc.LocationKind, seq: u
     // Encoding belongs to the copied locations, not the next outstanding request.
     // Publish it only after a result survives owner/overlay checks and builds.
     st.enc = enc;
+    st.result_kind = kind;
     if (rows.all.items.len == 1) {
         // **하나면 목록 없이 간다**(§8.2l) — 고를 것이 없다.
         goToRow(self, &rows.all.items[0]);
@@ -333,7 +336,7 @@ fn goToRow(self: *AppSession, row: *const reference_picker.Row) void {
         },
         error.Unopenable, error.NoDocument => {
             st.notified_none += 1;
-            self.showNoticeKey(noneKey(st.waiting_kind));
+            self.showNoticeKey(noneKey(st.result_kind));
         },
     }
 }

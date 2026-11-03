@@ -6752,6 +6752,16 @@ pub fn build(b: *std.Build) void {
         run_feature_stop.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_feature_stop.step);
     }
+    const location_kind_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LOCKIND"} });
+    const run_location_kind = b.addRunArtifact(location_kind_tests);
+    run_location_kind.setCwd(b.path("."));
+    run_location_kind.addArg("--maru-expect-tests=8");
+    run_location_kind.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-location-result-kind", "Verify shown location results retain their own search kind").dependOn(&run_location_kind.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_location_kind.addArg("--maru-expect-passed=8");
+        macos_only_test_step.dependOn(&run_location_kind.step);
+    }
     const location_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LOCSAVE"} });
     const run_location_save = b.addRunArtifact(location_save_tests);
     run_location_save.setCwd(b.path("."));

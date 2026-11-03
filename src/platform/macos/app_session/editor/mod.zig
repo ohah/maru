@@ -75682,6 +75682,148 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 // Prepare a genuinely installed list, then change focus without a render tick.
 // Keys can arrive in this interval, including with A still visible in a split.
 // Phases use real requests: 0=list wait, 1=resolved display, 2=prefetch, 3=pending Enter.
+// Retry clock seams below are explicit: these tests verify ordering, not elapsed time.
+fn locationRetryLifecycleForTest(index: usize) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_DECLCAP");
+    const chosen = location_kind_cases_for_test[index];
+    try testing.expectEqual(@as(u8, 8), references_client.max_retries);
+    try testing.expectEqual(@as(u64, 400), references_client.retry_ms);
+    for (0..6) |mode| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "source.c", "int source; // REFSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        f.term.rt.editor_selection = editor_selection.Selection.at(1);
+        const owner = lsp_client.readyClientFor(s, f.term).?;
+        try testing.expect(references_client.gotoLocationsAtCaret(s, chosen.kind));
+        const st = &s.editor_references;
+        const first_seq = st.waiting_seq;
+        const before_reply_ms = s.awakeMs();
+        references_client.onClientResponse(s, owner, chosen.kind, first_seq, null, true);
+        try testing.expect(!st.waiting and st.retry_at_ms != 0);
+        try testing.expect(st.retry_at_ms >= before_reply_ms + references_client.retry_ms);
+        try testing.expect(st.retry_at_ms <= s.awakeMs() + references_client.retry_ms);
+        try testing.expectEqual(@as(u8, 1), st.retries);
+        try testing.expectEqual(@as(u64, 0), st.notified_none);
+        const sent = s.editor_lsp.sent_references;
+        switch (mode) {
+            0, 1 => {
+                st.retry_at_ms = std.math.maxInt(u64);
+                references_client.tick(s);
+                try testing.expectEqual(sent, s.editor_lsp.sent_references);
+                try testing.expectEqual(@as(u64, 0), st.retried);
+                st.retry_at_ms = 1;
+                references_client.tick(s);
+                try testing.expect(st.waiting and st.retry_at_ms == 0);
+                try testing.expect(st.waiting_seq != first_seq);
+                try testing.expectEqual(sent + 1, s.editor_lsp.sent_references);
+                try testing.expectEqual(@as(u64, 1), st.retried);
+                if (mode == 1) {
+                    // A repeated tick and old duplicate reply cannot settle the new wait.
+                    references_client.tick(s);
+                    references_client.onClientResponse(s, owner, chosen.kind, first_seq, null, true);
+                    try testing.expect(st.waiting and st.retry_at_ms == 0);
+                    try testing.expectEqual(sent + 1, s.editor_lsp.sent_references);
+                    try testing.expectEqual(@as(u64, 1), st.retried);
+                }
+                const uri = try maru.session.editor.lsp.rpc.fileUri(testing.allocator, f.term.rt.editorDocument().path.?);
+                defer testing.allocator.free(uri);
+                const raw = try locationKindRawForTest(uri, true);
+                defer testing.allocator.free(raw);
+                var reply = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+                defer reply.deinit();
+                references_client.onClientResponse(s, owner, chosen.kind, st.waiting_seq, reply.value, false);
+                try testing.expect(s.chrome_host.reference_picker.open);
+                try testing.expectEqual(@as(usize, 2), s.reference_picker_rows.all.items.len);
+                try testing.expectEqual(chosen.kind, st.result_kind);
+                try testing.expect(!st.waiting and st.retry_at_ms == 0);
+            },
+            2 => {
+                // Walk every real retry; do not seed the counter directly at the limit.
+                for (0..references_client.max_retries) |_| {
+                    st.retry_at_ms = 1;
+                    references_client.tick(s);
+                    try testing.expect(st.waiting);
+                    references_client.onClientResponse(s, owner, chosen.kind, st.waiting_seq, null, true);
+                }
+                try testing.expectEqual(references_client.max_retries, st.retries);
+                try testing.expectEqual(@as(u64, references_client.max_retries), st.retried);
+                try testing.expectEqual(sent + references_client.max_retries, s.editor_lsp.sent_references);
+                try testing.expect(!st.waiting and st.retry_at_ms == 0);
+                try testing.expectEqual(@as(u64, 1), st.notified_none);
+                try testing.expectEqualStrings(maru.i18n.t(chosen.notice_key), s.chrome_host.notice.message);
+                references_client.tick(s);
+                try testing.expectEqual(sent + references_client.max_retries, s.editor_lsp.sent_references);
+            },
+            3 => {
+                st.retry_at_ms = 1;
+                references_client.tick(s);
+                references_client.onClientResponse(s, owner, chosen.kind, st.waiting_seq, null, false);
+                try testing.expect(!st.waiting and st.retry_at_ms == 0);
+                try testing.expectEqual(@as(u64, 1), st.notified_none);
+                try testing.expectEqualStrings(maru.i18n.t(chosen.notice_key), s.chrome_host.notice.message);
+                references_client.tick(s);
+                try testing.expectEqual(sent + 1, s.editor_lsp.sent_references);
+            },
+            4 => {
+                const next = location_kind_cases_for_test[(index + 1) % location_kind_cases_for_test.len];
+                try testing.expect(references_client.gotoLocationsAtCaret(s, next.kind));
+                try testing.expect(st.waiting and st.retry_at_ms == 0);
+                try testing.expectEqual(@as(u8, 0), st.retries);
+                references_client.onClientResponse(s, owner, chosen.kind, first_seq, null, true);
+                references_client.tick(s);
+                try testing.expect(st.waiting and st.retry_at_ms == 0);
+                try testing.expectEqual(next.kind, st.waiting_kind);
+                try testing.expectEqual(sent + 1, s.editor_lsp.sent_references);
+                references_client.onClientResponse(s, owner, next.kind, st.waiting_seq, null, false);
+                try testing.expect(!st.waiting and st.retry_at_ms == 0);
+                try testing.expectEqualStrings(maru.i18n.t(next.notice_key), s.chrome_host.notice.message);
+                try testing.expectEqual(@as(u64, 1), st.notified_none);
+            },
+            5 => {
+                // Opening B pumps real host ticks; hold the retry until activation completes.
+                st.retry_at_ms = std.math.maxInt(u64);
+                const second = try openSecondReadRootForTest(&f, "int other; // REFSTALL\n");
+                try testing.expect(term_ops.activateSurfaceById(s, second.surface.id));
+                const before = s.editor_lsp.sent_references;
+                const retried = st.retried;
+                st.retry_at_ms = 1;
+                references_client.tick(s);
+                try testing.expect(!st.waiting and st.retry_at_ms == 0);
+                try testing.expectEqual(before, s.editor_lsp.sent_references);
+                try testing.expectEqual(retried, st.retried);
+                try testing.expectEqual(@as(u64, 0), st.notified_none);
+                try testing.expectEqualStrings("int other; // REFSTALL\n", second.rt.editorDocument().opened.?.file.content);
+                try testing.expectEqual(@as(usize, 0), second.rt.editorDocument().history.undo_len);
+            },
+            else => unreachable,
+        }
+        try testing.expectEqual(@as(u64, 0), st.navigated);
+        try testing.expectEqualStrings("int source; // REFSTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), f.term.rt.editorDocument().history.undo_len);
+        try batchApplyDisk(&f.fx, "source.c", "int source; // REFSTALL\n");
+        if (mode <= 1 or mode == 5) try testing.expect(!s.chrome_host.notice.open);
+        if (mode >= 2) try testing.expect(!s.chrome_host.reference_picker.open);
+        std.debug.print("LOCRETRY case kind={s} mode={d} sent={d} retried={d} none={d} preserved=true\n", .{
+            @tagName(chosen.kind), mode, s.editor_lsp.sent_references, st.retried, st.notified_none,
+        });
+    }
+}
+test "LOCRETRY1 references retry deadline exhaustion and source lifetime" {
+    try locationRetryLifecycleForTest(0);
+}
+test "LOCRETRY2 implementations retry deadline exhaustion and source lifetime" {
+    try locationRetryLifecycleForTest(1);
+}
+test "LOCRETRY3 type definitions retry deadline exhaustion and source lifetime" {
+    try locationRetryLifecycleForTest(2);
+}
+test "LOCRETRY4 declarations retry deadline exhaustion and source lifetime" {
+    try locationRetryLifecycleForTest(3);
+}
+
 const LocationKindCaseForTest = struct { kind: maru.session.editor.lsp.rpc.LocationKind, notice_key: maru.i18n.Key };
 const location_kind_cases_for_test = [_]LocationKindCaseForTest{
     .{ .kind = .references, .notice_key = .ref_none },

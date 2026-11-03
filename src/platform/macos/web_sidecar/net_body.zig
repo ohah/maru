@@ -156,8 +156,14 @@ pub fn record(v: msg.NetRecord) void {
     }
     const ok = table.start(gpa, v.browser, v.session) catch false;
     // 재검증 6 차 D1: 이 세션의 시작 — 그 앞의 IO 시각의 기록은 적지 않고 그 앞에 시작한 워커 W 는 맞추기에 넣지 않는다(기록 전에 나간 fetch 가
-    // 기록 뒤 같은 주소 fetch 의 기록을 가져갔다).
-    if (ok) table.markStarted(v.browser, machUs());
+    // 기록 뒤 같은 주소 fetch 의 기록을 가져갔다). 재검증 7 차(E1): IO 스레드가 주소 해시를 내게(`any_recording`) **먼저** 켜고 그 뒤에 잰다 —
+    // 전에는 반대라 그 사이 IO 의 기록은 해시 없이 표에 들지 않는데 경계 뒤에 시작한 W 는 맞추기에 들어, 제 기록이 없는 W 가 같은 주소의 남의
+    // 기록을 가져갔다. 켜기 전에 해시 없이 읽고 경계 뒤에 상자에 든 기록(IO 스레드가 그 사이 밀렸다)의 W 는 시작 사건이 경계 앞이라 맞추기에
+    // 들지 않고, 시작을 잃은 W 는 짝을 맺지 않는다(`net_body_table.tryDecide`).
+    if (ok) {
+        refreshAny();
+        table.markStarted(v.browser, machUs());
+    }
     runActions();
     if (!ok or !register(entry)) {
         clearControl(v.browser);
@@ -601,6 +607,13 @@ fn swFlush(_: [*c]c.cef_task_t) callconv(.c) void {
     }
 }
 
+/// 재검증 7 차: 눈먼 때의 열쇠는 워커 타깃만(epoch 없이) — 붙은 뒤 enable 답 전에 `Inspector.targetReloadedAfterCrash` 로 epoch 가 오르면
+/// 옛 epoch 열쇠로 연 눈먼 때를 enable 답·떨어짐이 새 epoch 열쇠로 닫지 못해 영영 열려, 그 탭의 그 뒤 서비스 워커 본문이 모두 `w_blind` 였다
+/// (실측 `--review-body-v20fa` v20i-swlag-d100 — 앞 사례의 워커가 다시 붙자마자 다시 떴다가 떨어졌다, p2 0/20).
+fn blindKey(target: u64) u64 {
+    return sw_mod.targetKey(target, 0);
+}
+
 fn detachSession(browser: BrowserId, sid: []const u8) void {
     var pb: [160]u8 = undefined;
     const params = std.fmt.bufPrint(&pb, "{{\"sessionId\":\"{s}\"}}", .{sid}) catch return;
@@ -620,6 +633,8 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
     const sid = sid_v.string;
     if (!attached) {
         dbg("sw-detached b={d} sid={s}", .{ browser, sid });
+        // 재검증 7 차: 떨어진 세션의 눈먼 때를 닫는다(그 뒤의 W 는 아예 보이지 않는다 — 그 기록은 설명되지 않아 C3b′ 가 막는다).
+        if (sw.find(sid)) |x| table.workerEnabled(x.browser, blindKey(x.target), machUs());
         sw.detached(sid);
         return;
     }
@@ -638,15 +653,26 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
         };
     };
     // 기록하는 탭이고 걸어 둔 auto-attach 의 서비스 워커면 둔다 — 아니면(밸브로 멈춤·떼는 중·옛 세대·다른 꼴) 곧 뗀다(공격 2 A1).
-    const keep = sw_cdp and table.recording(browser) and std.mem.eql(u8, kind, "service_worker") and sw.attached(browser, sid, target_id) == .keep;
-    if (!keep) {
+    // 재검증 7 차(N13): 몫을 넘으면 세워 둔다(`.park` — enable 하지 않고 시한 뒤 뗀다; 곧 떼면 Chromium 이 같은 워커를 곧 다시 붙였다).
+    const now = machUs();
+    const a: sw_mod.Attach = if (sw_cdp and table.recording(browser) and std.mem.eql(u8, kind, "service_worker")) sw.attachedAt(browser, sid, target_id, now) else .detach;
+    if (a == .detach) {
         dbg("sw-attached b={d} sid={s} type={s} target={s} keep=false", .{ browser, sid, kind, target_id });
         return detachSession(browser, sid);
     }
+    if (a == .park) {
+        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=park", .{ browser, sid, kind, target_id });
+        return ensureForeignCheck();
+    }
     // 재검증 6 차 F13: 워커 스크립트 주소의 출처가 맨 위 출처가 아니면(다른 출처 iframe 의 워커·이동 중) 시한 뒤 뗀다(`foreignCheck`).
-    const own = sw.noteOrigin(sid, table_mod.originHash(url), table.topOriginOf(browser), machUs());
-    dbg("sw-attached b={d} sid={s} type={s} target={s} keep=true own={} url={s}", .{ browser, sid, kind, target_id, own, url[0..@min(url.len, 160)] });
-    if (!own) ensureForeignCheck();
+    // 재검증 7 차(N13): 남의 출처 세션은 탭마다 따로 묶은 몫(`max_foreign_per_tab`)까지만 — 넘으면 세워 둔다.
+    const origin = sw.noteOrigin(sid, table_mod.originHash(url), table.topOriginOf(browser), now);
+    dbg("sw-attached b={d} sid={s} type={s} target={s} keep=true own={} url={s}", .{ browser, sid, kind, target_id, origin == .own, url[0..@min(url.len, 160)] });
+    if (origin == .drop) return detachSession(browser, sid);
+    if (origin != .own) ensureForeignCheck();
+    if (origin == .park) return;
+    // 재검증 7 차: enable 답이 올 때까지(그리고 붙기 앞) 시작한 W 는 시작 사건 없이 보인다 — 눈먼 때를 연다.
+    if (sw.find(sid)) |x| table.workerAttached(gpa, browser, blindKey(x.target), now) catch {};
     const eid = sendSession(browser, sid, "Network.enable", "{\"maxTotalBufferSize\":0,\"maxResourceBufferSize\":0,\"maxPostDataSize\":1}");
     sw.noteEnable(sid, eid);
     // waitForDebuggerOnStart 는 거짓이라 기다리는 것이 없다 — CEF 가 바뀌어도 멈추지 않게 놓는다(해가 없다).
@@ -671,16 +697,24 @@ fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t
         // 맨 위 출처가 아닌 워커는 올리지 않는다 — 그 탭의 P(맨 위 출처 문서의 것 — C0)는 맨 위 출처의 워커만 답한다. 맨 위 출처의 것이 되면
         // 그때 올린다(`topOrigin`).
         if (ok and rid == s.enable_id and table.recording(id) and s.foreign_since == 0) table.link.raiseVisible(id, s.enabled_wall_us);
+        // 재검증 7 차: enable 답(성공·실패) — 그 세션의 눈먼 때를 닫는다(그 뒤에 시작한 W 는 시작 사건이 보인다).
+        if (rid == s.enable_id) table.workerEnabled(id, blindKey(s.target), machUs());
         dbg("sw-result b={d} sid={s} id={d} ok={}", .{ id, sid, rid, ok });
         return 1;
     }
     const method = sw_mod.eventMethod(m) orelse return 1;
-    if (std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash") or std.mem.eql(u8, method, "Inspector.targetCrashed")) sw.reloaded(sid);
+    if (std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash") or std.mem.eql(u8, method, "Inspector.targetCrashed")) {
+        sw.reloaded(sid);
+        // 재검증 7 차: 새 epoch 의 앞뒤를 눈먼 때로 — 다시 뜬 워커의 첫 요청이 시작 사건 없이 올 수 있다.
+        table.workerReloaded(gpa, id, blindKey(s.target), machUs()) catch {};
+    }
     if (debug_log) dbg("sw-ev b={d} sid={s} epoch={d} method={s} t={d} head={s}", .{ id, sid, s.epoch, method, machUs(), m[0..@min(m.len, 240)] });
-    // 쏟아짐 밸브는 워커 사건도 센다(공격 2 A9 — 같은 사건이 기록하는 탭마다 온다).
+    // 쏟아짐 밸브는 워커 사건도 센다(공격 2 A9 — 같은 사건이 기록하는 탭마다 온다). 재검증 7 차(N11): 남의 출처 세션(떼기를 기다린다 —
+    // 맞추기에 넣지 않는다)의 사건은 세지 않는다 — 다른 출처 iframe 의 워커가 쏟는 fetch 가 그 3 초 안에 밸브를 닫아 이 탭의 기록 전체를
+    // 멈췄다(실측 v20m r11-valve — 1.85 초에 paused, 그 뒤 본문 0/10).
     if (table.recording(id)) {
         const now = machUs();
-        table.cdpEvent(gpa, id, null, now) catch {};
+        if (s.foreign_since == 0) table.cdpEvent(gpa, id, null, now) catch {};
         // 재검증 5 차 S3: 쓰는 사건만 푼다(요청·응답·실패 — 받기·ExtraInfo 는 풀지 않는다).
         if (table.recording(id) and (std.mem.eql(u8, method, "Network.requestWillBeSent") or std.mem.eql(u8, method, "Network.responseReceived") or std.mem.eql(u8, method, "Network.loadingFailed"))) {
             workerEvent(id, s, method, m, now);
@@ -748,6 +782,7 @@ fn foreignCheck(_: [*c]c.cef_task_t) callconv(.c) void {
     const now = machUs();
     while (sw.takeForeign(now)) |x| {
         dbg("sw-foreign-detach b={d} sid={s} origin={x}", .{ x.browser, x.sidSlice(), x.origin });
+        if (x.target != 0) table.workerEnabled(x.browser, blindKey(x.target), now); // 재검증 7 차: 그 세션의 눈먼 때를 닫는다
         detachSession(x.browser, x.sidSlice());
     }
     ensureForeignCheck();

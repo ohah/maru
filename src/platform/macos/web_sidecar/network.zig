@@ -563,7 +563,12 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     // W9d②: 기록하는 탭이 있으면 맞추기 열쇠 — 온 주소(2 KiB 앞부분이 아니다 — 긴 주소의 앞이 같을 수 있다)의 해시와 IO 시각.
     if (net_body.any_recording.load(.acquire)) e.url_hash = body_table.hashUrl16(units(raw_url)); // IO 시각은 `enqueue` 가 찍는다
     const url = readUrl(raw_url, &ub, &uh);
-    if (url.text.len == 0) return c.RV_CONTINUE;
+    if (url.text.len == 0) {
+        // 재검증 7 차(E1 의 같은 뿌리): 싣지 못하는 주소 — 기록이 표에 들지 않는다. 기록하면 넘긴 것처럼 표지를 남긴다(제 기록이 없는 W·CDP 요청이
+        // 같은 주소의 남의 기록을 가져가지 않게).
+        if (e.url_hash != 0) markDropKind(e.targets[0..e.target_count], request, false);
+        return c.RV_CONTINUE;
+    }
     e.flags.url_truncated = url.truncated;
     var mb: [msg.max_net_method_bytes]u8 = undefined;
     var method = userfreeText(request.*.get_method.?(request), msg.max_net_method_bytes, &mb).text;
@@ -589,7 +594,10 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     e.header_count = hb.count;
     const initiator = initiator_buf[0..initiator_len];
     protocol.text.replaceControl(initiator_buf[0..initiator_len]);
-    const ev = makeEvent(e, .{ .host = url.host, .url_host = url.host, .url = url.text, .method = method, .initiator = initiator, .site = site, .headers = hb.block().bytes }) orelse return c.RV_CONTINUE;
+    const ev = makeEvent(e, .{ .host = url.host, .url_host = url.host, .url = url.text, .method = method, .initiator = initiator, .site = site, .headers = hb.block().bytes }) orelse {
+        if (e.url_hash != 0) markDropKind(e.targets[0..e.target_count], request, false); // 재검증 7 차: 위와 같다(할당 실패)
+        return c.RV_CONTINUE;
+    };
     enqueue(ev);
     return c.RV_CONTINUE;
 }
@@ -768,8 +776,12 @@ fn credentialHeaders(block: msg.NetHeaderBlock) bool {
 
 /// 기록 하나를 그 탭(대상 `index`)에 보낸다 — 적을 때 찍은 것과 지금의 지켜보기 중 더 덜어 내는 쪽으로(3 회차 P1c).
 fn send(e: *const Event, browser: BrowserId, index: usize) void {
-    const view = watchView(browser) orelse return; // 그사이 지켜보기가 꺼졌다
-    const bit: u8 = @as(u8, 1) << @intCast(index);
+    const view = watchView(browser) orelse {
+        // 그사이 지켜보기가 꺼졌다. 재검증 7 차: 그 탭이 아직 본문을 기록하면 이 시작은 표에 들지 않는다 — 표지를 남긴다.
+        if (e.kind == .begin and e.url_hash != 0 and net_body.recording(browser)) net_body.noteDropKind(browser, e.url_hash, e.t_io_us, false);
+        return;
+    };
+    const bit: u32 = @as(u32, 1) << @intCast(index);
     const d = view.decide(e.stamp.full & bit != 0, e.stamp.covered & bit != 0, e.host, e.site);
     var ub: [msg.max_net_url_bytes]u8 = undefined;
     var stripped: net_fields.HeaderBuilder = .{};
@@ -793,7 +805,11 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
                 flags.stripped = true;
                 flags.headers_truncated = flags.headers_truncated or stripped.truncated;
             }
-            if (url.len == 0) return;
+            if (url.len == 0) {
+                // 재검증 7 차(E1 의 같은 뿌리): 보내지 못하는 시작 — 기록하는 탭이면 그 기록은 표에 들지 않는다. 넘긴 것처럼 표지를 남긴다.
+                if (e.url_hash != 0 and net_body.recording(browser)) net_body.noteDropKind(browser, e.url_hash, e.t_io_us, false);
+                return;
+            }
             // W9d②: 기록하는 탭이면 본문 후보로 적는다 — 적었으면 이 요청의 본문 끝이 꼭 하나 온다(`body_expected`).
             var flags2: msg.NetFlags2 = .{};
             if (e.url_hash != 0 and net_body.recording(browser)) {

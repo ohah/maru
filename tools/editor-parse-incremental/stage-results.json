@@ -1,0 +1,161 @@
+{
+  "head": "0f462ab7f8169dcc4cbeeec6b8c988712a96c390",
+  "binary_sha256": "6818d29aa092f096a0b1d000544634672412819165fd5720b4f298b50cd4a593",
+  "processes": 32,
+  "edits": 640,
+  "independent_raw_stage_rows": 672,
+  "summary": {
+    "flat-3000.zig": {
+      "full": {
+        "edits": 60,
+        "median_ms": {
+          "total_ns": 9.167875,
+          "current_copy_ns": 0.067562,
+          "prior_copy_ns": 0.0244585,
+          "leaf_copy_ns": 0.0,
+          "change_ns": 0.131771,
+          "shift_ns": 0.000125,
+          "native_ns": 0.927687,
+          "refresh_ns": 0.000125,
+          "summary_ns": 0.010417,
+          "folds_ns": 4.5103125,
+          "brackets_ns": 3.420917,
+          "other_ns": 0.010397
+        },
+        "median_fold_share": 0.49469707921316286
+      },
+      "incremental": {
+        "edits": 60,
+        "median_ms": {
+          "total_ns": 5.7214585,
+          "current_copy_ns": 0.0606455,
+          "prior_copy_ns": 0.0238125,
+          "leaf_copy_ns": 0.011459,
+          "change_ns": 0.1320415,
+          "shift_ns": 0.008459,
+          "native_ns": 0.936979,
+          "refresh_ns": 0.0030835,
+          "summary_ns": 0.0095,
+          "folds_ns": 4.542229,
+          "brackets_ns": 8.35e-05,
+          "other_ns": 0.010957
+        },
+        "median_fold_share": 0.7915743971240667
+      }
+    },
+    "flat-50000.zig": {
+      "full": {
+        "edits": 60,
+        "median_ms": {
+          "total_ns": 173.0239585,
+          "current_copy_ns": 1.1572915,
+          "prior_copy_ns": 0.790916,
+          "leaf_copy_ns": 0.0,
+          "change_ns": 2.282334,
+          "shift_ns": 0.000125,
+          "native_ns": 32.7273955,
+          "refresh_ns": 0.00025,
+          "summary_ns": 0.020854,
+          "folds_ns": 75.521417,
+          "brackets_ns": 57.416125,
+          "other_ns": 0.132562
+        },
+        "median_fold_share": 0.4444189841195867
+      },
+      "incremental": {
+        "edits": 60,
+        "median_ms": {
+          "total_ns": 113.0120415,
+          "current_copy_ns": 1.141646,
+          "prior_copy_ns": 0.766271,
+          "leaf_copy_ns": 0.167208,
+          "change_ns": 2.2799585,
+          "shift_ns": 0.141,
+          "native_ns": 31.764229,
+          "refresh_ns": 0.0095835,
+          "summary_ns": 0.0165625,
+          "folds_ns": 76.1811875,
+          "brackets_ns": 0.00025,
+          "other_ns": 0.1362305
+        },
+        "median_fold_share": 0.6737447877969949
+      }
+    },
+    "multiline-3000.zig": {
+      "full": {
+        "edits": 60,
+        "median_ms": {
+          "total_ns": 9.174667,
+          "current_copy_ns": 0.07,
+          "prior_copy_ns": 0.029875,
+          "leaf_copy_ns": 0.0,
+          "change_ns": 0.150084,
+          "shift_ns": 8.3e-05,
+          "native_ns": 0.9061255,
+          "refresh_ns": 0.000125,
+          "summary_ns": 0.009729,
+          "folds_ns": 4.5531045,
+          "brackets_ns": 3.3768755,
+          "other_ns": 0.0106675
+        },
+        "median_fold_share": 0.49828150338559674
+      },
+      "incremental": {
+        "edits": 60,
+        "median_ms": {
+          "total_ns": 5.859875,
+          "current_copy_ns": 0.0687915,
+          "prior_copy_ns": 0.0295415,
+          "leaf_copy_ns": 0.0111665,
+          "change_ns": 0.150125,
+          "shift_ns": 0.0085,
+          "native_ns": 0.9327295,
+          "refresh_ns": 0.003166,
+          "summary_ns": 0.009083,
+          "folds_ns": 4.593125,
+          "brackets_ns": 6.25e-05,
+          "other_ns": 0.01127
+        },
+        "median_fold_share": 0.7897875288210194
+      }
+    },
+    "multiline-50000.zig": {
+      "full": {
+        "edits": 60,
+        "median_ms": {
+          "total_ns": 169.858166,
+          "current_copy_ns": 1.289271,
+          "prior_copy_ns": 0.877583,
+          "leaf_copy_ns": 0.0,
+          "change_ns": 2.567917,
+          "shift_ns": 0.000125,
+          "native_ns": 31.8717295,
+          "refresh_ns": 0.00025,
+          "summary_ns": 0.026521,
+          "folds_ns": 76.175875,
+          "brackets_ns": 57.8050625,
+          "other_ns": 0.1452715
+        },
+        "median_fold_share": 0.44311348079853463
+      },
+      "incremental": {
+        "edits": 60,
+        "median_ms": {
+          "total_ns": 116.497354,
+          "current_copy_ns": 1.2607295,
+          "prior_copy_ns": 0.8639795,
+          "leaf_copy_ns": 0.165229,
+          "change_ns": 2.588687,
+          "shift_ns": 0.141521,
+          "native_ns": 31.619042,
+          "refresh_ns": 0.01075,
+          "summary_ns": 0.0206875,
+          "folds_ns": 77.752479,
+          "brackets_ns": 0.000209,
+          "other_ns": 0.1481665
+        },
+        "median_fold_share": 0.6728192852952729
+      }
+    }
+  }
+}

@@ -1544,6 +1544,16 @@ pub const BracketIndex = struct {
 
     /// 다시 판 트리에 맞춘다 — **편집 직후**(`Provider.onEdit` 다음)에 부른다. `edited` 는 편집 뒤 좌표의 바뀐 글자 범위(`[start, new_end)`).
     pub fn refresh(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, edited: Provider.ByteRange) error{OutOfMemory}!void {
+        return self.refreshCancellable(allocator, prov, source, edited, NeverStop{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Cancelled => unreachable,
+        };
+    }
+
+    /// 워커의 부분 수집도 취소를 확인한다. 실패한 목록은 다시 공개하지 않는다.
+    pub fn refreshCancellable(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, edited: Provider.ByteRange, stop: anytype) error{ OutOfMemory, Cancelled }!void {
+        errdefer self.invalidate();
+        if (stop.isRequested()) return error.Cancelled;
         var buf: [Provider.max_changed]Provider.ByteRange = undefined;
         const changed = prov.takeChanged(&buf);
         if (self.walking) {
@@ -1567,7 +1577,7 @@ pub const BracketIndex = struct {
         }
         ranges[n] = edited;
         n += 1;
-        if (!try self.repair(allocator, prov, source, ranges[0..n])) {
+        if (!try self.repairWithStop(allocator, prov, source, ranges[0..n], stop)) {
             self.invalidate();
             return;
         }
@@ -1579,6 +1589,14 @@ pub const BracketIndex = struct {
 
     /// `ranges`(지금 트리 좌표 — 정렬 안 됐어도 된다)만 지금 트리에서 다시 훑어 목록을 고친다. 합이 상한을 넘으면 거짓(고치지 않았다).
     fn repair(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, ranges: []Provider.ByteRange) error{OutOfMemory}!bool {
+        return self.repairWithStop(allocator, prov, source, ranges, NeverStop{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Cancelled => unreachable,
+        };
+    }
+
+    fn repairWithStop(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, ranges: []Provider.ByteRange, stop: anytype) error{ OutOfMemory, Cancelled }!bool {
+        if (stop.isRequested()) return error.Cancelled;
         std.mem.sort(Provider.ByteRange, ranges, {}, struct {
             fn lt(_: void, a: Provider.ByteRange, b: Provider.ByteRange) bool {
                 return a.start < b.start;
@@ -1625,7 +1643,7 @@ pub const BracketIndex = struct {
             const r = ranges[k];
             fresh.clearRetainingCapacity();
             var cover: Provider.ByteRange = r;
-            try collectLeaves(allocator, root, source, prov.slot, r, &fresh, &cover);
+            try collectLeavesWithStop(allocator, root, source, prov.slot, r, &fresh, &cover, stop);
             const lo = lowerBound(self.leaves.items, cover.start);
             const hi = lowerBound(self.leaves.items, cover.end);
             try self.leaves.replaceRange(allocator, lo, hi - lo, fresh.items);
@@ -1750,6 +1768,13 @@ pub const BracketIndex = struct {
 
     /// `node` 아래에서 `r` 에 걸친 잎의 괄호를 문서 순서로 모은다. `cover` 는 걸친 잎들까지 넓힌 범위가 된다(잎이 범위 가장자리를 넘는다).
     fn collectLeaves(allocator: std.mem.Allocator, node: c.TSNode, source: []const u8, slot: Slot, r: Provider.ByteRange, out: *std.ArrayList(BracketLeaf), cover: *Provider.ByteRange) error{OutOfMemory}!void {
+        return collectLeavesWithStop(allocator, node, source, slot, r, out, cover, NeverStop{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Cancelled => unreachable,
+        };
+    }
+    fn collectLeavesWithStop(allocator: std.mem.Allocator, node: c.TSNode, source: []const u8, slot: Slot, r: Provider.ByteRange, out: *std.ArrayList(BracketLeaf), cover: *Provider.ByteRange, stop: anytype) error{ OutOfMemory, Cancelled }!void {
+        if (stop.isRequested()) return error.Cancelled;
         const s = c.ts_node_start_byte(node);
         const e = c.ts_node_end_byte(node);
         // 걸치는가 — 폭 0 인 편집 범위(지우기)는 그 자리를 품거나 맞닿은 노드를 본다.
@@ -1773,7 +1798,7 @@ pub const BracketIndex = struct {
             // `>` 와 `>=` 는 같다(적대적 2회차 N18: 등가) — 범위 끝에서 시작하는 잎은 빈 범위(지우기)에서만 걸치는데, 그 잎은 `shift` 가 이미 그대로
             // 두었다(맞닿은 잎은 버리지 않는다). 토큰이 합쳐지는 지우기는 트리 모양이 바뀌어 달라진 범위가 덮는다.
             if (c.ts_node_start_byte(child) > r.end) break;
-            try collectLeaves(allocator, child, source, slot, r, out, cover);
+            try collectLeavesWithStop(allocator, child, source, slot, r, out, cover, stop);
             if (!c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
         }
     }
@@ -6006,4 +6031,68 @@ test "bracket preparation 같은 세대의 다른 parser와 진행 중 옛 순�
     try current.prepareBracketIndex(a, &index, "const x = [2]u8{1, 2};\n", &token);
     try std.testing.expectEqualDeep(cold.leaves.items, index.leaves.items);
     try std.testing.expect(!index.walking and index.walk_alloc == null);
+}
+
+const IncrementalBracketStop = struct {
+    calls: *usize,
+    pub fn isRequested(self: @This()) bool {
+        self.calls.* += 1;
+        return self.calls.* >= 9;
+    }
+};
+const incremental_bracket_before = "fn f() void { _ = f(); }\n";
+const incremental_bracket_after = "fn f() void { _ = f([1], [2], [3], [4]); }\n";
+fn incrementalBracketEdit() Edit {
+    const start = std.mem.indexOf(u8, incremental_bracket_before, "f();").? + 2;
+    const end = start + incremental_bracket_after.len - incremental_bracket_before.len;
+    return .{ .start_byte = @intCast(start), .old_end_byte = @intCast(start), .new_end_byte = @intCast(end), .start_point = pointAt(incremental_bracket_before, start), .old_end_point = pointAt(incremental_bracket_before, start), .new_end_point = pointAt(incremental_bracket_after, end) };
+}
+
+test "bracket preparation 증분 수집 도중 취소는 부분 목록 공개를 막고 전체 수집으로 복구한다" {
+    const a = std.testing.allocator;
+    var p = Provider.init(incremental_bracket_before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var index = try fullIndexForTest(a, &p, incremental_bracket_before);
+    defer index.deinit(a);
+    const edit = incrementalBracketEdit();
+    index.shift(a, edit.start_byte, edit.old_end_byte, edit.new_end_byte);
+    var token: Cancellation = .{};
+    try std.testing.expectEqual(Provider.ParseStatus.done, p.onEditCancellable(incremental_bracket_after, edit, &token));
+    var calls: usize = 0;
+    try std.testing.expectError(error.Cancelled, index.refreshCancellable(a, &p, incremental_bracket_after, .{ .start = edit.start_byte, .end = edit.new_end_byte }, IncrementalBracketStop{ .calls = &calls }));
+    try std.testing.expect(calls >= 9);
+    try std.testing.expect(!index.ready and index.synced_parser == null);
+    try p.prepareBracketIndex(a, &index, incremental_bracket_after, &token);
+    var fresh = try fullIndexForTest(a, &p, incremental_bracket_after);
+    defer fresh.deinit(a);
+    try std.testing.expectEqualDeep(fresh.leaves.items, index.leaves.items);
+}
+
+fn incrementalBracketAllocationJudge(a: std.mem.Allocator) !void {
+    const stable = std.testing.allocator;
+    var original = Provider.init(incremental_bracket_before, .zig, 0) orelse return error.NoProvider;
+    defer original.deinit();
+    var old = try fullIndexForTest(stable, &original, incremental_bracket_before);
+    defer old.deinit(stable);
+    var p = original.copyReady(.zig) orelse return error.NoProvider;
+    defer p.deinit();
+    var index = (try old.copyMatched(a, original.parser, original.tree_gen, p.parser, p.tree_gen)).?;
+    defer index.deinit(a);
+    const edit = incrementalBracketEdit();
+    index.shift(a, edit.start_byte, edit.old_end_byte, edit.new_end_byte);
+    var token: Cancellation = .{};
+    try std.testing.expectEqual(Provider.ParseStatus.done, p.onEditCancellable(incremental_bracket_after, edit, &token));
+    index.refreshCancellable(a, &p, incremental_bracket_after, .{ .start = edit.start_byte, .end = edit.new_end_byte }, &token) catch |err| {
+        try std.testing.expect(!index.ready and index.synced_parser == null);
+        try std.testing.expect(old.ready and old.synced_parser == original.parser);
+        return err;
+    };
+    var fresh = try fullIndexForTest(stable, &p, incremental_bracket_after);
+    defer fresh.deinit(stable);
+    try std.testing.expectEqualDeep(fresh.leaves.items, index.leaves.items);
+    try std.testing.expectEqual(@as(u64, 1), index.partials);
+    try std.testing.expectEqual(@as(u64, 0), index.rebuilds);
+}
+test "bracket preparation 증분 복사와 부분 갱신의 모든 할당 실패는 원본과 회수를 보존한다" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, incrementalBracketAllocationJudge, .{});
 }

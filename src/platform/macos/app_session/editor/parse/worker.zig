@@ -32,11 +32,14 @@ const Basis = struct {
     tag: request.Request,
     snapshot: buffer.Snapshot,
     provider: ?syntax.Provider,
+    // 잎 복사는 워커 allocator에서 한다. 복사/취소가 끝나면 즉시 빌림을 반환한다.
+    bracket_source: ?*Job = null,
 };
 const Job = struct {
     next: ?*Job = null,
-    // 메인만 읽고 고친다. worker의 큐 이동 중에도 실제 Snapshot 반환까지 작업이 살아 있음을 보인다.
+    // 참조 수는 mutex로 보호한다. main 목록은 Snapshot을 반환할 때까지 메인만 관리한다.
     main_refs: usize = 0, // 메인 소비자가 반환할 때까지 native 퇴역을 막는다.
+    work_refs: usize = 0, // mutex 보호. 후속 워커의 불변 잎 복사 동안만 유지한다.
     main_prev: ?*Job = null,
     main_next: ?*Job = null,
     tag: request.Request,
@@ -73,6 +76,10 @@ const Job = struct {
             defer allocator.free(old_bytes);
             parsed = base.provider.?;
             base.provider = null;
+            if (base.bracket_source) |source| {
+                const original = &source.provider.?;
+                self.brackets = (source.brackets.copyMatched(allocator, original.parser, original.tree_gen, parsed.parser, parsed.tree_gen) catch null) orelse .{};
+            }
             if (std.mem.eql(u8, old_bytes, bytes)) {
                 self.mode = .reused;
                 complete = true;
@@ -87,7 +94,11 @@ const Job = struct {
                     .old_end_point = syntax.pointAt(old_bytes, span.end),
                     .new_end_point = syntax.pointAt(bytes, span.start + span.text.len),
                 };
+                self.brackets.shift(allocator, edit.start_byte, edit.old_end_byte, edit.new_end_byte);
                 complete = parsed.onEditCancellable(bytes, edit, &self.cancellation) == .done;
+                if (complete and !self.cancellation.isRequested()) {
+                    self.brackets.refreshCancellable(allocator, &parsed, bytes, .{ .start = edit.start_byte, .end = edit.new_end_byte }, &self.cancellation) catch self.brackets.invalidate();
+                }
             }
         } else {
             parsed = syntax.Provider.initCancellable(bytes, self.language, &self.cancellation) orelse {
@@ -172,6 +183,15 @@ const State = struct {
     fn io(self: *State) std.Io {
         return self.threaded.io();
     }
+    // execute/대기 취소 양쪽에서 반환한다. 다음 완료까지 붙들면 과거 작업이 사슬로 남는다.
+    fn releaseBasisLocked(self: *State, job: *Job) void {
+        if (job.basis) |*base| if (base.bracket_source) |source| {
+            base.bracket_source = null;
+            std.debug.assert(source.work_refs != 0);
+            source.work_refs -= 1;
+            if (source.work_refs == 0 and source.main_refs == 0) self.retiring.push(source);
+        };
+    }
     fn cancelLocked(self: *State, document: Identity) void {
         if (self.active) |job| if (std.meta.eql(job.tag.input.document, document)) {
             job.cancellation.request();
@@ -198,6 +218,7 @@ const State = struct {
         defer self.mutex.unlock(io_value);
         while (true) {
             if (self.retiring.pop()) |job| {
+                self.releaseBasisLocked(job);
                 self.mutex.unlock(io_value);
                 job.brackets.deinit(self.options.copy_allocator);
                 job.folds.deinit(self.options.copy_allocator);
@@ -223,6 +244,7 @@ const State = struct {
                 self.mutex.unlock(io_value);
                 job.execute(self);
                 self.mutex.lockUncancelable(io_value);
+                self.releaseBasisLocked(job);
                 self.active = null;
                 if (job.cancellation.isRequested()) job.outcome = .cancelled;
                 if (self.stopping) self.retiring.push(job) else self.completed.push(job);
@@ -298,7 +320,7 @@ pub const Completion = struct {
         std.debug.assert(self.job.main_refs != 0 and state.held != 0);
         state.held -= 1;
         self.job.main_refs -= 1;
-        if (self.job.main_refs == 0) state.retiring.push(self.job);
+        if (self.job.main_refs == 0 and self.job.work_refs == 0) state.retiring.push(self.job);
         state.changed.signal(io_value);
         state.mutex.unlock(io_value);
         self.* = undefined;
@@ -320,7 +342,8 @@ pub const Service = struct {
     pub fn submit(self: *Service, gate: *request.Gate, input: request.Input, snapshot: *buffer.Snapshot, language: syntax.Language) !request.Request {
         return self.submitImpl(gate, input, snapshot, language, null, if (builtin.is_test) null else {});
     }
-    /// 기준 Completion은 이 호출 동안만 빌린다. 서로 다른 native 핸들과 Snapshot 참조를 만든다.
+    /// 기준의 native 핸들과 Snapshot 참조는 독립 복사한다. 호출 뒤 caller는 즉시 반환해도 된다.
+    /// 같은 서비스의 불변 괄호 잎은 워커가 복사/취소를 끝낼 때까지 내부 참조로 보호한다.
     /// 기준이 없거나 문서/문법이 다르면 기존 cold parse 경로를 사용한다.
     pub fn submitFrom(self: *Service, gate: *request.Gate, input: request.Input, snapshot: *buffer.Snapshot, language: syntax.Language, base: *const Completion) !request.Request {
         return self.submitImpl(gate, input, snapshot, language, base, if (builtin.is_test) null else {});
@@ -358,6 +381,15 @@ pub const Service = struct {
                 if (previous.provider()) |original| if (original.copyReady(language)) |copy| {
                     self.state.recordNative(true);
                     job.basis = .{ .tag = previous.tag(), .snapshot = previous.job.snapshot.clone(), .provider = copy };
+                    // main 보유 결과를 빌리므로 여기서는 퇴역할 수 없다. 참조 증가는 큐 mutex로 보호한다.
+                    const source_state = self.state;
+                    const source_io = source_state.io();
+                    source_state.mutex.lockUncancelable(source_io);
+                    if (previous.state == self.state and previous.job.work_refs != std.math.maxInt(usize)) {
+                        previous.job.work_refs += 1;
+                        job.basis.?.bracket_source = previous.job;
+                    }
+                    source_state.mutex.unlock(source_io);
                 };
             }
         }

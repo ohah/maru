@@ -59,8 +59,13 @@ test "incremental service measurement" {
             var fresh = syntax.Provider.init(current, language, 0) orelse return error.NoProvider;
             defer fresh.deinit();
             nodes = syntax.testing.equal(fresh.tree.?, result.provider().?.tree.?) orelse return error.TreeMismatch;
+            var full: syntax.BracketIndex = .{};
+            defer full.deinit(a);
+            try std.testing.expect(try full.step(a, &fresh, current, 0));
+            try std.testing.expectEqualDeep(full.leaves.items, result.preparedBrackets().?.leaves.items);
         }
-        std.debug.print("PARSE_MEASURE index={d} mode={s} accuracy={d} submit_ns={d} complete_ns={d} nodes={d}\n", .{ index, @tagName(result.mode()), @intFromBool(accuracy), submitted - start, completed - start, nodes });
+        const brackets = result.preparedBrackets() orelse return error.MissingBrackets;
+        std.debug.print("PARSE_MEASURE index={d} mode={s} accuracy={d} submit_ns={d} complete_ns={d} nodes={d} bracket_rebuilds={d} bracket_partials={d} bracket_leaves={d}\n", .{ index, @tagName(result.mode()), @intFromBool(accuracy), submitted - start, completed - start, nodes, brackets.rebuilds, brackets.partials, brackets.leaves.items.len });
         prior.release();
         prior = result;
     }

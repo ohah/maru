@@ -7031,8 +7031,8 @@ pub fn build(b: *std.Build) void {
     b.step("test-editor-sticky-snapshot", "Verify independently owned copied sticky summaries").dependOn(&run_sticky_snapshot.step);
     const bracket_preparation_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"bracket preparation"} });
     const run_bracket_preparation = b.addRunArtifact(bracket_preparation_tests);
-    run_bracket_preparation.addArg("--maru-expect-tests=6");
-    run_bracket_preparation.addArg("--maru-expect-passed=6");
+    run_bracket_preparation.addArg("--maru-expect-tests=8");
+    run_bracket_preparation.addArg("--maru-expect-passed=8");
     test_step.dependOn(&run_bracket_preparation.step);
     b.step("test-editor-bracket-preparation", "Verify cancellable worker bracket preparation and independent leaves").dependOn(&run_bracket_preparation.step);
     const fold_preparation_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"fold preparation"} });
@@ -7436,8 +7436,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
         }), .filters = &.{"parse worker"} });
         const run_parse_worker = b.addRunArtifact(parse_worker_tests);
-        run_parse_worker.addArg("--maru-expect-tests=25");
-        run_parse_worker.addArg("--maru-expect-passed=25");
+        run_parse_worker.addArg("--maru-expect-tests=29");
+        run_parse_worker.addArg("--maru-expect-passed=29");
         b.step("test-editor-parse-worker", "Verify native parse queue ownership and cancellation").dependOn(&run_parse_worker.step);
         test_step.dependOn(&run_parse_worker.step);
         macos_only_test_step.dependOn(&run_parse_worker.step);

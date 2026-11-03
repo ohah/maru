@@ -93,7 +93,7 @@ macOS 로컬 shell 1개 surface
 - [비동기 파싱의 실제 입력 표시 지연](plans/editor-input-latency.md) — 외부 고정 주기 48프로세스·1,440입력에 이어 준비 뒤 6프로세스의 주소·스택을 조사했다. 비동기 메인에서 접힘·심볼 트리 순회가 반복 관측됐다. 준비 실패·훅 경로 복구 확인·환경 허용 목록을 별도 기록한다.
 - [비동기 완료의 심볼 요약 준비](plans/editor-async-sticky-preparation.md) — 실제 두 뷰의 첫 조회 재구축을 재현하고 워커 준비·취소·선택적 OOM 보존을 구현했다. Native 집중 검증 및 동일 바이너리 GUI 대조 48회/1,440입력을 완료했다. 접힘 캐시 소유권 변경은 포함하지 않는다.
 - [비동기 완료의 접힘 후보 준비](plans/editor-async-fold-preparation.md) — 실제 두 뷰의 접힘 재순회를 재현하고 byte 후보의 worker 준비·독립 복사·취소/OOM 복구를 검증한다. Debug/ReleaseFast·제품 회귀와 후보 없음/있음 두 fixture의 실제 대조 합계 96회/2,880입력을 완료했다.
-- [비동기 완료의 괄호 잎 준비](plans/editor-async-bracket-preparation.md) — 두 뷰의 초기 재수집을 재현하고 worker 준비·독립 잎 복사·취소/OOM 복구를 검증한다. Debug/ReleaseFast·채택 96프로세스/2,880입력의 구문/색 표시 대조를 완료했다. 생산자 지각의 미완료 묶음과 구문 표시 지연의 손익도 기록했다.
+- [비동기 완료의 괄호 잎 준비](plans/editor-async-bracket-preparation.md) — 두 뷰의 초기 재수집을 재현하고 worker 준비·독립 잎 복사·취소/OOM 복구를 검증한다. Debug/ReleaseFast·채택 96프로세스/2,880입력의 구문/색 표시 대조를 완료했다. 생산자 지각의 미완료 묶음과 구문 표시 지연의 손익도 기록했다. 후속은 워커의 이전 완료 잎 재사용·변경 범위 갱신과 내부 빌림 수명을 구현하며, 별도 32프로세스/640편집으로 전체 준비와 대조한다.
 - [캐시 경로의 원격 커밋 검증](plans/editor-scm-cache-path-test.md) — 정상 캐시 저장소를 허용하면서 실제 로컬 메시지 경로 유출을 거절한다.
 - [pane 프레임 준비 비용 귀속](plans/editor-pane-frame-attribution.md) — 편집과 프레임을 분리해 기하·표식·장식·고정 머리줄의 중첩 비용을 관측한다.
 - [구문 Provider 편집 비용 귀속](plans/editor-provider-edit-attribution.md) — 파싱·변경 범위·트리 이동과 실제 뷰별 호출 수를 분리해 다음 개선의 근거를 만든다.

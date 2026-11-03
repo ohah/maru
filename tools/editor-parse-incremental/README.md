@@ -1,9 +1,9 @@
 # 명시적 증분 파싱 인계
 
-`Service.submitFrom`은 caller가 보유한 `Completion`을 호출 동안만 빌린다. 문서 신원·문법 판·실제
+`Service.submitFrom`은 caller가 보유한 `Completion`으로 독립 파싱 기준을 만든다. 문서 신원·문법 판·실제
 언어가 같고 ready 트리가 있으면 메인에서 `Provider.copyReady`와 `Snapshot.clone`을 준비한다.
 성공 뒤 원본 Completion은 곧바로 반납해도 된다. native 복사 실패나 기준 불일치는 cold 경로를 쓴다.
-기존 `submit`의 cold 계약과 기존 제품 파싱 정책은 유지한다. UI·완료 wake에는 연결하지 않았다.
+기존 `submit`의 cold 계약을 유지한다. 이 도구의 직접 서비스 측정은 제품의 UI·완료 wake 검증과 구분한다.
 
 워커는 이전/새 원문을 각각 복사하고 `edit_ops.reloadChange`로 UTF-8 경계를 보존한 범위를 만든다.
 `syntax.pointAt`의 좌표는 LF 행·byte 열이며 CRLF 원문을 보존한다. 동일 본문은 복사 트리를 그대로
@@ -69,3 +69,25 @@ C 내부 malloc 실패 전수·race detector·실제 wake/IME·표시 설치·�
 최종 결과와 아티팩트 경로는 [실측 기록](results.md)을 따른다.
 
 완료 통지의 선택적 hook과 재무장 순서는 [추가 계약](../editor-parse-notify/README.md)을 따른다. 실제 OS dispatch는 후속이다.
+
+
+## 괄호 전체/증분 준비 비교
+
+`submitFrom`은 같은 서비스의 불변 괄호 잎을 내부 참조로 잠시 보유한다. caller는 호출 직후
+반환해도 되며, 워커는 독립 복사/실행 또는 취소 후 빌림을 반환한다. 배열 복사는 메인에서
+하지 않는다. 같은 본문은 재사용하고 나머지는 위치 보정과 변경 범위만 수집한다.
+
+```sh
+python3 -m unittest discover -s tools/editor-parse-incremental -p 'test_*.py'
+python3 tools/editor-parse-incremental/brackets.py --output /absolute/new/result \
+  --deps /absolute/existing/zig-pkg --cache /absolute/cache
+```
+
+외부 사본에만 기준 잎 재사용을 끄는 private 환경 분기를 넣는다. 같은 ReleaseFast 실행
+파일에서 두 경로 모두 증분 파싱·심볼/접힘 준비를 사용한다. 입력은 문서 중간 줄 앞에 공백
+20개를 한 개씩 삽입하며, 매번 이전 완료를 기다린다. 파싱 준비와 워커 완료 경과를 분리한다.
+3,000/50,000 함수의 한 줄/여러 줄 fixture마다 성능 각 3프로세스·정확성 각 1프로세스를
+교대 실행한다. 초기 빌드 교정 실행은 모집단에 넣지 않는다. 모든 결과의 전체/부분 수집
+계수와 입력 개수를 확인하고, 정확성 구간은 별도 전체 트리와 괄호 잎 배열을 대조한다.
+[채택 결과](bracket-results.md)를 따른다. 닫힌 루프의 서비스 경과이며 GUI 연타·Metal 표시·
+물리 HID·IME·CPU 시간·RSS 개선의 증거가 아니다.

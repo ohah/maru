@@ -1,0 +1,96 @@
+{
+  "complete": true,
+  "binary_sha256": "6a9cd6d24f0eb4a0df7208a6b21159271534b979a10cc5c2b5a8ae83202e1771",
+  "processes": 32,
+  "edits": 640,
+  "summary": {
+    "flat-3000.zig": {
+      "full": {
+        "submit_ns": {
+          "p50_ms": 0.020646,
+          "max_ms": 0.039917
+        },
+        "complete_ns": {
+          "p50_ms": 9.299459,
+          "max_ms": 10.40425
+        }
+      },
+      "incremental": {
+        "submit_ns": {
+          "p50_ms": 0.0189995,
+          "max_ms": 0.030375
+        },
+        "complete_ns": {
+          "p50_ms": 5.915854,
+          "max_ms": 6.581583
+        }
+      }
+    },
+    "flat-50000.zig": {
+      "full": {
+        "submit_ns": {
+          "p50_ms": 0.046271,
+          "max_ms": 0.18125
+        },
+        "complete_ns": {
+          "p50_ms": 172.9685,
+          "max_ms": 191.602208
+        }
+      },
+      "incremental": {
+        "submit_ns": {
+          "p50_ms": 0.046375,
+          "max_ms": 0.096083
+        },
+        "complete_ns": {
+          "p50_ms": 116.163979,
+          "max_ms": 130.819625
+        }
+      }
+    },
+    "multiline-3000.zig": {
+      "full": {
+        "submit_ns": {
+          "p50_ms": 0.0232295,
+          "max_ms": 0.03475
+        },
+        "complete_ns": {
+          "p50_ms": 9.5045625,
+          "max_ms": 10.775125
+        }
+      },
+      "incremental": {
+        "submit_ns": {
+          "p50_ms": 0.022479,
+          "max_ms": 0.039875
+        },
+        "complete_ns": {
+          "p50_ms": 6.152083,
+          "max_ms": 6.905792
+        }
+      }
+    },
+    "multiline-50000.zig": {
+      "full": {
+        "submit_ns": {
+          "p50_ms": 0.0472915,
+          "max_ms": 0.219333
+        },
+        "complete_ns": {
+          "p50_ms": 175.076521,
+          "max_ms": 197.592709
+        }
+      },
+      "incremental": {
+        "submit_ns": {
+          "p50_ms": 0.0519165,
+          "max_ms": 0.088167
+        },
+        "complete_ns": {
+          "p50_ms": 121.2310625,
+          "max_ms": 135.467209
+        }
+      }
+    }
+  }
+}

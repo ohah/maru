@@ -85,6 +85,12 @@ pub fn machUs() i64 {
 var debug_log = false;
 /// 판정자 진단(`MARU_WEB_TEST_SW_NOTES`) — 서비스 워커 잇기의 까닭 줄만(사건마다의 줄 없이 — 시각을 바꾸지 않게).
 var sw_note_log = false;
+/// 재검증 8 차(R-1) 판정자 전용(`MARU_WEB_TEST_SW_LOSE=<글>`): 응답 주소에 그 글이 든 워커 응답(`Network.responseReceived`)을 표에 주지 않는다 —
+/// 그 W 의 시작 사건이 HEAD 나 `Range` 를 실었으면 준다. 실측의 「워커 W 응답을 눈먼 때 밖에서도 잃는다」(7 실행 중 1)를 판정 `v20n-r1h` 가 판마다
+/// 내게 한다(GET W 를 잃고 τ 를 나눈 HEAD·Range W 만 보인다). 제품에서는 켜지 않는다.
+var test_lose: []const u8 = "";
+var test_lose_keep: [64]u64 = @splat(0);
+var test_lose_next: usize = 0;
 
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (!debug_log) return;
@@ -96,6 +102,7 @@ fn init() void {
     ready = true;
     debug_log = std.c.getenv("MARU_WEB_TEST_BODY_LOG") != null;
     sw_note_log = std.c.getenv("MARU_WEB_TEST_SW_NOTES") != null;
+    if (std.c.getenv("MARU_WEB_TEST_SW_LOSE")) |v| test_lose = std.mem.span(v);
     if (std.c.getenv("MARU_WEB_SW_CDP")) |v| sw_cdp = !std.mem.eql(u8, std.mem.span(v), "0");
     // 재검증 5 차 S3: 워커 세션을 붙이면 서비스 워커 갈래 기록의 쌍둥이는 워커 W 다. 본문을 잇는 것(S3b)은 `sw_link`.
     table.sw_twin_worker = sw_cdp;
@@ -217,9 +224,10 @@ pub fn cefRedirect(browser: BrowserId, request: u64, pending: bool) void {
 }
 
 /// CEF 응답 — 설정이 꺼졌을 때 응답 호스트가 덮이는가(`net_response` 헤더와 같은 결정).
-pub fn cefCovered(browser: BrowserId, request: u64, covered: bool) void {
-    dbg("cef-response b={d} req={d} covered={}", .{ browser, request, covered });
+pub fn cefCovered(browser: BrowserId, request: u64, covered: bool, status: u16) void {
+    dbg("cef-response b={d} req={d} covered={} status={d}", .{ browser, request, covered, status });
     table.cefCovered(browser, request, covered);
+    table.cefStatus(browser, request, status); // 재검증 8 차(R-1): 서비스 워커 갈래 기록에 P 를 이을 때 상태를 견준다
 }
 
 /// CEF 끝 — `ok` 는 CEF 가 성공으로 끝냈는가(W9d② 적대 리뷰 3 회차 P5: 취소·실패로 끝난 기록은 성공한 CDP 요청의 짝이 아니다), `received` 는
@@ -228,6 +236,15 @@ pub fn cefEnd(browser: BrowserId, request: u64, ok: bool, received: u64) void {
     dbg("cef-end b={d} req={d} ok={} received={d} t={d}", .{ browser, request, ok, received, machUs() });
     table.cefEndReceived(browser, request, machUs(), ok, received);
     ensureTick();
+}
+
+/// 재검증 8 차: `net_watch` 끔(`network.watch`) — 그 탭이 기록 중이면 그 때부터 서비스 워커 본문을 잇지 않는다(`Table.watchOff`). maru 는 기록을
+/// 먼저 끄고 지켜보기를 끄니 지금은 닿지 않는다(막아 둔다).
+pub fn watchOff(browser: BrowserId) void {
+    if (!ready) return;
+    if (!table.recording(browser)) return;
+    table.watchOff(browser, machUs());
+    dbg("watch-off-while-recording b={d}", .{browser});
 }
 
 /// 주 프레임에 새 문서가 시작됐다(`network.documentStarted` — UI 스레드). W9d② 20 회 검증 N1: 앞 문서와 함께 끊긴 요청은 CDP 끝이 오지 않는다 —
@@ -672,7 +689,8 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
     if (origin != .own) ensureForeignCheck();
     if (origin == .park) return;
     // 재검증 7 차: enable 답이 올 때까지(그리고 붙기 앞) 시작한 W 는 시작 사건 없이 보인다 — 눈먼 때를 연다.
-    if (sw.find(sid)) |x| table.workerAttached(gpa, browser, blindKey(x.target), now) catch {};
+    // 재검증 8 차: 맨 위 출처의 세션이면 그 눈먼 때 앞에 맺은 짝을 되돌린다(늦게 안 눈먼 때), 남의 출처 세션은 눈먼 때만.
+    if (sw.find(sid)) |x| (if (origin == .own) table.workerAttached(gpa, browser, blindKey(x.target), now) else table.workerAttachedForeign(gpa, browser, blindKey(x.target), now)) catch {};
     const eid = sendSession(browser, sid, "Network.enable", "{\"maxTotalBufferSize\":0,\"maxResourceBufferSize\":0,\"maxPostDataSize\":1}");
     sw.noteEnable(sid, eid);
     // waitForDebuggerOnStart 는 거짓이라 기다리는 것이 없다 — CEF 가 바뀌어도 멈추지 않게 놓는다(해가 없다).
@@ -732,6 +750,7 @@ fn workerEvent(id: BrowserId, s: *const sw_mod.Session, method: []const u8, m: [
     if (parsed.value != .object) return;
     const params = parsed.value.object.get("params") orelse return;
     const ev = table_mod.parseWorkerEvent(method, params) orelse return;
+    if (test_lose.len > 0 and testLose(ev, params, s)) return;
     if (debug_log) switch (ev) {
         .sent => |v| dbg("sw-wsent b={d} t={x} rid={s} url={x} ts={d} redirect={} excl={}", .{ id, s.target, v.rid, v.url_hash, v.ts_us, v.redirect, v.excluded }),
         .response => |v| {
@@ -751,6 +770,36 @@ fn workerEvent(id: BrowserId, s: *const sw_mod.Session, method: []const u8, m: [
     // 기록을 가져간다), 맨 위 출처의 것이 된 세션은 그 뒤에 시작한 W 만.
     const from: i64 = if (s.foreign_since != 0) std.math.maxInt(i64) else s.own_since;
     table.workerEventFrom(gpa, id, sw_mod.targetKey(s.target, s.epoch), ev, now, from) catch {};
+}
+
+/// 재검증 8 차(R-1) 판정자 전용(`test_lose`): 이 워커 사건을 표에 주지 않는가.
+fn testLose(ev: table_mod.WorkerEvent, params: std.json.Value, s: *const sw_mod.Session) bool {
+    const field = struct {
+        fn get(v: std.json.Value, a: []const u8, b: []const u8) []const u8 {
+            if (v != .object) return "";
+            const o = v.object.get(a) orelse return "";
+            if (o != .object) return "";
+            const x = o.object.get(b) orelse return "";
+            return if (x == .string) x.string else "";
+        }
+    };
+    switch (ev) {
+        .sent => |v| {
+            if (std.mem.indexOf(u8, field.get(params, "request", "url"), test_lose) == null) return false;
+            if (v.method_hash != table_mod.hashMethod("GET") or v.range_hash != 0) {
+                test_lose_keep[test_lose_next] = sw_mod.hashId(v.rid) ^ s.target;
+                test_lose_next = (test_lose_next + 1) % test_lose_keep.len;
+            }
+            return false;
+        },
+        .response => |v| {
+            if (std.mem.indexOf(u8, field.get(params, "response", "url"), test_lose) == null) return false;
+            if (std.mem.indexOfScalar(u64, &test_lose_keep, sw_mod.hashId(v.rid) ^ s.target) != null) return false;
+            std.debug.print("body: sw-lose t={x} rid={s} tau={d}\n", .{ s.target, v.rid, v.tau });
+            return true;
+        },
+        .failed => return false,
+    }
 }
 
 /// 재검증 5 차 S3b(C0): 맨 위 문서의 출처(`network.mainFrameAddress` — `scheme://host[:port]`).

@@ -45,8 +45,15 @@ pub const max_in_flight_per_tab: usize = 128;
 pub const max_sw_in_flight_per_origin: usize = 128;
 pub const max_sw_in_flight: usize = 4 * max_sw_in_flight_per_origin;
 /// 재검증 7 차(N14): 어느 지켜보는 탭도 그 출처를 보이지 않게 된(닫힘·끔·이동) 서비스 워커 요청은 몫에서 놓는다 — 요청 표의 자리는 끝날
-/// 때까지 쥔다(이만큼까지 — 넘치면 몫에 남긴다). 전에는 닫힌 탭의 워커가 쥔 fetch 가 끝날 때까지 전체 512 가 찬 채였다(v20m r14-cap512).
+/// 때까지 쥔다. 전에는 닫힌 탭의 워커가 쥔 fetch 가 끝날 때까지 전체 512 가 찬 채였다(v20m r14-cap512).
+/// 재검증 8 차(D-v20n-1): 놓는 것은 **언제나**다 — 7 차는 놓은 수가 이 값에 닿으면 더 놓지 않아, 한 탭이 끝나지 않는 fetch 를 쥔 워커 출처 여덟을
+/// 옮겨 다니면 떠난 출처의 요청이 몫에 남아 전체 512 를 채웠다(다른 탭의 서비스 워커 갈래 기록 0/20 — 실측 `v20n-r12-hop` 2/2). 상한은 요청 수가
+/// 아니라 요청 표의 자리로 잰다: 서비스 워커 갈래 요청(몫으로 세는 것 + 놓은 것)의 자리는 `max_sw_slots` 이고, 다 차면 새 요청을 위해 **가장
+/// 오래된 놓은 요청**의 자리를 비운다(`evictOrphan` — 그 요청의 뒤 기록은 보내지 않고, 시작을 보냈으면 본문 표에 잃은 것으로 알린다).
 pub const max_sw_orphans: usize = max_sw_in_flight;
+/// 재검증 8 차(D-v20n-1): 서비스 워커 갈래 요청이 쥘 수 있는 요청 표의 자리(몫으로 세는 것 + 놓은 것). 페이지 요청의 자리(`max_in_flight`)는 늘
+/// 남는다 — 놓은 요청이 아무리 쌓여도 페이지 요청을 막지 않는다.
+pub const max_sw_slots: usize = max_sw_in_flight + max_sw_orphans;
 /// IO → UI 넘김 상자의 상한 — 개수와 바이트. 넘치면 그 기록은 버리고 수를 센다.
 pub const max_queue_events: usize = 4096;
 pub const max_queue_bytes: usize = 8 * 1024 * 1024;
@@ -183,6 +190,8 @@ pub const Track = struct {
     /// 놓았다 — N14, `State.sw_orphans`).
     sw_origin: u64 = 0,
     sw_counted: bool = false,
+    /// 재검증 8 차(D-v20n-1): 서비스 워커 갈래 요청을 잡은 차례(`State.sw_seq` — 가장 오래된 놓은 요청을 고른다).
+    sw_seq: u64 = 0,
     /// `net_begin` 을 보냈다(`on_before_resource_load` — 그 전에 끝나면 아무것도 보내지 않는다).
     begun: bool = false,
     /// 문을 지날 때 받은 것(IO 스레드의 `get_resource_request_handler` 에만 있다) — begin 에 싣는다.
@@ -234,11 +243,14 @@ pub const State = struct {
     sw_path: Bucket = .{ .tokens = global_burst },
     /// 지켜보기를 켤 때마다 오른다(`Watch.generation`).
     next_generation: u32 = 0,
-    tracks: [max_in_flight + max_sw_in_flight + max_sw_orphans]Track = @splat(.{}),
+    tracks: [max_in_flight + max_sw_slots]Track = @splat(.{}),
     /// 페이지 요청(탭 몫)의 수 — 서비스 워커 갈래 요청은 `sw_in_flight`(몫으로 세는 것)·`sw_orphans`(몫에서 놓았지만 끝나지 않은 것 — N14).
     in_flight: usize = 0,
     sw_in_flight: usize = 0,
     sw_orphans: usize = 0,
+    /// 재검증 8 차(D-v20n-1): 서비스 워커 갈래 요청을 잡을 때마다 오른다(`Track.sw_seq`)와, 자리가 차서 비운 놓은 요청 수(진단·시험).
+    sw_seq: u64 = 0,
+    sw_evicted: u64 = 0,
     queue_events: usize = 0,
     queue_bytes: usize = 0,
     /// W9d②: 놓친 시작의 표지(본문 표가 그 창의 같은 주소 짝을 모호하게 친다 — `net_body_table.noteDrop`). 넘치면 그 탭을 `drop_marks_overflowed` 에.
@@ -317,7 +329,7 @@ pub const State = struct {
     }
 
     /// 재검증 7 차(N14): 어느 지켜보는 탭도 맨 위에 두지 않은 출처의 서비스 워커 요청을 몫(그 출처·전체)에서 놓는다 — 그 요청은 끝날 때까지
-    /// 표의 자리를 쥐지만(`sw_orphans`, `max_sw_orphans` 까지) 다른 출처의 몫을 막지 않는다. 그 출처를 다시 보이는 탭이 생겨도 되세지 않는다
+    /// 표의 자리를 쥐지만(`sw_orphans` — 자리가 차면 가장 오래된 것부터 비운다, 재검증 8 차) 다른 출처의 몫을 막지 않는다. 그 출처를 다시 보이는 탭이 생겨도 되세지 않는다
     /// (그 탭의 새 요청만 센다 — 늦게 끝나는 옛 요청이 128 을 넘겨 쥐는 일은 없다: 옛 것은 셀 수에 들지 않는다).
     pub fn releaseOrphans(self: *State) void {
         if (self.sw_in_flight == 0) return;
@@ -329,11 +341,27 @@ pub const State = struct {
         };
         for (&self.tracks) |*t| if (t.request != 0 and t.service_worker and t.sw_counted) {
             if (std.mem.indexOfScalar(u64, shown[0..n], t.sw_origin) != null) continue;
-            if (self.sw_orphans >= max_sw_orphans) return;
+            // 재검증 8 차(D-v20n-1): 언제나 놓는다 — 놓아도 쓰는 자리 수(몫 + 놓은 것)는 같다(`max_sw_slots`).
             t.sw_counted = false;
             self.sw_in_flight -|= 1;
             self.sw_orphans += 1;
         };
+    }
+
+    /// 재검증 8 차(D-v20n-1): 서비스 워커 갈래의 자리(`max_sw_slots`)가 찼다 — 가장 오래된 놓은 요청의 자리를 비운다(그 출처를 맨 위에 둔
+    /// 지켜보는 탭이 없는 요청이다). 그 요청의 뒤 기록(리다이렉트·응답·끝)은 보내지 않는다 — 시작을 보냈으면 붙인 탭마다 잃은 것으로 알린다
+    /// (`markLost` — 본문 표는 그 기록을 끝난 것·모르는 것으로 친다; 넘김 상자가 넘쳐 버린 끝과 같은 길). 놓은 요청이 없으면 거짓.
+    fn evictOrphan(self: *State) bool {
+        var oldest: ?*Track = null;
+        for (&self.tracks) |*t| if (t.request != 0 and t.service_worker and !t.sw_counted) {
+            if (oldest == null or t.sw_seq < oldest.?.sw_seq) oldest = t;
+        };
+        const t = oldest orelse return false;
+        if (t.begun) self.markLost(t.targetSlice(), t.request);
+        t.* = .{};
+        self.sw_orphans -|= 1;
+        self.sw_evicted +|= 1;
+        return true;
     }
 
     /// 재검증 7 차(N12): 그 출처의 서비스 워커 요청 중 몫으로 세는 수.
@@ -513,8 +541,11 @@ pub const State = struct {
     pub fn trackServiceWorker(self: *State, request: u64, first: *Watch, origin: u64) ?*Track {
         if (self.find(request)) |t| return t;
         if (self.swCapped(origin)) return null;
+        // 재검증 8 차(D-v20n-1): 서비스 워커 갈래의 자리가 찼으면 가장 오래된 놓은 요청을 비운다(몫으로 세는 것은 `swCapped` 가 512 로 묶는다).
+        if (self.sw_in_flight + self.sw_orphans >= max_sw_slots and !self.evictOrphan()) return null;
         for (&self.tracks) |*t| if (t.request == 0) {
-            t.* = .{ .request = request, .owner = first.browser, .owner_generation = first.generation, .service_worker = true, .sw_origin = origin, .sw_counted = true };
+            self.sw_seq += 1;
+            t.* = .{ .request = request, .owner = first.browser, .owner_generation = first.generation, .service_worker = true, .sw_origin = origin, .sw_counted = true, .sw_seq = self.sw_seq };
             self.sw_in_flight += 1;
             return t;
         };
@@ -1303,4 +1334,86 @@ test "재검증 7 차 기준 · 탐침 v20m P12(F14a): 서비스 워커 몫은 �
     std.debug.print("\n[탐침 v20m P12] after tab 1 (hog.test holds {d}, released {d}) moved to victim.test: victim SW request targets {d} (first {d}) → track {} cap {} · tab 2 dropped_sw_cap {d}\n", .{ s.swOriginCount(originKey("https://hog.test")), s.sw_orphans, v.targets, out[0], v.track != null, v.cap, s.watchByCef(12).?.dropped_sw_cap });
     // 바라는 것(F14a 의 뜻 — 「다른 출처 탭의 워커가 제 몫을 다 써도 이 출처의 요청은 닫히지 않는다」): victim 의 요청은 적힌다.
     try testing.expect(v.track != null);
+}
+
+// ── 재검증 8 차 기준: 재검증 7 차 검증 11–20 회차(v20n-B)의 탐침 — R12-a 는 고치기 전에 실패했다(D-v20n-1) ──
+
+test "재검증 8 차 기준 · v20n R12-a(D-v20n-1): 한 탭이 출처를 차례로 옮기며 각 출처의 워커에 끝나지 않는 요청을 쥐게 해도, 떠난 출처의 요청은 언제나 몫에서 놓인다 — 그 탭 혼자 전체 512 를 채워 다른 탭(다른 출처)의 서비스 워커 요청을 막지 못한다(7 차는 놓은 수 512 뒤로 놓지 않아 hop 7 에서 막혔다)" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(1, 11, true, true, false, &.{})); // 옮겨 다니는 탭
+    try testing.expect(s.setWatch(2, 12, true, true, false, &.{})); // 다른 출처의 기록 탭
+    s.setTopOrigin(2, "https://victim.test");
+    var out: [max_targets]BrowserId = undefined;
+    var now: i64 = 1_000_000;
+    var r: u64 = 1;
+    var origins: [12][32]u8 = undefined;
+    var hops: usize = 0;
+    var victim_ok_at: ?usize = null;
+    while (hops < origins.len) : (hops += 1) {
+        const o = try std.fmt.bufPrint(&origins[hops], "https://o{d}.test", .{hops});
+        s.setTopOrigin(1, o);
+        for (0..max_sw_in_flight_per_origin) |_| {
+            now += 20_000;
+            _ = s.startServiceWorker(o, r, now, &out);
+            r += 1;
+        }
+        now += 20_000;
+        const v = s.startServiceWorker("https://victim.test", r, now, &out);
+        r += 1;
+        if (v.track) |t| s.untrack(t) else if (victim_ok_at == null) victim_ok_at = hops;
+    }
+    std.debug.print("\n[v20n R12-a] one tab hopped {d} origins · counted {d} · orphans {d} · evicted {d} · victim first refused after hop {any}\n", .{ hops, s.sw_in_flight, s.sw_orphans, s.sw_evicted, victim_ok_at });
+    // 바라는 것(6 차 F14a 가 지키던 것 — 「다른 출처의 워커가 제 몫을 다 써도 이 출처의 요청은 닫히지 않는다」): 다른 탭의 요청은 끝까지 적힌다.
+    try testing.expect(victim_ok_at == null);
+    // 자리는 서비스 워커 갈래의 몫(`max_sw_slots`)을 넘지 않고, 넘칠 때 가장 오래된 놓은 요청부터 비웠다.
+    try testing.expect(s.sw_in_flight + s.sw_orphans <= max_sw_slots);
+    try testing.expect(s.sw_evicted > 0);
+    try testing.expect(s.find(1) == null); // o0 의 첫 요청 — 가장 오래되어 비웠다
+    try testing.expect(s.find(r - 2) != null); // 마지막 출처의 요청은 남는다
+}
+
+test "재검증 8 차(D-v20n-1): 놓은 요청이 서비스 워커 갈래의 자리를 다 채워도 페이지 요청의 자리는 남고, 비운 놓은 요청이 시작을 보냈으면 붙인 탭마다 잃은 것으로 알린다 — 몫으로 세는 요청은 비우지 않는다" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
+    try testing.expect(s.setWatch(2, 12, true, true, false, &.{}));
+    var out: [max_targets]BrowserId = undefined;
+    var now: i64 = 1_000_000;
+    var r: u64 = 1;
+    // 탭 1 이 출처 여덟을 옮기며 출처마다 128 — 놓은 요청이 1 024 자리를 모두 쥔다.
+    var ob: [8][32]u8 = undefined;
+    for (0..8) |h| {
+        const o = try std.fmt.bufPrint(&ob[h], "https://h{d}.test", .{h});
+        s.setTopOrigin(1, o);
+        for (0..max_sw_in_flight_per_origin) |_| {
+            now += 20_000;
+            const a = s.startServiceWorker(o, r, now, &out);
+            try testing.expect(a.track != null);
+            if (h == 0 and r == 1) a.track.?.begun = true; // 첫 요청만 시작을 보냈다
+            r += 1;
+        }
+    }
+    s.setTopOrigin(1, "https://elsewhere.test");
+    try testing.expectEqual(@as(usize, 0), s.sw_in_flight);
+    try testing.expectEqual(max_sw_slots, s.sw_orphans);
+    // 페이지 요청은 제 자리를 다 쓴다 — 놓은 요청이 쥔 자리와 무관하다(지켜보는 탭 넷 × 탭 몫 128 = 전체 512).
+    s.setTopOrigin(2, "https://victim.test");
+    try testing.expect(s.setWatch(3, 13, true, true, false, &.{}));
+    try testing.expect(s.setWatch(4, 14, true, true, false, &.{}));
+    for (0..max_in_flight) |k| try testing.expect(s.track(100_000 + k, s.watchOf(@intCast(1 + k % 4)).?) != null);
+    try testing.expectEqual(max_in_flight, s.in_flight);
+    // 다른 출처의 서비스 워커 요청은 가장 오래된 놓은 요청(r 1 — 시작을 보냈다)을 비우고 적힌다.
+    const v = s.startServiceWorker("https://victim.test", r, now + 20_000, &out);
+    try testing.expect(v.track != null);
+    try testing.expect(s.find(1) == null);
+    try testing.expectEqual(@as(u64, 1), s.sw_evicted);
+    var lm: [max_lost_marks]LostMark = undefined;
+    var over: [max_targets]BrowserId = undefined;
+    try testing.expectEqual(@as(usize, 1), s.takeLostMarks(&lm, &over));
+    try testing.expectEqual(LostMark{ .browser = 1, .request = 1 }, lm[0]);
+    // 시작을 보내지 않은 놓은 요청을 비우면 표지가 없다.
+    try testing.expect(s.startServiceWorker("https://victim.test", r + 1, now + 40_000, &out).track != null);
+    try testing.expectEqual(@as(usize, 0), s.takeLostMarks(&lm, &over));
+    try testing.expect(s.find(2) == null);
+    // 몫으로 세는 요청(victim 의 둘)은 비우지 않는다 — 놓은 요청이 없으면 자리가 차도 거절한다.
+    try testing.expect(s.find(r) != null and s.find(r + 1) != null);
 }

@@ -130,6 +130,8 @@ pub fn watch(v: msg.NetWatch) void {
     _ = state.setWatch(v.browser, entry.cef_id, v.on, v.full, v.any_host, hosts[0..v.host_count]);
     if (v.on) state.setTopOrigin(v.browser, origin);
     doUnlock();
+    // 재검증 8 차: 기록 중에 지켜보기만 꺼졌다 — 문이 그 탭에 기록을 붙이지 않으니 서비스 워커 본문은 그 때부터 잇지 않는다.
+    if (!v.on) net_body.watchOff(v.browser);
 }
 
 /// 브라우저가 닫혔다.
@@ -839,7 +841,7 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
             hop.url_truncated = false;
             if (!d.full) hop.stripped = true;
             // W9d②: 설정이 꺼졌을 때 응답 호스트가 덮이지 않으면 본문도 받지 않는다(헤더를 덜어 내는 것과 같은 결정).
-            net_body.cefCovered(browser, e.request, d.full or d.covered);
+            net_body.cefCovered(browser, e.request, d.full or d.covered, e.status);
             break :blk .{ .net_response = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .mime = e.mime, .headers = headers } };
         },
         .end => blk: {

@@ -3036,9 +3036,12 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
           (`rough`·`rough+clock` — 판의 1/4 이 W 응답을 잃고 fetch 의 1/12 이 다른 fetch 의 τ 를 µs 까지 베낀다)에 틀린 본문이 남았다 — 미루기 전
           14·16, 미룬 뒤 3·4(6 차 코드도 같은 30 000 판에서 4 — 그때 세계로). 남은 것은 모두 **제 기록이 이 표에 없는 fetch**(기록 전에 나간 fetch·
           빼는 꼴의 미리 받기)가 **W 응답을 잃고**(A2 깨짐) 그 P 의 τ 가 **보이는 다른 W 의 τ 와 µs 까지 같은** 꼴이다 — 기록이 없으니 설명·어둠이
-          서지 않고, τ 가 색인에 없으니 「독 τ」 로도 막지 못한다. 실제 CEF 에서 W 응답을 잃는 것은 워커 세션의 눈먼 때뿐이고(그때의 응답 τ 는
-          그 세션의 enable 답보다 앞이라 C3a 가 막는다), 서로 다른 두 네트워크 응답의 `responseTime` 이 µs 까지 같은 것도 드물어 고치지 않고
-          남는 틈으로 둔다. 어둠이 적은 네 세계는 30 000 판에서도 WRONG 0.
+          서지 않고, τ 가 색인에 없으니 「독 τ」 로도 막지 못한다. 7 차는 「실제 CEF 에서 W 응답을 잃는 것은 워커 세션의 눈먼 때뿐이고 µs 충돌도
+          드물다」 로 고치지 않았으나 둘 다 실측과 달랐다(재검증 8 차 LOW-1 — 검증자 v20n 2 회차): ① W 응답을 눈먼 때 밖에서도 잃었다(enable 답
+          약 1 초 뒤의 응답 둘 — 7 실행 중 1), ② µs τ 충돌은 드물지 않다 — 같은 주소의 캐시되는 fetch 가 겹치면 HTTP 캐시가 한 네트워크 응답을
+          나눠 τ 가 같고(39/39 판 — GET 끼리는 같은 바이트), 그 τ 를 HEAD(200·빈 본문)·Range(206)도 함께 나눈다(10/10 — 바이트가 다르다). 둘이
+          겹치면 응답을 잃은 GET W 의 P 가 τ 를 나눈 HEAD W 의 기록에 붙을 수 있었다(위험 R-1 — 8 차가 막았다, 아래 「재검증 8 차」). 어둠이 적은 네
+          세계는 30 000 판에서도 WRONG 0.
       - **E1 의 길 막기**: 문은 서비스 워커 갈래 요청을 그 출처를 맨 위에 둔 지켜보는 탭 **모두**에 붙인다(`max_targets` = 표의 자리 32, `Stamp` 는
         32 비트). `record()` 는 `any_recording` 을 켠 **뒤에** `markStarted` 한다(켜기 전에 해시 없이 읽고 경계 뒤 상자에 든 기록의 W 는 시작 사건이
         경계 앞이라 맞추기 밖이고, 시작을 잃은 W 는 짝을 맺지 않는다). 후보 상한(4 096 — 모두 짝을 지어 놓을 것이 없다)·싣지 못하는 주소·할당 실패·
@@ -3077,7 +3080,7 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         | `swcdp-body-k2` fetch 뒤 대체 + 페이지도 대체 주소 | 60 | 40 | 0 | 대체 fetch 와 페이지의 같은 주소가 겹친다 |
         | `swcdp-body-cache` · `hb` | 30 · 15 | 10 · 0 | 10 · 0 | |
         | `swcdp-body-k3` 다른 탭의 메모 A · B | 10 · 10 | 10 · 10 | 10 · 10 | |
-        | `swcdp-body-scopes` 두 범위 SW 가 같은 주소를 0–9 ms 차로 | 160 | 0 | 82–92 | 겹치지 않는 판(차 > 5 ms 남짓)은 잇는다 — 6 차의 C5(창 2 초)보다 좁다 |
+        | `swcdp-body-scopes` 두 범위 SW 가 같은 주소를 0–9 ms 차로 | 160 | 0 | 64–92(재검증 8 차 17 회차 — 실측 64·86, 처음 적은 82–92 보다 넓게 갈린다) | 겹치지 않는 판(차 > 5 ms 남짓)은 잇는다 — 6 차의 C5(창 2 초)보다 좁다; 몇 판이 겹치는지가 타이밍에 달린다 |
         | `swcdp-body-xtarget` 두 타깃 같은 때 300 판 | 600 | 0 | 0 | |
         | `v20l-pre` · `-tog` 기록 전 W1 + 켬 직후 같은 주소 W2(다섯 판) | 111 · 110 | 70 · 70 | 0 · 0 | 켬 직후는 눈먼 때(세션이 붙는 중)·W2 는 시작을 잃는다 |
         | `v20l-rng` HTTP 캐시 Range·적중·재검증 | 40 | 10 | 0 | 같은 주소 데우기·Range 가 이어 겹친다 |
@@ -3097,8 +3100,8 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         | `--network`·`--network-body` 의 `body-r4-sw-mixed` | 40 | 40 | 0 | 같은 주소 그대로 넘김 한꺼번에 |
         | `body-r5-sw-other-url` | 40 | 40 | 0 | 워커의 대체 fetch 와 페이지의 같은 주소 |
         | `body-r5-sw-http-cache` | 30 | 15 | 0 | 받자마자(5 ms 안) 같은 주소를 다시 — 판정 창이 겹친다 |
-        | `body-r5-sw-two-tabs` A · B | 180 · 180 | 120 · 60 | 0 · 3–5 | 두 탭이 같은 주소를 거의 같이 |
-        | `body-r5-sw-update` | 400 | 0 | 45–55 | 두 판 워커가 겹치지 않은 판은 잇는다(틀림 0) |
+        | `body-r5-sw-two-tabs` A · B | 180 · 180 | 120 · 60 | 0 · 26–29(재검증 8 차 17 회차 — 실측 28·26·29, 처음 적은 3–5 는 틀렸다) | 두 탭이 같은 주소를 거의 같이(B 의 뒤 판은 겹치지 않는다) |
+        | `body-r5-sw-update` | 400 | 0 | 40–55(재검증 8 차 17 회차 — 실측 40·46) | 두 판 워커가 겹치지 않은 판은 잇는다(틀림 0) |
         | `--review-body-v20fa` v20i `swlag` X·p1·p2(20 판씩) | 60 | 하한 30 이상 | 0 · 0 · 20 | X·p1 은 같은 주소를 워커가 한꺼번에 — p2 는 혼자라 잇는다 |
         | v20i `swsyn`(s2 는 워커가 스스로 답한다 — 기록 없음) | 40 | 하한 15 이상 | 0 | X·p1 겹침 |
         | v20j `swrev` S 400·600 / S 0 | 40 | 하한 30 이상 | 0 / 38 | 서버가 늦으면 같은 주소 둘이 겹친다 |
@@ -3135,14 +3138,21 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         시계 N19a·N19a2·N19b·N19c·N19d, 설명 미루기 D1–D10 10/10, CEF 변이 N11(밸브가 남의 세션 사건을 센다 — r11-valve FAIL) 1/1. 합 37 중 35.
         게이트 12(`fmt-check`·`check-task-split`·`check-doc-links`·`check-doc-line-refs`·`check-config-docs`·`check-mobile-contract`·
         `check-macos-app-host`·`macos-app-host-swift-check`·`check-boundaries`·`check-targets`·`check-wasm-sync`·`web-sidecar`) 모두 통과.
-      - **리베이스 주의(18 회차 — W9d③ `feat/web-osr-w9d3`·W9d④·W9e①·② 와 합칠 때)**: 넷 모두 이 갈래의 5 차·6 차·7 차를 품지 않는다(`git merge-tree`
+      - **리베이스 주의(18 회차 — W9d③ `feat/web-osr-w9d3`·W9d④·W9e①·② 와 합칠 때)**: 넷 모두 이 갈래의 5 차·6 차·7 차·8 차를 품지 않는다(`git merge-tree`
         로 본 충돌: W9d③ — `build/web_sidecar.zig`·`control-plane-browser.md`·이 계획·`devtools_table.zig`·`net_body.zig`·`wire.zig`; W9d④·W9e — 그에
-        더해 `cli/browser.zig`·`cli/mcp.zig`·`app_host_abi.zig`·`web_osr.zig`).
+        더해 `cli/browser.zig`·`cli/mcp.zig`·`app_host_abi.zig`·`web_osr.zig`, 그리고 재검증 8 차 18 회차가 다시 잰 다섯 — `net_gate.zig`·
+        `session/control_browser.zig`·`session/control_pane_grant.zig`·`session/web_osr_network.zig`·판정자 `tools/web_sidecar_judge/main.zig`(앞 목록에서
+        빠졌다). `net_gate.zig` 의 충돌 덩어리는 `Track` 의 필드다 — 이쪽 `site`/`site_len`(과 8 차의 `sw_seq`) ↔ 저쪽 `block_kind`·`block_rules:
+        [max_targets]u32`·`mock_*`: **둘 다 남긴다**(저쪽 칸은 `max_targets` 32 로 항목마다 커질 뿐 — 8 칸을 가정한 비트는 저쪽 코드에 없었다). 8 차의
+        `max_sw_slots`·`evictOrphan`·`releaseOrphans`(언제나 놓는다)는 그 파일 안의 자동 병합이다).
         - **`devtools_table.forbiddenMethod`**: W9e①·② 와의 충돌 덩어리는 `Target.` 줄 하나와 `return` 뿐이다. **W9e 쪽(목록 + `Fetch.`·`Emulation.`)을
           고르면 `Target.*` 막기가 소리 없이 사라지고 컴파일은 된다** — `targetParamsAllowed` 는 남지만 `getTargets`·`attachToTarget`·`setAutoAttach` 가
           다시 열린다. 두 쪽의 막는 접두를 **모두** 남기고, 6 차 F11 시험(`Target.*` 는 인자 없는 `getTargetInfo` 만)과 W9e 시험을 **모두** 남긴다(한쪽만
           고르면 시험이 잡지 못한다). W9d③ 쪽을 고르면 `target_info_method`·`targetParamsAllowed`·`target_params_max` 정의가 사라져 컴파일이 깨진다
-          (잡힌다 — 그래도 W9d③ 의 막기는 인자를 보지 않으니 6 차 쪽 몸을 남긴다).
+          (잡힌다). 몸은 **두 쪽의 합집합**이다(재검증 8 차 18 회차 — 앞 판은 「6 차 쪽 몸을 남긴다」 였다): 6 차의 `Target.*`(인자 없는 `getTargetInfo`
+          만)와 W9d③ 의 `continueInterceptedRequest`·`loadNetworkResource`·`Browser.executeBrowserCommand` 막기(W9d③ 은 제 `Target.*` 막기도 가진다 —
+          인자를 보지 않는 그것 대신 6 차의 것)를 모두 남긴다 — 6 차 쪽 몸만 남기면 W9d③ 의 셋을 잃는다. W9e② 의 막기 목록은 W9d③ 최신보다 짧다(넷을
+          합칠 때 같은 줄에 모인다 — 가장 긴 목록에 6 차 `Target.*` 를 더한다).
         - **`net_body.browserClosed`**: 충돌이 바로 그 줄이다 — 이 갈래의 `table.forgetTop(browser);` ↔ W9d③ 의 `blocking.recordingGone(cef_id);`.
           **둘 다 남기고** 그 뒤의 `sw.forget(browser)`(자동 병합)도 남아야 한다. `forgetTop` 을 잃으면 `tops` 32 자리가 새어 32 번 닫은 뒤
           `topOriginOf` 가 0 → 모든 워커 세션이 남의 것 → 모든 서비스 워커 본문을 잃는다(지금 그것을 보는 판정은 없다 — 합친 뒤 33 탭을 기록 중
@@ -3152,3 +3162,83 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
           내기 비트(`u32`)도 같다. `net_body_sw.Origin`·`Attach.park` 를 다른 갈래의 `onTarget` 이 모르면 세워 둔 세션을 enable 하는 길이 생기지 않게
           `switch` 를 빠짐없이 한다.
         - 공통: 리베이스 뒤 `zig build test-web-sidecar`(시험 수 원장 `pure_test_count` — 두 쪽의 시험을 모두 더한다)와 게이트 12 를 다시 돈다.
+    - **재검증 8 차(7 차 고침 `34df5f03c` 의 재검증 1–20 회차 — 검증자 v20n, 2026-11-03)**: 결함 하나(D-v20n-1)와 위험 하나(R-1), 가정·시험·글의
+      LOW 들을 찾았다. 「틀린 본문 0 이 잃는 본문보다 앞선다」 에 따라 구조적으로 보수적인 규칙을 골랐다. 검증 기록은 `scratchpad/w9d2_v20n/ROUNDS_{1-10,11-20}.md`,
+      고침의 실행 기록은 `scratchpad/w9d2_v8/`.
+      - **R-1(위험 → 고침 — 틀린 본문)**: 실측 둘 — ① 워커 W 의 응답을 눈먼 때 밖에서도 잃는다(7 실행 중 1), ② 같은 µs τ 를 GET(200)·HEAD(200, 빈 본문)·
+        Range(206)가 함께 나눈다(HTTP 캐시의 한 쓰기 — 10/10) — 가 겹치면 응답을 잃은 GET W 의 P 가 τ 를 나눈 HEAD W 의 짝(HEAD 기록)을 「τ 가 꼭 하나」 로
+        가리켜 HEAD 기록에 GET 본문이 붙을 수 있었다. 실제 CEF 에서 낸다: 판정 `v20n-r1h`(앞 fetch 를 같이 쓰는 페이지 GET + 그 때 같은 주소의
+        HEAD·Range — W1 의 응답은 host 가 버린다, `MARU_WEB_TEST_SW_LOSE`)에서 머리 비교만 되돌린 8 차 빌드는 **HEAD 판 5/5 WRONG**(Range 판은 상태가 달라
+        C6 이 막았다). 고침:
+        - **머리**(`net_body_sw.Sig` — 메서드 해시·`Range` 머리 값의 해시): W 는 시작 사건에서(`Link.noteSent` — 응답 때 `ws` 로 옮긴다, 탭 사이 사본이
+          다르면·시작을 잃었으면 모른다), P 는 `requestWillBeSent` 에서 읽는다. `Link.decide` 는 τ 가 꼭 하나인 W 도 **머리가 P 와 같을 때만** 잇고(다르면
+          `sig` — 그 W 의 기록은 끝내지 않는다, 그 W 의 제 P 가 잇는다), **부분 응답(206)은 잇지 않는다**(`partial` — 바이트가 `Range` 에 달렸고 `Range`
+          는 CDP 머리 밖에서도 붙을 수 있다), **같은 τ 를 머리·상태가 다른 W 가 함께 쓰면**(디스크 적중 포함) 그 τ 는 독 τ(`mixed` — 영영).
+        - **기록 쪽 상태**: CEF 응답의 상태(`Candidate.cef_status` — `network.zig` 가 `net_response` 때 준다)가 P 의 상태와 다르면 잇지 않는다(C6 을 기록
+          쪽에도 — 짝을 맺은 W 와 머리가 같아도 그 W 가 같은 열쇠의 206 기록을 가져갔을 수 있다).
+        - 「µs τ 가 같으면 본문이 같다」 에 기대던 다른 자리: C7′ 의 「이미 이었다(같은 바이트)」 는 둘째 P 를 잇지 않을 뿐이라 그대로, C1(`http-cache`·
+          `cache-storage`)·C3a 의 「가리킨 기록을 `ambiguous` 로」 는 본문을 붙이지 않아 그대로다. 남는 가정은 「머리·상태가 같고 τ 가 µs 까지 같은 두
+          네트워크 응답은 HTTP 캐시가 나눈 한 응답이다」 — 서로 다른 두 응답의 참 µs 충돌은 실측에서 보지 못했다(남는 틈 ①).
+        - **판정자**: `--review-body-swcdp` 의 참값을 기록의 메서드·상태로 가른다(`expectedBody` — HEAD·204·304 는 빈 본문, 206 은 `Content-Range` 의 조각,
+          본문이 있어야 할 기록이 `no_body` 면 틀림). 전에는 HEAD 기록의 `X-Body` 가 GET 과 같은 셈이라 GET 본문이 붙어도 「제 본문」 으로 셌다(위 5/5 가
+          그 꼴 — 판정자를 고치기 전에는 보이지 않았다).
+      - **D-v20n-1(MED — 잃는 본문)**: N14 의 「떠난 출처의 요청은 몫에서 놓는다」 가 놓은 수 512(`max_sw_orphans`) 뒤로 멈춰, 한 탭이 끝나지 않는 fetch 를
+        쥔 워커 출처 여덟을 옮겨 다니면 떠난 출처의 요청이 몫에 남아 전체 512 를 채웠다 — 다른 탭의 서비스 워커 갈래 기록 0/20(`v20n-r12-hop` 2/2). 고침:
+        떠난 출처의 요청은 **언제나** 놓고(놓아도 쓰는 자리 수는 같다), 상한은 요청 표의 자리로 잰다 — 서비스 워커 갈래 요청(셈 + 놓은 것)의 자리
+        `max_sw_slots` 1 024 가 차면 **가장 오래된 놓은 요청**의 자리를 비운다(`evictOrphan` — 그 요청의 뒤 기록(응답·끝)은 보내지 않고, 시작을 보냈으면 붙인
+        탭마다 `markLost` — 본문 표는 그 기록을 끝난 것·모르는 것으로 친다; maru 의 목록에는 그 요청의 끝이 오지 않는다 — 넘김 상자가 넘친 끝과 같은 꼴).
+        페이지 요청의 자리 512 는 늘 남는다. 판정 `v20n-r12-hop`·순수 R12-a 를 기준으로 들였다.
+      - **늦게 안 눈먼 때(퍼즈 30 000 판이 찾았다 — 고침)**: 새 τ 나누기 세계(아래)의 씨앗 10293 — 새로 뜬 워커(타깃 2)의 W 가 붙은 알림보다 먼저
+        시작하고 응답도 잃어 끝내 보이지 않았는데, 그 알림이 닿기 **전에** 같은 주소의 보이는 W(제 기록이 표에 없다 — 알지 못하는 길)가 판정해 그
+        기록과 짝을 맺었다. 눈먼 때는 알림 때 앞 1 초로 열리지만 이미 끝난 판정은 그것을 보지 못했다. 이제 눈먼 때를 열 때(`openBlind`) 그 때(앞
+        50 ms 여유)에 IO 를 찍은 기록 가운데 짝을 맺고 P 를 아직 잇지 않은 것을 본문 없이 끝낸다. 이미 이은 것은 되돌릴 수 없다(남는 틈 ②). 되돌리는 것은 맨 위 출처의 세션이 붙을 때뿐이다 — 남의 출처 세션(다른 출처 iframe 의 워커)의 W 기록은 문이 이 탭에
+        붙이지 않는다(문과 표의 맨 위 출처는 같은 `mainFrameAddress` 에서 바뀐다); 처음 판은 그 붙음에도 되돌려 `v20l-pre` 의 한 판 대조 8 을 잃었다(실측).
+      - **19 회차(값)**: `resolveDefer` 가 워커 사건마다 미룬 기록 × W 자리를 훑던 것을 (주소, 메서드) 마다 열린 자리의 표(`Tab.open_keys` — 8 개까지 적고
+        넘치면 그 열쇠는 모두 열린 것으로 — 잃는 쪽)와, 자리가 바뀌지 않았고 시한 전이면 곧 돌아가는 수(`span_epoch`)로 바꿨다. 미룬 기록은 탭마다
+        1 024(`max_wdefer`) — 넘으면 미루지 않아 어둠(fail-safe). Debug 값: R19-b(미룬 1 000·자리 8 051) 사건 하나 56 µs(7 차 147 µs — 그 판은 열린 자리가
+        목록 앞에 있어 짧았다), 7 차의 나쁜 차례 R19-c(열린 자리가 목록 끝) 사건 60 µs·자리를 닫는 응답 560 µs(7 차 코드는 34 387 µs).
+      - **LOW**: LOW-1(7 차 「퍼즈」 의 남는 틈 근거를 실측으로 — 위 7 차 절을 고쳤다), LOW-2(순수 R4-a·R4-b — 변이 C6·C13 을 잡는다), LOW-3(퍼즈의
+        τ 베끼기를 실측 꼴로 — `share`: 같은 주소의 앞 fetch 가 머리를 받기 전이면 그 쓰기를 함께 받는다(GET 은 같은 바이트, HEAD 빈 본문, Range 206),
+        다른 타깃의 시작 사건을 늦춘다; 새 세계 `gentle+blind+share+lose` — W 응답 1/20 을 잃는다. 옛 「아무 fetch 의 τ 를 다른 본문으로」 는
+        `SW_FUZZ_LEGACY=1` 일 때만), LOW-4·20 회차(`--review-body-v20fa` 의 서비스 워커 사례 모두에 서비스 워커 갈래 기록 수의 아래 끝과 겹치지 않는 대조
+        fetch 여덟의 제 본문 ≥ 6 — `MARU_WEB_SW_CDP=0` 에서 서비스 워커 사례 20 개가 모두 실패한다 — 대조 제 본문 0/8, 켠 빌드는 66/66), 7 회차(`v20l-tabs` 는 탭마다 제 대조만 — `actl`·`bctl`), 16 회차(MCP 글에 「다른
+        워커의 눈먼 때」·「응답 뒤 5 ms 안의 같은 주소」·머리), 17 회차(잃는 본문 표의 셋을 실측으로 — 위 표), 18 회차(리베이스 주의의 충돌 파일 다섯·
+        `forbiddenMethod` 는 합집합 — 위). 지켜보기가 기록 중에 꺼지면(`net_watch` 끔 — 지금 maru 로는 닿지 않는다) 그 때부터 어둠(`Table.watchOff`).
+      - **퍼즈(30 000 판, ReleaseSafe)**: 거친 세계의 틀린 본문 — 7 차 코드 rough 3·rough+clock 4(옛 세계 — 다시 쟀다), 8 차 코드는 옛 세계(`SW_FUZZ_LEGACY=1`)
+        0·0(남던 꼴은 모두 시작을 잃은 W(머리를 모른다)가 τ 를 함께 써 `mixed` 로 막힌다), 실측 꼴 세계 0·0. 새 세계 `gentle+blind+share+lose` 는 머리
+        비교를 되돌린 변이에서 3 000 판 WRONG 2, 늦게 안 눈먼 때를 고치기 전 30 000 판 WRONG 1(씨앗 10293), 고친 뒤 0. 나머지 넷 0. 늦게 안 눈먼 때의
+        고침은 눈먼 때 세계 둘의 이은 수를 42 341 → 39 674·46 151 → 43 346 줄였다(잃는 쪽).
+      - **잃는 본문(7 차 → 8 차)**: 서비스 워커 갈래 기록의 제 본문(7 차 실측은 검증자 v20n 의 기준 실행 `scratchpad/w9d2_v20n/logs_b/base_*.log`·
+        `logs/reg_*.log`, 8 차는 최종 빌드 `scratchpad/w9d2_v8/logs/reg_*.log` — 판정 줄의 수, 대조 포함):
+
+        | 판정 사례 | 7 차 | 8 차 | 까닭(8 차) |
+        |---|---|---|---|
+        | `v20n-r1`(열쇠 가장자리 — 탐침) | 188 | 173 | 워커 GET 으로 답한 페이지 HEAD 15 — 머리가 달라 잇지 않는다(본문은 맞았다) |
+        | `v20n-r12-hop` 다른 탭 B(D-v20n-1) | 0/20 | 20/20 | 떠난 출처의 요청을 언제나 놓는다 |
+        | `body-r5-sw-update`(`--network-body` · `--network`) | 40 · 62 | 12 · 18 | 새 판 워커가 기록 중 붙을 때 그 앞 1 초의 P 를 기다리던 짝을 되돌린다(늦게 안 눈먼 때) |
+        | `body-r5-sw-two-tabs` B | 28 · 0 | 0 · 29 | 그대로(두 갈래 — 0 이거나 26–29, 판마다 겹침이 갈린다) |
+        | `swcdp-body-*`·`v20l-*`·`v20m-*`·`--review-body-v20fa` 서비스 워커 사례 | — | 같다 | `swcdp-body-scopes` 72·80 → 82·76(타이밍) 말고는 같은 수 |
+        | 퍼즈 눈먼 때 세계 둘의 이은 수(30 000 판) | 42 341 · 46 151 | 39 674 · 43 346 | 늦게 안 눈먼 때 |
+
+        늘어난 잃음은 「틀린 본문 0 이 앞선다」 의 결정 안이다(사용자 결정 — 7 차).
+      - **판정·시험(재검증 8 차 최종 빌드)**: 순수 `zig build test-web-sidecar` **319/319**(시험 수 원장 319 — net_gate 23·net_body_table 208·net_body_sw 18;
+        7 차 300 + 검증자 탐침 6(R4-a·R4-b·R6-a·R12-a·R19-a·R19-b) + 8 차 13), CLI `test-cli-failure-contract` 832 통과·1 skip(7 차와 같다), 퍼즈 30 000 판
+        일곱 세계 WRONG 0(위). 실제 CEF(최종 빌드, 1 분 부하 2–28): 고친 갈래 2 판씩 — `--review-body-swcdp` 의 `v20n-*` 여덟(`v20n-r1h` 포함) 8/8·8/8,
+        `v20n-r12-hop` 1/1·1/1(B 20/20 제 본문 20); 회귀 1 판씩 — `--network` 173/173, `--network-body` 92/92, `--review-body-v20a` 35/35, `-v20b` 42/42,
+        `-swcdp` 38/38(첫 판 37/38 — `v20m-navn` 의 「several ends 1」 은 판정자가 다시 쓰인 CEF 요청 번호(300 초 뒤 다른 주소)의 끝을 앞 생의 칸에
+        더한 것이라 판정자를 고쳐 다시 돌렸다), `-v20l` 13/15(`r14-many`·`r14-stall` — 7 차 회귀와 같은 꼴, 전체 차례에서만 「many 71」 로 B 가 서지
+        않는다; 둘만 따로 2/2), `-v20m` 9/9, `-v20fb` 336/336(`V20F_HOSTLOG`), `-v20fa`(단독) 66/66, 대조 `MARU_WEB_SW_CDP=0` 의 v20fa 서비스 워커
+        사례 20/20 FAIL(의도). 변이(전용 작업 트리, ReleaseSafe·퍼즈 3 000 판, 판정은 실패 수로만, 변이마다 되돌림 확인): 순수 22 — R-1 열하나(머리 비교·
+        메서드만·Range 만·206·독 τ 둘·사본 다름·W 머리·P 의 Range·기록 쪽 상태·늦게 안 눈먼 때), D-v20n-1 넷(언제나 놓기·비우기·가장 오래된 것·잃음 표지),
+        19 회차 넷(상한·수·넘침·닫힌 자리 지우기), 지켜보기 끔 하나, 7 차의 C6·C13 — 첫 판은 유효 21 중 18(지켜보기 끔 변이는 컴파일 오류로 무효; 살아남은 셋 — P 의
+        Range 를 0 으로·넘친 열쇠를 닫힌 것으로·닫힌 자리를 표에서 지우지 않기 — 에 시험을 더했다), 최종 **22/22**(넷은 처음에 시험 안의 union 칸 panic 으로
+        멈춰 잡혔다 — 시험을 고쳐 단언 실패로 다시 쟀다). 판정자(CEF) 3/3: 머리 비교를 되돌림 → `v20n-r1h` HEAD 판 WRONG 5/5, 언제나 놓기를 되돌림·
+        비우기를 없앰 → `v20n-r12-hop` B 0/20. 게이트 12(`fmt-check`·`check-task-split`·`check-doc-links`·`check-doc-line-refs`·`check-config-docs`·
+        `check-mobile-contract`·`check-macos-app-host`·`macos-app-host-swift-check`·`check-boundaries`·`check-targets`·`check-wasm-sync`·`web-sidecar`) 모두 통과.
+      - **남는 틈**: ① 머리·상태가 같은 서로 다른 두 네트워크 응답의 참 µs τ 충돌 ∧ 그 하나의 W 응답을 잃음(실측에서 보지 못했다 — 퍼즈 옛 세계로만 낸다),
+        ② 늦게 안 눈먼 때 — 붙은 알림이 짝·잇기보다 늦으면(그 워커의 W 가 시작·응답을 모두 잃고, 같은 주소의 보이는 W 가 제 기록 없이 짝을 맺고 P 가 그
+        알림 전에 이었다 — 제 기록 없는 보이는 W 의 길은 알려진 것이 없다), ③ D-v20n-1 의 비운 놓은 요청은 maru 목록에 끝이 오지 않는다, ④ 7 차의 남는
+        틈(N11b 등) 그대로.
+      - **8 차가 바꾼 형(리베이스)**: `sw_mod.Link.decide` 가 머리(`Sig`)를 받는다, `Event.will_be_sent`·`WorkerEvent.sent` 에 `range_hash`, `Candidate.cef_status`·
+        `Table.cefStatus`, `net_body.cefCovered` 가 상태를 받는다, `net_gate.max_sw_slots`·`Track.sw_seq`·`State.evictOrphan`, `Table.watchOff`·
+        `net_body.watchOff`, 판정자 진단 `MARU_WEB_TEST_SW_LOSE`(sidecar — 판정자만 켠다).

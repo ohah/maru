@@ -34,13 +34,13 @@ def compare(root):
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--build',required=True,type=Path);p.add_argument('--output',required=True,type=Path)
-    p.add_argument('--fixture',choices=['flat','multiline'],default='flat');p.add_argument('--cache',choices=['summary','fold','bracket'],default='summary');p.add_argument('--sizes',default='3000,50000');p.add_argument('--periods',default='50,100');p.add_argument('--flows',default='typing,shared');p.add_argument('--repetitions',type=int,default=3)
+    p.add_argument('--fixture',choices=['flat','multiline'],default='flat');p.add_argument('--cache',choices=['summary','fold','bracket','fold_reuse'],default='summary');p.add_argument('--sizes',default='3000,50000');p.add_argument('--periods',default='50,100');p.add_argument('--flows',default='typing,shared');p.add_argument('--repetitions',type=int,default=3)
     args=p.parse_args();out=args.output.resolve();build=args.build.resolve();root=HERE.parents[1]
     sizes=[int(n) for n in args.sizes.split(',')];periods=[int(n) for n in args.periods.split(',')];flows=args.flows.split(',')
     if out.exists() or out==root or root in out.parents or args.repetitions<1 or any(not x or len(x)!=len(set(x)) for x in [sizes,periods,flows]) or not set(sizes)<={3000,50000} or not set(periods)<={50,100} or not set(flows)<={'typing','shared'}:p.error('new external output and fixed matrix required')
     source=json.loads((build/'source.json').read_text());verify.require(source.get(args.cache+'_control') is True,'controlled summary build required')
     out.mkdir(mode=0o700)
-    tool_paths=[HERE/n for n in ['run.py','verify.py','protocol.py','summary_control.py','fold_control.py','bracket_control.py','summarize.py','summary_study.py']]+[HERE.parent/'editor-input-attribution/observer.py']
+    tool_paths=[HERE/n for n in ['run.py','verify.py','protocol.py','summary_control.py','fold_control.py','bracket_control.py','fold_reuse_control.py','summarize.py','summary_study.py']]+[HERE.parent/'editor-input-attribution/observer.py']
     tools={str(path.relative_to(root)):verify.sha(path) for path in tool_paths}
     for path in tool_paths:
         target=out/'tool-snapshot'/path.relative_to(root);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(path,target)

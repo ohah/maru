@@ -23,6 +23,7 @@ import Carbon.HIToolbox
     static var phase=0
     static var due=0.0, running=0.0
     static var original: String?, originalView: String?
+    static var focusLossEvents:[[String:Any]]=[]
     static var focusLost=false, paused=false
     static var pauseStart: UInt64=0, pauseEnd: UInt64=0
     static var baseline=[UInt64](repeating:0,count:8), baselineMemory=[UInt64](repeating:0,count:2)
@@ -38,7 +39,17 @@ import Carbon.HIToolbox
         NSWorkspace.shared.frontmostApplication?.processIdentifier==getpid() &&
         SessionHostInputSourcePolicy.currentSourceID()==selected && view.inputContext?.selectedKeyboardInputSource==selected
     }
+    static func focusSnapshot(_ reason: String,_ view: MaruMetalTerminalView,_ window: NSWindow?) -> [String:Any] {
+        let front=NSWorkspace.shared.frontmostApplication
+        return ["reason":reason,"phase":phase,"time_ns":UInt64(CACurrentMediaTime()*1e9),
+                "active":NSApp.isActive,"key_window":window?.isKeyWindow ?? false,
+                "visible":window?.isVisible ?? false,"responder_matches":window?.firstResponder === view,
+                "frontmost_pid":front?.processIdentifier ?? 0,"frontmost_bundle":front?.bundleIdentifier ?? "none",
+                "global_source":SessionHostInputSourcePolicy.currentSourceID() ?? "none",
+                "view_source":view.inputContext?.selectedKeyboardInputSource ?? "none"]
+    }
     static func finish(_ error: String?,_ session: OpaquePointer,_ view: MaruMetalTerminalView) {
+        let finalFocus=focusSnapshot("finish",view,view.window)
         var state=[UInt64](repeating:0,count:8);latencyState(session,&state)
         var header=[UInt64](repeating:0,count:9), flat=[UInt64](repeating:0,count:36*12)
         streamCopy(&header,&flat)
@@ -60,6 +71,8 @@ import Carbon.HIToolbox
             "baseline":baseline,"state":state,"visible_line":line,"document_verified":streamValid(session),
             "memory":memory,"baseline_memory":baselineMemory,"pause_start_ns":pauseStart,"pause_end_ns":pauseEnd,"suppressed_frames":streamDropCount()]
         var record=value
+        record["focus_at_finish"]=finalFocus
+        record["focus_loss_events"]=focusLossEvents
         record["initial_tail_sha256"]=tail.map { String(format:"%02x",$0) }.joined()
         if let path=env["MARU_LATENCY_OUTPUT"],let data=try? JSONSerialization.data(withJSONObject:record,options:[.sortedKeys]) {
             try? data.write(to:URL(fileURLWithPath:path),options:.atomic)
@@ -90,8 +103,11 @@ extension MaruAppHostController {
             view.inputContext?.deactivate();view.inputContext?.selectedKeyboardInputSource=InputStream.selected;view.inputContext?.activate()
             guard latencySetup(session,InputStream.env["MARU_LATENCY_FLOW"]=="shared") else { InputStream.finish("setup",session,view);return }
             for name in [NSApplication.didResignActiveNotification,NSWindow.didResignKeyNotification] {
-                InputStream.observers.append(NotificationCenter.default.addObserver(forName:name,object:name==NSApplication.didResignActiveNotification ? NSApp : w,queue:.main) { _ in
-                    MainActor.assumeIsolated { if InputStream.phase>0 && InputStream.phase<3 { InputStream.focusLost=true } }
+                InputStream.observers.append(NotificationCenter.default.addObserver(forName:name,object:name==NSApplication.didResignActiveNotification ? NSApp : w,queue:.main) { notification in
+                    MainActor.assumeIsolated { if InputStream.phase>0 && InputStream.phase<3 {
+                        InputStream.focusLost=true
+                        if InputStream.focusLossEvents.count<32 { InputStream.focusLossEvents.append(InputStream.focusSnapshot(notification.name.rawValue,view,w)) }
+                    } }
                 })
             }
             InputStream.phase=1;InputStream.due=now+1;return

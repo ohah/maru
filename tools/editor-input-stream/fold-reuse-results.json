@@ -1,0 +1,643 @@
+{
+  "schema": 1,
+  "kind": "worker-cache-study",
+  "cache": "fold_reuse",
+  "app_sha256": "19078820c312856abf3633079daecfdd242962a3df4735876766cb0b14636d8a",
+  "head": "626185e131caffb9978ae1b4245b600b8ce94467",
+  "before": {
+    "schema": 1,
+    "protocol": "independent-target-ascii-v1",
+    "root": "/Users/yoonhb/.cache/maru-agent-artifacts/fold-reuse-display-multiline-2/disabled",
+    "head": "626185e131caffb9978ae1b4245b600b8ce94467",
+    "app_sha256": "19078820c312856abf3633079daecfdd242962a3df4735876766cb0b14636d8a",
+    "producer_sha256": "383c0d0e97c4d87b3ed5992d5147e8a30d4bbc2921c313fe94d484672a039763",
+    "fixture_kind": "multiline",
+    "summary_control": null,
+    "fold_control": null,
+    "bracket_control": null,
+    "fold_reuse_control": "disabled",
+    "manifest_sha256": "2e4255ec58d28e8566035253bd1099dd9bd422c7e7eaf6dc14df181def085de6",
+    "verifier_sha256": "b5dc81f711a23b18554cd36cd2c9931ad8795b64edc17e0d299b71a78a29c93d",
+    "summary_tool_sha256": "7e7f1cedd6c20f55d3ba11eb81bd98f4df43b46962784eb81f910340b0082c7e",
+    "host": null,
+    "processes": 12,
+    "inputs": 360,
+    "aggregation": "all keys including first; pooled median and nearest-rank p95; no trimming",
+    "conditions": [
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 27.8360625,
+          "p95": 44.132583,
+          "maximum": 45.577959
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.647688,
+          "p95": 2.369292,
+          "maximum": 17.627583
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 25.797188,
+          "p95": 34.9075,
+          "maximum": 44.541042
+        },
+        "last_post_to_syntax_present_ms": [
+          42.447708,
+          33.75,
+          40.48975
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          3,
+          1,
+          10
+        ],
+        "full_ready_on_first_present_count": [
+          3,
+          1,
+          10
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          42.447708,
+          33.75,
+          40.48975
+        ],
+        "max_producer_lateness_ms": 5.708708,
+        "memory_per_process_bytes": [
+          {
+            "peak": 143065088,
+            "baseline_resident": 136560640,
+            "final_resident": 141606912
+          },
+          {
+            "peak": 148602880,
+            "baseline_resident": 136675328,
+            "final_resident": 147193856
+          },
+          {
+            "peak": 143884288,
+            "baseline_resident": 136577024,
+            "final_resident": 142426112
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 30.161167,
+          "p95": 45.730541,
+          "maximum": 46.411417
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.686875,
+          "p95": 2.628416,
+          "maximum": 13.896708
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 29.377417,
+          "p95": 43.137917,
+          "maximum": 45.605958
+        },
+        "last_post_to_syntax_present_ms": [
+          41.415375,
+          43.981875,
+          41.252584
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          15,
+          7,
+          19
+        ],
+        "full_ready_on_first_present_count": [
+          15,
+          7,
+          19
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          41.415375,
+          43.981875,
+          41.252584
+        ],
+        "max_producer_lateness_ms": 5.97425,
+        "memory_per_process_bytes": [
+          {
+            "peak": 145227776,
+            "baseline_resident": 134922240,
+            "final_resident": 143736832
+          },
+          {
+            "peak": 144752640,
+            "baseline_resident": 135151616,
+            "final_resident": 143278080
+          },
+          {
+            "peak": 144572416,
+            "baseline_resident": 135053312,
+            "final_resident": 143114240
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 38.8672295,
+          "p95": 47.407917,
+          "maximum": 57.927875
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.7017915,
+          "p95": 6.969167,
+          "maximum": 17.275875
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 38.021583500000006,
+          "p95": 45.537,
+          "maximum": 46.815542
+        },
+        "last_post_to_syntax_present_ms": [
+          146.107209,
+          149.983125,
+          137.183792
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          146.107209,
+          149.983125,
+          137.183792
+        ],
+        "max_producer_lateness_ms": 5.586375,
+        "memory_per_process_bytes": [
+          {
+            "peak": 358924288,
+            "baseline_resident": 326467584,
+            "final_resident": 338264064
+          },
+          {
+            "peak": 359661568,
+            "baseline_resident": 326303744,
+            "final_resident": 339296256
+          },
+          {
+            "peak": 360071168,
+            "baseline_resident": 326565888,
+            "final_resident": 339755008
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 36.802896000000004,
+          "p95": 42.824208,
+          "maximum": 49.013375
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.7934585000000001,
+          "p95": 2.468125,
+          "maximum": 20.017666
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 35.971458,
+          "p95": 41.313958,
+          "maximum": 43.916041
+        },
+        "last_post_to_syntax_present_ms": [
+          134.198291,
+          137.449459,
+          140.230917
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          0,
+          0,
+          0
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          134.198291,
+          137.449459,
+          140.230917
+        ],
+        "max_producer_lateness_ms": 5.741959,
+        "memory_per_process_bytes": [
+          {
+            "peak": 338051072,
+            "baseline_resident": 307363840,
+            "final_resident": 319422464
+          },
+          {
+            "peak": 341032960,
+            "baseline_resident": 308084736,
+            "final_resident": 320831488
+          },
+          {
+            "peak": 340639744,
+            "baseline_resident": 307920896,
+            "final_resident": 320061440
+          }
+        ]
+      }
+    ]
+  },
+  "after": {
+    "schema": 1,
+    "protocol": "independent-target-ascii-v1",
+    "root": "/Users/yoonhb/.cache/maru-agent-artifacts/fold-reuse-display-multiline-2/prepared",
+    "head": "626185e131caffb9978ae1b4245b600b8ce94467",
+    "app_sha256": "19078820c312856abf3633079daecfdd242962a3df4735876766cb0b14636d8a",
+    "producer_sha256": "383c0d0e97c4d87b3ed5992d5147e8a30d4bbc2921c313fe94d484672a039763",
+    "fixture_kind": "multiline",
+    "summary_control": null,
+    "fold_control": null,
+    "bracket_control": null,
+    "fold_reuse_control": "prepared",
+    "manifest_sha256": "eb6c1d910bcfd64f2c6d0768ef21d6263e9b0c31a66e4d45ee385f2cb4c1912e",
+    "verifier_sha256": "b5dc81f711a23b18554cd36cd2c9931ad8795b64edc17e0d299b71a78a29c93d",
+    "summary_tool_sha256": "7e7f1cedd6c20f55d3ba11eb81bd98f4df43b46962784eb81f910340b0082c7e",
+    "host": null,
+    "processes": 12,
+    "inputs": 360,
+    "aggregation": "all keys including first; pooled median and nearest-rank p95; no trimming",
+    "conditions": [
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 34.647396,
+          "p95": 40.258042,
+          "maximum": 51.132125
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.683,
+          "p95": 3.576458,
+          "maximum": 19.252375
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.438625,
+          "p95": 39.189333,
+          "maximum": 41.967583
+        },
+        "last_post_to_syntax_present_ms": [
+          30.237125,
+          29.330458,
+          32.483167
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          29,
+          30,
+          28
+        ],
+        "full_ready_on_first_present_count": [
+          29,
+          30,
+          28
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          30.237125,
+          29.330458,
+          32.483167
+        ],
+        "max_producer_lateness_ms": 5.463083,
+        "memory_per_process_bytes": [
+          {
+            "peak": 142589952,
+            "baseline_resident": 136232960,
+            "final_resident": 141049856
+          },
+          {
+            "peak": 145113088,
+            "baseline_resident": 136282112,
+            "final_resident": 143572992
+          },
+          {
+            "peak": 147554304,
+            "baseline_resident": 136167424,
+            "final_resident": 146030592
+          }
+        ]
+      },
+      {
+        "size": 3000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 31.6659165,
+          "p95": 42.216208,
+          "maximum": 47.395208
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6860625,
+          "p95": 2.665041,
+          "maximum": 14.076875
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 30.4838125,
+          "p95": 39.205208,
+          "maximum": 46.239667
+        },
+        "last_post_to_syntax_present_ms": [
+          41.284083,
+          23.824583,
+          32.78825
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          25,
+          18,
+          23
+        ],
+        "full_ready_on_first_present_count": [
+          25,
+          18,
+          23
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          41.284083,
+          23.824583,
+          32.78825
+        ],
+        "max_producer_lateness_ms": 5.643,
+        "memory_per_process_bytes": [
+          {
+            "peak": 142852096,
+            "baseline_resident": 134823936,
+            "final_resident": 140443648
+          },
+          {
+            "peak": 140394496,
+            "baseline_resident": 129155072,
+            "final_resident": 138854400
+          },
+          {
+            "peak": 145211392,
+            "baseline_resident": 135118848,
+            "final_resident": 143785984
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "shared",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 35.199396,
+          "p95": 44.523708,
+          "maximum": 47.450292
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6171875,
+          "p95": 2.5885,
+          "maximum": 11.950833
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 34.415437499999996,
+          "p95": 43.880709,
+          "maximum": 44.964458
+        },
+        "last_post_to_syntax_present_ms": [
+          88.75025,
+          68.907,
+          89.641416
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          29
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          88.75025,
+          68.907,
+          89.641416
+        ],
+        "max_producer_lateness_ms": 5.448625,
+        "memory_per_process_bytes": [
+          {
+            "peak": 360136704,
+            "baseline_resident": 326385664,
+            "final_resident": 341950464
+          },
+          {
+            "peak": 358432768,
+            "baseline_resident": 326533120,
+            "final_resident": 340148224
+          },
+          {
+            "peak": 358301696,
+            "baseline_resident": 326418432,
+            "final_resident": 340213760
+          }
+        ]
+      },
+      {
+        "size": 50000,
+        "period_ms": 100,
+        "flow": "typing",
+        "mode": "async",
+        "processes": 3,
+        "post_to_present_ms": {
+          "count": 90,
+          "median": 34.281853999999996,
+          "p95": 45.929541,
+          "maximum": 62.667708
+        },
+        "post_to_native_ms": {
+          "count": 90,
+          "median": 0.6320625,
+          "p95": 2.480125,
+          "maximum": 22.515292
+        },
+        "native_to_present_ms": {
+          "count": 90,
+          "median": 33.5767915,
+          "p95": 44.717541,
+          "maximum": 45.692584
+        },
+        "last_post_to_syntax_present_ms": [
+          74.091833,
+          78.382,
+          69.696458
+        ],
+        "syntax_to_full_color_ms": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "syntax_ready_before_next_post": [
+          29,
+          29,
+          28
+        ],
+        "syntax_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "full_ready_on_first_present_count": [
+          0,
+          0,
+          0
+        ],
+        "coalesced_keys": 0,
+        "final_color_after_last_post_ms": [
+          74.091833,
+          78.382,
+          69.696458
+        ],
+        "max_producer_lateness_ms": 5.100791,
+        "memory_per_process_bytes": [
+          {
+            "peak": 338608128,
+            "baseline_resident": 307904512,
+            "final_resident": 320372736
+          },
+          {
+            "peak": 336773120,
+            "baseline_resident": 307937280,
+            "final_resident": 318472192
+          },
+          {
+            "peak": 341114880,
+            "baseline_resident": 307888128,
+            "final_resident": 323223552
+          }
+        ]
+      }
+    ]
+  }
+}

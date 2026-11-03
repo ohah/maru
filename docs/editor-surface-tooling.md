@@ -1366,6 +1366,8 @@ JSON-RPC 프로브): 열면 `cargo check`(rustc) 진단이 오고, 오류를 **�
 재시도도 같은 활성 원본에서만 최신 caret으로 보내고, 문서 전환·닫기·Save As 뒤에는 취소한다.
 다른 문서로 예전 명령을 옮겨 보내지 않는다. §8.2m의 세 명령도 이 경계를 같이 사용한다.
 실행 증거와 미검증 범위는 [응답 소유 계획](plans/lsp-signature-reference-origins.md)을 따른다.
+예약 시각·중복 tick·8회 상한·새 명령 교체·실제 문서 전환은
+[재시도 수명 검증](plans/lsp-location-retry-lifecycle.md)에서 네 종류를 함께 대조한다.
 
 참조·구현·타입 정의·선언 결과 검색은 공용 native IME 범위 문맥을 사용한다.
 확정 query로만 기존 제목/보조 텍스트 필터를 적용하고 preedit는 표시만 한다. 후보 Return은

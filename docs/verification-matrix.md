@@ -1,5 +1,10 @@
 # 검증 매트릭스
 
+Save As와 참조/구현/타입 정의/선언: `test-editor-location-picker-save-as`는 실제 두 서버의
+UTF-8/UTF-16 협상과 실제 Save As 뒤 native Enter의 경로·byte 위치·파일 보존을 대조한다.
+[계획](plans/lsp-location-picker-save-as.md)의 64조건이며 직접 callback은 응답 순서 제어다.
+실제 SDK 의미 정확성·OS 패널·HID·픽셀 검증으로 확대하지 않는다.
+
 Save As 중 코드 액션: `test-editor-code-action-save-as`는 실제 대상 적용과 이전 경로의
 디스크 bytes, 목록/메뉴/resolve와 새 URI 재결합 뒤 적용/Undo를 검사한다.
 [계획](plans/lsp-code-action-save-as.md)의 38조건이며 실제 파일/native controller와 직접

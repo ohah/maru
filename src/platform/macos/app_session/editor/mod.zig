@@ -20758,7 +20758,7 @@ test "REF2 구현·타입 정의·선언 — 팔레트 명령이 같은 피커�
     s.dispatchAppAction(.goto_implementation);
     const seq_now = s.editor_references.waiting_seq;
     const stale0 = s.editor_references.dropped_stale;
-    references_client.onLocationsResponse(s, .references, seq_now, null, false);
+    references_client.onLocationsResponse(s, .references, seq_now, null, false, .utf16);
     try testing.expectEqual(stale0 + 1, s.editor_references.dropped_stale);
     try testing.expect(s.editor_references.waiting); // 아직 구현 응답을 기다린다
     try testing.expect(refSettled(&f.fx));
@@ -74173,7 +74173,7 @@ test "reference picker IME host ignored LSP reply keeps the active input transac
     fx.session.editor_references.waiting = true;
     fx.session.editor_references.waiting_seq = 123;
     fx.session.editor_references.waiting_kind = .references;
-    references_client.onLocationsResponse(fx.session, .references, 123, null, false);
+    references_client.onLocationsResponse(fx.session, .references, 123, null, false, .utf16);
     fx.session.imeEnd(null);
     try testing.expectEqual(@as(u64, 1), fx.session.editor_references.dropped_behind_overlay);
     try testing.expectEqual(generation, fx.session.reference_picker_rows.result_generation);
@@ -75682,6 +75682,168 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 // Prepare a genuinely installed list, then change focus without a render tick.
 // Keys can arrive in this interval, including with A still visible in a split.
 // Phases use real requests: 0=list wait, 1=resolved display, 2=prefetch, 3=pending Enter.
+// Test document bytes for UTF-8/UTF-16 position decoding, not localized UI text.
+const location_save_source = "한😀target\nint x; // REFSTALL\n";
+const location_second_source = "한😀other\nint b; // REFSTALL\n";
+fn locationSaveEncodingForTest(utf16: bool) void {
+    if (utf16) {
+        _ = setenv("MARU_FAKE_LSP_UTF16", "1", 1);
+    } else {
+        _ = unsetenv("MARU_FAKE_LSP_UTF16");
+    }
+}
+fn locationSaveResultForTest(uri: []const u8, utf16: bool) ![]u8 {
+    const col: u32 = if (utf16) 3 else 7;
+    return std.json.Stringify.valueAlloc(testing.allocator, .{
+        .{ .uri = uri, .range = .{ .start = .{ .line = 0, .character = col }, .end = .{ .line = 0, .character = col + 1 } } },
+        .{ .uri = uri, .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 1 } } },
+    }, .{});
+}
+fn locationPickerSaveForTest(kind: maru.session.editor.lsp.rpc.LocationKind) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_DECLCAP");
+    for ([_]bool{ false, true }) |utf16| for (0..5) |mode| {
+        locationSaveEncodingForTest(utf16);
+        defer _ = unsetenv("MARU_FAKE_LSP_UTF16");
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", location_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        try testing.expectEqual(@as(maru.session.editor.lsp.rpc.PositionEncoding, if (utf16) .utf16 else .utf8), lsp_client.readyClientFor(s, f.term).?.encoding);
+        locationSaveEncodingForTest(!utf16);
+        _ = try pane_ops.splitSharedEditorPane(s, .horizontal, false);
+        const second = try openSecondReadRootForTest(&f, location_second_source);
+        // Creating another root can move the client array. Capture current addresses.
+        const first = lsp_client.readyClientFor(s, f.term).?;
+        const other = lsp_client.readyClientFor(s, second).?;
+        try testing.expectEqual(@as(maru.session.editor.lsp.rpc.PositionEncoding, if (utf16) .utf8 else .utf16), other.encoding);
+        _ = unsetenv("MARU_FAKE_LSP_UTF16");
+        try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
+        f.term.rt.editor_selection = editor_selection.Selection.at(7);
+        try testing.expect(references_client.gotoLocationsAtCaret(s, kind));
+        const raw = try locationSaveResultForTest(first.findDoc(f.term).?.uri, utf16);
+        defer testing.allocator.free(raw);
+        var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+        defer result.deinit();
+        references_client.onClientResponse(s, first, kind, s.editor_references.waiting_seq, result.value, false);
+        try testing.expect(s.chrome_host.reference_picker.open);
+        try testing.expectEqual(@as(usize, 2), s.reference_picker_rows.all.items.len);
+        const generation = s.reference_picker_rows.result_generation;
+        const epoch = f.term.rt.editorDocument().save_target_epoch;
+        const undo = f.term.rt.editorDocument().history.undo_len;
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch + 1, f.term.rt.editorDocument().save_target_epoch);
+        try testing.expect(s.chrome_host.reference_picker.open);
+        try testing.expectEqualStrings(f.path, s.reference_picker_rows.all.items[0].path);
+        const other_raw = try locationSaveResultForTest(other.findDoc(second).?.uri, !utf16);
+        defer testing.allocator.free(other_raw);
+        var other_result = try std.json.parseFromSlice(std.json.Value, testing.allocator, other_raw, .{});
+        defer other_result.deinit();
+        if (mode != 0) {
+            try testing.expect(term_ops.activateSurfaceById(s, second.surface.id));
+            try testing.expect(references_client.gotoLocationsAtCaret(s, kind));
+            try testing.expect(s.editor_references.waiting and s.chrome_host.reference_picker.open);
+            if (mode >= 2) references_client.onClientResponse(s, other, kind, s.editor_references.waiting_seq, if (mode == 2) other_result.value else null, mode == 4);
+            try testing.expectEqual(generation, s.reference_picker_rows.result_generation);
+            try testing.expect(s.chrome_host.reference_picker.open);
+        }
+        s.chrome_host.notice.dismiss();
+        s.chrome_host.reference_picker.selected = 0;
+        try pressKey(&f.fx, .enter, .{});
+        const active = pane_ops.activePane(s).activeTerm();
+        try testing.expectEqualStrings(f.path, active.rt.editorDocument().path.?);
+        try testing.expectEqualStrings(location_save_source, active.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 7), active.rt.editor_selection.?.focus);
+        try testing.expectEqual(undo, f.term.rt.editorDocument().history.undo_len);
+        // A subsequent accepted result must publish the second server's encoding.
+        try testing.expect(term_ops.activateSurfaceById(s, second.surface.id));
+        try testing.expect(references_client.gotoLocationsAtCaret(s, kind));
+        references_client.onClientResponse(s, other, kind, s.editor_references.waiting_seq, other_result.value, false);
+        try testing.expect(s.chrome_host.reference_picker.open);
+        s.chrome_host.reference_picker.selected = 0;
+        try pressKey(&f.fx, .enter, .{});
+        try testing.expect(pane_ops.activePane(s).activeTerm() == second);
+        try testing.expectEqual(@as(usize, 7), second.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(usize, 0), second.rt.editorDocument().history.undo_len);
+        try batchApplyDisk(&f.fx, "before.c", location_save_source);
+        try batchApplyDisk(&f.fx, "after.c", location_save_source);
+        try batchApplyDisk(&f.fx, "nested/second.c", location_second_source);
+    };
+}
+test "LOCSAVE1 references preserve published position encoding across actual Save As" {
+    try locationPickerSaveForTest(.references);
+}
+test "LOCSAVE2 implementations preserve published position encoding across actual Save As" {
+    try locationPickerSaveForTest(.implementation);
+}
+test "LOCSAVE3 type definitions preserve published position encoding across actual Save As" {
+    try locationPickerSaveForTest(.type_definition);
+}
+test "LOCSAVE4 declarations preserve published position encoding across actual Save As" {
+    try locationPickerSaveForTest(.declaration);
+}
+
+test "LOCSAVE5 pending location responses retain target lifetime guards after actual Save As" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_DECLCAP");
+    for ([_]maru.session.editor.lsp.rpc.LocationKind{ .references, .implementation, .type_definition, .declaration }) |kind| for ([_]bool{ false, true }) |utf16| for (0..3) |response| {
+        locationSaveEncodingForTest(utf16);
+        defer _ = unsetenv("MARU_FAKE_LSP_UTF16");
+        var f = (try SmtFixture.openRepo(testing.allocator, "before.c", location_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const owner = lsp_client.readyClientFor(s, f.term).?;
+        try testing.expectEqual(@as(maru.session.editor.lsp.rpc.PositionEncoding, if (utf16) .utf16 else .utf8), owner.encoding);
+        f.term.rt.editor_selection = editor_selection.Selection.at(7);
+        try testing.expect(references_client.gotoLocationsAtCaret(s, kind));
+        const old_seq = s.editor_references.waiting_seq;
+        const raw = try locationSaveResultForTest(owner.findDoc(f.term).?.uri, utf16);
+        defer testing.allocator.free(raw);
+        var old = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+        defer old.deinit();
+        const target = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer testing.allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        try awaitSaveAsForTest();
+        references_client.onClientResponse(s, owner, kind, old_seq, if (response == 0) old.value else null, response == 2);
+        try testing.expect(!s.editor_references.waiting and s.editor_references.retry_at_ms == 0);
+        try testing.expect(!s.chrome_host.reference_picker.open);
+        try testing.expectEqual(@as(u64, 0), s.editor_references.notified_none);
+        const Bound = struct { s: *AppSession, t: *Term, owner: *lsp_client.Client };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Bound{ .s = s, .t = f.term, .owner = owner }, struct {
+            fn ready(c: Bound) bool {
+                const current = lsp_client.readyClientFor(c.s, c.t) orelse return false;
+                return current == c.owner and std.mem.endsWith(u8, current.findDoc(c.t).?.uri, "after.c");
+            }
+        }.ready));
+        const fresh_raw = try locationSaveResultForTest(owner.findDoc(f.term).?.uri, utf16);
+        defer testing.allocator.free(fresh_raw);
+        var fresh = try std.json.parseFromSlice(std.json.Value, testing.allocator, fresh_raw, .{});
+        defer fresh.deinit();
+        try testing.expect(references_client.gotoLocationsAtCaret(s, kind));
+        const seq = s.editor_references.waiting_seq;
+        try testing.expect(seq != old_seq);
+        references_client.onClientResponse(s, owner, kind, old_seq, old.value, false);
+        try testing.expect(s.editor_references.waiting);
+        references_client.onClientResponse(s, owner, kind, seq, fresh.value, false);
+        try testing.expect(s.chrome_host.reference_picker.open);
+        s.chrome_host.reference_picker.selected = 0;
+        try pressKey(&f.fx, .enter, .{});
+        try testing.expectEqualStrings(target, pane_ops.activePane(s).activeTerm().rt.editorDocument().path.?);
+        try testing.expectEqual(@as(usize, 7), pane_ops.activePane(s).activeTerm().rt.editor_selection.?.focus);
+        try batchApplyDisk(&f.fx, "before.c", location_save_source);
+        try batchApplyDisk(&f.fx, "after.c", location_save_source);
+    };
+}
+
 const action_save_source = "int a; // CASTALL\n";
 const ActionSaveProbe = struct { term: *Term, owner: *lsp_client.Client, seq: u32, phase: u8, uri_buf: [std.fs.max_path_bytes + 16]u8 = undefined, uri_len: usize = 0 };
 fn actionSaveReplyForTest(probe: ActionSaveProbe) ![]u8 {

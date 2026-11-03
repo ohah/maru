@@ -6752,6 +6752,16 @@ pub fn build(b: *std.Build) void {
         run_feature_stop.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_feature_stop.step);
     }
+    const location_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LOCSAVE"} });
+    const run_location_save = b.addRunArtifact(location_save_tests);
+    run_location_save.setCwd(b.path("."));
+    run_location_save.addArg("--maru-expect-tests=9");
+    run_location_save.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-location-picker-save-as", "Verify location picker snapshots across actual Save As").dependOn(&run_location_save.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_location_save.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_location_save.step);
+    }
     const action_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CASAVE"} });
     const run_action_save = b.addRunArtifact(action_save_tests);
     run_action_save.setCwd(b.path("."));

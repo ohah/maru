@@ -33,7 +33,7 @@ pub const State = struct {
     /// 되묻기 예약(`retry_at_ms` 에 caret 자리로 다시). 사용자가 새로 부르면 지워진다.
     retry_at_ms: u64 = 0,
     retries: u8 = 0,
-    /// 응답 때 쓸 인코딩(요청한 클라이언트의 것) — 행의 `character` 를 `navigateTo` 가 그 인코딩으로 푼다.
+    /// Published result encoding. A newer request must not reinterpret these rows.
     enc: lsp.rpc.PositionEncoding = .utf16,
     /// 판정자 관측.
     opened: u64 = 0,
@@ -103,7 +103,6 @@ fn request(self: *AppSession, term: *Term, offset: usize) bool {
     st.waiting = true;
     st.waiting_seq = seq;
     st.owner = ownerFor(term);
-    st.enc = (editor_lsp.readyClientFor(self, term) orelse return false).encoding;
     return true;
 }
 
@@ -173,13 +172,13 @@ pub fn onClientResponse(self: *AppSession, origin: *editor_lsp.Client, kind: lsp
             st.retry_at_ms = 0;
             return;
         },
-        .accept => onLocationsResponse(self, kind, seq, result, retryable),
+        .accept => onLocationsResponse(self, kind, seq, result, retryable, origin.encoding),
     }
 }
 
 /// references 응답(`editor_lsp` 가 부른다). 지금 기다리는 seq 가 아니면 버린다. 되물을 수 있는 오류(`content modified` 등)면 잠시 뒤
 /// 다시 — 상한을 넘기면 「찾지 못했습니다」.
-pub fn onLocationsResponse(self: *AppSession, kind: lsp.rpc.LocationKind, seq: u32, result: ?std.json.Value, retryable: bool) void {
+pub fn onLocationsResponse(self: *AppSession, kind: lsp.rpc.LocationKind, seq: u32, result: ?std.json.Value, retryable: bool, enc: lsp.rpc.PositionEncoding) void {
     const st = &self.editor_references;
     if (!st.waiting or seq != st.waiting_seq or kind != st.waiting_kind) {
         st.dropped_stale += 1;
@@ -234,6 +233,9 @@ pub fn onLocationsResponse(self: *AppSession, kind: lsp.rpc.LocationKind, seq: u
         return;
     };
     const rows = &self.reference_picker_rows;
+    // Encoding belongs to the copied locations, not the next outstanding request.
+    // Publish it only after a result survives owner/overlay checks and builds.
+    st.enc = enc;
     if (rows.all.items.len == 1) {
         // **하나면 목록 없이 간다**(§8.2l) — 고를 것이 없다.
         goToRow(self, &rows.all.items[0]);

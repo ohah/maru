@@ -883,3 +883,151 @@ test "parse worker 괄호 준비 OOM은 정상 파싱과 기존 수집을 보존
     try std.testing.expect(copies.has_induced_failure);
     try std.testing.expectEqual(copies.allocated_bytes, copies.freed_bytes);
 }
+
+fn expectBrackets(result: Completion, text: []const u8, language: syntax.Language) !void {
+    const a = std.testing.allocator;
+    var fresh = syntax.Provider.init(text, language, 0) orelse return error.NoProvider;
+    defer fresh.deinit();
+    var index: syntax.BracketIndex = .{};
+    defer index.deinit(a);
+    try std.testing.expect(try index.step(a, &fresh, text, 0));
+    try std.testing.expectEqualDeep(index.leaves.items, result.preparedBrackets().?.leaves.items);
+}
+
+test "parse worker 괄호 증분은 언어와 편집 경계별 전체 수집과 같고 원본을 보존한다" {
+    const cases = [_]struct { language: syntax.Language = .zig, before: []const u8, after: []const u8 }{
+        .{ .before = "fn f() void {}", .after = "fn ff() void {}" },
+        .{ .before = "fn f() void {}", .after = " fn f() void {}" },
+        .{ .before = "fn f() void {}", .after = "fn f() void {}\n" },
+        .{ .before = "fn f() void {}", .after = "fn f() void {()}" },
+        .{ .before = "fn f() void {()}", .after = "fn f() void {}" },
+        .{ .before = "fn f() void {}", .after = "fn f() void }" },
+        .{ .before = "fn f() void {}", .after = "fn f() void {" },
+        .{ .before = "fn f() void { x(); }", .after = "fn f() void { // x(); }" },
+        .{ .before = "fn f() void { // x();\n}", .after = "fn f() void { x();\n}" },
+        .{ .before = "const x = \"()\";", .after = "const x = () ;" },
+        .{ .before = "const x = ();", .after = "const x = \"()\";" },
+        .{ .before = "// 가😀\r\nfn f() void {}", .after = "// 가😁\r\nfn f() void {}" },
+        .{ .before = "fn f() void {}", .after = "fn f() void {}" },
+        .{ .language = .css, .before = "a { x: foo(\"()\"); }", .after = "a { x: url(\"()\"); }" },
+        .{ .language = .css, .before = "a { x: url(\"()\"); }", .after = "a { x: foo(\"()\"); }" },
+        .{ .language = .json, .before = "{\"x\":[1]}", .after = "{\"x\":{\"y\":[1]}}" },
+        .{ .language = .html, .before = "<a>()[]</a>", .after = "<a>{()}[]</a>" },
+        .{ .language = .markdown, .before = "text (a) [b]", .after = "`(a)` [b]" },
+        .{ .before = "fn a() void {}\nfn b() void {}", .after = "fn aaa() void {}\nfn bb() void {()}" },
+        .{ .before = "const x = (){}[];", .after = "const x = [()]{};" },
+    };
+    const a = std.testing.allocator;
+    for (cases, 0..) |case, case_index| {
+        errdefer std.debug.print("bracket incremental case={d}\n", .{case_index});
+        var before = try buffer.Buffer.init(a, case.before);
+        defer before.deinit();
+        var after = try buffer.Buffer.init(a, case.after);
+        defer after.deinit();
+        var service = try Service.init(a, .{});
+        defer service.deinit() catch unreachable;
+        var gate: request.Gate = .{};
+        var input = test_input;
+        var snapshot = before.snapshot();
+        _ = try worker.testing.submit(&service, &gate, input, &snapshot, case.language, null, null);
+        var first = testTake(&service);
+        defer first.release();
+        input.revision += 1;
+        snapshot = after.snapshot();
+        _ = try service.submitFrom(&gate, input, &snapshot, case.language, &first);
+        var next = testTake(&service);
+        defer next.release();
+        try std.testing.expect(next.accept(&gate));
+        try expectBrackets(next, case.after, case.language);
+        try expectBrackets(first, case.before, case.language);
+        try std.testing.expectEqual(@as(u64, 0), next.preparedBrackets().?.rebuilds);
+        try std.testing.expectEqual(@as(u64, @intFromBool(!std.mem.eql(u8, case.before, case.after))), next.preparedBrackets().?.partials);
+    }
+}
+
+test "parse worker 괄호 기준은 후속 완료마다 반환되어 과거 작업 사슬을 남기지 않는다" {
+    const a = std.testing.allocator;
+    var source = try buffer.Buffer.init(a, "fn f() void {}\n");
+    defer source.deinit();
+    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
+    {
+        var service = try Service.init(a, .{ .audit = &audit });
+        defer service.deinit() catch unreachable;
+        var gate: request.Gate = .{};
+        var input = test_input;
+        _ = try testQueue(&service, &gate, input, source, null);
+        var prior = testTake(&service);
+        defer prior.release();
+        for (0..50) |index| {
+            _ = try source.insert(0, " ");
+            input.revision += 1;
+            _ = try testQueueFrom(&service, &gate, input, source, &prior, null);
+            prior.release(); // 복사 전에 main 참조를 반환해도 worker 빌림이 보호한다.
+            prior = testTake(&service);
+            try std.testing.expect(prior.accept(&gate));
+            try std.testing.expectEqual(@as(u64, 0), prior.preparedBrackets().?.rebuilds);
+            const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 10_000_000_000;
+            while (audit.destroyed.load(.acquire) < index + 1) {
+                if (std.Io.Clock.awake.now(std.testing.io).nanoseconds > deadline) return error.RetainedHistory;
+                std.Thread.yield() catch {};
+            }
+            service.reap();
+            try std.testing.expectEqual(@as(usize, 1), service.heldCount());
+        }
+    }
+    try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
+    try std.testing.expect(!audit.wrong_thread.load(.acquire));
+}
+
+test "parse worker 다른 서비스의 기준은 잎 수명을 서로의 큐에 연결하지 않는다" {
+    const a = std.testing.allocator;
+    var source = try buffer.Buffer.init(a, "fn f() void {}\n");
+    defer source.deinit();
+    var first_service = try Service.init(a, .{});
+    var next_service = try Service.init(a, .{});
+    defer next_service.deinit() catch unreachable;
+    var gate: request.Gate = .{};
+    _ = try testQueue(&first_service, &gate, test_input, source, null);
+    var first = testTake(&first_service);
+    var input = test_input;
+    input.revision += 1;
+    _ = try testQueueFrom(&next_service, &gate, input, source, &first, null);
+    first.release();
+    try first_service.deinit();
+    var next = testTake(&next_service);
+    defer next.release();
+    try std.testing.expect(next.accept(&gate));
+    try expectBrackets(next, "fn f() void {}\n", .zig);
+    try std.testing.expectEqual(@as(u64, 1), next.preparedBrackets().?.rebuilds);
+}
+
+test "parse worker 괄호 변경 범위 상한 초과는 부분 결과 대신 전체 수집으로 복구한다" {
+    const a = std.testing.allocator;
+    var before_text: std.ArrayList(u8) = .empty;
+    defer before_text.deinit(a);
+    try before_text.appendSlice(a, "//");
+    try before_text.appendNTimes(a, 'x', syntax.BracketIndex.partial_limit + 1);
+    try before_text.appendSlice(a, "\nfn f() void {}\n");
+    var after_text = try a.dupe(u8, before_text.items);
+    defer a.free(after_text);
+    @memset(after_text[2 .. 2 + syntax.BracketIndex.partial_limit + 1], 'y');
+    var before = try buffer.Buffer.init(a, before_text.items);
+    defer before.deinit();
+    var after = try buffer.Buffer.init(a, after_text);
+    defer after.deinit();
+    var service = try Service.init(a, .{});
+    defer service.deinit() catch unreachable;
+    var gate: request.Gate = .{};
+    _ = try testQueue(&service, &gate, test_input, before, null);
+    var first = testTake(&service);
+    defer first.release();
+    var input = test_input;
+    input.revision += 1;
+    _ = try testQueueFrom(&service, &gate, input, after, &first, null);
+    var next = testTake(&service);
+    defer next.release();
+    try std.testing.expect(next.accept(&gate));
+    try expectBrackets(next, after_text, .zig);
+    try std.testing.expectEqual(@as(u64, 1), next.preparedBrackets().?.rebuilds);
+    try std.testing.expectEqual(@as(u64, 0), next.preparedBrackets().?.partials);
+}

@@ -5460,6 +5460,10 @@ worker/view 게이트는 실제 취소/OOM·두 뷰 재수집 0·개별 색 풀�
 [채택 96프로세스 대조](../tools/editor-input-stream/bracket-results.md)는 구문 준비 표시와 최종 색을
 나누며 구문 표시 지연의 손익과 별도 미완료 생산자 지각 묶음을 보존한다.
 native 검사를 OS IME 검증으로 해석하지 않는다.
+후속 증분 갱신은 worker 29개와 native 준비 8개에서 언어/편집 경계별 전체 잎 대조,
+연속 50편집의 기준 퇴역, 다른 서비스 격리, 범위 상한 복구, 부분 취소/OOM을 검사한다.
+[같은 실행 파일의 32프로세스 대조](../tools/editor-parse-incremental/bracket-results.md)는
+워커 완료 시간이며 화면 표시 개선으로 일반화하지 않는다.
 
 ## Chromium role 로케이터 테스트 응답 수명
 

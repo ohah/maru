@@ -137,7 +137,10 @@ fn data(conn: c_int, head: []const u8, delay_ms: u64, head_first_ms: u64) void {
 /// `W` 는 HTTP 캐시를 거치지 않는다(`cache:'no-store'` — 재검증 3 차 N-4: 캐시 잠금이 같은 주소 GET 을 줄 세워 동시성을 보려던 항목이 그것을
 /// 보지 못했다).
 const read_js = "function F(u,o){return fetch(u,o).then(function(r){return r.text()}).catch(function(){})}" ++
-    "function W(u,w){return F(u,{headers:{'x-who':w},cache:'no-store'})}";
+    "function W(u,w){return F(u,{headers:{'x-who':w},cache:'no-store'})}" ++
+    // 재검증 8 차(LOW-4·20 회차): 대조 fetch 여덟 — 서로 다른 주소(`_ctl<c>`)를 하나씩(40 ms 사이 — 겹치지 않는다) 워커가 그대로 넘긴다. 워커
+    // CDP 로 잇는 길이 살아 있으면 모두 제 본문이다(판정마다 `ctl_own ≥ 6` — `MARU_WEB_SW_CDP=0` 이면 0 이라 실패한다).
+    "function CTL(b,w){return (async function(){for(var c=0;c<8;c++){await W(b+'_ctl'+c+'&d=0',w);await new Promise(function(r){setTimeout(r,40)})}})()}";
 
 /// 서비스 워커: /v20f/sw/dl?d=N — N ms 뒤 그 요청을 그대로 넘긴다(출처 network).
 const sw_js = "self.addEventListener('install',function(e){self.skipWaiting()});" ++
@@ -364,7 +367,7 @@ fn serveOne(conn: c_int) void {
     if (std.mem.eql(u8, path, "/v20i/sw/p")) return reply(conn, html, "<!doctype html><title>swp</title><script>" ++ read_js ++
         "function reg(next){navigator.serviceWorker.register('/v20i/sw/sw.js',{scope:'/v20i/sw/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,300)})}" ++
         "var P=new URLSearchParams(location.search);var D=+(P.get('d')||0);var M=P.get('m')||'p2';var K=P.get('k')||'';var R=+(P.get('r')||20);var j=0;" ++
-        "function step(){if(j>=R){setTimeout(function(){document.title='swpdone'},1500);return}var u='/v20i/sw/x?k='+K+'_'+j+'&d='+D;j++;W(u,'p1');setTimeout(function(){W(u,M)},1);setTimeout(step,D+600)}reg(step)</script>swp");
+        "function step(){if(j>=R){CTL('/v20i/sw/x?k='+K,'p2').then(function(){setTimeout(function(){document.title='swpdone'},1500)});return}var u='/v20i/sw/x?k='+K+'_'+j+'&d='+D;j++;W(u,'p1');setTimeout(function(){W(u,M)},1);setTimeout(step,D+600)}reg(step)</script>swp");
     // ── 재검증 4 차 뒤(검증자 v20j A R6-1): 서비스 워커가 같은 주소 두 요청을 거꾸로 넘긴다 — p1 은 D ms 뒤 fetch(e.request), p2 는 곧. 서버는
     // S ms 뒤에 답한다(두 워커 기록이 두 응답보다 앞에 시작한다).
     if (std.mem.eql(u8, path, "/v20j/sw/sw.js")) return reply(conn, "application/javascript", "self.addEventListener('install',function(e){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
@@ -383,20 +386,20 @@ fn serveOne(conn: c_int) void {
     if (std.mem.eql(u8, path, "/v20j/mx/sw.js")) return reply(conn, "application/javascript", "self.addEventListener('install',function(e){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
         "self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname!='/v20j/mx/pt')return;if(e.request.headers.get('x-mode')=='fb')return;e.respondWith(fetch(e.request))})");
     if (std.mem.eql(u8, path, "/v20j/mx/pt")) return data(conn, head, 0, 0);
-    if (std.mem.eql(u8, path, "/v20j/mx/p")) return reply(conn, html, "<!doctype html><title>mx</title><script>function F(u,o){return fetch(u,o).then(function(r){return r.text()}).catch(function(){})}" ++
+    if (std.mem.eql(u8, path, "/v20j/mx/p")) return reply(conn, html, "<!doctype html><title>mx</title><script>" ++ read_js ++
         "function reg(next){navigator.serviceWorker.register('/v20j/mx/sw.js',{scope:'/v20j/mx/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,200)})}" ++
-        "var P=new URLSearchParams(location.search);var K=P.get('k')||'';var k=0;function step(){if(k>=20){document.title='mxdone';return}var u='/v20j/mx/pt?'+K+'_'+k;k++;" ++
+        "var P=new URLSearchParams(location.search);var K=P.get('k')||'';var k=0;function step(){if(k>=20){CTL('/v20j/mx/pt?'+K,'ctl').then(function(){document.title='mxdone'});return}var u='/v20j/mx/pt?'+K+'_'+k;k++;" ++
         "F(u,{headers:{'x-mode':'fb','x-who':'fb'}});F(u,{headers:{'x-who':'pt'}});F(u,{headers:{'x-mode':'fb','x-who':'fb'}});F(u,{headers:{'x-who':'pt'}});setTimeout(step,200)}reg(step)</script>mx");
     if (std.mem.eql(u8, path, "/v20j/sw/q")) return reply(conn, html, "<!doctype html><title>swq</title><script>" ++ read_js ++
         "function reg(next){navigator.serviceWorker.register('/v20j/sw/sw.js',{scope:'/v20j/sw/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,300)})}" ++
         "var P=new URLSearchParams(location.search);var S=+(P.get('s')||0);var K=P.get('k')||'';var R=+(P.get('r')||20);var MO=P.get('mo')||'m2e';var j=0;" ++
-        "function step(){if(j>=R){setTimeout(function(){document.title='swqdone'},1500);return}var u='/v20j/sw/x?k='+K+'_'+j+'&s='+S;j++;" ++
+        "function step(){if(j>=R){CTL('/v20j/sw/x?k='+K,'ctl').then(function(){setTimeout(function(){document.title='swqdone'},1500)});return}var u='/v20j/sw/x?k='+K+'_'+j+'&s='+S;j++;" ++
         "if(MO=='fb'){W(u,'f1');W(u+'&fb=1','pf');setTimeout(step,2*S+800);return}" ++
         "W(u,'m1').then(function(){setTimeout(function(){W(u,MO)},300)});setTimeout(step,2*S+1200)}reg(step)</script>swq");
     if (std.mem.eql(u8, path, "/v20j/sw/p")) return reply(conn, html, "<!doctype html><title>swj</title><script>" ++ read_js ++
         "function reg(next){navigator.serviceWorker.register('/v20j/sw/sw.js',{scope:'/v20j/sw/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,300)})}" ++
         "var P=new URLSearchParams(location.search);var D=+(P.get('d')||0);var S=+(P.get('s')||0);var K=P.get('k')||'';var R=+(P.get('r')||20);var FW=P.get('f')||'p1';var j=0;" ++
-        "function step(){if(j>=R){setTimeout(function(){document.title='swjdone'},1500);return}var u='/v20j/sw/x?k='+K+'_'+j+'&d='+D+'&s='+S;j++;W(u,FW);if(P.get('n2')!='0')setTimeout(function(){W(u,'p2')},1);setTimeout(step,D+S+600)}reg(step)</script>swj");
+        "function step(){if(j>=R){CTL('/v20j/sw/x?k='+K,'ctl').then(function(){setTimeout(function(){document.title='swjdone'},1500)});return}var u='/v20j/sw/x?k='+K+'_'+j+'&d='+D+'&s='+S;j++;W(u,FW);if(P.get('n2')!='0')setTimeout(function(){W(u,'p2')},1);setTimeout(step,D+S+600)}reg(step)</script>swj");
 
     // hostile: D (x-who d, 300 ms), F (aborted at once — before CEF), E (x-who e, 3 s) of one URL in one task.
     if (std.mem.eql(u8, path, "/v20i/h")) {
@@ -648,6 +651,19 @@ fn ownBody(x: *const Body) bool {
 }
 
 /// `who` 는 응답 머리 X-Who(서버가 요청의 x-who 를 되돌림).
+/// 재검증 8 차(LOW-4·20 회차): `at` 뒤 그 탭의 주소에 `needle` 이 든 서비스 워커 갈래 기록 수(빈 판이 통과하지 않게 — 아래 끝).
+fn swRecs(r: *Run, browser: u64, at: usize, needle: []const u8) usize {
+    var n: usize = 0;
+    var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    defer seen.deinit(r.gpa);
+    for (r.begins.items[at..]) |b| if (b.browser == browser and b.flags.service_worker and std.mem.indexOf(u8, b.url, needle) != null) {
+        if (seen.contains(b.request)) continue;
+        seen.put(r.gpa, b.request, {}) catch {};
+        n += 1;
+    };
+    return n;
+}
+
 fn tally(r: *Run, browser: u64, at: usize, needle: []const u8, who: ?[]const u8) Tally {
     var t: Tally = .{};
     var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
@@ -1445,7 +1461,12 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             var sl2: [400]u8 = undefined;
             // 재검증 7 차(겹침 규칙): X·p1 은 같은 주소를 워커가 한꺼번에 받는다 — 둘 다 `ambiguous` 가 설계다. 하한은 p2(D ms 뒤 혼자 — 20 판, 워커가
             // 막 붙은 눈먼 때의 판 둘을 둔다)만, s2(워커가 스스로 답한다 — 기록이 없다)는 하한이 없다(WRONG 0·끝 하나만).
-            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[1], "p2")) @as(usize, 18) else 0) and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
+            // 재검증 8 차(LOW-4): 서비스 워커 갈래 기록 수의 아래 끝(X·p1·p2 — 판마다 셋, s2 는 둘; 대조 여덟)과 대조 fetch 의 제 본문 ≥ 6(워커 CDP 를
+            // 끈 빌드에서는 0 — 빈 판이 통과하지 않는다).
+            const ctl = tally(&r, rec_tab, at, "_ctl", null);
+            const swn = swRecs(&r, rec_tab, at, "/v20i/sw/x?");
+            const sw_floor: usize = (if (comptime std.mem.eql(u8, c[1], "p2")) @as(usize, 54) else 36) + 7;
+            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[1], "p2")) @as(usize, 18) else 0) and ec.missing == 0 and ec.doubled == 0 and swn >= sw_floor and ctl.own >= 6, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · service-worker records {d} (floor {d}) · control own {d}/{d} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), swn, sw_floor, ctl.own, ctl.total, all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
             try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swi");
             r.pump(2000);
@@ -1476,7 +1497,11 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             // 재검증 7 차(겹침 규칙): swrev 는 같은 주소 두 요청을 워커가 넘기고 서버가 S ms 뒤에 답한다 — S > 0 이면 두 W 가 시작부터 응답까지 겹쳐
             // 둘 다 `ambiguous` 가 설계다(하한 없음). S 0(곧 답한다)은 겹치지 않아 그대로 30.
             const v20j_min: usize = comptime if (std.mem.startsWith(u8, c[0], "swalt1")) 15 else if (std.mem.startsWith(u8, c[0], "swrev") and !std.mem.eql(u8, c[2], "0")) 0 else 30;
-            report(done and all.wrong == 0 and all.sw_captured >= v20j_min and ec.missing == 0 and ec.doubled == 0, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            // 재검증 8 차(LOW-4): 서비스 워커 갈래 기록 수의 아래 끝(판마다 둘 — p1·p2, A·p2, X·A; 대조 여덟)과 대조 fetch 의 제 본문 ≥ 6.
+            const ctl = tally(&r, rec_tab, at, "_ctl", null);
+            const swn = swRecs(&r, rec_tab, at, "/v20j/sw/x?");
+            const sw_floor: usize = 36 + 7;
+            report(done and all.wrong == 0 and all.sw_captured >= v20j_min and ec.missing == 0 and ec.doubled == 0 and swn >= sw_floor and ctl.own >= 6, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · service-worker records {d} (floor {d}) · control own {d}/{d} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), swn, sw_floor, ctl.own, ctl.total, all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
             try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swj");
             r.pump(2000);
@@ -1506,7 +1531,11 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             var sl2: [400]u8 = undefined;
             // 재검증 7 차(겹침 규칙): fb 는 워커의 대체 fetch(F — `&fb=1`)와 페이지의 같은 주소(pf)가 겹친다 — 둘 다 `ambiguous`, f1 은 제 주소를
             // 받은 뒤 다른 주소로 답해 짝이 없다(`unmatched`). 하한 없음(WRONG 0·끝 하나만).
-            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[2], "fb")) @as(usize, 0) else 18) and ec.missing == 0 and ec.doubled == 0, "v20k-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            // 재검증 8 차(LOW-4): 서비스 워커 갈래 기록 수의 아래 끝(fb 는 판마다 셋 — f1·F·pf, 메모는 둘 — m1·X; 대조 여덟)과 대조 fetch 의 제 본문 ≥ 6.
+            const ctl = tally(&r, rec_tab, at, "_ctl", null);
+            const swn = swRecs(&r, rec_tab, at, "/v20j/sw/x?");
+            const sw_floor: usize = (if (comptime std.mem.eql(u8, c[2], "fb")) @as(usize, 54) else 36) + 7;
+            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[2], "fb")) @as(usize, 0) else 18) and ec.missing == 0 and ec.doubled == 0 and swn >= sw_floor and ctl.own >= 6, "v20k-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} | {s} | {s} · service-worker records {d} (floor {d}) · control own {d}/{d} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), swn, sw_floor, ctl.own, ctl.total, all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
             try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swq");
             r.pump(2000);
@@ -1523,6 +1552,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             var notes: [1500]u8 = undefined;
             var nn: usize = 0;
             var st: [16]usize = @splat(0);
+            // 재검증 8 차(LOW-4): 판마다 서비스 워커 갈래 기록(pt 둘씩 20 묶음 = 40 + 대조 여덟)과 대조 fetch 의 제 본문.
+            var sw_recs: usize = 0;
+            var ctl_own: usize = 0;
+            var ctl_total: usize = 0;
             for (0..loads) |load| {
                 session += 1;
                 try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
@@ -1535,6 +1568,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
                 const all = tally(&r, rec_tab, at, "/v20j/mx/pt?", null);
                 const pt = tally(&r, rec_tab, at, "/v20j/mx/pt?", "pt");
                 const ec = endCheck(&r, rec_tab, at);
+                const ctl = tally(&r, rec_tab, at, "_ctl", null);
+                sw_recs += swRecs(&r, rec_tab, at, "/v20j/mx/pt?");
+                ctl_own += ctl.own;
+                ctl_total += ctl.total;
                 wrong += all.wrong;
                 sw_total += pt.total;
                 sw_own += pt.own;
@@ -1555,7 +1592,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             // 재검증 7 차(겹침 규칙): 이 판은 같은 주소의 워커 fetch 넷을 한꺼번에 낸다 — 같은 열쇠의 W 가 시작→응답 창에서 겹치므로
             // 그 창의 기록은 모두 `ambiguous` 로 끝나는 것이 설계다(잘못 붙이기 0 > 잃는 본문). 그래서 pass-through 의 own 비율은 하한이 아니라
             // 보고용이고, 판정은 WRONG 0 · 끝 없음 0 · 여러 끝 0 · 모든 판 끝남이다.
-            report(wrong == 0 and missing == 0 and doubled == 0 and bad_loads == 0, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
+            // 재검증 8 차(LOW-4): 서비스 워커 갈래 기록 수의 아래 끝과 대조 fetch 의 제 본문(판마다 6 이상의 합) — 워커 CDP 를 끈 빌드에서 실패한다.
+            const mix_floor = loads * (36 + 7);
+            report(wrong == 0 and missing == 0 and doubled == 0 and bad_loads == 0 and sw_recs >= mix_floor and ctl_own >= 6 * loads, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · service-worker records {d} (floor {d}) · control own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, sw_recs, mix_floor, ctl_own, ctl_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
         }
         // IO load between p1 and p2.
         inline for (.{ .{ "load-n100", "100" }, .{ "load-n400", "400" }, .{ "load-n1500", "1500" } }) |c| if (enabled("v20i-" ++ c[0])) {

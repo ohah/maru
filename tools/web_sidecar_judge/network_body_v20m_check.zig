@@ -943,6 +943,61 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         report(res[1].sw >= 20 and res[2].sw >= 20 and res[0].wrong + res[1].wrong + res[2].wrong == 0, "v20m-r14-cap512", std.fmt.bufPrint(&detail, "4 hog tabs (O3..O6) each make their SW hold 200 hanging fetches (held {d}/4, hogs' dropped_sw_inflight_cap {d}) || B (O1, recording) 20 SW fetches: full 512 — SW records {d}/20 dropped +{d} own body {d} (ready {}, t+{d} ms) || right after closing the 4 hog tabs — SW records {d}/20 dropped +{d} own body {d} (ready {}, t+{d} ms) || after all hanging fetches ended (server seen {d}) — SW records {d}/20 dropped +{d} own body {d} (ready {}, t+{d} ms)", .{ held, hog_drop, res[0].sw, res[0].drop, res[0].own, res[0].ready, res[0].at_ms, res[1].sw, res[1].drop, res[1].own, res[1].ready, res[1].at_ms, hang_seen.load(.monotonic), res[2].sw, res[2].drop, res[2].own, res[2].ready, res[2].at_ms }) catch "");
     }
 
+    // ── 재검증 8 차 기준 · v20n-B R12-hop(재검증 7 차 검증 12 회차 — D-v20n-1): 한 탭이 출처 여덟을 차례로 옮기며 각 워커에 끝나지 않는 fetch 를 쥐게
+    // 한다 — 떠난 출처의 요청이 몫에 남아 다른 탭(B, O1)의 서비스 워커 갈래 기록을 막는가. 7 차는 놓은 수 512 뒤로 놓지 않아 B 0/20(2/2 실패),
+    // 8 차는 언제나 놓고 자리가 차면 가장 오래된 놓은 요청을 비운다.
+    if (enabled("v20n-r12-hop")) {
+        const hs0 = hang_seen.load(.monotonic);
+        // 대조: B(O1)가 기록하며 20 번 — 몫이 비었을 때.
+        _ = recordOn(&r, tab_b);
+        var at = r.begins.items.len;
+        const d00 = r.dropped_sw.get(tab_b) orelse 0;
+        try r.goO(tab_b, 0, "/g/p?b=1&n=20&k=hpc_");
+        const ready0 = r.pumpTitle(tab_b, "ready", 25_000);
+        r.pump(2000);
+        const sw0 = swRecords(&r, tab_b, at, "k=hpc_");
+        const dr0 = (r.dropped_sw.get(tab_b) orelse 0) - d00;
+        recordOff(&r, tab_b);
+        try r.goO(tab_b, 0, "/blank");
+        r.pump(500);
+        // A 가 출처 여덟(O3..O6, localhost:P3..P6)을 옮겨 다닌다 — 출처마다 워커를 깔고 끝나지 않는 fetch 150(몫 128 + 넘김 22).
+        var held: usize = 0;
+        var hops: usize = 0;
+        for (0..8) |i| {
+            const port = ports[2 + (i % 4)];
+            const host_name: []const u8 = if (i < 4) "127.0.0.1" else "localhost";
+            var u: [256]u8 = undefined;
+            try r.go(tab_a, try std.fmt.bufPrint(&u, "http://{s}:{d}/g/p?b={d}&n=0", .{ host_name, port, 10 + (i % 4) }));
+            _ = r.pumpTitle(tab_a, "ready", 20_000);
+            try r.go(tab_a, try std.fmt.bufPrint(&u, "http://{s}:{d}/g/swhold?n=150&s=600", .{ host_name, port }));
+            if (r.pumpTitle(tab_a, "sheld", 10_000)) held += 1;
+            hops += 1;
+        }
+        try r.goO(tab_a, 0, "/blank"); // 마지막 출처도 떠난다
+        r.pump(1500);
+        // B 가 다시 기록하며 20 번.
+        _ = recordOn(&r, tab_b);
+        at = r.begins.items.len;
+        const d10 = r.dropped_sw.get(tab_b) orelse 0;
+        try r.goO(tab_b, 0, "/g/p?b=1&n=20&k=hpa_");
+        const ready1 = r.pumpTitle(tab_b, "ready", 25_000);
+        r.pump(2000);
+        const sw1 = swRecords(&r, tab_b, at, "k=hpa_");
+        const dr1 = (r.dropped_sw.get(tab_b) orelse 0) - d10;
+        const t1 = tally(&r, tab_b, at, "/g/x?k=hpa_");
+        recordOff(&r, tab_b);
+        try r.goO(tab_b, 0, "/blank");
+        var tb: [600]u8 = undefined;
+        // 바라는 것(N14): 어느 탭도 보이지 않는 출처의 워커가 쥔 fetch 는 B 의 서비스 워커 갈래 요청을 막지 않는다.
+        report(ready0 and sw0 >= 20 and ready1 and sw1 >= 20 and dr1 == 0 and t1.wrong == 0, "v20n-r12-hop", std.fmt.bufPrint(&detail, "control B (O1): SW records {d}/20 dropped +{d} (ready {}) || tab A hopped {d} origins, each SW holding 150 hanging fetches (held {d}/8), then left || B (O1) again: SW records {d}/20 · dropped_sw_inflight_cap +{d} (ready {}) · {s} · server hangs seen {d}", .{ sw0, dr0, ready0, hops, held, sw1, dr1, ready1, tallyLine(&t1, &tb), hang_seen.load(.monotonic) - hs0 }) catch "");
+        // 매달린 fetch 를 모두 끝낸다.
+        hang_release.store(true, .monotonic);
+        const deadline = os.nowMs() + 120_000;
+        while (hang_open.load(.monotonic) > 0 and os.nowMs() < deadline) r.pump(300);
+        r.pump(3000);
+        hang_release.store(false, .monotonic);
+    }
+
     // ── 15 회차: getTargetInfo 의 인자 꼴 ──────────────────────────────────────────────────────────────
     if (enabled("r15-forms")) {
         try r.goO(tab_a, 0, "/g/p?b=1&n=0&k=secretA");

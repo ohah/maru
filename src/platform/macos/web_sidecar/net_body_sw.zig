@@ -497,11 +497,19 @@ pub fn explainable(rid: []const u8, method: []const u8, kind: []const u8, url: [
     return std.mem.eql(u8, kind, "Script") or std.mem.eql(u8, method, "OPTIONS");
 }
 
+/// 재검증 8 차(R-1): 요청의 머리 가운데 응답의 바이트를 가르는 것 — 메서드의 해시(`hashMethod` — 0 = 모른다: 워커 요청의 시작 사건을 잃었거나
+/// 탭 사이 사본이 서로 다르게 왔다)와 `Range` 머리 값의 해시(0 = 없다). µs τ 가 같은 두 응답은 HTTP 캐시가 한 네트워크 응답을 나눠 준 것이지만,
+/// 같은 τ 를 GET(200)·HEAD(200, 빈 본문)·Range(206, 앞부분)가 함께 나눈다(실측 v20n-r2h 10/10 — 1–10 회차 2 회차). 그래서 「τ 가 같으면 본문이
+/// 같다」 는 머리가 같을 때만 선다.
+pub const Sig = struct { method: u64 = 0, range: u64 = 0 };
+
 pub const W = struct {
     tau: i64 = 0,
     disk: bool = false,
     excluded: bool = false,
     status: u16 = 0,
+    /// 재검증 8 차(R-1): 이 W 의 머리(시작 사건에서 — `Link.noteSent`). 모르면 0 — 그 W 로는 잇지 않는다.
+    sig: Sig = .{},
     /// 응답이 둘 왔다(requestId 재사용 — 공격 2 A13) 또는 짝을 의심해 끝냈다 — 이 W 를 가리키는 P 는 `ambiguous`.
     bad: bool = false,
     /// 짝(CEF 기록 번호 — 0 = 아직). 탭 둘이 다른 짝을 주면 `bad`.
@@ -516,6 +524,11 @@ pub const TauEntry = struct {
     disk: u16 = 0,
     /// 어느 W 의 리다이렉트 홉 τ 였다.
     hop: bool = false,
+    /// 재검증 8 차(R-1): 이 τ 의 첫 W 의 머리·상태와, 머리·상태가 다른 W 가 이 τ 를 함께 썼는가(디스크 적중 포함 — 독 τ). 같은 τ 의 HEAD·206 은
+    /// GET 200 과 바이트가 다르다 — 그런 τ 는 어느 P 에도 잇지 않는다.
+    sig: Sig = .{},
+    status: u16 = 0,
+    mixed: bool = false,
 };
 
 /// 판정의 까닭(시험 로그·판정이 본다 — 계획의 「알고 둔 틈」 이름).
@@ -535,6 +548,11 @@ pub const Reason = enum {
     excluded,
     horizon,
     bad_worker,
+    /// 재검증 8 차(R-1) — P 의 머리(메서드·`Range`)가 고른 W 와 다르다(그 W 는 τ 를 나눈 다른 응답 — HEAD·Range) / 고른 W 가 부분 응답(206 —
+    /// 바이트가 `Range` 에 달렸다) / 같은 τ 에 머리·상태가 다른 W 가 있다(독 τ).
+    sig,
+    partial,
+    mixed,
     /// C5 — 짝이 아직·없다·탭에 없다.
     unpaired,
     not_in_tab,
@@ -582,6 +600,9 @@ pub const jump_tolerance_us: i64 = 1_000;
 
 pub const Link = struct {
     ws: std.AutoHashMapUnmanaged(WKey, W) = .empty,
+    /// 재검증 8 차(R-1): 응답을 기다리는 W 의 머리(시작 사건 때 — 응답 때 `ws` 로 옮긴다). `max_ws` 에 닿으면 비운다(그 W 들은 머리를 몰라
+    /// 잇지 않는다 — 잃는 쪽).
+    sigs: std.AutoHashMapUnmanaged(WKey, Sig) = .empty,
     taus: std.AutoHashMapUnmanaged(i64, TauEntry) = .empty,
     /// 넣은 차례(쫓아내기 — 홉 τ 는 `hop_order`).
     order: std.ArrayList(WKey) = .empty,
@@ -609,6 +630,7 @@ pub const Link = struct {
 
     pub fn deinit(self: *Link, gpa: std.mem.Allocator) void {
         self.ws.deinit(gpa);
+        self.sigs.deinit(gpa);
         self.taus.deinit(gpa);
         self.order.deinit(gpa);
         self.hop_order.deinit(gpa);
@@ -676,6 +698,7 @@ pub const Link = struct {
     /// 기록하는 탭이 없다 — 모두 비운다(공격 2 A14).
     pub fn clear(self: *Link) void {
         self.ws.clearRetainingCapacity();
+        self.sigs.clearRetainingCapacity();
         self.taus.clearRetainingCapacity();
         self.order.clearRetainingCapacity();
         self.hop_order.clearRetainingCapacity();
@@ -700,18 +723,39 @@ pub const Link = struct {
         self.hop_order.replaceRangeAssumeCapacity(0, hn, &.{});
     }
 
+    /// 재검증 8 차(R-1): 워커 요청의 시작 사건(리다이렉트 홉이 아닌 것) — 그 머리를 응답 때까지 둔다. 탭 사이 사본이 다른 머리로 오면 모르는 것으로.
+    pub fn noteSent(self: *Link, gpa: std.mem.Allocator, key: WKey, sig: Sig) std.mem.Allocator.Error!void {
+        if (self.ws.getPtr(key)) |w| {
+            // 응답 뒤의 늦은 사본 — 다르면 그 W 의 머리를 모르는 것으로(잇지 않는다).
+            if (w.sig.method != sig.method or w.sig.range != sig.range) w.sig = .{};
+            return;
+        }
+        if (self.sigs.count() >= max_ws) self.sigs.clearRetainingCapacity();
+        const g = try self.sigs.getOrPut(gpa, key);
+        if (!g.found_existing) {
+            g.value_ptr.* = sig;
+        } else if (g.value_ptr.method != sig.method or g.value_ptr.range != sig.range) g.value_ptr.* = .{};
+    }
+
     /// 워커 응답(`responseReceived`) — τ 색인에 넣는다. 같은 W 가 다른 탭 세션으로 다시 오면 같은 값이면 둔다(다르면 그 W 는 `bad`).
     pub fn noteResponse(self: *Link, gpa: std.mem.Allocator, key: WKey, tau: i64, disk: bool, excl: bool, status: u16) std.mem.Allocator.Error!void {
         if (self.ws.getPtr(key)) |w| {
             if (w.tau != tau or w.disk != disk) w.bad = true;
+            _ = self.sigs.remove(key);
             return;
         }
         if (self.order.items.len >= max_ws) self.evict();
-        try self.ws.put(gpa, key, .{ .tau = tau, .disk = disk, .excluded = excl, .status = status });
+        const sig: Sig = if (self.sigs.fetchRemove(key)) |kv| kv.value else .{};
+        try self.ws.put(gpa, key, .{ .tau = tau, .disk = disk, .excluded = excl, .status = status, .sig = sig });
         try self.order.append(gpa, key);
         if (tau == 0 or tau <= self.horizon) return; // τ 없음(data:·blob:) — C2 / 지평 이하는 넣지 않는다(그 τ 의 P 는 지평으로 막힌다)
         const g = try self.taus.getOrPut(gpa, tau);
-        if (!g.found_existing) g.value_ptr.* = .{ .first = key };
+        if (!g.found_existing) {
+            g.value_ptr.* = .{ .first = key, .sig = sig, .status = status };
+        } else if (g.value_ptr.sig.method != sig.method or g.value_ptr.sig.range != sig.range or g.value_ptr.status != status) {
+            // 재검증 8 차(R-1): 같은 τ 를 머리·상태가 다른 W 가 함께 썼다(GET 200 · HEAD · 206 — 바이트가 다르다) — 독 τ(영영).
+            g.value_ptr.mixed = true;
+        }
         if (disk) g.value_ptr.disk +|= 1 else {
             g.value_ptr.nondisk +|= 1;
             if (g.value_ptr.nd_key == null) g.value_ptr.nd_key = key;
@@ -761,7 +805,12 @@ pub const Link = struct {
     }
 
     /// C1·C2·C3a·C4·C5 — P(그 탭 `browser`)를 어느 W·기록에 잇는가. C0·C3b′·C6·C7′ 은 부른 쪽(표).
-    pub fn decide(self: *const Link, browser: BrowserId, tau: i64, src: Src) Verdict {
+    ///
+    /// 재검증 8 차(R-1): `p` 는 P 의 머리(메서드·`Range`). τ 가 꼭 하나인 W 도 그 머리가 P 와 같을 때만 잇는다 — 같은 τ 를 GET 200·HEAD·206 이
+    /// 함께 나누고(실측 10/10), 워커 W 의 응답을 눈먼 때 밖에서도 잃는다(실측 7 실행 중 1) — 둘이 겹치면 응답을 잃은 GET W 의 P 가 τ 를 나눈 HEAD W
+    /// 의 기록을 가리켜 그 기록에 GET 본문이 붙을 수 있었다. 머리를 모르는 W(시작을 잃었다 — 0)·부분 응답(206)·머리가 섞인 τ 는 잇지 않는다.
+    /// 머리가 다르면 그 W 의 기록은 이 P 의 것이 아니다 — 끝내지 않는다(그 W 의 제 P 가 잇는다).
+    pub fn decide(self: *const Link, browser: BrowserId, tau: i64, src: Src, p: Sig) Verdict {
         switch (src) {
             .fallback, .none => return .skip,
             .cache_storage, .http_cache => {
@@ -778,12 +827,16 @@ pub const Link = struct {
         if (tau <= self.horizon) return .{ .ambiguous = .{ .reason = .horizon } };
         const e = self.taus.get(tau) orelse return .wait; // W 가 아직(시한 뒤 `no_worker`)
         if (e.hop) return .{ .ambiguous = .{ .reason = .hop } };
+        if (e.mixed) return .{ .ambiguous = .{ .reason = .mixed } }; // 재검증 8 차(R-1): 머리·상태가 다른 W 가 나눈 τ — 독 τ(영영)
         if (e.nondisk == 0) return .wait; // 디스크 적중뿐 — 네트워크 W 가 아직
         if (e.nondisk > 1) return .{ .ambiguous = .{ .reason = .many } }; // 독 τ(영영 — 지우지 않는다)
         const key = e.nd_key orelse return .wait;
         const w = self.ws.get(key) orelse return .{ .ambiguous = .{ .reason = .horizon } };
         if (w.excluded) return .{ .ambiguous = .{ .reason = .excluded } };
         if (w.bad) return .{ .ambiguous = .{ .reason = .bad_worker, .q = w.pair } };
+        // 재검증 8 차(R-1): 머리가 P 와 같은 W 만(메서드·`Range` — 모르면 잇지 않는다), 부분 응답(206)은 잇지 않는다.
+        if (w.sig.method != p.method or w.sig.range != p.range) return .{ .ambiguous = .{ .reason = .sig } };
+        if (w.status == 206) return .{ .ambiguous = .{ .reason = .partial } };
         if (w.pair == 0) return .wait; // 짝이 아직(시한 뒤 `unpaired`)
         return .{ .link = .{ .q = w.pair, .w = key, .status = w.status } };
     }
@@ -983,13 +1036,13 @@ test "S2 C1·C2: 출처 network 만 잇는다 — http-cache·cache-storage 는 
     const k = WKey.of(1, 0, "1.1");
     try l.noteResponse(gpa_t, k, 2_000_000, false, false, 200);
     try l.notePair(gpa_t, k, 77);
-    try testing.expectEqual(Verdict{ .link = .{ .q = 77, .w = k, .status = 200 } }, l.decide(5, 2_000_000, .network));
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .http_cache, .q = 77 } }, l.decide(5, 2_000_000, .http_cache));
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .cache_storage, .q = 77 } }, l.decide(5, 2_000_000, .cache_storage));
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .cache_storage } }, l.decide(5, 9_000_000, .cache_storage)); // 만든 응답을 put — τ 가 없다
-    try testing.expectEqual(Verdict.skip, l.decide(5, 2_000_000, .fallback));
-    try testing.expectEqual(Verdict.skip, l.decide(5, 2_000_000, .none));
-    try testing.expectEqual(Verdict.skip, l.decide(5, 0, .network));
+    try testing.expectEqual(Verdict{ .link = .{ .q = 77, .w = k, .status = 200 } }, l.decide(5, 2_000_000, .network, .{}));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .http_cache, .q = 77 } }, l.decide(5, 2_000_000, .http_cache, .{}));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .cache_storage, .q = 77 } }, l.decide(5, 2_000_000, .cache_storage, .{}));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .cache_storage } }, l.decide(5, 9_000_000, .cache_storage, .{})); // 만든 응답을 put — τ 가 없다
+    try testing.expectEqual(Verdict.skip, l.decide(5, 2_000_000, .fallback, .{}));
+    try testing.expectEqual(Verdict.skip, l.decide(5, 2_000_000, .none, .{}));
+    try testing.expectEqual(Verdict.skip, l.decide(5, 0, .network, .{}));
     try testing.expectEqual(Src.http_cache, srcOf("http-cache"));
     try testing.expectEqual(Src.none, srcOf("weird"));
     try testing.expectEqual(@as(i64, 1_793_149_143_299_712), tauMicros(1.793149143299712e+12));
@@ -1005,31 +1058,31 @@ test "S2 C3a: 붙기 전에 받은 응답(메모)은 ambiguous — VS 는 새 �
     try l.noteResponse(gpa_t, k, 5_000_000, false, false, 200);
     try l.notePair(gpa_t, k, 9);
     // 기록하지 않는 탭 — VS 가 없다(닫힌 쪽).
-    try testing.expectEqual(Reason.before_visible, l.decide(5, 5_000_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.before_visible, l.decide(5, 5_000_000, .network, .{}).ambiguous.reason);
     l.raiseVisible(5, 4_000_000);
-    try testing.expect(l.decide(5, 5_000_000, .network) == .link);
+    try testing.expect(l.decide(5, 5_000_000, .network, .{}) == .link);
     // 늦게 붙은 타깃(새 범위·갱신) — 그 enable 답 앞의 τ 는 닫힌다.
     l.raiseVisible(5, 6_000_000);
-    try testing.expectEqual(Reason.before_visible, l.decide(5, 5_000_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.before_visible, l.decide(5, 5_000_000, .network, .{}).ambiguous.reason);
     l.raiseVisible(5, 1_000); // 내려가지 않는다
-    try testing.expectEqual(Reason.before_visible, l.decide(5, 5_000_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.before_visible, l.decide(5, 5_000_000, .network, .{}).ambiguous.reason);
     // 경계: VS + 여유.
     const k2 = WKey.of(1, 0, "1.2");
     try l.noteResponse(gpa_t, k2, 6_000_000 + visible_margin_us, false, false, 200);
     try l.notePair(gpa_t, k2, 10);
-    try testing.expect(l.decide(5, 6_000_000 + visible_margin_us, .network) == .link);
-    try testing.expectEqual(Reason.before_visible, l.decide(5, 6_000_000 + visible_margin_us - 1, .network).ambiguous.reason);
+    try testing.expect(l.decide(5, 6_000_000 + visible_margin_us, .network, .{}) == .link);
+    try testing.expectEqual(Reason.before_visible, l.decide(5, 6_000_000 + visible_margin_us - 1, .network, .{}).ambiguous.reason);
     // 벽시계가 뒤로 2 초 뛰었다 — 뛰기 앞에 선 VS 는 그대로(그 앞의 메모 τ 는 그 VS 보다 작다), 뛰기 뒤에 올리는 VS 는 뛰기 전 벽시계까지
     // (재검증 7 차 N19a — 뛰기 전의 메모 τ 가 뛴 뒤의 VS 보다 클 수 있다).
     l.clockSample(10_000_000, 1_000);
     l.clockSample(8_000_000, 2_000);
     try testing.expectEqual(@as(i64, 2_001_000), l.back_max);
-    try testing.expect(l.decide(5, 6_000_000 + visible_margin_us, .network) == .link);
+    try testing.expect(l.decide(5, 6_000_000 + visible_margin_us, .network, .{}) == .link);
     l.raiseVisible(5, 8_000_500); // 뛴 뒤 새 타깃의 enable 답
     try testing.expectEqual(@as(i64, 9_999_000 + 2_000 + visible_margin_us), l.visibleSince(5));
-    try testing.expectEqual(Reason.before_visible, l.decide(5, 9_000_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.before_visible, l.decide(5, 9_000_000, .network, .{}).ambiguous.reason);
     l.forgetTab(5);
-    try testing.expectEqual(Reason.before_visible, l.decide(5, 9_000_000_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.before_visible, l.decide(5, 9_000_000_000, .network, .{}).ambiguous.reason);
 }
 
 test "재검증 6 차 F16b: C3a(VS 앞 τ)도 τ 로 W 의 짝을 찾아 그 기록을 ambiguous 로 — 짝이 아직이면 기다리고, 어느 길도 잇지 않는다" {
@@ -1039,21 +1092,21 @@ test "재검증 6 차 F16b: C3a(VS 앞 τ)도 τ 로 W 의 짝을 찾아 그 기
     const k = WKey.of(1, 0, "1.1");
     try l.noteResponse(gpa_t, k, 5_000_000, false, false, 200);
     // W 는 보였는데 짝이 아직 — 기다린다(잇지 않는다).
-    try testing.expectEqual(Verdict.wait, l.decide(5, 5_000_000, .network));
+    try testing.expectEqual(Verdict.wait, l.decide(5, 5_000_000, .network, .{}));
     try l.notePair(gpa_t, k, 44);
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible, .q = 44 } }, l.decide(5, 5_000_000, .network));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible, .q = 44 } }, l.decide(5, 5_000_000, .network, .{}));
     // W 가 없는 τ — q 없이.
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 5_000_001, .network));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 5_000_001, .network, .{}));
     // 빼는 꼴·나쁜 W 는 짝이 없어도 기다리지 않는다.
     const e = WKey.of(1, 0, "preload-1");
     try l.noteResponse(gpa_t, e, 6_000_000, false, true, 200);
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 6_000_000, .network));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 6_000_000, .network, .{}));
     const bw = WKey.of(1, 0, "2.2");
     try l.noteResponse(gpa_t, bw, 6_500_000, false, false, 200);
     l.noteBad(bw);
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 6_500_000, .network));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 6_500_000, .network, .{}));
     // VS 가 없는 탭(기록하지 않는다)도 같다.
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible, .q = 44 } }, l.decide(6, 5_000_000, .network));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible, .q = 44 } }, l.decide(6, 5_000_000, .network, .{}));
 }
 
 test "재검증 6 차: 벽시계의 느린 흐름(slew)은 뒤로 뛴 폭으로 쌓이지 않는다 — 한 시간 −27 ppm 이 흘러도 VS 는 그대로, 뛰기는 남는다" {
@@ -1089,48 +1142,48 @@ test "S2 C4: τ 가 꼭 하나 — 같은 τ 의 디스크 아닌 W 둘은 영�
     defer l.deinit(gpa_t);
     l.raiseVisible(5, 1);
     // 아직 W 가 없다.
-    try testing.expectEqual(Verdict.wait, l.decide(5, 3_000, .network));
+    try testing.expectEqual(Verdict.wait, l.decide(5, 3_000, .network, .{}));
     // 디스크 적중이 먼저 온 τ — 네트워크 W 를 기다린다.
     const d = WKey.of(1, 0, "d");
     try l.noteResponse(gpa_t, d, 3_000, true, false, 200);
-    try testing.expectEqual(Verdict.wait, l.decide(5, 3_000, .network));
+    try testing.expectEqual(Verdict.wait, l.decide(5, 3_000, .network, .{}));
     const n = WKey.of(1, 0, "n");
     try l.noteResponse(gpa_t, n, 3_000, false, false, 200);
-    try testing.expectEqual(Verdict.wait, l.decide(5, 3_000, .network)); // 짝이 아직
+    try testing.expectEqual(Verdict.wait, l.decide(5, 3_000, .network, .{})); // 짝이 아직
     try l.notePair(gpa_t, n, 31);
-    try testing.expectEqual(Verdict{ .link = .{ .q = 31, .w = n, .status = 200 } }, l.decide(5, 3_000, .network));
+    try testing.expectEqual(Verdict{ .link = .{ .q = 31, .w = n, .status = 200 } }, l.decide(5, 3_000, .network, .{}));
     // 다른 타깃의 같은 τ(µs 충돌) — 독. 짝이 있어도.
     try l.noteResponse(gpa_t, WKey.of(2, 0, "z"), 3_000, false, false, 200);
-    try testing.expectEqual(Reason.many, l.decide(5, 3_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.many, l.decide(5, 3_000, .network, .{}).ambiguous.reason);
     // 홉 τ.
     const r = WKey.of(1, 0, "r");
     try l.noteHop(gpa_t, r, 4_000);
     try l.noteResponse(gpa_t, r, 4_500, false, false, 200);
     try l.notePair(gpa_t, r, 40);
-    try testing.expectEqual(Reason.hop, l.decide(5, 4_000, .network).ambiguous.reason);
-    try testing.expect(l.decide(5, 4_500, .network) == .link);
+    try testing.expectEqual(Reason.hop, l.decide(5, 4_000, .network, .{}).ambiguous.reason);
+    try testing.expect(l.decide(5, 4_500, .network, .{}) == .link);
     // 빼는 꼴(preload 등) — τ 색인에는 있다.
     const p = WKey.of(1, 0, "preload-3");
     try l.noteResponse(gpa_t, p, 5_000, false, true, 200);
-    try testing.expectEqual(Reason.excluded, l.decide(5, 5_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.excluded, l.decide(5, 5_000, .network, .{}).ambiguous.reason);
     // 같은 W 가 다른 τ 로 다시(requestId 재사용) — 나쁜 W.
     const q = WKey.of(1, 0, "q");
     try l.noteResponse(gpa_t, q, 6_000, false, false, 200);
     try l.notePair(gpa_t, q, 60);
     try l.noteResponse(gpa_t, q, 6_100, false, false, 200);
-    try testing.expectEqual(Reason.bad_worker, l.decide(5, 6_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.bad_worker, l.decide(5, 6_000, .network, .{}).ambiguous.reason);
     // 탭 둘이 다른 짝 — 나쁜 W, 그 기록도 ambiguous 로.
     const s = WKey.of(1, 0, "s");
     try l.noteResponse(gpa_t, s, 7_000, false, false, 200);
     try l.notePair(gpa_t, s, 70);
     try l.notePair(gpa_t, s, 71);
-    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .bad_worker, .q = 70 } }, l.decide(5, 7_000, .network));
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .bad_worker, .q = 70 } }, l.decide(5, 7_000, .network, .{}));
     try testing.expect(l.isExplained(70) and l.isExplained(71));
     // 짝을 의심해 끝낸 W.
     const u = WKey.of(1, 0, "u");
     try l.noteResponse(gpa_t, u, 8_000, false, false, 200);
     l.noteBad(u);
-    try testing.expectEqual(Reason.bad_worker, l.decide(5, 8_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.bad_worker, l.decide(5, 8_000, .network, .{}).ambiguous.reason);
 }
 
 test "S2 지평: 넘쳐 쫓아낸 τ 이하는 ambiguous, 그 이하 τ 의 새 W 는 넣지 않는다 — 쫓아낸 짝의 「설명됨」 도 지운다" {
@@ -1143,15 +1196,15 @@ test "S2 지평: 넘쳐 쫓아낸 τ 이하는 ambiguous, 그 이하 τ 의 새 
         try l.noteResponse(gpa_t, k, 10_000 + @as(i64, @intCast(i)), false, false, 200);
         try l.notePair(gpa_t, k, 100 + i);
     }
-    try testing.expect(l.decide(5, 10_000, .network) == .link);
+    try testing.expect(l.decide(5, 10_000, .network, .{}) == .link);
     try l.noteResponse(gpa_t, WKey.of(1, 0, "x"), 999_999, false, false, 200);
     try testing.expectEqual(@as(i64, 10_000 + evict_batch - 1), l.horizon);
-    try testing.expectEqual(Reason.horizon, l.decide(5, 10_000, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.horizon, l.decide(5, 10_000, .network, .{}).ambiguous.reason);
     try testing.expect(!l.isExplained(100));
-    try testing.expect(l.decide(5, 10_000 + evict_batch, .network) == .link);
+    try testing.expect(l.decide(5, 10_000 + evict_batch, .network, .{}) == .link);
     // 지평 이하 τ 의 늦은 W 는 넣지 않는다 — 그 τ 의 P 는 여전히 지평으로.
     try l.noteResponse(gpa_t, WKey.of(1, 0, "late"), 10_005, false, false, 200);
-    try testing.expectEqual(Reason.horizon, l.decide(5, 10_005, .network).ambiguous.reason);
+    try testing.expectEqual(Reason.horizon, l.decide(5, 10_005, .network, .{}).ambiguous.reason);
     l.clear();
     try testing.expectEqual(@as(i64, 0), l.horizon);
 }
@@ -1223,13 +1276,13 @@ test "S2 퍼즈(세계 모의기 — τ 고리): 이은 기록의 본문은 늘 
             const pick = rnd.uintLessThan(u8, 10);
             if (pick == 0) {
                 // 만든 응답 — 새 τ(아무 W 의 τ 와 같을 수도 있다 — 그래도 출처가 fallback-code 라 잇지 않는다).
-                const v = l.decide(5, base - @as(i64, rnd.uintLessThan(u32, 200)), .fallback);
+                const v = l.decide(5, base - @as(i64, rnd.uintLessThan(u32, 200)), .fallback, .{});
                 try testing.expect(v == .skip);
                 continue;
             }
             const f = fs[rnd.uintLessThan(usize, n)];
             const src: Src = if (f.disk) .http_cache else if (pick == 1) .cache_storage else .network;
-            const v = l.decide(5, f.tau, src);
+            const v = l.decide(5, f.tau, src, .{});
             switch (v) {
                 .link => |x| {
                     links += 1;
@@ -1320,7 +1373,7 @@ test "재검증 7 차 N19a·N19b(탐침 v20m P19): 벽시계가 X 뒤로 뛰어�
     const memo = WKey.of(3, 0, "9.0");
     try l.noteResponse(gpa_t, memo, wall0 + 900_000, false, false, 200);
     try l.notePair(gpa_t, memo, 76);
-    try testing.expect(l.decide(7, wall0 + 900_000, .network) == .ambiguous);
+    try testing.expect(l.decide(7, wall0 + 900_000, .network, .{}) == .ambiguous);
     // 한 시간 뒤 새 기록 — 워커 세션의 enable 답(지금 벽시계) 뒤 60 초의 응답은 잇는다(전에는 before_visible — v20m P19).
     mono += 3600 * 1_000_000;
     const now_wall = jump_wall + 3600 * 1_000_000;
@@ -1329,7 +1382,7 @@ test "재검증 7 차 N19a·N19b(탐침 v20m P19): 벽시계가 X 뒤로 뛰어�
     const k = WKey.of(3, 0, "9.1");
     try l.noteResponse(gpa_t, k, now_wall + 60_000_000, false, false, 200);
     try l.notePair(gpa_t, k, 77);
-    const v = l.decide(8, now_wall + 60_000_000, .network);
+    const v = l.decide(8, now_wall + 60_000_000, .network, .{});
     std.debug.print("\n[N19a] back_max {d} ms · P 60 s after enable (1 h after the jump) → {s}\n", .{ @divTrunc(l.back_max, 1000), @tagName(v) });
     try testing.expect(v == .link);
     // N19b: 한가한 한 시간 사이의 1.5 초 뒤로 뛰기 — 흐름의 몫은 표본 사이 10 초까지만(5 ms) 쳐서 뛰기로 본다(전에는 1.8 초까지 삼켰다).
@@ -1352,5 +1405,87 @@ test "재검증 7 차 N19a·N19b(탐침 v20m P19): 벽시계가 X 뒤로 뛰어�
     q.clockSample(wall0 + 600_000 - 5_000, 1_000_000 + 600_000);
     q.clockSample(wall0 + 700_000, 1_000_000 + 700_000);
     try testing.expect(q.back_max >= 4_000);
-    try testing.expect(q.decide(9, wall0 + 500_000, .network) == .link);
+    try testing.expect(q.decide(9, wall0 + 500_000, .network, .{}) == .link);
+}
+
+test "v20n R6-a: 기록을 끈 동안(워커 세션이 없어 시계 표본이 없다) 벽시계가 60 s 뒤로 뛰고 다시 켜면 — 켤 때의 VS 는 낮게 서지만 첫 워커 메시지의 표본이 뛰기를 보고 enable 답의 VS 가 뛰기 전 벽시계 위로 선다(그 앞 메모 τ 는 C3a 로 막힌다)" {
+    var l: Link = .{};
+    defer l.deinit(testing.allocator);
+    const b: BrowserId = 7;
+    const m0: i64 = 1_000_000_000;
+    const w0: i64 = 1_700_000_000_000_000;
+    // 첫 기록 세션 — 표본이 있다. 메모 τ 는 그때의 벽시계.
+    l.clockSample(w0, m0);
+    l.raiseVisible(b, w0);
+    // 첫 세션이 30 분 이어지는 동안 표본이 이어지고, 끄기 10 s 전에 메모를 받았다.
+    var k: i64 = 1;
+    while (k <= 180) : (k += 1) l.clockSample(w0 + k * 10_000_000, m0 + k * 10_000_000);
+    const memo_tau = w0 + 1_790_000_000;
+    l.forgetTab(b);
+    l.clear(); // 기록하는 탭이 없다 — τ 색인만 비우고 시계 기준은 남는다
+    // 끈 뒤(표본 없음) 벽시계가 60 s 뒤로 뛰었다. 10 s 뒤 다시 켬 — 켤 때의 VS 는 표본 없이 지금 벽시계로.
+    const m1 = m0 + 1_810_000_000;
+    const w1 = w0 + 1_810_000_000 - 60_000_000;
+    l.raiseVisible(b, w1);
+    try testing.expect(l.visibleSince(b) < memo_tau); // 이 사이에는 C3a 가 그 메모를 막지 못한다(다만 잇기는 첫 enable 답 뒤다)
+    // 첫 워커 메시지(`workerScriptLoaded`)의 표본 → enable 답의 VS.
+    l.clockSample(w1 + 100_000, m1 + 100_000);
+    l.raiseVisible(b, w1 + 150_000);
+    try testing.expect(l.visibleSince(b) > memo_tau);
+    try testing.expect(l.decide(b, memo_tau, .network, .{}) == .ambiguous);
+}
+
+test "재검증 8 차 R-1: τ 를 나눈 W 는 머리(메서드·Range)가 P 와 같을 때만 잇는다 — 머리를 모르는 W·206·머리·상태가 섞인 τ 는 잇지 않는다" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    l.raiseVisible(5, 1);
+    const get: Sig = .{ .method = 0x6e7, .range = 0 };
+    const head: Sig = .{ .method = 0x4ead, .range = 0 };
+    const rng: Sig = .{ .method = 0x6e7, .range = 0x5241 };
+    // HEAD W 하나만 보인다(같은 τ 의 GET W 는 응답을 잃었다) — GET P 는 잇지 않는다(기록은 끝내지 않는다 — 그 W 의 제 P 가 잇는다).
+    const h1 = WKey.of(1, 0, "h1");
+    try l.noteSent(gpa_t, h1, head);
+    try l.noteResponse(gpa_t, h1, 3_000, false, false, 200);
+    try l.notePair(gpa_t, h1, 31);
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .sig } }, l.decide(5, 3_000, .network, get));
+    try testing.expectEqual(Verdict{ .link = .{ .q = 31, .w = h1, .status = 200 } }, l.decide(5, 3_000, .network, head));
+    // Range W(206) — 머리가 같아도 잇지 않는다.
+    const r1 = WKey.of(1, 0, "r1");
+    try l.noteSent(gpa_t, r1, rng);
+    try l.noteResponse(gpa_t, r1, 4_000, false, false, 206);
+    try l.notePair(gpa_t, r1, 41);
+    try testing.expectEqual(@as(?Reason, .sig), reasonOf(l.decide(5, 4_000, .network, get)));
+    try testing.expectEqual(@as(?Reason, .partial), reasonOf(l.decide(5, 4_000, .network, rng)));
+    // 시작 사건을 잃은 W(머리를 모른다) — 잇지 않는다.
+    const uk = WKey.of(1, 0, "u1");
+    try l.noteResponse(gpa_t, uk, 5_000, false, false, 200);
+    try l.notePair(gpa_t, uk, 51);
+    try testing.expectEqual(@as(?Reason, .sig), reasonOf(l.decide(5, 5_000, .network, get)));
+    // 같은 τ 에 GET 200(네트워크)과 HEAD(디스크 적중)가 함께 — 독 τ(GET P 도).
+    const g2 = WKey.of(1, 0, "g2");
+    try l.noteSent(gpa_t, g2, get);
+    try l.noteResponse(gpa_t, g2, 6_000, false, false, 200);
+    try l.notePair(gpa_t, g2, 61);
+    try testing.expect(l.decide(5, 6_000, .network, get) == .link);
+    const h2 = WKey.of(1, 0, "h2");
+    try l.noteSent(gpa_t, h2, head);
+    try l.noteResponse(gpa_t, h2, 6_000, true, false, 200);
+    try testing.expectEqual(@as(?Reason, .mixed), reasonOf(l.decide(5, 6_000, .network, get)));
+    // 탭 사이 사본이 다른 머리로 왔다 — 모르는 것으로.
+    const c1 = WKey.of(1, 0, "c1");
+    try l.noteSent(gpa_t, c1, get);
+    try l.noteSent(gpa_t, c1, head);
+    try l.noteResponse(gpa_t, c1, 7_000, false, false, 200);
+    try l.notePair(gpa_t, c1, 71);
+    try testing.expectEqual(@as(?Reason, .sig), reasonOf(l.decide(5, 7_000, .network, get)));
+    // 머리의 표는 응답 때 옮겨 비운다.
+    try testing.expectEqual(@as(u32, 0), l.sigs.count());
+}
+
+/// 재검증 8 차: 판정의 까닭(잇거나 기다리면 null) — 시험이 union 칸을 곧바로 읽어 변이에서 panic 으로 멈추지 않게.
+fn reasonOf(v: Verdict) ?Reason {
+    return switch (v) {
+        .ambiguous => |a| a.reason,
+        else => null,
+    };
 }

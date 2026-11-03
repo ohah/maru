@@ -253,14 +253,16 @@ fn serveOne(conn: c_int) void {
         if (!head) writeAll(conn, body_s);
         return;
     }
+    if (v20nServe(conn, req, target, path)) return;
     if (v20lServe(conn, req, target, path)) return;
     return reply(conn, "text/plain", "", "?");
 }
 
 // ── 모으기 ────────────────────────────────────────────────────────────────────────────────────────────────
 
-const Begin = struct { browser: u64, request: u64, url: []u8, expected: bool, sw: bool };
-const Body = struct { browser: u64, request: u64, data: std.ArrayList(u8) = .empty, ends: usize = 0, state: msg.NetBodyState = .unavailable, xbody: []u8 = &.{}, xwho: []u8 = &.{}, cef_end: bool = false };
+/// 재검증 8 차(R-1): `head` — 기록의 메서드가 HEAD 다. `status`·`crange` — 기록 제 응답의 상태와 `Content-Range`(본문 길이의 참값을 가른다).
+const Begin = struct { browser: u64, request: u64, url: []u8, expected: bool, sw: bool, head: bool = false };
+const Body = struct { browser: u64, request: u64, data: std.ArrayList(u8) = .empty, ends: usize = 0, state: msg.NetBodyState = .unavailable, xbody: []u8 = &.{}, xwho: []u8 = &.{}, cef_end: bool = false, status: u16 = 0, crange: []u8 = &.{} };
 
 const Run = struct {
     host: *Host,
@@ -279,6 +281,16 @@ const Run = struct {
     begins: std.ArrayList(Begin) = .empty,
     bodies: std.ArrayList(Body) = .empty,
 
+    fn findBody(self: *Run, browser: u64, request: u64) ?*Body {
+        var i = self.bodies.items.len;
+        while (i > 0) {
+            i -= 1;
+            const b = &self.bodies.items[i];
+            if (b.request == request and b.browser == browser) return b;
+        }
+        return null;
+    }
+
     fn body(self: *Run, browser: u64, request: u64) *Body {
         var i = self.bodies.items.len;
         while (i > 0) {
@@ -294,10 +306,14 @@ const Run = struct {
         switch (m) {
             .net_begin => |v| {
                 if (v.flags.service_worker) self.sw_begin.put(self.gpa, v.request, {}) catch {};
-                self.begins.append(self.gpa, .{ .browser = v.browser, .request = v.request, .url = self.gpa.dupe(u8, v.url) catch &.{}, .expected = v.flags2.body_expected, .sw = v.flags.service_worker }) catch {};
+                // 재검증 8 차: CEF 요청 번호는 긴 실행에서 다시 쓰인다(실측 — 300 초 뒤 다른 주소가 같은 번호) — 앞 생의 본문이 끝났으면 새 칸으로(같은
+                // 칸에 끝이 둘로 세여 「several ends」 가 되었다 — `v20m-navn`).
+                if (self.findBody(v.browser, v.request)) |old| if (old.ends > 0) self.bodies.append(self.gpa, .{ .browser = v.browser, .request = v.request }) catch {};
+                self.begins.append(self.gpa, .{ .browser = v.browser, .request = v.request, .url = self.gpa.dupe(u8, v.url) catch &.{}, .expected = v.flags2.body_expected, .sw = v.flags.service_worker, .head = std.ascii.eqlIgnoreCase(v.method, "HEAD") }) catch {};
             },
             .net_response => |v| {
                 const b = self.body(v.browser, v.request);
+                b.status = v.status;
                 var it = net_fields.HeaderIterator.init(v.headers);
                 while (it.next()) |hh| {
                     if (std.ascii.eqlIgnoreCase(hh.name, "x-served")) {
@@ -306,6 +322,7 @@ const Run = struct {
                     }
                     if (std.ascii.eqlIgnoreCase(hh.name, "x-body")) b.xbody = self.gpa.dupe(u8, hh.value) catch &.{};
                     if (std.ascii.eqlIgnoreCase(hh.name, "x-who")) b.xwho = self.gpa.dupe(u8, hh.value) catch &.{};
+                    if (std.ascii.eqlIgnoreCase(hh.name, "content-range")) b.crange = self.gpa.dupe(u8, hh.value) catch &.{};
                 }
             },
             .net_end => |v| self.body(v.browser, v.request).cef_end = true,
@@ -440,6 +457,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     env_buf[env_n] = if (flag_off) "MARU_WEB_SW_CDP=0" else "MARU_WEB_SW_CDP=1";
     env_n += 1;
     env_buf[env_n] = "MARU_WEB_TEST_BODY_LOG=1";
+    env_n += 1;
+    // 재검증 8 차(R-1): `v20n-r1h` 의 주소(`lose1`)에 든 워커 GET 응답을 host 가 버린다(판정자 전용 진단 — 다른 판의 주소에는 없다).
+    env_buf[env_n] = "MARU_WEB_TEST_SW_LOSE=lose1";
     env_n += 1;
     var sp_buf: [1100]u8 = undefined;
     const stderr_path: ?[:0]const u8 = if (std.c.getenv("SWCDP_HOST_STDERR")) |p| std.mem.span(p) else blk: {
@@ -647,6 +667,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     }
     try v20lRun(&r, report, &session);
     try v20mRun(&r, report, &session);
+    try v20nRun(&r, report, &session);
     host.send(.shutdown) catch {};
     host_alive = false;
     _ = host.wait(wait_ms);
@@ -730,6 +751,12 @@ const Tally = struct { total: usize = 0, sw: usize = 0, sw_own: usize = 0, page_
 
 /// `at` 부터 그 탭의 `/swp/x`·`/swp/c` 기록 — 잡은 본문이 그 기록 제 응답의 셈(X-Body)과 다르면 틀린 본문.
 fn tally(r: *Run, browser: u64, at: usize) Tally {
+    return tallyCtl(r, browser, at, "ctl");
+}
+
+/// 재검증 8 차(7 회차): `ctl_needle` — 대조 fetch 로 셀 주소의 글(`v20l-tabs` 는 탭마다 `actl`·`bctl` — 두 탭이 같은 워커를 보아 두 탭의 대조가
+/// 두 표에 모두 든다; 한 탭의 대조가 모두 잃어도 다른 탭의 대조로 서지 않게 탭마다 제 대조만 센다).
+fn tallyCtl(r: *Run, browser: u64, at: usize, ctl_needle: []const u8) Tally {
     var t: Tally = .{};
     var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
     defer seen.deinit(r.gpa);
@@ -739,7 +766,7 @@ fn tally(r: *Run, browser: u64, at: usize) Tally {
         const x = r.body(browser, b.request);
         t.total += 1;
         if (b.sw) t.sw += 1;
-        const ctl = b.sw and std.mem.indexOf(u8, b.url, "ctl") != null;
+        const ctl = b.sw and std.mem.indexOf(u8, b.url, ctl_needle) != null;
         if (ctl) t.ctl += 1;
         // 워커가 받은 응답을 읽지 않고 쥔 fetch(K1 의 갱신)는 기록하는 동안 끝나지 않는다 — CEF 가 끝내지 않았으면 본문의 끝도 없다(`held`, 끝 없음
         // 아님 — 재검증 5 차 S0 의 v20k m2l 과 같다). CEF 가 끝냈는데 본문의 끝이 없으면 「끝 없음」.
@@ -750,21 +777,44 @@ fn tally(r: *Run, browser: u64, at: usize) Tally {
         if (x.ends == 1) t.states[@backingInt(x.state)] += 1;
         // v20l: 기록마다 한 줄(`V20L_DUMP`) — 회차 분석용.
         if (std.c.getenv("V20L_DUMP") != null) std.debug.print("V20L-REC b={d} req={d} sw={} url={s} ends={d} state={s} who={s} xbody={s} got={s}\n", .{ browser, b.request, b.sw, b.url[@min(b.url.len, std.mem.indexOf(u8, b.url, "/sw") orelse 0)..], x.ends, if (x.ends > 0) @tagName(x.state) else "-", x.xwho, x.xbody, x.data.items[0..@min(x.data.items.len, 24)] });
+        // 재검증 8 차(R-1): 본문 길이의 참값은 기록의 메서드·상태가 가른다 — HEAD·204·304 는 빈 본문, 206 은 `Content-Range` 의 조각. 그 밖은 셈의
+        // JSON 그대로(`X-Body` — 기록 제 응답의 머리). HEAD 기록에 GET 본문이 붙거나(HEAD 의 `X-Body` 는 GET 과 같은 셈이라 JSON 만 보면 맞아
+        // 보인다), 본문이 있는 기록이 「0 바이트」(`no_body`)로 끝나면 틀린 본문이다.
+        var want_buf: [64]u8 = undefined;
+        const full = std.fmt.bufPrint(&want_buf, "{{\"n\":\"{s}\"}}", .{x.xbody}) catch "";
+        const want = expectedBody(b.head, x.status, x.crange, full);
         if (x.ends >= 1 and x.state == .captured) {
             if (std.mem.indexOf(u8, x.data.items, "forged") != null) t.forged += 1;
-            var want: [64]u8 = undefined;
-            const w = std.fmt.bufPrint(&want, "{{\"n\":\"{s}\"}}", .{x.xbody}) catch "";
-            if (x.xbody.len > 0 and std.mem.eql(u8, x.data.items, w)) {
+            if (x.xbody.len > 0 and want != null and std.mem.eql(u8, x.data.items, want.?)) {
                 if (b.sw) t.sw_own += 1 else t.page_own += 1;
                 if (ctl) t.ctl_own += 1;
             } else {
                 t.wrong += 1;
-                const piece = std.fmt.bufPrint(t.notes[t.notes_len..], " [WRONG req {d}{s} who {s} X-Body {s} got {s}]", .{ b.request, if (b.sw) " sw" else "", x.xwho, x.xbody, x.data.items[0..@min(x.data.items.len, 24)] }) catch "";
+                const piece = std.fmt.bufPrint(t.notes[t.notes_len..], " [WRONG req {d}{s}{s} status {d} who {s} X-Body {s} got {s}]", .{ b.request, if (b.sw) " sw" else "", if (b.head) " HEAD" else "", x.status, x.xwho, x.xbody, x.data.items[0..@min(x.data.items.len, 24)] }) catch "";
                 t.notes_len += piece.len;
             }
         }
+        if (x.ends >= 1 and x.state == .no_body and x.xbody.len > 0 and want != null and want.?.len > 0) {
+            t.wrong += 1;
+            const piece = std.fmt.bufPrint(t.notes[t.notes_len..], " [WRONG req {d}{s} no_body but status {d} X-Body {s}]", .{ b.request, if (b.sw) " sw" else "", x.status, x.xbody }) catch "";
+            t.notes_len += piece.len;
+        }
     };
     return t;
+}
+
+/// 재검증 8 차(R-1): 기록 제 응답의 본문 참값 — HEAD·204·304 는 빈 글, 206 은 `Content-Range: bytes a-b/n` 의 조각(읽지 못하면 null — 맞는 본문이
+/// 없다), 그 밖은 `full`.
+fn expectedBody(head: bool, status: u16, crange: []const u8, full: []const u8) ?[]const u8 {
+    if (head or status == 204 or status == 304) return "";
+    if (status != 206) return full;
+    const sp = std.mem.indexOfScalar(u8, crange, ' ') orelse return null;
+    const dash = std.mem.indexOfScalarPos(u8, crange, sp, '-') orelse return null;
+    const slash = std.mem.indexOfScalarPos(u8, crange, dash, '/') orelse return null;
+    const a = std.fmt.parseInt(usize, std.mem.trim(u8, crange[sp + 1 .. dash], " "), 10) catch return null;
+    const z = std.fmt.parseInt(usize, std.mem.trim(u8, crange[dash + 1 .. slash], " "), 10) catch return null;
+    if (z < a or z >= full.len) return null;
+    return full[a .. z + 1];
 }
 
 fn bodyLine(t: *const Tally, done: bool, buf: []u8) []const u8 {
@@ -900,7 +950,7 @@ const swv_if_page = "<!doctype html><title>if</title><script>" ++ swv_page_js ++
     "for(var j=0;j<15;j++){await Promise.all([W('/swv/x?k='+K+'f'+j,'pt'),W('/swv/x?k='+K+'f'+j,'co')]);await S(30)}parent.postMessage('ifdone','*')}).catch(function(){parent.postMessage('ifdone','*')})</script>if";
 
 fn v20lTallied(url: []const u8) bool {
-    for ([_][]const u8{ "/swv/x", "/swv/c", "/swv/r", "/swv/nav", "/swvpage" }) |p| if (std.mem.indexOf(u8, url, p) != null) return true;
+    for ([_][]const u8{ "/swv/x", "/swv/c", "/swv/r", "/swv/nav", "/swvpage", "/swz/x", "/swz/c", "/swz/r" }) |p| if (std.mem.indexOf(u8, url, p) != null) return true;
     return false;
 }
 
@@ -1135,8 +1185,9 @@ fn v20lRun(r: *Run, report: Report, session: *u32) !void {
         const db = r.pumpTitle(tab_b, "bdone", 90_000);
         if (!da) da = r.pumpTitle(tab_a, "bdone", 1000);
         r.pump(4000);
-        const ta = tally(r, tab_a, at);
-        const tb = tally(r, tab_b, at);
+        // 재검증 8 차(7 회차): 탭마다 제 대조(A 는 `actl`, B 는 `bctl`)만 센다.
+        const ta = tallyCtl(r, tab_a, at, "actl");
+        const tb = tallyCtl(r, tab_b, at, "bctl");
         var la: [2000]u8 = undefined;
         var lbb: [2000]u8 = undefined;
         // 재검증 7 차(E7): 탭마다 대조의 제 본문 — 같은 워커를 두 탭이 함께 보므로 두 탭의 대조가 겹치지 않게 뒤 탭은 앞 탭의 대조 뒤에 연다(`p0`).
@@ -1487,4 +1538,189 @@ fn v20mRun(r: *Run, report: Report, session: *u32) !void {
         try r.navigate(tab_a, "/blank");
         r.pump(500);
     }
+}
+
+// ── v20n(W9d② 재검증 7 차 `34df5f03c` 적대 검증 1–10 회차 탐침 — `SWCDP_ONLY=v20n-…` 로 **고를 때만** 돈다) ─────────────────────────────
+//
+// 참값은 위와 같다(기록 제 응답 머리의 `X-Body`). 워커는 `/swz/` 범위의 `swz_js` 하나가 x-who 로 고른다(그 밖은 그대로 넘김).
+//   v20n-r1   (1 회차) 열쇠 가장자리 — 조각만 다른 같은 주소 둘·같은 주소 HEAD + GET·쿼리 차례만 다른 주소 둘·302 를 따라간 fetch 와 그 끝 주소·
+//             POST → 303 → GET 과 그 끝 주소·페이지 GET 에 워커 HEAD 응답·페이지 HEAD 에 워커 GET 응답(같은 주소의 그대로 넘김과 함께)·혼자인 대조
+//   v20n-r2   (2 회차) 기록 전에 나간 캐시되는 fetch(서버 1.5 s)와 기록 켬 뒤의 같은 주소 fetch(HTTP 캐시 쓰기를 함께 쓸 수 있다 — 같은 τ) 10 판
+//   v20n-r2n  (2 회차 대조) 같은 꼴을 no-store 로
+//   v20n-r3   (3 회차) 같은 주소 둘 겹침(하나는 `V20N_HOLD` ms — 기본 9 700) 동안 다른 주소 24 개와 같은 주소 셋째 — 설명 미루기
+//   v20n-r8   (8 회차) 캐시 항목에 대해 워커의 no-cache(304)·적중·페이지 HEAD·OPTIONS·그 주소로의 302 를 한꺼번에
+
+const swz_js = "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});var IF={};" ++
+    "self.addEventListener('fetch',function(e){var q=e.request;if(q.mode=='navigate')return;var u=new URL(q.url);var w=q.headers.get('x-who')||u.searchParams.get('w')||'';" ++
+    "if(w=='head'){e.respondWith(fetch(u.href,{method:'HEAD',headers:{'x-who':'HEADW'},cache:'no-store'}));return}" ++
+    "if(w=='gfh'){e.respondWith(fetch(u.href,{headers:{'x-who':'GFH'},cache:'no-store'}));return}" ++
+    "if(w=='rv'){e.respondWith(fetch(u.href,{headers:{'x-who':'RV'},cache:'no-cache'}));return}" ++
+    "if(w=='hit'){e.respondWith(fetch(u.href,{headers:{'x-who':'HIT'}}));return}" ++
+    // 재검증 8 차(R-1 — `v20n-r1h`): 앞 fetch W1 을 같이 쓰고(묶기), 같이 쓰는 때 같은 주소의 HEAD(coh)·Range(cor)를 따로 받는다 — HTTP 캐시의 한
+    // 쓰기를 나눠 같은 τ 가 된다(r2h 실측). W1 의 응답은 host 가 버린다(`MARU_WEB_TEST_SW_LOSE`) — 보이는 것은 τ 를 나눈 HEAD·Range W 뿐이다.
+    "if(w=='coh'||w=='cor'){var k=u.href;var j1=IF[k];if(!j1){j1=IF[k]=fetch(k,{headers:{'x-who':'W1'},cache:'default'}).then(function(r){setTimeout(function(){delete IF[k]},0);return r})}" ++
+    "else{fetch(k,w=='coh'?{method:'HEAD',headers:{'x-who':'SIDEH'},cache:'default'}:{headers:{'x-who':'SIDER','Range':'bytes=0-3'},cache:'default'}).then(function(r){return r.text()}).catch(function(){})}" ++
+    "e.respondWith(j1.then(function(r){return r.clone()}));return}" ++
+    "e.respondWith(fetch(q))});";
+
+const swz_page_body = "reg('/swz/sw.js','/swz/').then(async function(){if(!navigator.serviceWorker.controller){location.reload();return}" ++
+    "if(C=='r1'){await CTL();" ++
+    "for(var j=0;j<20;j++){var u='/swz/x?k='+K+'f'+j;await Promise.all([F(u+'#a',{'x-who':'pt'}),F(u+'#b',{'x-who':'pt'})]);await S(30)}" ++
+    "for(var j=0;j<20;j++){var u='/swz/x?k='+K+'h'+j;await Promise.all([F(u,{'x-who':'pt'},{method:'HEAD'}),F(u,{'x-who':'pt'})]);await S(30)}" ++
+    "for(var j=0;j<20;j++){await Promise.all([W('/swz/x?k='+K+'q'+j+'&a=1&b=2','pt'),W('/swz/x?k='+K+'q'+j+'&b=2&a=1','pt')]);await S(30)}" ++
+    "for(var j=0;j<15;j++){await Promise.all([W('/swz/r?k='+K+'r'+j,'pt'),W('/swz/x?k='+K+'r'+j+'&rd=1','pt')]);await S(30)}" ++
+    "for(var j=0;j<15;j++){await Promise.all([F('/swz/r303?k='+K+'s'+j,{'x-who':'pt'},{method:'POST',body:'x'}),W('/swz/x?k='+K+'s'+j+'&rd=1','pt')]);await S(30)}" ++
+    "for(var j=0;j<15;j++){var u='/swz/x?k='+K+'g'+j;await Promise.all([W(u,'head'),W(u,'pt')]);await S(30)}" ++
+    "for(var j=0;j<15;j++){var u='/swz/x?k='+K+'e'+j;await Promise.all([F(u,{'x-who':'gfh'},{method:'HEAD'}),W(u,'pt')]);await S(30)}" ++
+    "for(var j=0;j<15;j++){await F('/swz/x?k='+K+'e2'+j,{'x-who':'gfh'},{method:'HEAD'});await S(30)}" ++
+    "for(var j=0;j<15;j++){await W('/swz/x?k='+K+'g2'+j,'head');await S(30)}" ++
+    "for(var j=0;j<15;j++){await W('/swz/r?k='+K+'r2'+j,'pt');await S(30)}" ++
+    "for(var j=0;j<15;j++){await W('/swz/x?k='+K+'solo'+j,'pt');await S(30)}}" ++
+    "if(C=='r2'||C=='r2n'||C=='r2s'){var CM=C!='r2n'?'default':'no-store';var DD=P.get('d')||'1500';document.title='p0';for(var j=1;j<=10;j++){var u='/swz/'+(C!='r2n'?'c':'x')+'?k='+K+'c'+j+'&d='+DD;" ++
+    "var a=F(u,{'x-who':'pt','x-d':DD},{cache:CM});document.title='a'+j;await SIG(N+2*j-1);var b=F(u,{'x-who':'pt'},{cache:CM});await Promise.all([a,b]);await S(300);" ++
+    "var E=performance.getEntriesByName(location.origin+u).map(function(x){return Math.round(x.workerStart)+':'+Math.round(x.startTime)+':'+Math.round(x.responseStart)}).join(',');await fetch('/swz/log?j='+j+'&e='+E,{cache:'no-store'}).catch(function(){});" ++
+    "document.title='b'+j;await SIG(N+2*j)}}" ++
+    // 재검증 8 차(R-1): 판마다 기록 끔에서 W1(캐시되는 주소, 서버 1.5 s)을 내고 → 켬 → 같은 주소를 묶기로(그때 워커가 HEAD·Range 를 따로).
+    "if(C=='r1h'){for(var j=1;j<=10;j++){var md=(j%2)?'coh':'cor';var u='/swz/c?k='+K+'lose1x'+j+'&d=1500';var a=F(u,{'x-who':md},{cache:'default'});document.title='a'+j;await SIG(N+2*j-1);" ++
+    "var b=F(u,{'x-who':md},{cache:'default'});await Promise.all([a,b]);await S(300);document.title='b'+j;await SIG(N+2*j)}}" ++
+    "if(C=='r2h'){for(var j=0;j<10;j++){var u='/swz/c?k='+K+'h'+j+'&d=1500';var a=F(u,{'x-who':'pt'},{cache:'default'});await S(300);" ++
+    "var b=F(u,{'x-who':'pt'},{method:'HEAD',cache:'default'});var c=F(u+'&rg=1',{'x-who':'pt'},{cache:'default'});await S(200);var d=F(u,{'x-who':'pt','Range':'bytes=0-3'},{cache:'default'});await Promise.all([a,b,c,d]);await S(100)}}" ++
+    "if(C=='r3'){await CTL();var HD=P.get('h')||'9700';var u='/swz/x?k='+K+'d';var A=F(u,{'x-who':'pt','x-d':HD});await S(3);var B=F(u,{'x-who':'pt','x-d':'50'});" ++
+    "var L=[];for(var i=0;i<24;i++){L.push(W('/swz/x?k='+K+'o'+i,'pt'));await S(500);if(i==10){L.push(F(u,{'x-who':'pt','x-d':'30'}))}}" ++
+    "await Promise.all([A,B].concat(L));await S(2500);await CTL()}" ++
+    "if(C=='r8'){await CTL();for(var j=0;j<10;j++){var cu='/swz/c?k='+K+'g'+j;await F(cu,{'x-who':'pt'},{cache:'default'});await S(30);" ++
+    "await Promise.all([W(cu,'rv'),F(cu,{'x-who':'hit'},{cache:'default'}),F(cu,{'x-who':'pt'},{method:'HEAD',cache:'default'}),F(cu,{'x-who':'pt'},{method:'OPTIONS'}),F('/swz/rc?k='+K+'g'+j,{'x-who':'pt'},{cache:'default'})]);await S(50)}" ++
+    "await S(500);await CTL()}" ++
+    "await S(1500);document.title='bdone'})";
+
+fn v20nServe(conn: c_int, req: []const u8, target: []const u8, path: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "/swz/")) return false;
+    if (std.mem.eql(u8, path, "/swz/log")) {
+        std.debug.print("V20N-LOG {s}\n", .{target});
+        reply(conn, "text/plain", "", "ok");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swz/sw.js")) {
+        reply(conn, "text/javascript", "", swz_js);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swz/p")) {
+        reply(conn, html, "", "<!doctype html><title>z</title><script>" ++ swv_page_js ++ swz_page_body ++ "</script>z");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swz/r") or std.mem.eql(u8, path, "/swz/r303") or std.mem.eql(u8, path, "/swz/rc")) {
+        var lb: [300]u8 = undefined;
+        const to = if (std.mem.eql(u8, path, "/swz/rc")) std.fmt.bufPrint(&lb, "Location: /swz/c?k={s}\r\n", .{queryValue(target, "k")}) catch "" else std.fmt.bufPrint(&lb, "Location: /swz/x?k={s}&rd=1\r\n", .{queryValue(target, "k")}) catch "";
+        replyStatus(conn, if (std.mem.eql(u8, path, "/swz/r303")) "303 See Other" else "302 Found", "text/plain", to, "");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swz/x")) {
+        if (std.mem.startsWith(u8, req, "OPTIONS ") and headerValue(req, "access-control-request-method").len > 0) {
+            writeAll(conn, "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return true;
+        }
+        v20lCounted(conn, req, target, "200 OK", "Cache-Control: no-store\r\n");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swz/c")) {
+        // HTTP 캐시에 남는 응답(Range 는 알리지 않는다 — 캐시가 제 항목의 앞부분으로 답하면 참값 꼴이 갈린다). 재검증은 304.
+        if (headerValue(req, "if-modified-since").len > 0 or headerValue(req, "if-none-match").len > 0) {
+            writeAll(conn, "HTTP/1.1 304 Not Modified\r\nCache-Control: max-age=600\r\nLast-Modified: Mon, 26 Oct 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n");
+            return true;
+        }
+        v20lCounted(conn, req, target, "200 OK", "Cache-Control: max-age=600\r\nLast-Modified: Mon, 26 Oct 2026 00:00:00 GMT\r\n");
+        return true;
+    }
+    return false;
+}
+
+/// 「고를 때만」 — `SWCDP_ONLY` 가 그 이름을 담을 때만(기준 판정 `--review-body-swcdp` 에는 들지 않는다).
+fn v20nPicked(name: []const u8) bool {
+    const only = std.c.getenv("SWCDP_ONLY") orelse return false;
+    return std.mem.indexOf(u8, std.mem.span(only), name) != null;
+}
+
+/// 판 하나 — 새 기록 세션으로 `/swz/p?c=…` 를 열고 `bdone` 까지.
+fn v20nCase(r: *Run, report: Report, session: *u32, comptime name: []const u8, c: []const u8, extra: []const u8, ms: u32, sw_min: usize, own_min: usize) !void {
+    var pb: [256]u8 = undefined;
+    session.* += 1;
+    const on = recordOn(r, tab_a, session.*);
+    const at = r.begins.items.len;
+    try r.navigate(tab_a, std.fmt.bufPrint(&pb, "/swz/p?c={s}&k=z{s}{d}{s}", .{ c, c, session.*, extra }) catch "");
+    const done = r.pumpTitle(tab_a, "bdone", ms);
+    r.pump(4000);
+    const t = tally(r, tab_a, at);
+    var lb2: [2400]u8 = undefined;
+    report(on and done and t.wrong == 0 and t.multi_end == 0 and t.sw >= sw_min and t.sw_own >= own_min, name, bodyLine(&t, done, &lb2));
+    try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+    r.pump(500);
+    try r.navigate(tab_a, "/blank");
+    r.pump(500);
+}
+
+fn v20nRun(r: *Run, report: Report, session: *u32) !void {
+    var detail: [6000]u8 = undefined;
+    var pb: [256]u8 = undefined;
+    if (v20nPicked("v20n-r1")) try v20nCase(r, report, session, "v20n-r1", "r1", "", 120_000, 150, 12);
+    // 재검증 8 차(R-1): `v20n-r1h` 는 기준 판정이다(고르지 않아도 돈다).
+    inline for (.{ "v20n-r1h", "v20n-r2n", "v20n-r2s", "v20n-r2" }) |nm| if (if (comptime std.mem.eql(u8, nm, "v20n-r1h")) enabled(nm) else (v20nPicked(nm ++ ",") or (std.mem.endsWith(u8, std.mem.span(std.c.getenv("SWCDP_ONLY") orelse ""), nm)))) {
+        // 기록 끔에서 첫 fetch(기록 전) → 켬 → 같은 주소 둘째 fetch. 판마다 새 기록 세션.
+        const c = nm[5..];
+        const n0 = sig.load(.monotonic);
+        _ = r.titles.remove(tab_a);
+        const dd = std.c.getenv("V20N_D") orelse "1500";
+        try r.navigate(tab_a, std.fmt.bufPrint(&pb, "/swz/p?c={s}&k=z{s}{d}&n={d}&d={s}", .{ c, c, session.*, n0, std.mem.span(dd) }) catch "");
+        // 2 회차: 첫 판의 W_a 는 그 워커의 첫 붙기 앞에 나간다 — `r2s` 는 판마다 워커를 멈춰(기록 끔 동안) 매 판을 그 꼴로 만든다.
+        const stop_each = comptime std.mem.eql(u8, nm, "v20n-r2s");
+        if (stop_each) try r.host.send(.{ .devtools_call = .{ .browser = tab_a, .call = 8001, .method = "ServiceWorker.enable", .params_size = 0 } });
+        const p0 = true;
+        var tot: Tally = .{};
+        var ok: usize = 0;
+        const at_all = r.begins.items.len;
+        for (1..11) |j| {
+            var tb: [8]u8 = undefined;
+            if (!r.pumpTitle(tab_a, std.fmt.bufPrint(&tb, "a{d}", .{j}) catch "", 15_000)) break;
+            r.pump(100);
+            session.* += 1;
+            _ = recordOn(r, tab_a, session.*);
+            const at = r.begins.items.len;
+            r.pump(400);
+            sig.store(n0 + 2 * j - 1, .monotonic);
+            if (r.pumpTitle(tab_a, std.fmt.bufPrint(&tb, "b{d}", .{j}) catch "", 15_000)) ok += 1;
+            r.pump(3000);
+            const t = tally(r, tab_a, at);
+            tot.total += t.total;
+            tot.sw += t.sw;
+            tot.sw_own += t.sw_own;
+            tot.wrong += t.wrong;
+            tot.multi_end += t.multi_end;
+            tot.no_end += t.no_end;
+            for (t.states, 0..) |v, i| tot.states[i] += v;
+            if (t.notes_len > 0 and tot.notes_len + t.notes_len < tot.notes.len) {
+                @memcpy(tot.notes[tot.notes_len .. tot.notes_len + t.notes_len], t.notes[0..t.notes_len]);
+                tot.notes_len += t.notes_len;
+            }
+            try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+            r.pump(300);
+            if (stop_each) {
+                try r.host.send(.{ .devtools_call = .{ .browser = tab_a, .call = @intCast(8100 + j), .method = "ServiceWorker.stopAllWorkers", .params_size = 0 } });
+                r.pump(600);
+            }
+            sig.store(n0 + 2 * j, .monotonic);
+        }
+        _ = at_all;
+        var lb2: [2400]u8 = undefined;
+        // 재검증 8 차(R-1): `v20n-r1h` 는 τ 를 나눈 HEAD·Range 기록이 판마다 생겨야 한다(빈 판이 통과하지 않게).
+        const r1h_ok = comptime !std.mem.eql(u8, nm, "v20n-r1h");
+        report(p0 and ok == 10 and tot.wrong == 0 and tot.multi_end == 0 and (r1h_ok or tot.sw >= 8), nm, std.fmt.bufPrint(&detail, "trials {d}/10: {s}", .{ ok, bodyLine(&tot, ok == 10, &lb2) }) catch "");
+        try r.navigate(tab_a, "/blank");
+        r.pump(500);
+    };
+    if (v20nPicked("v20n-r3")) {
+        const hold = std.c.getenv("V20N_HOLD") orelse "9700";
+        var eb: [32]u8 = undefined;
+        try v20nCase(r, report, session, "v20n-r3", "r3", std.fmt.bufPrint(&eb, "&h={s}", .{std.mem.span(hold)}) catch "", 120_000, 20, 0);
+    }
+    if (v20nPicked("v20n-r2h")) try v20nCase(r, report, session, "v20n-r2h", "r2h", "", 120_000, 10, 0);
+    if (v20nPicked("v20n-r8")) try v20nCase(r, report, session, "v20n-r8", "r8", "", 120_000, 30, 0);
 }

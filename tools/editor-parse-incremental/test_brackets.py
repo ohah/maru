@@ -46,6 +46,35 @@ class Reader(unittest.TestCase):
         with self.assertRaises(ValueError):
             brackets.read_rows(sample().replace('All 1 tests passed.', 'failed'), 0, False)
 
+class FoldReader(unittest.TestCase):
+    def rows(self, full=False):
+        text = sample()
+        return '\n'.join(line + (f' fold_nodes={1000 if full else 5} fold_reused={int(not full)} fold_records=0' if line.startswith('PARSE_MEASURE ') else '') for line in text.splitlines()) + '\n'
+
+    def test_fold_controls_keep_bracket_reuse(self):
+        for full in (False, True):
+            self.assertEqual(len(brackets.read_rows(self.rows(full), 0, full, folds=True)), 20)
+
+    def test_missing_fold_observation(self):
+        with self.assertRaises(ValueError):
+            brackets.read_rows(sample(), 0, False, folds=True)
+
+    def test_partial_fold_observation(self):
+        with self.assertRaises(ValueError):
+            brackets.read_rows(self.rows().replace(' fold_nodes=5 fold_reused=1 fold_records=0', '', 1), 0, False, folds=True)
+
+    def test_fold_branch_mismatch(self):
+        with self.assertRaises(ValueError):
+            brackets.read_rows(self.rows(True), 0, False, folds=True)
+
+    def test_fold_work_missing(self):
+        with self.assertRaises(ValueError):
+            brackets.read_rows(self.rows().replace('fold_nodes=5', 'fold_nodes=0'), 0, False, folds=True)
+
+    def test_bracket_control_cannot_change_in_fold_study(self):
+        with self.assertRaises(ValueError):
+            brackets.read_rows(self.rows(True).replace('bracket_rebuilds=0', 'bracket_rebuilds=1'), 0, True, folds=True)
+
 
 if __name__ == '__main__':
     unittest.main()

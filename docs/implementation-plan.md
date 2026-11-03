@@ -92,7 +92,7 @@ macOS 로컬 shell 1개 surface
 - [구문 파싱 비동기화](plans/editor-async-parse.md) — 승인한 실패 중단·명시적 복구 정책으로 일반 입력과 완료 표시를 연결했다. 비교·병합은 기존 동기 경로를 유지한다. GUI 지연 개선량은 별도 실측 범위다.
 - [비동기 파싱의 실제 입력 표시 지연](plans/editor-input-latency.md) — 외부 고정 주기 48프로세스·1,440입력에 이어 준비 뒤 6프로세스의 주소·스택을 조사했다. 비동기 메인에서 접힘·심볼 트리 순회가 반복 관측됐다. 준비 실패·훅 경로 복구 확인·환경 허용 목록을 별도 기록한다.
 - [비동기 완료의 심볼 요약 준비](plans/editor-async-sticky-preparation.md) — 실제 두 뷰의 첫 조회 재구축을 재현하고 워커 준비·취소·선택적 OOM 보존을 구현했다. Native 집중 검증 및 동일 바이너리 GUI 대조 48회/1,440입력을 완료했다. 접힘 캐시 소유권 변경은 포함하지 않는다.
-- [비동기 완료의 접힘 후보 준비](plans/editor-async-fold-preparation.md) — 실제 두 뷰의 접힘 재순회를 재현하고 byte 후보의 worker 준비·독립 복사·취소/OOM 복구를 검증한다. Debug/ReleaseFast·제품 회귀와 후보 없음/있음 두 fixture의 실제 대조 합계 96회/2,880입력을 완료했다.
+- [비동기 완료의 접힘 후보 준비](plans/editor-async-fold-preparation.md) — 실제 두 뷰의 접힘 재순회를 재현하고 byte 후보의 worker 준비·독립 복사·취소/OOM 복구를 검증한다. Debug/ReleaseFast·제품 회귀와 후보 없음/있음 두 fixture의 실제 대조 합계 96회/2,880입력을 완료했다. 후속은 worker 기준의 후보 값/독립 트리 복사와 증분 갱신이며 별도 32프로세스/640편집으로 대조한다.
 - [비동기 완료의 괄호 잎 준비](plans/editor-async-bracket-preparation.md) — 두 뷰의 초기 재수집을 재현하고 worker 준비·독립 잎 복사·취소/OOM 복구를 검증한다. Debug/ReleaseFast·채택 96프로세스/2,880입력의 구문/색 표시 대조를 완료했다. 생산자 지각의 미완료 묶음과 구문 표시 지연의 손익도 기록했다. 후속은 워커의 이전 완료 잎 재사용·변경 범위 갱신과 내부 빌림 수명을 구현하며, 별도 32프로세스/640편집으로 전체 준비와 대조한다.
 - [증분화 후 워커 단계별 비용](../tools/editor-parse-incremental/stage-results.md) — 제품 변경 없이 원문/파싱/심볼/접힘/괄호 구간을 나누고 다음 개선 대상을 정한다.
 - [캐시 경로의 원격 커밋 검증](plans/editor-scm-cache-path-test.md) — 정상 캐시 저장소를 허용하면서 실제 로컬 메시지 경로 유출을 거절한다.

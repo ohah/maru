@@ -6096,3 +6096,73 @@ fn incrementalBracketAllocationJudge(a: std.mem.Allocator) !void {
 test "bracket preparation 증분 복사와 부분 갱신의 모든 할당 실패는 원본과 회수를 보존한다" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, incrementalBracketAllocationJudge, .{});
 }
+
+test "fold preparation 워커 복사는 원본 native 핸들을 읽지 않고 독립 기준 트리에 후보를 묶는다" {
+    const a = std.testing.allocator;
+    const f = FoldChangeFixture;
+    var source = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+    defer source.deinit();
+    var original: FoldCache = .{};
+    defer original.deinit(a);
+    var token: Cancellation = .{};
+    try source.prepareFoldCache(a, &original, &token);
+    var peer = source.copyReady(.zig) orelse return error.NoProvider;
+    defer peer.deinit();
+    var copied: FoldCache = blk: {
+        const saved = original.tree;
+        // 원본 핸들에 native 호출이 생기면 이 대조는 실패한다. 값/판 메타데이터만 읽어야 한다.
+        original.tree = @ptrFromInt(1);
+        defer original.tree = saved;
+        break :blk (try original.copyMatchedOnto(a, source.parser, source.tree_gen, peer.parser, peer.tree_gen, peer.tree)).?;
+    };
+    defer copied.deinit(a);
+    try std.testing.expect(copied.tree != peer.tree and copied.tree != original.tree);
+    try std.testing.expect(copied.records.items.ptr != original.records.items.ptr);
+    copied.edit(f.edit);
+    peer.onEdit(f.after, f.edit);
+    try peer.prepareFoldCache(a, &copied, &token);
+    try foldCacheJudge(&peer, &copied, f.after);
+    try std.testing.expectEqual(@as(u64, 1), copied.reused_changes);
+    try foldCacheJudge(&source, &original, f.before);
+}
+
+fn foldWorkerCopyAllocationJudge(a: std.mem.Allocator) !void {
+    const stable = std.testing.allocator;
+    const f = FoldChangeFixture;
+    var source = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+    defer source.deinit();
+    var original: FoldCache = .{};
+    defer original.deinit(stable);
+    var token: Cancellation = .{};
+    try source.prepareFoldCache(stable, &original, &token);
+    var peer = source.copyReady(.zig) orelse return error.NoProvider;
+    defer peer.deinit();
+    var copy = (try original.copyMatchedOnto(a, source.parser, source.tree_gen, peer.parser, peer.tree_gen, peer.tree)).?;
+    defer copy.deinit(a);
+    copy.edit(f.edit);
+    peer.onEdit(f.after, f.edit);
+    try peer.prepareFoldCache(a, &copy, &token);
+    try foldCacheJudge(&peer, &copy, f.after);
+    try foldCacheJudge(&source, &original, f.before);
+}
+test "fold preparation 워커 복사와 증분 갱신의 모든 Zig 할당 실패는 원본과 회수를 보존한다" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, foldWorkerCopyAllocationJudge, .{});
+}
+
+test "fold preparation 워커 복사는 잘못된 판과 dirty 기준 및 없는 대상 트리를 거절한다" {
+    const a = std.testing.allocator;
+    const f = FoldChangeFixture;
+    var source = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+    defer source.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    var token: Cancellation = .{};
+    try source.prepareFoldCache(a, &cache, &token);
+    var peer = source.copyReady(.zig) orelse return error.NoProvider;
+    defer peer.deinit();
+    try std.testing.expect((try cache.copyMatchedOnto(a, peer.parser, source.tree_gen, peer.parser, peer.tree_gen, peer.tree)) == null);
+    try std.testing.expect((try cache.copyMatchedOnto(a, source.parser, source.tree_gen + 1, peer.parser, peer.tree_gen, peer.tree)) == null);
+    try std.testing.expect((try cache.copyMatchedOnto(a, source.parser, source.tree_gen, peer.parser, peer.tree_gen, null)) == null);
+    cache.edit(f.edit);
+    try std.testing.expect((try cache.copyMatchedOnto(a, source.parser, source.tree_gen, peer.parser, peer.tree_gen, peer.tree)) == null);
+}

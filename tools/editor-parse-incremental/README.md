@@ -111,3 +111,19 @@ python3 tools/editor-parse-incremental/stage_report.py /absolute/diagnostic \
 `--stages`는 별도 진단 모집단이며 기본 비교와 합치지 않는다. 초기 열기와 후속 편집도
 구분한다. [결과와 다음 개선 대상](stage-results.md)을 따른다. 시간은 CPU가 아닌 경과이며,
 로그 출력 비용이 서비스 완료에 더해질 수 있다. 실제 GUI 표시나 native 내부 작업량 증거가 아니다.
+
+
+## 접힘 후보의 전체/증분 준비 비교
+
+```sh
+python3 tools/editor-parse-incremental/brackets.py --folds --output /absolute/new/folds \
+  --deps /absolute/existing/zig-pkg --cache /absolute/cache
+```
+
+두 경로 모두 증분 파싱·심볼 준비·괄호 재사용을 유지한다. 외부 사본의 private 분기로
+접힘 후보 복사만 끄거나 켠다. 각 결과의 접힘 방문 노드·변경 범위 재사용·후보 수와
+괄호 전체 재수집 0을 확인한다. 정확성 구간은 별도 전체 파싱의 접힘 byte 후보도 대조한다.
+`--folds`와 `--stages`는 서로 다른 실험이므로 함께 사용하지 않는다. `--folds` 없이 실행하는
+기존 괄호 대조는 접힘 복사 분기를 건드리지 않는다. 단계 진단의 나머지 구간에는 접힘
+기준 복사/편집 비용이 포함될 수 있으며 C 파서 단독 시간으로 해석하지 않는다.
+[이번 비교 결과](fold-results.md)는 이전 진단이나 GUI 입력/표시 모집단과 구분한다.

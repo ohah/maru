@@ -5516,3 +5516,14 @@ mise exec -- zig test -OReleaseFast --dep array_repeat -Mroot=src/platform/macos
 Python 검증은 시계 해상도 아래 0ns의 정상 호출과 합계/호출 비트/세대/분기 손상 거절을
 구분한다. 독립 원시 토큰 reader는 JSON·전체 행렬·로그·소스·실행 파일 해시를 다시 확인한다.
 제품은 유지하며 경과를 CPU 시간·GUI/HID/IME/픽셀·메모리 증거로 확대하지 않는다.
+
+
+## worker 접힘 후보 증분 재사용
+
+[계획](plans/editor-async-fold-preparation.md)의 후속은 원본 native 핸들을 접근하지 않고
+worker 독립 기준 트리와 후보 값을 복사한다. native 준비 10개·worker 31개에서 잘못된 판,
+dirty/없는 대상, Zig 할당 실패, 취소/기준 부재 복구, 20가지 언어/줄/구조 편집의 전체
+byte 후보와 현재 줄 투영, 원본 불변과 연속 기준 퇴역을 대조한다.
+[실측](../tools/editor-parse-incremental/fold-results.md)은 같은 실행 파일의 접힘 전체/증분
+준비 32프로세스/640편집이며 괄호 재사용은 양쪽에서 유지한다. 성능/정확성·fixture를
+구분한다. GUI 표시·HID/IME·CPU 시간·RSS 또는 모든 언어의 개선으로 일반화하지 않는다.

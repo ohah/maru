@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+위치 검색 서버 재시작: `test-editor-location-server`는 네 종류에서 실제 fake LSP 종료·
+새 PID의 정상 응답·다른 root 종료·끄기/켜기를 24조건으로 대조한다.
+[실행 범위](plans/lsp-location-server-restart.md)는 실제 프로세스/wire와 직접 callback·시계 seam을 구분한다.
+
 위치 재시도: `test-editor-location-retry`는 네 종류의 예약 시각·중복 tick·8회 상한·
 재시도 불가 오류·새 명령·실제 문서 전환을 24조건으로 대조한다.
 [검증 범위](plans/lsp-location-retry-lifecycle.md)는 native host·실제 fake 요청·직접 응답과 clock seam이다.

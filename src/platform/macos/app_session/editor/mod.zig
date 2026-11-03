@@ -75683,6 +75683,166 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 // Keys can arrive in this interval, including with A still visible in a split.
 // Phases use real requests: 0=list wait, 1=resolved display, 2=prefetch, 3=pending Enter.
 // Retry clock seams below are explicit: these tests verify ordering, not elapsed time.
+fn locationServerLifecycleForTest(index: usize) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_DECLCAP");
+    const chosen = location_kind_cases_for_test[index];
+    for (0..6) |mode| {
+        const marker = if (mode == 1 or mode == 5) "REFBUSY" else "REFSTALL";
+        const source = if (mode == 1 or mode == 5)
+            "int target; target; target; // REFTD2 REFBUSY\n"
+        else
+            "int target; target; target; // REFTD2 REFSTALL\n";
+        var f = (try SmtFixture.openRepo(testing.allocator, "source.c", source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const second = if (mode == 3) try openSecondReadRootForTest(&f, "int sibling; // REFSTALL\n") else null;
+        try testing.expect(term_ops.activateSurfaceById(s, f.term.surface.id));
+        if (mode == 2) try removeMarkerHover(s, f.term, marker);
+        f.term.rt.editor_selection = editor_selection.Selection.at(5);
+        try testing.expect(references_client.gotoLocationsAtCaret(s, chosen.kind));
+        const st = &s.editor_references;
+        if (mode == 1 or mode == 5) {
+            try testing.expect(pumpLspUntil(&f.fx, 1500, s, struct {
+                fn scheduled(ss: *AppSession) bool {
+                    return ss.editor_references.retry_at_ms != 0;
+                }
+            }.scheduled));
+            st.retry_at_ms = std.math.maxInt(u64); // Hold the retry while the real stop is observed.
+        }
+        if (mode == 2) {
+            try testing.expect(pumpLspUntil(&f.fx, 1500, s, struct {
+                fn shown(ss: *AppSession) bool {
+                    return ss.chrome_host.reference_picker.open;
+                }
+            }.shown));
+            try testing.expect(s.reference_picker_rows.all.items.len >= 2);
+        }
+        var owner = lsp_client.readyClientFor(s, f.term).?;
+        const source_pid = owner.proc.?.pid;
+        const stop = if (second) |term| lsp_client.readyClientFor(s, term).? else owner;
+        const stop_pid = stop.proc.?.pid;
+        const old_seq = st.waiting_seq;
+        const sent = s.editor_lsp.sent_references;
+        const generation = s.reference_picker_rows.result_generation;
+        if (mode >= 4) {
+            s.loaded_config.config.lsp.enabled = false;
+            lsp_client.pump(s);
+            try testing.expectEqual(@as(usize, 0), s.editor_lsp.clients.items.len);
+            // owner/stop are now freed. Only copied pid/seq values may be reused.
+        } else {
+            try testing.expect(stop_pid > 0);
+            try testing.expectEqual(@as(c_int, 0), std.c.kill(stop_pid, std.c.SIG.KILL));
+            try testing.expect(pumpLspUntil(&f.fx, 3000, stop, struct {
+                fn down(c: *lsp_client.Client) bool {
+                    return c.phase == .restarting;
+                }
+            }.down));
+            stop.retry_at_ms = std.math.maxInt(u64);
+        }
+        if (mode != 3) {
+            try testing.expect(lsp_client.readyClientFor(s, f.term) == null);
+            if (mode != 1 and mode != 5) try testing.expect(!references_client.gotoLocationsAtCaret(s, chosen.kind));
+            try testing.expectEqual(sent, s.editor_lsp.sent_references);
+        } else {
+            try testing.expectEqual(source_pid, lsp_client.readyClientFor(s, f.term).?.proc.?.pid);
+            try testing.expect(st.waiting);
+            try testing.expectEqual(old_seq, st.waiting_seq);
+        }
+        // A retry due while disconnected follows the existing kind-specific failure policy.
+        if (mode == 1 or mode == 5) {
+            try testing.expect(st.retry_at_ms != 0);
+            st.retry_at_ms = 1;
+            references_client.tick(s);
+            try testing.expect(!st.waiting and st.retry_at_ms == 0);
+            try testing.expectEqual(@as(u64, 1), st.notified_none);
+            try testing.expectEqualStrings(maru.i18n.t(chosen.notice_key), s.chrome_host.notice.message);
+            try testing.expectEqual(sent, s.editor_lsp.sent_references);
+            s.chrome_host.notice.dismiss();
+        } else try testing.expectEqual(@as(u64, 0), st.notified_none);
+        if (mode == 2) {
+            try testing.expectEqual(generation, s.reference_picker_rows.result_generation);
+            try testing.expect(s.chrome_host.reference_picker.open);
+            // Published locations remain independently usable while their server is absent.
+            try pressKey(&f.fx, .enter, .{});
+            try testing.expectEqual(@as(u64, 1), st.navigated);
+            try testing.expectEqualStrings(f.path, pane_ops.activePane(s).activeTerm().rt.editorDocument().path.?);
+        }
+        if (mode != 2) try removeMarkerHover(s, f.term, marker);
+        f.term.rt.editor_selection = editor_selection.Selection.at(5);
+        const content = try testing.allocator.dupe(u8, f.term.rt.editorDocument().opened.?.file.content);
+        defer testing.allocator.free(content);
+        const undo = f.term.rt.editorDocument().history.undo_len;
+        if (mode >= 4) {
+            s.loaded_config.config.lsp.enabled = true;
+        } else if (mode != 3) {
+            owner.retry_at_ms = 0; // Explicit restart-backoff seam; PID and wire reply are real.
+        }
+        if (mode != 3) {
+            const Ctx = struct { s: *AppSession, term: *Term, pid: std.c.pid_t };
+            try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = s, .term = f.term, .pid = source_pid }, struct {
+                fn ready(c: Ctx) bool {
+                    return (lsp_client.readyClientFor(c.s, c.term) orelse return false).proc.?.pid != c.pid;
+                }
+            }.ready));
+        }
+        owner = lsp_client.readyClientFor(s, f.term).?;
+        const new_pid = owner.proc.?.pid;
+        try testing.expect(references_client.gotoLocationsAtCaret(s, chosen.kind));
+        try testing.expectEqual(sent + 1, s.editor_lsp.sent_references);
+        try testing.expect(st.waiting and st.retry_at_ms == 0);
+        if (mode < 4) {
+            try testing.expect(st.waiting_seq != old_seq);
+            const uri = try maru.session.editor.lsp.rpc.fileUri(testing.allocator, f.path);
+            defer testing.allocator.free(uri);
+            const raw = try locationKindRawForTest(uri, true);
+            defer testing.allocator.free(raw);
+            var reply = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+            defer reply.deinit();
+            // Synthetic old replies are separate from the actual stopped process and fresh wire response.
+            references_client.onClientResponse(s, owner, chosen.kind, old_seq, reply.value, false);
+            references_client.onClientResponse(s, owner, chosen.kind, old_seq, null, false);
+            references_client.onClientResponse(s, owner, chosen.kind, old_seq, null, true);
+            try testing.expect(st.waiting and st.retry_at_ms == 0);
+            try testing.expect(!s.chrome_host.reference_picker.open);
+        }
+        try testing.expect(pumpLspUntil(&f.fx, 1500, s, struct {
+            fn shown(ss: *AppSession) bool {
+                return ss.chrome_host.reference_picker.open and !ss.editor_references.waiting;
+            }
+        }.shown));
+        try testing.expect(s.reference_picker_rows.all.items.len >= 2);
+        try testing.expectEqual(chosen.kind, st.result_kind);
+        try testing.expect(!st.waiting and st.retry_at_ms == 0);
+        try testing.expectEqual(@as(u64, if (mode == 1 or mode == 5) 1 else 0), st.notified_none);
+        try testing.expectEqual(@as(u64, if (mode == 2) 1 else 0), st.navigated);
+        try testing.expectEqualStrings(content, f.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(undo, f.term.rt.editorDocument().history.undo_len);
+        try batchApplyDisk(&f.fx, "source.c", source);
+        if (second) |term| {
+            try testing.expectEqualStrings("int sibling; // REFSTALL\n", term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+        }
+        std.debug.print("LOCSERVER case kind={s} mode={d} old_pid={d} new_pid={d} stopped_pid={d} none={d} preserved=true\n", .{
+            @tagName(chosen.kind), mode, source_pid, new_pid, stop_pid, st.notified_none,
+        });
+    }
+}
+test "LOCSERVER1 references survive real server termination and restart" {
+    try locationServerLifecycleForTest(0);
+}
+test "LOCSERVER2 implementations survive real server termination and restart" {
+    try locationServerLifecycleForTest(1);
+}
+test "LOCSERVER3 type definitions survive real server termination and restart" {
+    try locationServerLifecycleForTest(2);
+}
+test "LOCSERVER4 declarations survive real server termination and restart" {
+    try locationServerLifecycleForTest(3);
+}
+
 fn locationRetryLifecycleForTest(index: usize) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);

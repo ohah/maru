@@ -1368,6 +1368,9 @@ JSON-RPC 프로브): 열면 `cargo check`(rustc) 진단이 오고, 오류를 **�
 실행 증거와 미검증 범위는 [응답 소유 계획](plans/lsp-signature-reference-origins.md)을 따른다.
 예약 시각·중복 tick·8회 상한·새 명령 교체·실제 문서 전환은
 [재시도 수명 검증](plans/lsp-location-retry-lifecycle.md)에서 네 종류를 함께 대조한다.
+실제 서버 종료·새 PID의 재검색·다른 root 종료·LSP 끄기/켜기는
+[프로세스 재시작 검증](plans/lsp-location-server-restart.md)에서 구분한다. 대기 상태가
+새 명령을 막지 않는 기존 정책과 게시 결과의 독립 수명은 유지한다.
 
 참조·구현·타입 정의·선언 결과 검색은 공용 native IME 범위 문맥을 사용한다.
 확정 query로만 기존 제목/보조 텍스트 필터를 적용하고 preedit는 표시만 한다. 후보 Return은

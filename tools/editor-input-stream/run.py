@@ -24,7 +24,7 @@ def provider_fingerprints():
     return {str(p):verify.sha(p) if p.is_file() else None for p in paths}
 
 
-def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None, fixture_kind="flat", bracket_control=None):
+def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None, fixture_kind="flat", bracket_control=None, fold_reuse_control=None):
     target.mkdir(mode=0o700)
     (target/'profile').mkdir();(target/'host').mkdir(mode=0o700)
     data = protocol.fixture(size,fixture_kind)
@@ -36,7 +36,8 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     if fold_control is not None and (state.get('fold_control') is not True or fold_control not in ('disabled','prepared')):
         raise ValueError('verified fold control build/mode required')
     if bracket_control is not None and (state.get('bracket_control') is not True or bracket_control not in ('disabled','prepared')):raise ValueError('verified bracket control build/mode required')
-    if sum(x is not None for x in [summary_control,fold_control,bracket_control])>1:raise ValueError('one cache control required')
+    if fold_reuse_control is not None and (state.get('fold_reuse_control') is not True or fold_reuse_control not in ('disabled','prepared')):raise ValueError('verified fold reuse build/mode required')
+    if sum(x is not None for x in [summary_control,fold_control,bracket_control,fold_reuse_control])>1:raise ValueError('one cache control required')
     app = build/'source/zig-out/Maru.app/Contents/MacOS/maru-macos-app'
     producer = build/'producer'
     if verify.sha(app) != state['app_sha256'] or verify.sha(producer) != state['producer_sha256']:
@@ -44,6 +45,8 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     env = {k:v for k,v in os.environ.items() if not k.startswith('MARU_')}
     if observer is not None:env=observer.environment(env)
     elif environment_filter is not None:env=environment_filter(env)
+    # 생산자/복원 도구에는 앱의 가상 profile을 넘기지 않고 같은 환경 허용 목록만 적용한다.
+    auxiliary_environment=dict(env)
     profile = str(target/'profile')
     env.update(CFFIXED_USER_HOME=profile,XDG_CONFIG_HOME=profile+'/.config',XDG_CACHE_HOME=profile+'/.cache',XDG_STATE_HOME=profile+'/.state',
         MARU_CONFIG=str(target/'config'),MARU_SESSION_HOST_ROOT=str(target/'host'),MARU_EDITOR_BACKUP_ROOT=str(target/'backups'),
@@ -56,15 +59,16 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     if summary_control=='disabled':env['MARU_STREAM_SKIP_SUMMARY_PREPARATION']='1'
     if fold_control=='disabled':env['MARU_STREAM_SKIP_FOLD_PREPARATION']='1'
     if bracket_control=='disabled':env['MARU_STREAM_SKIP_BRACKET_PREPARATION']='1'
+    if fold_reuse_control=='disabled':env['MARU_STREAM_SKIP_FOLD_REUSE']='1'
     meta = {'count':count,'mode':mode,'flow':flow,'size':size,'repeat':rep,'shared':flow=='shared','period_ns':period*1_000_000,'lateness_ns':20_000_000,
             'kind':kind,'fixture_bytes':len(data),'fixture_sha256':hashlib.sha256(data).hexdigest(),
             'fixture_tail_sha256':hashlib.sha256(data[3:]).hexdigest(),'load_before':os.getloadavg(),
-            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind,'bracket_control':bracket_control}
+            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind,'bracket_control':bracket_control,'fold_reuse_control':fold_reuse_control}
     child = sender = None
     failure = None
     with (target/'app.log').open('w') as log, (target/'producer.log').open('w') as sender_log:
         try:
-            child = subprocess.Popen([str(app)],env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+            child = subprocess.Popen([str(app)],cwd=target,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             meta['app_pid']=child.pid
             deadline = time.monotonic()+70
             while not (target/'ready.json').exists():
@@ -79,7 +83,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
             command = [str(producer),'--ready',str(target/'ready.json'),'--output',str(target/'posts.json'),'--stop',str(target/'app.json'),
                        '--period-ns',str(meta['period_ns']),'--lateness-ns',str(meta['lateness_ns'])]
             if kind == 'skip': command += ['--skip-seq','3']
-            sender = subprocess.Popen(command,stdout=sender_log,stderr=subprocess.STDOUT,start_new_session=True)
+            sender = subprocess.Popen(command,stdout=sender_log,stderr=subprocess.STDOUT,start_new_session=True,env=auxiliary_environment,cwd=target)
             meta['producer_pid']=sender.pid
             meta['app_exit']=child.wait(timeout=50)
             meta['producer_exit']=sender.wait(timeout=3)
@@ -103,7 +107,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
                     if finished.get('restored') is True:
                         recovery = {'exit':0,'status':'restored_in_app'}
                     else:
-                        recovered = subprocess.run([str(producer),'--recover-source',str(target/'source-record.json'),'--expected-pid',str(child.pid)],capture_output=True,text=True,timeout=5)
+                        recovered = subprocess.run([str(producer),'--recover-source',str(target/'source-record.json'),'--expected-pid',str(child.pid)],capture_output=True,text=True,timeout=5,env=auxiliary_environment,cwd=target)
                         recovery = {'exit':recovered.returncode,'stdout':recovered.stdout,'stderr':recovered.stderr}
                         if recovered.returncode: failure = failure or 'input source recovery failed'
                 except Exception as error:
@@ -137,7 +141,7 @@ def main():
     if any(not xs or len(xs)!=len(set(xs)) for xs in [sizes,periods,flows,modes]): p.error('unique nonempty dimensions required')
     source=json.loads((build/'source.json').read_text())
     if source.get('harness')!=protocol.NAME: p.error('independent stream build required')
-    if source.get('summary_control') or source.get('fold_control') or source.get('bracket_control'):p.error('use cache study for the controlled experiment build')
+    if source.get('summary_control') or source.get('fold_control') or source.get('bracket_control') or source.get('fold_reuse_control'):p.error('use cache study for the controlled experiment build')
     if verify.sha(build/'producer')!=source['producer_sha256'] or verify.sha(build/'source/zig-out/Maru.app/Contents/MacOS/maru-macos-app')!=source['app_sha256']: p.error('immutable build required')
     if a.kind=='skip' and a.count<4: p.error('skip control needs at least four inputs')
     subprocess.run([str(build/'producer'),'--preflight'],check=True)

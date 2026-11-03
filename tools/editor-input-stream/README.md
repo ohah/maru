@@ -134,3 +134,12 @@ ASCII 1키=1편집인 한정된 workload다. IME·물리 키보드·광학 표�
 최종 색, 접두부·세대·합쳐진 프레임 동일성과 누락을 검사한다. 마지막 게시→구문 표시와
 구문→최종 색을 분리하며, 다음 키 게시 전에 표시된 횟수도 기록한다. 메인 타이머의 완료 통지와
 GPU presentedTime을 혼동하지 않는다. 세대나 시각이 없는 자료는 0ms로 채우지 않는다.
+
+## 접힘 후보 증분 재사용 대조
+
+`prepare.py --stream --fold-reuse-control`로 고정 앱을 만들고
+`summary_study.py --cache fold_reuse --fixture multiline --periods 100`으로 비교한다.
+접힘 준비 자체는 유지하며 재사용만 끈다. `fold_reuse_stats`와
+`fold_reuse_baseline_stats`는 시도·복사·우회·뷰 node 순회·뷰 record 순회를 기록한다.
+입력 구간의 증가량과 구문 표시 프레임을 함께 검사한다. 다른 control과 동시 사용하지 않는다.
+[채택한 100ms 결과와 제외한 모집단](fold-reuse-results.md)을 따른다.

@@ -91,3 +91,23 @@ python3 tools/editor-parse-incremental/brackets.py --output /absolute/new/result
 계수와 입력 개수를 확인하고, 정확성 구간은 별도 전체 트리와 괄호 잎 배열을 대조한다.
 [채택 결과](bracket-results.md)를 따른다. 닫힌 루프의 서비스 경과이며 GUI 연타·Metal 표시·
 물리 HID·IME·CPU 시간·RSS 개선의 증거가 아니다.
+
+
+## 워커 내부 단계 진단
+
+```sh
+python3 tools/editor-parse-incremental/brackets.py --stages --output /absolute/new/diagnostic \
+  --deps /absolute/existing/zig-pkg --cache /absolute/cache
+python3 tools/editor-parse-incremental/stage_report.py /absolute/diagnostic \
+  --output /absolute/new/stage-report.json
+```
+
+외부 소스 사본의 `Job.execute`에만 겹치지 않는 구간 시각과 호출 비트를 넣는다. 제품 코드와
+배포 옵션에는 계측을 넣지 않는다. 원문·잎 복사, 범위/좌표, Provider 편집·파싱, 괄호 위치/부분 갱신,
+심볼 요약, 접힘/괄호 준비를 구분한다. 구간 시간이 0ns일 수 있으므로 호출 비트로 누락을
+구별한다. 구간 합계와 worker 전체·서비스 완료의 포함 관계를 검사한다. 별도의 토큰 reader는
+원시 로그·JSON·실행 파일·소스/fixture 해시와 전체 행렬을 다시 대조한다.
+
+`--stages`는 별도 진단 모집단이며 기본 비교와 합치지 않는다. 초기 열기와 후속 편집도
+구분한다. [결과와 다음 개선 대상](stage-results.md)을 따른다. 시간은 CPU가 아닌 경과이며,
+로그 출력 비용이 서비스 완료에 더해질 수 있다. 실제 GUI 표시나 native 내부 작업량 증거가 아니다.

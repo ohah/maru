@@ -12,6 +12,8 @@ import statistics
 import subprocess
 import sys
 
+import stages
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools/editor-input-stream'))
 from protocol import fixture
@@ -50,6 +52,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--deps', type=Path, required=True)
     parser.add_argument('--cache', type=Path, required=True)
+    parser.add_argument('--stages', action='store_true', help='private worker stage timing; separate diagnostic population')
     args = parser.parse_args()
     out = args.output.resolve()
     deps = args.deps.resolve()
@@ -60,7 +63,7 @@ def main():
     source.mkdir()
     files = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
     inventory = {}
-    for extra in ('tools/editor-parse-incremental/brackets.py', 'tools/editor-parse-incremental/test_brackets.py'):
+    for extra in ('tools/editor-parse-incremental/brackets.py', 'tools/editor-parse-incremental/test_brackets.py', 'tools/editor-parse-incremental/stages.py', 'tools/editor-parse-incremental/test_stages.py'):
         if extra not in files and (ROOT / extra).is_file():
             files.append(extra)
     for name in files:
@@ -75,7 +78,8 @@ def main():
     text = worker.read_text()
     if text.count(ANCHOR) != 1:
         raise ValueError('private control anchor changed')
-    worker.write_text(text.replace(ANCHOR, CONTROL))
+    controlled = text.replace(ANCHOR, CONTROL)
+    worker.write_text(stages.instrument(controlled) if args.stages else controlled)
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'DEVELOPER_DIR', 'SDKROOT') if key in os.environ}
     zig = subprocess.check_output(['mise', 'which', 'zig'], cwd=ROOT, env=env, text=True).strip()
     inputs = {}
@@ -86,14 +90,16 @@ def main():
             inputs[name] = dict(sha256=sha(out / name), bytes=(out / name).stat().st_size)
     env.update(ZIG_LOCAL_PKG_DIR=str(deps), MARU_PARSE_FILE=str(out / 'flat-3000.zig'), MARU_PARSE_MODE='incremental', MARU_PARSE_ACCURACY='1')
     command = [zig, 'build', 'measure-editor-parse-incremental', '-Doptimize=ReleaseFast', '--cache-dir', str(args.cache.resolve()), '-j2', '--verbose']
-    write(out / 'source.json', dict(head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(), original=inventory, private_worker_sha256=sha(worker), command=command, host=platform.platform(), inputs=inputs))
+    write(out / 'source.json', dict(head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(), original=inventory, private_worker_sha256=sha(worker), command=command, host=platform.platform(), inputs=inputs, stage_diagnostics=args.stages))
     with (out / 'build.log').open('xb') as log:
         subprocess.run(command, cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
     build_text = (out / 'build.log').read_text()
     found = re.findall(r'info\(verbose\): (\S+/test) --maru-expect-tests=1\b', build_text)
     if not found:
         raise ValueError('missing compiled measurement')
-    read_rows(build_text, 1, False)
+    initial_rows = read_rows(build_text, 1, False)
+    if args.stages:
+        stages.read(build_text, initial_rows, False)
     binary = out / 'measure-test'
     shutil.copy2(found[-1], binary)
     digest = sha(binary)
@@ -112,7 +118,8 @@ def main():
                     with log.open('xb') as stream:
                         subprocess.run([str(binary), '--maru-expect-tests=1'], cwd=source, env=run_env, stdout=stream, stderr=subprocess.STDOUT, check=True)
                     rows = read_rows(log.read_text(), accuracy, full)
-                    runs.append(dict(fixture=name, mode=mode, accuracy=accuracy, rep=rep, load_before=load_before, load_after=os.getloadavg(), log=log.name, log_sha256=sha(log), rows=rows))
+                    stage_rows = stages.read(log.read_text(), rows, full) if args.stages else None
+                    runs.append(dict(stages=stage_rows, fixture=name, mode=mode, accuracy=accuracy, rep=rep, load_before=load_before, load_after=os.getloadavg(), log=log.name, log_sha256=sha(log), rows=rows))
                     write(out / 'runs.json', runs)
     if sha(binary) != digest or any(sha(ROOT / name) != value for name, value in inventory.items()):
         raise ValueError('source or executable drift')
@@ -122,7 +129,7 @@ def main():
         for mode in ('full', 'incremental'):
             rows = [row for run in runs if run['fixture'] == name and run['mode'] == mode and run['accuracy'] == 0 for row in run['rows']]
             summary[name][mode] = {key: dict(p50_ms=statistics.median(row[key] for row in rows) / 1e6, max_ms=max(row[key] for row in rows) / 1e6) for key in ('submit_ns', 'complete_ns')}
-    write(out / 'result.json', dict(complete=True, binary_sha256=digest, processes=len(runs), edits=sum(len(run['rows']) for run in runs), summary=summary))
+    write(out / 'result.json', dict(complete=True, stage_diagnostics=args.stages, binary_sha256=digest, processes=len(runs), edits=sum(len(run['rows']) for run in runs), summary=summary))
     print(json.dumps(summary, indent=2))
 
 

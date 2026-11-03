@@ -5502,3 +5502,13 @@ mise exec -- zig test -OReleaseFast --dep array_repeat -Mroot=src/platform/macos
 
 이 검사는 가짜 DevTools 응답의 수명·상한 거절·UTF-8 이름 자르기·객체 묶음 반환을 확인한다.
 실제 Chromium이나 물리 GUI를 실행한 증거로 취급하지 않는다. 제품 동작과 공개 API는 바꾸지 않는다.
+
+
+## 증분화 후 파싱 워커 구간
+
+[단계별 진단](../tools/editor-parse-incremental/stage-results.md)은 #4678 머지 main의 외부
+사본에서 32프로세스·640편집과 초기 열기를 포함한 672구간을 대조했다. 성능/정확성·
+초기/후속·fixture를 나누고 같은 실행 파일의 전체/증분 괄호 경로를 확인한다.
+Python 검증은 시계 해상도 아래 0ns의 정상 호출과 합계/호출 비트/세대/분기 손상 거절을
+구분한다. 독립 원시 토큰 reader는 JSON·전체 행렬·로그·소스·실행 파일 해시를 다시 확인한다.
+제품은 유지하며 경과를 CPU 시간·GUI/HID/IME/픽셀·메모리 증거로 확대하지 않는다.

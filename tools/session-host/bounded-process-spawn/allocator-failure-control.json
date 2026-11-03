@@ -1,0 +1,63 @@
+{
+  "failed_ci_run": 41408106884,
+  "failed_job": 125154890870,
+  "error": "NondeterministicMemoryUsage",
+  "unchanged_baseline_test_sha256": "700fb4de0f0036c9f01edd6bc1d72becf4c43887c71f0cbddc273955f20566ee",
+  "root_cause": "Successful OS-backed arena resize/remap removes fresh allocations from the failing allocator sequence; its baseline and injected runs can disagree.",
+  "probes": {
+    "alloc-probe": [
+      {
+        "mode": "debug",
+        "allocations": 15,
+        "successful_resizes": 14,
+        "samples": 1
+      },
+      {
+        "mode": "debug",
+        "allocations": 14,
+        "successful_resizes": 26,
+        "samples": 16
+      },
+      {
+        "mode": "debug",
+        "allocations": 15,
+        "successful_resizes": 25,
+        "samples": 31
+      },
+      {
+        "mode": "fast",
+        "allocations": 15,
+        "successful_resizes": 25,
+        "samples": 1
+      },
+      {
+        "mode": "fast",
+        "allocations": 15,
+        "successful_resizes": 24,
+        "samples": 1
+      },
+      {
+        "mode": "fast",
+        "allocations": 14,
+        "successful_resizes": 26,
+        "samples": 46
+      }
+    ],
+    "alloc-stable-probe": [
+      {
+        "mode": "debug",
+        "allocations": 27,
+        "successful_resizes": 0,
+        "samples": 48
+      },
+      {
+        "mode": "fast",
+        "allocations": 27,
+        "successful_resizes": 0,
+        "samples": 48
+      }
+    ]
+  },
+  "correction": "Disable resize/remap in the test backing allocator; retain standard testing allocator alloc/free and checkAllAllocationFailures coverage.",
+  "product_allocator_changed": false
+}

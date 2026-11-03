@@ -87,7 +87,11 @@ test "preowned semantic result fails before held-file IO" {
 }
 
 test "every bridge allocation failure unwinds without publishing" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationPath, .{});
+    // The OS can sometimes remap a growing JSON arena and sometimes require a
+    // fresh allocation. That changes the number of allocation failure positions
+    // between the successful baseline and a later injected run. Keep growth as
+    // fresh tracked allocations so every failure position is exercised reliably.
+    try std.testing.checkAllAllocationFailures(stableAllocationBacking(), allocationPath, .{});
 }
 
 test "oversized canonical role is rejected before allocation or descriptor IO" {
@@ -191,4 +195,16 @@ fn countOpenFds() !usize {
     var count: usize = 0;
     while (try iterator.next(std.testing.io)) |_| count += 1;
     return count;
+}
+
+fn stableAllocationBacking() std.mem.Allocator {
+    const Backing = struct {
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = std.testing.allocator.vtable.alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = std.testing.allocator.vtable.free,
+        };
+    };
+    return .{ .ptr = std.testing.allocator.ptr, .vtable = &Backing.vtable };
 }

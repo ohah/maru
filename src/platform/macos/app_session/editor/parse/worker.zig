@@ -32,14 +32,14 @@ const Basis = struct {
     tag: request.Request,
     snapshot: buffer.Snapshot,
     provider: ?syntax.Provider,
-    // 잎 복사는 워커 allocator에서 한다. 복사/취소가 끝나면 즉시 빌림을 반환한다.
-    bracket_source: ?*Job = null,
+    // 괄호/접힘 값 복사는 워커 allocator에서 한다. 실행/취소가 끝나면 빌림을 반환한다.
+    cache_source: ?*Job = null,
 };
 const Job = struct {
     next: ?*Job = null,
     // 참조 수는 mutex로 보호한다. main 목록은 Snapshot을 반환할 때까지 메인만 관리한다.
     main_refs: usize = 0, // 메인 소비자가 반환할 때까지 native 퇴역을 막는다.
-    work_refs: usize = 0, // mutex 보호. 후속 워커의 불변 잎 복사 동안만 유지한다.
+    work_refs: usize = 0, // mutex 보호. 후속 워커의 불변 캐시 복사 동안만 유지한다.
     main_prev: ?*Job = null,
     main_next: ?*Job = null,
     tag: request.Request,
@@ -76,8 +76,9 @@ const Job = struct {
             defer allocator.free(old_bytes);
             parsed = base.provider.?;
             base.provider = null;
-            if (base.bracket_source) |source| {
+            if (base.cache_source) |source| {
                 const original = &source.provider.?;
+                self.folds = (source.folds.copyMatchedOnto(allocator, original.parser, original.tree_gen, parsed.parser, parsed.tree_gen, parsed.tree) catch null) orelse .{};
                 self.brackets = (source.brackets.copyMatched(allocator, original.parser, original.tree_gen, parsed.parser, parsed.tree_gen) catch null) orelse .{};
             }
             if (std.mem.eql(u8, old_bytes, bytes)) {
@@ -94,6 +95,7 @@ const Job = struct {
                     .old_end_point = syntax.pointAt(old_bytes, span.end),
                     .new_end_point = syntax.pointAt(bytes, span.start + span.text.len),
                 };
+                self.folds.edit(edit);
                 self.brackets.shift(allocator, edit.start_byte, edit.old_end_byte, edit.new_end_byte);
                 complete = parsed.onEditCancellable(bytes, edit, &self.cancellation) == .done;
                 if (complete and !self.cancellation.isRequested()) {
@@ -185,8 +187,8 @@ const State = struct {
     }
     // execute/대기 취소 양쪽에서 반환한다. 다음 완료까지 붙들면 과거 작업이 사슬로 남는다.
     fn releaseBasisLocked(self: *State, job: *Job) void {
-        if (job.basis) |*base| if (base.bracket_source) |source| {
-            base.bracket_source = null;
+        if (job.basis) |*base| if (base.cache_source) |source| {
+            base.cache_source = null;
             std.debug.assert(source.work_refs != 0);
             source.work_refs -= 1;
             if (source.work_refs == 0 and source.main_refs == 0) self.retiring.push(source);
@@ -343,7 +345,7 @@ pub const Service = struct {
         return self.submitImpl(gate, input, snapshot, language, null, if (builtin.is_test) null else {});
     }
     /// 기준의 native 핸들과 Snapshot 참조는 독립 복사한다. 호출 뒤 caller는 즉시 반환해도 된다.
-    /// 같은 서비스의 불변 괄호 잎은 워커가 복사/취소를 끝낼 때까지 내부 참조로 보호한다.
+    /// 같은 서비스의 불변 괄호/접힘 값은 워커가 복사/취소를 끝낼 때까지 내부 참조로 보호한다.
     /// 기준이 없거나 문서/문법이 다르면 기존 cold parse 경로를 사용한다.
     pub fn submitFrom(self: *Service, gate: *request.Gate, input: request.Input, snapshot: *buffer.Snapshot, language: syntax.Language, base: *const Completion) !request.Request {
         return self.submitImpl(gate, input, snapshot, language, base, if (builtin.is_test) null else {});
@@ -387,7 +389,7 @@ pub const Service = struct {
                     source_state.mutex.lockUncancelable(source_io);
                     if (previous.state == self.state and previous.job.work_refs != std.math.maxInt(usize)) {
                         previous.job.work_refs += 1;
-                        job.basis.?.bracket_source = previous.job;
+                        job.basis.?.cache_source = previous.job;
                     }
                     source_state.mutex.unlock(source_io);
                 };

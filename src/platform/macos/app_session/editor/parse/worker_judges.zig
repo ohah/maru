@@ -823,6 +823,16 @@ test "parse worker 접힘 후보 OOM은 파싱을 유지하고 기존 조회로 
         try p.foldSpansCached(a, &cache, lines.lines, &spans);
         try std.testing.expectEqual(@as(usize, 1), spans.items.len);
         try std.testing.expect(cache.nodes > 0);
+        // 선택적 준비가 없던 기준도 다음 정상 요청에서 전체 후보를 복구한다.
+        copies.fail_index = std.math.maxInt(usize);
+        var input = test_input;
+        input.revision += 1;
+        _ = try testQueueFrom(&service, &gate, input, text, &result, null);
+        var recovered = testTake(&service);
+        defer recovered.release();
+        try std.testing.expect(recovered.accept(&gate));
+        try expectFolds(recovered, "fn f() void {\n}\n", .zig);
+        try std.testing.expect(recovered.preparedFolds().?.nodes > 0);
     }
     try std.testing.expectEqual(copies.allocated_bytes, copies.freed_bytes);
 }
@@ -973,6 +983,7 @@ test "parse worker 괄호 기준은 후속 완료마다 반환되어 과거 작�
             }
             service.reap();
             try std.testing.expectEqual(@as(usize, 1), service.heldCount());
+            try std.testing.expectEqual(@as(u64, 1), prior.preparedFolds().?.reused_changes);
         }
     }
     try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
@@ -1030,4 +1041,118 @@ test "parse worker 괄호 변경 범위 상한 초과는 부분 결과 대신 �
     try expectBrackets(next, after_text, .zig);
     try std.testing.expectEqual(@as(u64, 1), next.preparedBrackets().?.rebuilds);
     try std.testing.expectEqual(@as(u64, 0), next.preparedBrackets().?.partials);
+}
+
+fn expectFolds(result: Completion, source: []const u8, language: syntax.Language) !void {
+    const a = std.testing.allocator;
+    var fresh = syntax.Provider.init(source, language, 0) orelse return error.NoProvider;
+    defer fresh.deinit();
+    var token: syntax.Cancellation = .{};
+    var full: syntax.FoldCache = .{};
+    defer full.deinit(a);
+    try fresh.prepareFoldCache(a, &full, &token);
+    const actual = result.preparedFolds() orelse return error.NoFolds;
+    try std.testing.expectEqualDeep(full.records.items, actual.records.items);
+    // byte 목록뿐 아니라 각 뷰의 줄 좌표 투영도 전체 조회에 대조한다.
+    var peer = result.provider().?.copyReady(language) orelse return error.NoProvider;
+    defer peer.deinit();
+    var cache = (try actual.copyMatched(a, result.provider().?.parser, result.provider().?.tree_gen, peer.parser, peer.tree_gen)).?;
+    defer cache.deinit(a);
+    var lines = try maru.session.editor.line_index.build(a, source);
+    defer lines.deinit();
+    var expected: std.ArrayList(syntax.Provider.FoldSpan) = .empty;
+    defer expected.deinit(a);
+    var got: std.ArrayList(syntax.Provider.FoldSpan) = .empty;
+    defer got.deinit(a);
+    try fresh.foldSpans(a, &expected);
+    try peer.foldSpansCached(a, &cache, lines.lines, &got);
+    try std.testing.expectEqualDeep(expected.items, got.items);
+    try std.testing.expectEqual(@as(u64, 0), cache.nodes);
+}
+
+test "parse worker 접힘 증분은 언어와 줄 및 구조 편집마다 전체 후보와 좌표가 같다" {
+    const cases = [_]struct { language: syntax.Language = .zig, before: []const u8, after: []const u8 }{
+        .{ .before = "fn f() void {\n}\n", .after = " fn f() void {\n}\n" },
+        .{ .before = "fn f() void {\n}\n", .after = "fn f() void {\n}\n\n" },
+        .{ .before = "fn f() void {\n}\n", .after = "fn renamed() void {\n}\n" },
+        .{ .before = "fn f() void {}\n", .after = "fn f() void {\n}\n" },
+        .{ .before = "fn f() void {\n}\n", .after = "fn f() void {}\n" },
+        .{ .before = "fn f() void {\n}\n", .after = "fn f() void {\n" },
+        .{ .before = "fn f() void {\n}\n", .after = "fn f() void \n}\n" },
+        .{ .before = "fn f() void {\n}\n", .after = "// fn f() void {\n}\n" },
+        .{ .before = "const x = \"{ }\";\n", .after = "const x = .{\n};\n" },
+        .{ .before = "const X = struct {\n fn f() void {\n }\n};\n", .after = "const X = struct {\n fn f() void {\n  if (true) {\n  }\n }\n};\n" },
+        .{ .before = "const X = struct {\n fn f() void {\n }\n};\n", .after = "const X = struct {\n};\n" },
+        .{ .before = "fn f() void {\n}\n", .after = "fn f() void {\n}\nfn g() void {\n}\n" },
+        .{ .before = "fn a() void {\n}\nfn b() void {\n}\n", .after = "fn aaa() void {\n}\nfn bb() void {\n}\n" },
+        .{ .before = "// 가😀\r\nfn f() void {\r\n}\r\n", .after = "// 가😁\r\nfn ff() void {\r\n}\r\n" },
+        .{ .language = .javascript, .before = "function f() {\n return `x`;\n}\n", .after = "function f() {\n return `${() => {\n}}`;\n}\n" },
+        .{ .language = .python, .before = "def f():\n  return 1\n", .after = "def f():\n  if True:\n    return 2\n" },
+        .{ .language = .css, .before = "a {\n x: url(\"()\");\n}\n", .after = "a {\n x: foo(\"()\");\n}\n" },
+        .{ .language = .html, .before = "<a>\ntext\n</a>\n", .after = "<a>\n<b>\ntext\n</b>\n</a>\n" },
+        .{ .language = .json, .before = "{\n\"x\":[]\n}\n", .after = "{\n\"x\":[\n1\n]\n}\n" },
+        .{ .before = "fn f() void {\n}\n", .after = "fn f() void {\n}\n" },
+    };
+    const a = std.testing.allocator;
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print("fold incremental case={d}\n", .{index});
+        var before = try buffer.Buffer.init(a, case.before);
+        defer before.deinit();
+        var after = try buffer.Buffer.init(a, case.after);
+        defer after.deinit();
+        var service = try Service.init(a, .{});
+        defer service.deinit() catch unreachable;
+        var gate: request.Gate = .{};
+        var input = test_input;
+        var snapshot = before.snapshot();
+        _ = try service.submit(&gate, input, &snapshot, case.language);
+        var first = testTake(&service);
+        defer first.release();
+        input.revision += 1;
+        snapshot = after.snapshot();
+        _ = try service.submitFrom(&gate, input, &snapshot, case.language, &first);
+        var next = testTake(&service);
+        defer next.release();
+        try std.testing.expect(next.accept(&gate));
+        try expectFolds(next, case.after, case.language);
+        try expectFolds(first, case.before, case.language);
+        const prepared = next.preparedFolds().?;
+        try std.testing.expect(prepared.tree != first.preparedFolds().?.tree);
+        try std.testing.expect(prepared.tree != next.provider().?.tree);
+        const edited = !std.mem.eql(u8, case.before, case.after);
+        try std.testing.expectEqual(@as(u64, @intFromBool(edited)), prepared.reused_changes + prepared.compared_changes);
+        if (!edited) try std.testing.expectEqual(@as(u64, 0), prepared.nodes);
+    }
+}
+
+test "parse worker 접힘 증분 준비 취소는 원본을 보존하고 완료와 빌림을 회수한다" {
+    const a = std.testing.allocator;
+    var before = try buffer.Buffer.init(a, "fn f() void {\n}\n");
+    defer before.deinit();
+    var after = try buffer.Buffer.init(a, "fn f() void {\n if (true) {\n }\n}\n");
+    defer after.deinit();
+    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
+    {
+        var service = try Service.init(a, .{ .audit = &audit });
+        defer service.deinit() catch unreachable;
+        var gate: request.Gate = .{};
+        _ = try testQueue(&service, &gate, test_input, before, null);
+        var first = testTake(&service);
+        defer first.release();
+        var input = test_input;
+        input.revision += 1;
+        var pause: syntax.Cancellation.TestGate = .{ .stage = .folds };
+        defer pause.release();
+        _ = try testQueueFrom(&service, &gate, input, after, &first, &pause);
+        try waitEntered(&pause);
+        service.cancelDocument(input.document);
+        pause.release();
+        var cancelled = testTake(&service);
+        defer cancelled.release();
+        try std.testing.expectEqual(Outcome.cancelled, cancelled.outcome());
+        try std.testing.expect(cancelled.preparedFolds() == null);
+        try expectFolds(first, "fn f() void {\n}\n", .zig);
+    }
+    try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
+    try std.testing.expect(!audit.wrong_thread.load(.acquire));
 }

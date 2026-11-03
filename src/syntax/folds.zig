@@ -39,9 +39,27 @@ pub const Cache = struct {
     }
     /// 기존 버퍼를 재사용하되 source와 대상의 native 참조는 분리한다. 실패는 대상을 바꾸지 않는다.
     pub fn copyMatchedInto(self: *const Cache, a: std.mem.Allocator, source_parser: *c.TSParser, source_gen: u64, target_parser: *c.TSParser, target_gen: u64, target: *Cache) error{OutOfMemory}!bool {
+        if (!self.matches(source_parser, source_gen)) return false;
+        try self.copyRecordsOnto(a, target_parser, target_gen, self.tree.?, target);
+        return true;
+    }
+
+    /// 완료의 값만 빌리고 native 복사는 caller가 독립 소유한 동일 판의 트리에서 만든다.
+    /// caller는 target_tree가 source_parser/source_gen의 실제 복제임을 보장한다.
+    /// source의 tree 핸들에는 native 호출을 하지 않아 main/worker의 동시 복사를 피한다.
+    pub fn copyMatchedOnto(self: *const Cache, a: std.mem.Allocator, source_parser: *c.TSParser, source_gen: u64, target_parser: *c.TSParser, target_gen: u64, target_tree: ?*c.TSTree) error{OutOfMemory}!?Cache {
+        if (!self.matches(source_parser, source_gen) or target_tree == null) return null;
+        var result: Cache = .{};
+        errdefer result.deinit(a);
+        try self.copyRecordsOnto(a, target_parser, target_gen, target_tree.?, &result);
+        return result;
+    }
+    fn matches(self: *const Cache, parser: *c.TSParser, generation: u64) bool {
+        return self.tree != null and self.parser == parser and self.synced_gen == generation and self.edits == 0 and self.dirty == null;
+    }
+    fn copyRecordsOnto(self: *const Cache, a: std.mem.Allocator, target_parser: *c.TSParser, target_gen: u64, independent_tree: *c.TSTree, target: *Cache) error{OutOfMemory}!void {
         std.debug.assert(self != target);
-        if (self.tree == null or self.parser != source_parser or self.synced_gen != source_gen or self.edits != 0 or self.dirty != null) return false;
-        const tree = c.ts_tree_copy(self.tree.?) orelse return error.OutOfMemory;
+        const tree = c.ts_tree_copy(independent_tree) orelse return error.OutOfMemory;
         errdefer c.ts_tree_delete(tree);
         try target.records.ensureTotalCapacity(a, self.records.items.len);
         if (target.tree) |old| c.ts_tree_delete(old);
@@ -52,7 +70,6 @@ pub const Cache = struct {
         target.parser = target_parser;
         target.dirty = null;
         target.edits = 0;
-        return true;
     }
 
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator) void {

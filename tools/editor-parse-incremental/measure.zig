@@ -63,9 +63,15 @@ test "incremental service measurement" {
             defer full.deinit(a);
             try std.testing.expect(try full.step(a, &fresh, current, 0));
             try std.testing.expectEqualDeep(full.leaves.items, result.preparedBrackets().?.leaves.items);
+            var full_folds: syntax.FoldCache = .{};
+            defer full_folds.deinit(a);
+            var token: syntax.Cancellation = .{};
+            try fresh.prepareFoldCache(a, &full_folds, &token);
+            try std.testing.expectEqualDeep(full_folds.records.items, result.preparedFolds().?.records.items);
         }
         const brackets = result.preparedBrackets() orelse return error.MissingBrackets;
-        std.debug.print("PARSE_MEASURE index={d} mode={s} accuracy={d} submit_ns={d} complete_ns={d} nodes={d} bracket_rebuilds={d} bracket_partials={d} bracket_leaves={d}\n", .{ index, @tagName(result.mode()), @intFromBool(accuracy), submitted - start, completed - start, nodes, brackets.rebuilds, brackets.partials, brackets.leaves.items.len });
+        const folds = result.preparedFolds() orelse return error.MissingFolds;
+        std.debug.print("PARSE_MEASURE index={d} mode={s} accuracy={d} submit_ns={d} complete_ns={d} nodes={d} bracket_rebuilds={d} bracket_partials={d} bracket_leaves={d} fold_nodes={d} fold_reused={d} fold_records={d}\n", .{ index, @tagName(result.mode()), @intFromBool(accuracy), submitted - start, completed - start, nodes, brackets.rebuilds, brackets.partials, brackets.leaves.items.len, folds.nodes, folds.reused_changes, folds.records.items.len });
         prior.release();
         prior = result;
     }

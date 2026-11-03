@@ -1,0 +1,98 @@
+{
+  "complete": true,
+  "cache": "folds",
+  "stage_diagnostics": false,
+  "binary_sha256": "fd7453d53847b295883981b35900d8c5e7fe0cc76b5d8e04da4b7d2ea2f06cdc",
+  "processes": 32,
+  "edits": 640,
+  "summary": {
+    "flat-3000.zig": {
+      "full": {
+        "submit_ns": {
+          "p50_ms": 0.0180215,
+          "max_ms": 0.043833
+        },
+        "complete_ns": {
+          "p50_ms": 5.765875,
+          "max_ms": 6.094709
+        }
+      },
+      "incremental": {
+        "submit_ns": {
+          "p50_ms": 0.0179165,
+          "max_ms": 0.073458
+        },
+        "complete_ns": {
+          "p50_ms": 1.088542,
+          "max_ms": 1.366542
+        }
+      }
+    },
+    "flat-50000.zig": {
+      "full": {
+        "submit_ns": {
+          "p50_ms": 0.041875,
+          "max_ms": 0.144
+        },
+        "complete_ns": {
+          "p50_ms": 116.0124585,
+          "max_ms": 130.564
+        }
+      },
+      "incremental": {
+        "submit_ns": {
+          "p50_ms": 0.04425,
+          "max_ms": 0.070166
+        },
+        "complete_ns": {
+          "p50_ms": 38.7715625,
+          "max_ms": 56.5115
+        }
+      }
+    },
+    "multiline-3000.zig": {
+      "full": {
+        "submit_ns": {
+          "p50_ms": 0.02125,
+          "max_ms": 0.034875
+        },
+        "complete_ns": {
+          "p50_ms": 5.847042,
+          "max_ms": 6.271458
+        }
+      },
+      "incremental": {
+        "submit_ns": {
+          "p50_ms": 0.014875,
+          "max_ms": 0.055
+        },
+        "complete_ns": {
+          "p50_ms": 1.137083,
+          "max_ms": 1.601375
+        }
+      }
+    },
+    "multiline-50000.zig": {
+      "full": {
+        "submit_ns": {
+          "p50_ms": 0.0434585,
+          "max_ms": 0.079833
+        },
+        "complete_ns": {
+          "p50_ms": 121.037375,
+          "max_ms": 133.618916
+        }
+      },
+      "incremental": {
+        "submit_ns": {
+          "p50_ms": 0.0333545,
+          "max_ms": 0.067208
+        },
+        "complete_ns": {
+          "p50_ms": 40.1083955,
+          "max_ms": 55.655208
+        }
+      }
+    }
+  }
+}

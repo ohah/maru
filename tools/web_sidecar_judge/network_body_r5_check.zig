@@ -597,7 +597,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "odone", 30_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv5/sw/o?", null);
-        report(done and t.wrong == 0 and t.sw_captured >= 36, "body-r5-sw-other-url", lineOf(&t, &detail, &sl));
+        // 재검증 7 차(겹침 규칙): 워커의 /o?b fetch 와 페이지의 /o?b 그대로 넘김이 겹쳐 잃는다(전 40/40) — 틀린 본문 0 만.
+        report(done and t.wrong == 0 and t.sw >= 40, "body-r5-sw-other-url", lineOf(&t, &detail, &sl));
     }
     if (enabled("redirect")) {
         const at = r.begins.items.len;
@@ -615,7 +616,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "hcdone", 30_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv5/sw/hc?", null);
-        report(done and t.wrong == 0 and t.sw_captured >= 13 and t.sw_captured * 2 <= t.sw, "body-r5-sw-http-cache", lineOf(&t, &detail, &sl));
+        // 재검증 7 차(겹침 규칙): 첫 받기가 끝나자 곧(5 ms 안) 같은 주소를 다시 받아 두 W 의 판정 창이 겹친다 — 첫 받기도 잃는다(전 15/30; 둘째는
+        // HTTP 캐시라 늘 잃는다 — C1).
+        report(done and t.wrong == 0 and t.sw >= 30 and t.sw_captured * 2 <= t.sw, "body-r5-sw-http-cache", lineOf(&t, &detail, &sl));
     }
     if (enabled("dedupe")) {
         const at = r.begins.items.len;
@@ -638,7 +641,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const a2 = tally(&r, c[0], at, "/rv5/sw/hold?", "A2");
             const bb = tally(&r, c[0], at, "/rv5/sw/hold?", "B");
             var lb: [4000]u8 = undefined;
-            report(done and t.wrong == 0 and t.sw_captured >= (if (c[0] == rec_tab) @as(usize, 108) else 54), c[1], std.fmt.bufPrint(&detail, "by who: A1 own/amb/other {d}/{d}/{d} · A2 own/amb/other {d}/{d}/{d} · B own/amb/other {d}/{d}/{d} · all: {s}", .{ a1.own, a1.ambiguous, a1.other, a2.own, a2.ambiguous, a2.other, bb.own, bb.ambiguous, bb.other, lineOf(&t, &lb, &sl) }) catch "");
+            // 재검증 7 차(겹침 규칙): 두 탭이 같은 주소를 거의 같이 — 겹쳐 잃는다(전 A 120·B 60). 틀린 본문 0 만.
+            report(done and t.wrong == 0 and t.sw >= 160, c[1], std.fmt.bufPrint(&detail, "by who: A1 own/amb/other {d}/{d}/{d} · A2 own/amb/other {d}/{d}/{d} · B own/amb/other {d}/{d}/{d} · all: {s}", .{ a1.own, a1.ambiguous, a1.other, a2.own, a2.ambiguous, a2.other, bb.own, bb.ambiguous, bb.other, lineOf(&t, &lb, &sl) }) catch "");
         }
         try r.navigate(tab_b, "/rv5/blank?b");
         r.pump(500);
@@ -649,7 +653,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "updone", 40_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv5/sw/u?", null);
-        report(done and t.wrong == 0 and t.sw_captured == 0, "body-r5-sw-update", lineOf(&t, &detail, &sl));
+        // 재검증 7 차(겹침 규칙): 두 판 워커의 같은 주소가 겹치지 않은 판은 잇는다(제 본문 — 서버 셈 X-Body 가 참값; 전에는 C5 의 2 초 창으로 모두
+        // `ambiguous` 라 0 을 단언했다). 틀린 본문 0 만.
+        report(done and t.wrong == 0 and t.sw >= 400, "body-r5-sw-update", lineOf(&t, &detail, &sl));
     }
     // ── 적대 탭 ──
     if (enabled("hostile")) {

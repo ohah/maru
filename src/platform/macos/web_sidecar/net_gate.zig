@@ -14,6 +14,8 @@
 //! 표지(W9d② — 넘김 상자가 넘쳐 버린 시작도 붙일 탭마다 표지를 남긴다, 표지가 넘치면 그 탭을 넘침으로 — 적대 리뷰 4 회차), 넘김 상자가 넘쳐
 //! 버린 시작 아닌 기록(리다이렉트·응답·끝)의 표지(본문을 기록할 때 — 그 요청의 본문 끝이 꼭 오게, 적대 리뷰 5 회차 C1), 리다이렉트·응답의 덮기는
 //! 시작의 첫 사이트로(요청 표가 쥔다 — 어느 호스트든의 지켜보기가 제 사이트의 응답을 덮고 다른 사이트로 옮긴 홉은 덮지 않는다, W9d② 20 회 검증 D1).
+//! 재검증 7 차: 서비스 워커 갈래 요청은 그 출처를 연 지켜보는 탭 **모두**에 붙고(E1 — 전에는 앞 8 탭), 몫은 그 요청을 낸 워커의 출처마다(N12)이며
+//! 그 출처를 보이는 탭이 없어지면 놓는다(N14).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -35,18 +37,25 @@ pub const max_in_flight_per_tab: usize = 128;
 /// `max_in_flight_per_tab` 을 차지하지 않는다. 기록하는 동안 maru 의 DevTools 가 서비스 워커를 붙잡아 두어 워커가 본문을 읽지 않은 fetch 는
 /// 기록 중 끝나지 않는다(실측: 판정 v20fa 의 갱신 fetch 가 사례마다 20 개씩 남아 128 에 닿자 그 탭의 페이지 요청까지 적히지 않았다). 몫이
 /// 차면 그 뒤 서비스 워커 갈래 요청은 적지 않고 수만 센다(`Watch.dropped_sw_cap` — maru 의 `dropped_sw_inflight_cap`).
-/// 재검증 6 차 F14a: 몫은 탭마다(`max_sw_in_flight_per_tab` — 요청을 붙일 첫 탭, 곧 그 서비스 워커의 출처를 맨 위에 연 지켜보는 탭) 나누고
-/// 전체는 그 넷(W9d① 의 페이지 요청과 같은 꼴 — 넷이 모여야 전체가 찬다). 전에는 sidecar 전체에 하나라 기록하지 않는 다른 출처 탭의 워커가
+/// 재검증 6 차 F14a: 전체는 넷이 모여야 찬다(W9d① 의 페이지 요청과 같은 꼴). 전에는 sidecar 전체에 하나라 기록하지 않는 다른 출처 탭의 워커가
 /// 끝나지 않는 fetch 128 개를 쥐면 지켜보는 **모든** 탭의 서비스 워커 갈래 요청이 목록과 본문에서 사라졌다(W9d① F9 가 페이지 요청에서 막은 꼴).
-pub const max_sw_in_flight_per_tab: usize = 128;
-pub const max_sw_in_flight: usize = 4 * max_sw_in_flight_per_tab;
+/// 재검증 7 차(N12): 몫은 **그 요청을 낸 서비스 워커의 출처**마다다(`max_sw_in_flight_per_origin` — 요청 표의 `Track.sw_origin` 으로 센다). 6 차는
+/// 요청을 받을 때의 첫 대상 탭(지켜보기 자리 차례)에 매겨, 그 탭이 다른 출처로 옮기면 앞 출처 워커가 쥔 fetch 128 이 옮겨 간 출처의 다른 탭
+/// 요청까지 막았다(실측 v20m r12-move — B 0/30). 출처에 매기면 탭이 옮겨도 그 출처의 몫이 그 출처에 남는다.
+pub const max_sw_in_flight_per_origin: usize = 128;
+pub const max_sw_in_flight: usize = 4 * max_sw_in_flight_per_origin;
+/// 재검증 7 차(N14): 어느 지켜보는 탭도 그 출처를 보이지 않게 된(닫힘·끔·이동) 서비스 워커 요청은 몫에서 놓는다 — 요청 표의 자리는 끝날
+/// 때까지 쥔다(이만큼까지 — 넘치면 몫에 남긴다). 전에는 닫힌 탭의 워커가 쥔 fetch 가 끝날 때까지 전체 512 가 찬 채였다(v20m r14-cap512).
+pub const max_sw_orphans: usize = max_sw_in_flight;
 /// IO → UI 넘김 상자의 상한 — 개수와 바이트. 넘치면 그 기록은 버리고 수를 센다.
 pub const max_queue_events: usize = 4096;
 pub const max_queue_bytes: usize = 8 * 1024 * 1024;
 /// 지켜보는 표의 자리 — sidecar 의 브라우저 상한과 같다.
 pub const capacity = @import("registry.zig").capacity;
-/// 서비스 워커 요청 하나를 붙이는 탭 수 상한(그 출처를 연 지켜보는 탭들).
-pub const max_targets: usize = 8;
+/// 서비스 워커 요청 하나를 붙이는 탭 수 상한(그 출처를 연 지켜보는 탭들). 재검증 7 차(E1): 지켜보는 표의 자리 수와 같다 — 전에는 8 이라
+/// 같은 출처를 지켜보는 아홉째 탭부터는 그 출처의 서비스 워커 갈래 요청이 목록에도 본문 표에도 들지 않았고, 그 탭의 워커 세션은 W 를 다
+/// 보아 제 기록이 없는 W 가 같은 주소의 남의 기록을 가져갔다(실제 CEF v20m-t9·t9n WRONG 12/12).
+pub const max_targets: usize = capacity;
 /// 출처·호스트 글 상한.
 pub const max_origin_bytes = protocol.message.max_net_origin_bytes;
 /// W9d②: 기록하는 탭이 놓친 시작(문이 넘겼거나 넘김 상자가 넘쳤다)의 표지 자리 — 보내는 task 가 비울 때까지. 넘치면 그 탭은 넘침으로 남긴다.
@@ -100,8 +109,8 @@ pub const Watch = struct {
     bucket: Bucket = .{ .tokens = tab_burst },
     /// 이 탭 몫으로 쥔 요청 수(`max_in_flight_per_tab`).
     in_flight: u16 = 0,
-    /// 재검증 6 차 F14a: 이 탭 몫으로 쥔 서비스 워커 갈래 요청 수(`max_sw_in_flight_per_tab` — 이 탭이 첫 대상인 요청).
-    sw_in_flight: u16 = 0,
+    /// 재검증 7 차(N14): 맨 위 출처의 해시(`originKey` — 0 = 없다) — 출처마다의 서비스 워커 몫을 놓을지 가른다.
+    top_hash: u64 = 0,
     /// 문에서 넘긴 수(UI 스레드가 `net_dropped` 로 보내고 비운다).
     dropped: u32 = 0,
     /// 재검증 5 차 S3b (B): 서비스 워커 몫(`max_sw_in_flight`)이 차서 넘긴 서비스 워커 갈래 요청 수(붙일 탭마다 — `net_dropped.sw_inflight_cap`).
@@ -138,11 +147,26 @@ pub const Watch = struct {
 /// 보낼 때의 덜어 내기 — `full` 거짓이면 덜어 낸다(`covered` 는 덮이는 호스트의 허용 목록 값을 남길지).
 pub const Decision = struct { full: bool, covered: bool };
 
-/// 적을 때 붙일 탭마다 찍은 결정(비트 i = 대상 i — `max_targets` 가 8 이라 한 바이트).
-pub const Stamp = struct { full: u8 = 0, covered: u8 = 0 };
+/// 적을 때 붙일 탭마다 찍은 결정(비트 i = 대상 i — `max_targets` 가 32 라 네 바이트).
+pub const Stamp = struct { full: u32 = 0, covered: u32 = 0 };
 
 comptime {
-    std.debug.assert(max_targets <= 8);
+    std.debug.assert(max_targets <= 32);
+}
+
+/// 재검증 7 차(N12): 출처 글의 열쇠(대소문자를 가리지 않는다 — `serviceWorkerTargets` 의 견줌과 같다). 빈 출처는 0.
+pub fn originKey(origin: []const u8) u64 {
+    if (origin.len == 0) return 0;
+    var h = std.hash.Wyhash.init(0x5f0);
+    var buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < origin.len) {
+        const n = @min(buf.len, origin.len - i);
+        for (origin[i..][0..n], buf[0..n]) |c, *o| o.* = std.ascii.toLower(c);
+        h.update(buf[0..n]);
+        i += n;
+    }
+    return @max(1, h.final());
 }
 
 /// 시작한 요청 하나(번호 — 리다이렉트·인증 재시도에도 같다).
@@ -155,6 +179,10 @@ pub const Track = struct {
     targets: [max_targets]BrowserId = @splat(0),
     target_count: u8 = 0,
     service_worker: bool = false,
+    /// 재검증 7 차(N12): 서비스 워커 요청을 낸 워커의 출처(`originKey`)와 그 출처의 몫으로 세는가(거짓 = 어느 탭도 그 출처를 보이지 않아 몫에서
+    /// 놓았다 — N14, `State.sw_orphans`).
+    sw_origin: u64 = 0,
+    sw_counted: bool = false,
     /// `net_begin` 을 보냈다(`on_before_resource_load` — 그 전에 끝나면 아무것도 보내지 않는다).
     begun: bool = false,
     /// 문을 지날 때 받은 것(IO 스레드의 `get_resource_request_handler` 에만 있다) — begin 에 싣는다.
@@ -190,7 +218,7 @@ pub const Track = struct {
 };
 
 /// `State.admitServiceWorker` 의 답 — 그 출처를 연 지켜보는 탭 수와 문을 지났는가.
-/// `cap` — 서비스 워커 몫이 차서 넘겼다(첫 대상 탭의 `max_sw_in_flight_per_tab` 이나 전체 `max_sw_in_flight` — 재검증 6 차 F14a).
+/// `cap` — 서비스 워커 몫이 차서 넘겼다(그 출처의 `max_sw_in_flight_per_origin` 이나 전체 `max_sw_in_flight` — 재검증 7 차 N12).
 pub const ServiceWorkerAdmit = struct { targets: usize, admitted: bool, cap: bool = false };
 
 /// `State.startServiceWorker` 의 답 — 붙일 탭 수와 잡은 자리(못 잡았으면 null).
@@ -206,10 +234,11 @@ pub const State = struct {
     sw_path: Bucket = .{ .tokens = global_burst },
     /// 지켜보기를 켤 때마다 오른다(`Watch.generation`).
     next_generation: u32 = 0,
-    tracks: [max_in_flight + max_sw_in_flight]Track = @splat(.{}),
-    /// 페이지 요청(탭 몫)의 수 — 서비스 워커 갈래 요청은 `sw_in_flight`.
+    tracks: [max_in_flight + max_sw_in_flight + max_sw_orphans]Track = @splat(.{}),
+    /// 페이지 요청(탭 몫)의 수 — 서비스 워커 갈래 요청은 `sw_in_flight`(몫으로 세는 것)·`sw_orphans`(몫에서 놓았지만 끝나지 않은 것 — N14).
     in_flight: usize = 0,
     sw_in_flight: usize = 0,
+    sw_orphans: usize = 0,
     queue_events: usize = 0,
     queue_bytes: usize = 0,
     /// W9d②: 놓친 시작의 표지(본문 표가 그 창의 같은 주소 짝을 모호하게 친다 — `net_body_table.noteDrop`). 넘치면 그 탭을 `drop_marks_overflowed` 에.
@@ -245,6 +274,7 @@ pub const State = struct {
             if (slot) |w| {
                 w.* = .{};
                 self.watching -= 1;
+                self.releaseOrphans(); // 재검증 7 차(N14)
             }
             return true;
         }
@@ -282,9 +312,40 @@ pub const State = struct {
         const n = @min(origin.len, w.top_origin.len);
         @memcpy(w.top_origin[0..n], origin[0..n]);
         w.top_len = n;
+        w.top_hash = originKey(origin[0..n]);
+        self.releaseOrphans(); // 재검증 7 차(N14): 떠난 출처의 서비스 워커 요청은 몫에서 놓는다
     }
 
-    /// 서비스 워커 요청의 출처를 연 지켜보는 탭들(넘치면 앞의 `max_targets` 개). 없으면 0.
+    /// 재검증 7 차(N14): 어느 지켜보는 탭도 맨 위에 두지 않은 출처의 서비스 워커 요청을 몫(그 출처·전체)에서 놓는다 — 그 요청은 끝날 때까지
+    /// 표의 자리를 쥐지만(`sw_orphans`, `max_sw_orphans` 까지) 다른 출처의 몫을 막지 않는다. 그 출처를 다시 보이는 탭이 생겨도 되세지 않는다
+    /// (그 탭의 새 요청만 센다 — 늦게 끝나는 옛 요청이 128 을 넘겨 쥐는 일은 없다: 옛 것은 셀 수에 들지 않는다).
+    pub fn releaseOrphans(self: *State) void {
+        if (self.sw_in_flight == 0) return;
+        var shown: [capacity]u64 = undefined;
+        var n: usize = 0;
+        for (&self.watches) |*w| if (w.on and w.top_hash != 0) {
+            shown[n] = w.top_hash;
+            n += 1;
+        };
+        for (&self.tracks) |*t| if (t.request != 0 and t.service_worker and t.sw_counted) {
+            if (std.mem.indexOfScalar(u64, shown[0..n], t.sw_origin) != null) continue;
+            if (self.sw_orphans >= max_sw_orphans) return;
+            t.sw_counted = false;
+            self.sw_in_flight -|= 1;
+            self.sw_orphans += 1;
+        };
+    }
+
+    /// 재검증 7 차(N12): 그 출처의 서비스 워커 요청 중 몫으로 세는 수.
+    pub fn swOriginCount(self: *const State, origin: u64) usize {
+        var n: usize = 0;
+        for (&self.tracks) |*t| if (t.request != 0 and t.service_worker and t.sw_counted and t.sw_origin == origin) {
+            n += 1;
+        };
+        return n;
+    }
+
+    /// 서비스 워커 요청의 출처를 연 지켜보는 탭들(`max_targets` 는 지켜보는 표의 자리 수라 넘치지 않는다 — 재검증 7 차 E1). 없으면 0.
     pub fn serviceWorkerTargets(self: *State, initiator: []const u8, out: *[max_targets]BrowserId) usize {
         var n: usize = 0;
         if (initiator.len == 0) return 0;
@@ -332,9 +393,9 @@ pub const State = struct {
         return self.sw_path.take(global_rate, global_burst, now_us);
     }
 
-    /// 재검증 6 차 F14a: 서비스 워커 몫이 찼는가 — 전체(`max_sw_in_flight`) 또는 첫 대상 탭의 것(`max_sw_in_flight_per_tab`).
-    fn swCapped(self: *const State, first: *const Watch) bool {
-        return self.sw_in_flight >= max_sw_in_flight or first.sw_in_flight >= max_sw_in_flight_per_tab;
+    /// 재검증 7 차(N12): 서비스 워커 몫이 찼는가 — 전체(`max_sw_in_flight`) 또는 그 요청을 낸 워커 출처의 것(`max_sw_in_flight_per_origin`).
+    fn swCapped(self: *const State, origin: u64) bool {
+        return self.sw_in_flight >= max_sw_in_flight or self.swOriginCount(origin) >= max_sw_in_flight_per_origin;
     }
 
     /// 탭·전체의 초당 양동이만(동시 요청 수는 보지 않는다 — 서비스 워커 갈래는 제 몫이 있다).
@@ -358,9 +419,9 @@ pub const State = struct {
         const n = self.serviceWorkerTargets(initiator, out);
         if (n == 0) return .{ .targets = 0, .admitted = false };
         const first = self.watchOf(out[0]) orelse return .{ .targets = 0, .admitted = false };
-        if (self.swCapped(first)) {
-            // 재검증 5 차 (B): 서비스 워커 몫이 찼다 — 붙일 탭마다 따로 센다(잃은 까닭 `sw_inflight_cap`). 재검증 6 차 F14a: 몫은 첫 대상 탭의 것과
-            // 전체 — 다른 출처 탭의 워커가 제 몫을 다 써도 이 출처의 요청은 닫히지 않는다.
+        if (self.swCapped(originKey(initiator))) {
+            // 재검증 5 차 (B): 서비스 워커 몫이 찼다 — 붙일 탭마다 따로 센다(잃은 까닭 `sw_inflight_cap`). 재검증 7 차 N12: 몫은 이 요청을 낸 워커
+            // 출처의 것과 전체 — 다른 출처의 워커가 제 몫을 다 써도(그 출처를 보이던 탭이 옮겨 왔어도) 이 출처의 요청은 닫히지 않는다.
             for (out[0..n]) |b| if (self.watchOf(b)) |w| {
                 w.dropped_sw_cap +|= 1;
             };
@@ -399,7 +460,7 @@ pub const State = struct {
         const a = self.admitServiceWorker(initiator, now_us, out);
         if (!a.admitted) return .{ .targets = a.targets, .track = null, .cap = a.cap };
         const first = self.watchOf(out[0]).?; // `admitServiceWorker` 가 방금 찾았다(같은 잠금)
-        const t = self.trackServiceWorker(request, first) orelse {
+        const t = self.trackServiceWorker(request, first, originKey(initiator)) orelse {
             self.sw_path.refund(global_burst);
             first.bucket.refund(tab_burst);
             self.global.refund(global_burst);
@@ -418,7 +479,7 @@ pub const State = struct {
         var out: Stamp = .{};
         for (targets, 0..) |b, i| {
             const w = self.watchOf(b) orelse continue;
-            const bit: u8 = @as(u8, 1) << @intCast(i);
+            const bit: u32 = @as(u32, 1) << @intCast(i);
             if (w.full) out.full |= bit;
             if (w.covers(host, site)) out.covered |= bit;
         }
@@ -448,21 +509,20 @@ pub const State = struct {
     }
 
     /// 재검증 5 차 (B): 서비스 워커 갈래 요청의 자리 — 서비스 워커 몫으로 센다(탭 몫·페이지 전체 몫은 쓰지 않는다). 꽉 찼으면 null.
-    /// 재검증 6 차 F14a: 첫 대상 탭의 서비스 워커 몫으로도 센다(끝나면 그 탭의 세대가 같을 때만 돌려준다 — 페이지 요청과 같다, 2 회차 N4).
-    pub fn trackServiceWorker(self: *State, request: u64, first: *Watch) ?*Track {
+    /// 재검증 7 차 N12: 그 요청을 낸 워커의 출처(`origin` — `originKey`)의 몫으로 센다(끝나면 돌려준다 — 몫에서 놓은 요청은 놓은 수에서).
+    pub fn trackServiceWorker(self: *State, request: u64, first: *Watch, origin: u64) ?*Track {
         if (self.find(request)) |t| return t;
-        if (self.swCapped(first)) return null;
+        if (self.swCapped(origin)) return null;
         for (&self.tracks) |*t| if (t.request == 0) {
-            t.* = .{ .request = request, .owner = first.browser, .owner_generation = first.generation, .service_worker = true };
+            t.* = .{ .request = request, .owner = first.browser, .owner_generation = first.generation, .service_worker = true, .sw_origin = origin, .sw_counted = true };
             self.sw_in_flight += 1;
-            first.sw_in_flight += 1;
             return t;
         };
         return null;
     }
 
     pub fn find(self: *State, request: u64) ?*Track {
-        if (request == 0 or self.in_flight + self.sw_in_flight == 0) return null;
+        if (request == 0 or self.in_flight + self.sw_in_flight + self.sw_orphans == 0) return null;
         for (&self.tracks) |*t| if (t.request == request) return t;
         return null;
     }
@@ -472,11 +532,8 @@ pub const State = struct {
     pub fn untrack(self: *State, t: *Track) void {
         if (t.request == 0) return;
         if (t.service_worker) {
-            if (self.watchOf(t.owner)) |w| if (w.generation == t.owner_generation) {
-                w.sw_in_flight -|= 1;
-            };
+            if (t.sw_counted) self.sw_in_flight -|= 1 else self.sw_orphans -|= 1;
             t.* = .{};
-            self.sw_in_flight -|= 1;
             return;
         }
         if (self.watchOf(t.owner)) |w| if (w.generation == t.owner_generation) {
@@ -1085,12 +1142,12 @@ test "W9d② 재검증 5 차 S3b (B): 서비스 워커 몫은 따로 — 워커�
         r += 1;
         now += 20_000;
     }
-    try testing.expectEqual(max_sw_in_flight_per_tab, held); // 재검증 6 차 F14a: 첫 대상 탭(1)의 몫
-    try testing.expectEqual(max_sw_in_flight_per_tab, s.sw_in_flight);
+    try testing.expectEqual(max_sw_in_flight_per_origin, held); // 재검증 7 차 N12: 그 워커 출처(sw.test)의 몫
+    try testing.expectEqual(max_sw_in_flight_per_origin, s.sw_in_flight);
     try testing.expectEqual(@as(usize, 0), s.in_flight);
     try testing.expectEqual(@as(u16, 0), s.watchByCef(11).?.in_flight); // 탭 몫은 그대로
-    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight_per_tab), s.watchByCef(11).?.dropped_sw_cap);
-    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight_per_tab), s.watchByCef(12).?.dropped_sw_cap);
+    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight_per_origin), s.watchByCef(11).?.dropped_sw_cap);
+    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight_per_origin), s.watchByCef(12).?.dropped_sw_cap);
     try testing.expectEqual(@as(u32, 0), s.watchByCef(11).?.dropped); // 다른 까닭의 넘김과 섞이지 않는다
     const capped = s.startServiceWorker("https://sw.test", r, now, &out);
     try testing.expect(capped.track == null and capped.cap and capped.targets == 2);
@@ -1105,7 +1162,7 @@ test "W9d② 재검증 5 차 S3b (B): 서비스 워커 몫은 따로 — 워커�
     try testing.expectEqual(max_in_flight_per_tab, pages);
     // 워커 요청 하나가 끝나면 몫이 돌아온다.
     s.untrack(s.find(1).?);
-    try testing.expectEqual(max_sw_in_flight_per_tab - 1, s.sw_in_flight);
+    try testing.expectEqual(max_sw_in_flight_per_origin - 1, s.sw_in_flight);
     try testing.expect(s.startServiceWorker("https://sw.test", r, now, &out).track != null);
     // 넘김 표지의 종류.
     s.markDropKind(&.{1}, 0x9, 7, true);
@@ -1128,7 +1185,7 @@ test "재검증 6 차 F14a(탐침 v20l D2): 서비스 워커 몫은 탭마다 �
     var out: [max_targets]BrowserId = undefined;
     var now: i64 = 1_000_000;
     var r: u64 = 1;
-    for (0..max_sw_in_flight_per_tab) |_| {
+    for (0..max_sw_in_flight_per_origin) |_| {
         try testing.expect(s.startServiceWorker("https://hog.test", r, now, &out).track != null);
         r += 1;
         now += 20_000;
@@ -1143,11 +1200,11 @@ test "재검증 6 차 F14a(탐침 v20l D2): 서비스 워커 몫은 탭마다 �
     r += 1;
     try testing.expectEqual(@as(u32, 0), s.watchByCef(12).?.dropped_sw_cap);
     try testing.expectEqual(@as(u32, 1), s.watchByCef(11).?.dropped_sw_cap);
-    try testing.expectEqual(@as(u16, max_sw_in_flight_per_tab), s.watchByCef(11).?.sw_in_flight);
-    try testing.expectEqual(@as(u16, 1), s.watchByCef(12).?.sw_in_flight);
-    // 끝나면 그 탭의 몫으로 돌아온다.
+    try testing.expectEqual(max_sw_in_flight_per_origin, s.swOriginCount(originKey("https://hog.test")));
+    try testing.expectEqual(@as(usize, 1), s.swOriginCount(originKey("https://VICTIM.test"))); // 대소문자를 가리지 않는다
+    // 끝나면 그 출처의 몫으로 돌아온다.
     s.untrack(s.find(1).?);
-    try testing.expectEqual(@as(u16, max_sw_in_flight_per_tab - 1), s.watchByCef(11).?.sw_in_flight);
+    try testing.expectEqual(max_sw_in_flight_per_origin - 1, s.swOriginCount(originKey("https://hog.test")));
     try testing.expect(s.startServiceWorker("https://hog.test", r, now, &out).track != null);
     r += 1;
     // 전체 512 — 넷이 모이면(W9d① 의 페이지 요청과 같은 꼴) 다른 탭도 닫힌다.
@@ -1155,7 +1212,7 @@ test "재검증 6 차 F14a(탐침 v20l D2): 서비스 워커 몫은 탭마다 �
     for (hogs, 0..) |o, i| {
         try testing.expect(s.setWatch(3 + i, @intCast(13 + i), true, true, false, &.{}));
         s.setTopOrigin(3 + i, o);
-        for (0..max_sw_in_flight_per_tab) |_| {
+        for (0..max_sw_in_flight_per_origin) |_| {
             now += 20_000;
             if (s.sw_in_flight == max_sw_in_flight) break;
             try testing.expect(s.startServiceWorker(o, r, now, &out).track != null);
@@ -1169,21 +1226,81 @@ test "재검증 6 차 F14a(탐침 v20l D2): 서비스 워커 몫은 탭마다 �
     try testing.expectEqual(@as(u32, 1), s.watchByCef(12).?.dropped_sw_cap);
 }
 
-test "재검증 6 차 F14a: 서비스 워커 몫도 세대를 본다 — 지켜보기를 껐다 켠 뒤 옛 요청이 끝나도 새 지켜보기의 몫을 깎지 않고, 전체 몫은 돌려준다" {
+test "재검증 7 차 N14: 그 출처를 보이는 지켜보는 탭이 없어지면(끔·닫힘·이동) 그 서비스 워커 요청은 몫에서 놓는다 — 끝날 때 두 번 돌려주지 않고, 다시 보여도 옛 요청은 세지 않는다" {
     var s: State = .{};
     try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
     s.setTopOrigin(1, "https://sw.test");
     var out: [max_targets]BrowserId = undefined;
     try testing.expect(s.startServiceWorker("https://sw.test", 5, 1_000_000, &out).track != null);
+    try testing.expectEqual(@as(usize, 1), s.sw_in_flight);
+    // 끔 — 그 출처를 보이는 탭이 없다: 몫에서 놓는다(자리는 끝날 때까지 쥔다).
     try testing.expect(s.setWatch(1, 11, false, true, false, &.{}));
+    try testing.expectEqual(@as(usize, 0), s.sw_in_flight);
+    try testing.expectEqual(@as(usize, 1), s.sw_orphans);
+    try testing.expect(s.find(5) != null);
     try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
     s.setTopOrigin(1, "https://sw.test");
     try testing.expect(s.startServiceWorker("https://sw.test", 6, 1_100_000, &out).track != null);
-    try testing.expectEqual(@as(u16, 1), s.watchByCef(11).?.sw_in_flight);
-    s.untrack(s.find(5).?); // 옛 세대 — 새 몫은 그대로
-    try testing.expectEqual(@as(u16, 1), s.watchByCef(11).?.sw_in_flight);
+    try testing.expectEqual(@as(usize, 1), s.swOriginCount(originKey("https://sw.test"))); // 옛 요청은 세지 않는다
+    s.untrack(s.find(5).?); // 옛 요청 — 놓은 수에서
+    try testing.expectEqual(@as(usize, 0), s.sw_orphans);
     try testing.expectEqual(@as(usize, 1), s.sw_in_flight);
     s.untrack(s.find(6).?);
-    try testing.expectEqual(@as(u16, 0), s.watchByCef(11).?.sw_in_flight);
     try testing.expectEqual(@as(usize, 0), s.sw_in_flight);
+    // 이동으로 떠난 출처도 놓는다 — 다른 탭이 그 출처를 보이면 놓지 않는다.
+    try testing.expect(s.setWatch(2, 12, true, true, false, &.{}));
+    s.setTopOrigin(2, "https://other.test");
+    for (0..max_sw_in_flight_per_origin) |k| try testing.expect(s.startServiceWorker("https://sw.test", 100 + k, 2_000_000 + @as(i64, @intCast(k)) * 20_000, &out).track != null);
+    try testing.expect(s.startServiceWorker("https://sw.test", 999, 9_000_000, &out).cap);
+    s.setTopOrigin(2, "https://sw.test"); // 다른 탭도 sw.test — 탭 1 이 떠나도 놓지 않는다
+    s.setTopOrigin(1, "https://elsewhere.test");
+    try testing.expectEqual(max_sw_in_flight_per_origin, s.sw_in_flight);
+    s.setTopOrigin(2, "https://elsewhere.test"); // 이제 아무도 보이지 않는다
+    try testing.expectEqual(@as(usize, 0), s.sw_in_flight);
+    try testing.expectEqual(max_sw_in_flight_per_origin, s.sw_orphans);
+    // 놓은 몫은 다른 출처(이제 그 출처를 보이는 탭이 다시 생겨도)의 새 요청을 막지 않는다.
+    s.setTopOrigin(1, "https://sw.test");
+    try testing.expect(s.startServiceWorker("https://sw.test", 1000, 9_100_000, &out).track != null);
+}
+
+test "재검증 7 차 E1: 같은 출처를 지켜보는 탭이 아홉 이상이어도 서비스 워커 갈래 요청은 모두에게 붙는다(전에는 앞 8 탭에만 — 아홉째 탭의 워커 세션은 W 를 보고 기록은 없었다)" {
+    var s: State = .{};
+    for (0..capacity) |i| {
+        try testing.expect(s.setWatch(@intCast(1 + i), @intCast(11 + i), true, true, false, &.{}));
+        s.setTopOrigin(@intCast(1 + i), "https://sw.test");
+    }
+    var out: [max_targets]BrowserId = undefined;
+    const a = s.startServiceWorker("https://sw.test", 7, 1_000_000, &out);
+    try testing.expectEqual(@as(usize, capacity), a.targets);
+    try testing.expectEqual(@as(BrowserId, capacity), out[capacity - 1]);
+    const st = s.stamp(out[0..a.targets], "sw.test", "sw.test");
+    try testing.expectEqual(@as(u32, 1) << (capacity - 1), st.full & (@as(u32, 1) << (capacity - 1)));
+}
+
+// ── 재검증 7 차 기준: 재검증 6 차 적대 검증 11–20 회차(v20m-B)의 탐침 — 고치기 전에 실패했고 고친 뒤의 성질을 단언한다 ──
+
+test "재검증 7 차 기준 · 탐침 v20m P12(F14a): 서비스 워커 몫은 그 요청을 받은 때의 첫 대상 「탭」 에 매겨져 탭이 옮겨도 따라간다 — 앞 출처(hog)의 워커가 쥔 128 이, 그 탭이 옮겨 간 출처(victim)의 첫 탭으로서 다른 탭(같은 victim)의 서비스 워커 요청까지 막는다" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
+    try testing.expect(s.setWatch(2, 12, true, true, false, &.{}));
+    s.setTopOrigin(1, "https://hog.test");
+    s.setTopOrigin(2, "https://victim.test");
+    var out: [max_targets]BrowserId = undefined;
+    var now: i64 = 1_000_000;
+    var r: u64 = 1;
+    for (0..max_sw_in_flight_per_origin) |_| {
+        try testing.expect(s.startServiceWorker("https://hog.test", r, now, &out).track != null);
+        r += 1;
+        now += 20_000;
+    }
+    // 대조: 탭 1 이 hog 에 있는 동안 victim 의 요청은 적힌다(F14a).
+    try testing.expect(s.startServiceWorker("https://victim.test", r, now, &out).track != null);
+    r += 1;
+    // 탭 1 이 victim 으로 옮긴다(앞 출처 워커의 fetch 128 은 그대로 이어진다 — 워커 자신의 fetch 는 페이지를 따라 끊기지 않는다).
+    s.setTopOrigin(1, "https://victim.test");
+    now += 20_000;
+    const v = s.startServiceWorker("https://victim.test", r, now, &out);
+    std.debug.print("\n[탐침 v20m P12] after tab 1 (hog.test holds {d}, released {d}) moved to victim.test: victim SW request targets {d} (first {d}) → track {} cap {} · tab 2 dropped_sw_cap {d}\n", .{ s.swOriginCount(originKey("https://hog.test")), s.sw_orphans, v.targets, out[0], v.track != null, v.cap, s.watchByCef(12).?.dropped_sw_cap });
+    // 바라는 것(F14a 의 뜻 — 「다른 출처 탭의 워커가 제 몫을 다 써도 이 출처의 요청은 닫히지 않는다」): victim 의 요청은 적힌다.
+    try testing.expect(v.track != null);
 }

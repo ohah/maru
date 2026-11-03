@@ -14,7 +14,8 @@
 //! C4(디스크 아닌 W 가 꼭 하나·독 τ·홉 τ·빼는 꼴·나쁜 W·지평), C5(짝 — 표가 W 의 응답 때 정해 `notePair`). C0·C3b′·C6·C7′ 은 표의 몫.
 //!
 //! 시험이 증명하는 것(S1): 원시 메시지 가르기(끝의 sessionId·머리의 id·메서드), 붙이기는 켬 답 뒤에만, 세대·떼기·모르는 세션, 자리 상한,
-//! 타깃 epoch. (S2) C1·C2·C3a·C4·지평·빼는 꼴, 세계 모의기 퍼즈(τ 고리 — 적대 워커의 복제·메모·디스크 적중(같은 τ 다른 본문)·µs 충돌·
+//! 타깃 epoch. 재검증 7 차: 남의 출처 세션의 탭마다 몫(N13)과 넘친 세션을 세워 두기(곧 떼면 되풀이되었다), 벽시계 뒤로 뛰기의 잃음이 그 폭
+//! 동안뿐인 것(N19a)과 한가한 동안의 뛰기(N19b). (S2) C1·C2·C3a·C4·지평·빼는 꼴, 세계 모의기 퍼즈(τ 고리 — 적대 워커의 복제·메모·디스크 적중(같은 τ 다른 본문)·µs 충돌·
 //! 기록 전 메모·만든 응답·Cache Storage: 이은 기록의 본문 == P 가 받은 본문).
 
 const std = @import("std");
@@ -35,6 +36,15 @@ pub const max_sessions_per_tab: usize = 16;
 /// 것이 되면 남긴다(`retarget`).
 pub const foreign_grace_us: i64 = 3_000_000;
 pub const max_sid_bytes: usize = 64;
+/// 재검증 7 차(N13): 탭 하나가 쥘 수 있는 남의 출처 세션 수 — 탭 몫 16(맨 위 출처)과 따로 묶는다. 전에는 남의 출처 세션을 어디에도 세지 않아
+/// 다른 출처 iframe 이 워커를 잇달아 띄우는 탭 하나가 전체 64 를 쥐었고(그동안 다른 기록 탭의 워커가 붙지 못해 0/20), 넘친 세션을 곧 떼면
+/// Chromium 이 같은 워커를 다시 붙여 붙임·뗌이 30 초에 16 000 번 되풀이되었다(실측 v20m r13-flood).
+pub const max_foreign_per_tab: usize = 4;
+/// 재검증 7 차(N13): 몫을 넘은 세션은 곧 떼지 않고 `Network.enable` 없이 「세워 둔다」(`Sw.parked`) — 그 사건은 삼키고 `foreign_grace_us`
+/// 뒤에 뗀다. 곧 떼면 Chromium 의 auto-attach 가 같은 워커를 곧 다시 붙여 되풀이했다 — 세워 두면 되풀이가 그 시한마다 한 번으로 준다. 자리가
+/// 없으면 곧 뗀다(전의 길). 자리 수: 실측 r13-flood(다른 출처 iframe 이 200 ms 마다 워커 다섯을 띄우고 3.5 초 뒤 푼다 — 동시에 약 90)에서 64 는
+/// 넘쳐 같은 워커를 57 번까지 다시 붙였다 — 넉넉히 256(한 자리 약 80 바이트).
+pub const max_parked: usize = 256;
 
 /// 원시 메시지 끝의 `,"sessionId":"…"}` 에서 sessionId(16 진 글자 1..64)를 꺼낸다. 아니면 null — 페이지 세션의 메시지다.
 /// CDP 는 자식 세션의 메시지에 sessionId 를 맨 끝에 붙인다(실측 p1 — 285/285). 끝을 꼭 맞춰야 한다: 페이지의 큰 본문 답이 끝 근처에 비슷한 글을
@@ -125,11 +135,26 @@ pub const TabState = struct {
     rearm_on_doc: bool = false,
 };
 
-pub const Attach = enum { keep, detach };
+/// `park` — 몫을 넘었다(재검증 7 차 N13): 세워 두었다(부른 쪽은 `Network.enable` 을 보내지 않고 시한 뒤 뗀다 — `takeForeign`).
+pub const Attach = enum { keep, park, detach };
+
+/// 재검증 7 차: `noteOrigin` 의 답 — 맨 위 출처의 세션·남의 출처 세션(시한 뒤 뗀다)·남의 출처 몫을 넘어 세워 둔 세션(표에서 빠졌다)·세워 둘
+/// 자리도 없어 표에서 뺀 세션(부른 쪽이 곧 뗀다).
+pub const Origin = enum { own, foreign, park, drop };
+
+/// 재검증 7 차(N13): 세워 둔 세션(표 밖 — 사건은 모르는 세션으로 삼킨다).
+const Parked = struct {
+    browser: BrowserId = 0,
+    sid: [max_sid_bytes]u8 = undefined,
+    sid_len: u8 = 0,
+    /// 이 시각 + `foreign_grace_us` 에 뗀다.
+    since: i64 = 0,
+};
 
 pub const Sw = struct {
     sessions: [max_sessions]Session = @splat(.{}),
     tabs: [max_tabs]TabState = @splat(.{}),
+    parked: [max_parked]Parked = @splat(.{}),
 
     /// 그 탭의 자리(없으면 null). 자리를 잡는 것은 `arm` 하나다 — 재검증 6 차(F16 과 같은 꼴): 전에는 묻기만 하는 길(끔의 `detachAll` 등)도
     /// 자리를 잡아, 기록을 끈 뒤 닫힌 탭(표에 없어 닫힘의 떼기 일이 오지 않는다)의 자리가 남았다 — 32 번이면 새 탭에 붙이기를 걸지 못했다.
@@ -175,6 +200,11 @@ pub const Sw = struct {
     /// 페이지 세션의 `Target.attachedToTarget`(서비스 워커) — 붙인 탭이면 세션을 적고 `keep`(부른 쪽이 그 세션에 `Network.enable`), 아니면
     /// `detach`(부른 쪽이 `Target.detachFromTarget`). 자리가 없어도(전체 `max_sessions`·그 탭 `max_sessions_per_tab` — 재검증 6 차 F14c) `detach`.
     pub fn attached(self: *Sw, browser: BrowserId, sid: []const u8, target_id: []const u8) Attach {
+        return self.attachedAt(browser, sid, target_id, 0);
+    }
+
+    /// `attached` — 세워 둘 때의 시각(`now_us` — 그 뒤 `foreign_grace_us` 에 뗀다)을 준다.
+    pub fn attachedAt(self: *Sw, browser: BrowserId, sid: []const u8, target_id: []const u8, now_us: i64) Attach {
         const t = self.tab(browser) orelse return .detach;
         if (!t.armed or sid.len == 0 or sid.len > max_sid_bytes) return .detach;
         if (self.find(sid)) |s| {
@@ -182,27 +212,78 @@ pub const Sw = struct {
             if (s.browser == browser) return .keep;
             return .detach;
         }
+        if (self.parkedIndex(sid)) |k| return if (self.parked[k].browser == browser) .park else .detach;
         // 탭 몫은 맨 위 출처의 세션만 센다 — 떼기를 기다리는 남의 출처 세션(이동 전 출처의 워커 — `foreign_grace_us`)이 몫을 쥐면 옮겨 간
-        // 출처의 워커가 붙지 못했다(v20l r14-many 실측: 워커 70 개 출처에서 옮긴 탭).
-        if (self.ownCount(browser) >= max_sessions_per_tab) return .detach;
+        // 출처의 워커가 붙지 못했다(v20l r14-many 실측: 워커 70 개 출처에서 옮긴 탭). 남의 출처 세션은 따로 묶는다(`noteOrigin`).
+        // 재검증 7 차(N13): 몫을 넘으면 세워 둔다(곧 떼면 되풀이되었다).
+        if (self.ownCount(browser) >= max_sessions_per_tab) return if (self.park(browser, sid, now_us)) .park else .detach;
         for (&self.sessions) |*s| if (s.browser == 0) {
             s.* = .{ .browser = browser, .target = hashId(target_id), .gen = t.gen };
             @memcpy(s.sid[0..sid.len], sid);
             s.sid_len = @intCast(sid.len);
             return .keep;
         };
-        return .detach;
+        return if (self.park(browser, sid, now_us)) .park else .detach;
+    }
+
+    /// 재검증 7 차(N13): 세션 하나를 세워 둔다(자리가 없으면 거짓 — 부른 쪽이 곧 뗀다).
+    fn park(self: *Sw, browser: BrowserId, sid: []const u8, since: i64) bool {
+        if (sid.len == 0 or sid.len > max_sid_bytes) return false;
+        for (&self.parked) |*p| if (p.browser == 0) {
+            p.* = .{ .browser = browser, .since = since };
+            @memcpy(p.sid[0..sid.len], sid);
+            p.sid_len = @intCast(sid.len);
+            return true;
+        };
+        return false;
+    }
+
+    fn parkedIndex(self: *const Sw, sid: []const u8) ?usize {
+        for (self.parked, 0..) |p, k| if (p.browser != 0 and std.mem.eql(u8, p.sid[0..p.sid_len], sid)) return k;
+        return null;
+    }
+
+    /// 세워 둔 세션인가(시험·진단).
+    pub fn isParked(self: *const Sw, sid: []const u8) bool {
+        return self.parkedIndex(sid) != null;
+    }
+
+    pub fn parkedCount(self: *const Sw, browser: BrowserId) usize {
+        var n: usize = 0;
+        for (self.parked) |p| if (p.browser != 0 and (browser == 0 or p.browser == browser)) {
+            n += 1;
+        };
+        return n;
+    }
+
+    /// 남의 출처 세션 수(떼기를 기다린다 — 그 탭의 따로 묶은 몫, 재검증 7 차 N13).
+    pub fn foreignCount(self: *const Sw, browser: BrowserId) usize {
+        var n: usize = 0;
+        for (self.sessions) |s| if (s.browser == browser and s.browser != 0 and s.foreign_since != 0) {
+            n += 1;
+        };
+        return n;
     }
 
     /// 재검증 6 차 F13: 붙은 세션의 출처(워커 스크립트 주소의 출처 해시)를 적고 그 탭의 맨 위 출처 `top` 과 견준다 — 같으면 참(맨 위 출처의
     /// 워커), 아니면 `foreign_since` 를 세운다(부른 쪽이 `foreign_grace_us` 뒤에 뗀다 — `takeForeign`). 모르는 출처(0)는 늘 남의 것이다.
-    pub fn noteOrigin(self: *Sw, sid: []const u8, origin: u64, top: u64, now_us: i64) bool {
-        const s = self.find(sid) orelse return false;
+    /// 재검증 7 차(N13): 남의 출처 세션이 그 탭의 몫(`max_foreign_per_tab`)을 넘으면 표에서 빼 세워 둔다(`.park` — 부른 쪽은 enable 하지 않는다).
+    pub fn noteOrigin(self: *Sw, sid: []const u8, origin: u64, top: u64, now_us: i64) Origin {
+        const s = self.find(sid) orelse return .foreign;
         s.origin = origin;
         const own = origin != 0 and origin == top;
-        if (own and s.foreign_since != 0) s.own_since = @max(now_us, 1);
-        s.foreign_since = if (own) 0 else if (s.foreign_since != 0) s.foreign_since else @max(now_us, 1);
-        return own;
+        if (own) {
+            if (s.foreign_since != 0) s.own_since = @max(now_us, 1);
+            s.foreign_since = 0;
+            return .own;
+        }
+        if (s.foreign_since == 0 and self.foreignCount(s.browser) >= max_foreign_per_tab) {
+            const parked = self.park(s.browser, sid, @max(now_us, 1));
+            s.* = .{};
+            return if (parked) .park else .drop;
+        }
+        if (s.foreign_since == 0) s.foreign_since = @max(now_us, 1);
+        return .foreign;
     }
 
     pub fn isForeign(self: *Sw, sid: []const u8) bool {
@@ -221,16 +302,33 @@ pub const Sw = struct {
                 s.foreign_since = 0;
                 s.own_since = @max(now_us, 1);
                 raise = @max(raise, s.enabled_wall_us);
-            } else if (!own and s.foreign_since == 0) s.foreign_since = @max(now_us, 1);
+            } else if (!own and s.foreign_since == 0) {
+                // 재검증 7 차(N13): 남의 출처 몫을 넘는 앞 출처 세션은 곧 뗀다(세워 두고 시한을 지난 것으로 — 다음 `takeForeign`). 전에는 출처를
+                // 잇달아 바꾸면 앞 출처 세션이 모두 시한까지 남아 한 탭이 전체 64 를 쥐었다(v20m P13b).
+                if (self.foreignCount(browser) >= max_foreign_per_tab) {
+                    if (self.park(browser, s.sidSlice(), @max(now_us, 1) - foreign_grace_us)) {
+                        s.* = .{};
+                        continue;
+                    }
+                }
+                s.foreign_since = @max(now_us, 1);
+            }
         };
         return raise;
     }
 
     /// 재검증 6 차 F13: 시한(`foreign_grace_us`)이 지난 남의 출처 세션 하나를 표에서 빼 돌려준다(부른 쪽이 떼고 null 까지 되풀이).
+    /// 재검증 7 차(N13): 세워 둔 세션도 시한이 지나면 돌려준다(그 출처는 0).
     pub fn takeForeign(self: *Sw, now_us: i64) ?Session {
         for (&self.sessions) |*s| if (s.browser != 0 and s.foreign_since != 0 and now_us - s.foreign_since >= foreign_grace_us) {
             const out = s.*;
             s.* = .{};
+            return out;
+        };
+        for (&self.parked) |*p| if (p.browser != 0 and now_us - p.since >= foreign_grace_us) {
+            var out: Session = .{ .browser = p.browser, .sid_len = p.sid_len };
+            @memcpy(out.sid[0..p.sid_len], p.sid[0..p.sid_len]);
+            p.* = .{};
             return out;
         };
         return null;
@@ -241,6 +339,9 @@ pub const Sw = struct {
         var at: ?i64 = null;
         for (self.sessions) |s| if (s.browser != 0 and s.foreign_since != 0) {
             at = if (at) |a| @min(a, s.foreign_since) else s.foreign_since;
+        };
+        for (self.parked) |p| if (p.browser != 0) {
+            at = if (at) |a| @min(a, p.since) else p.since;
         };
         return at;
     }
@@ -260,6 +361,7 @@ pub const Sw = struct {
     /// `Target.detachedFromTarget` — 그 세션을 지운다.
     pub fn detached(self: *Sw, sid: []const u8) void {
         if (self.find(sid)) |s| s.* = .{};
+        if (self.parkedIndex(sid)) |k| self.parked[k] = .{};
     }
 
     /// 타깃이 다시 떴다(같은 세션 — 실측 b: 다시 attach 가 오지 않는다). requestId 가 다시 쓰일 수 있어 epoch 를 올린다.
@@ -289,6 +391,10 @@ pub const Sw = struct {
         t.gen +%= 1;
         for (&self.sessions) |*s| if (s.browser == browser) {
             s.* = .{};
+        };
+        // 세워 둔 세션도 — `setAutoAttach{autoAttach:false}` 가 붙은 세션을 모두 뗀다(닫힘이면 세션이 이미 죽었다).
+        for (&self.parked) |*p| if (p.browser == browser) {
+            p.* = .{};
         };
         return was;
     }
@@ -444,10 +550,11 @@ pub const Reason = enum {
     w_held,
     w_pending_split,
     w_doubt,
-    /// 재검증 6 차 D1: 같은 열쇠에 제 기록이 없는 W 가 남는다(맞추기에 든 W 가 기록보다 많다 — 기록 전에 나간 fetch 가 남의 기록을 가져가 한 칸씩
-    /// 밀린 꼴) / 시작을 잃은 W(`timing.requestTime` — IO 뒤)와 시작이 보인 W(IO 앞)가 2 ms 안이라 차례를 믿지 못한다(1–10 회차 R10-a).
-    w_surplus,
-    w_clock,
+    /// 재검증 7 차(겹침 규칙): 판정 창에 같은 주소·메서드의 다른 W(짝을 맺은 것·지운 것·시작을 잃은 것 모두)가 겹친다 / 이 W 가 시작을 잃었다 /
+    /// 판정 창이 워커 세션의 눈먼 때(붙기 전·enable 답 전)에 닿는다 — 그 창의 기록은 모두 본문 없이. 6 차의 `w_surplus`·`w_clock` 을 갈음한다.
+    w_overlap,
+    w_lost_start,
+    w_blind,
 };
 
 pub const Verdict = union(enum) {
@@ -468,6 +575,10 @@ pub const evict_batch: usize = 1_024;
 pub const visible_margin_us: i64 = 1_000;
 /// 재검증 6 차: 벽시계의 느린 흐름으로 치는 빠르기의 위 끝(ppm — BSD `adjtime` 의 slew 상한 500 ppm). 이보다 빨리 뒤로 간 것만 뛰기로 친다.
 pub const slew_ppm: i64 = 500;
+/// 재검증 7 차(N19b): 흐름의 몫을 셀 때 표본 사이를 이만큼까지만 친다(그보다 긴 사이는 이만큼의 흐름만 허락한다 — 5 ms).
+pub const slew_window_us: i64 = 10_000_000;
+/// 재검증 7 차: 이보다 작은 뒤로 감은 뛰기로 치지 않는다(벽·단조를 잇달아 읽는 사이의 흔들림 — `visible_margin_us` 와 같다).
+pub const jump_tolerance_us: i64 = 1_000;
 
 pub const Link = struct {
     ws: std.AutoHashMapUnmanaged(WKey, W) = .empty,
@@ -484,7 +595,15 @@ pub const Link = struct {
     /// sidecar 가 본 벽시계 − 단조 시계의 최대와, 그보다 뒤로 뛴 가장 큰 폭(µs — 공격 1 M7: 기록 전에 벽시계가 뒤로 뛰면 그 전 메모의 τ 가 VS
     /// 보다 커진다).
     off_max: i64 = std.math.minInt(i64),
+    /// 본 뒤로 뛰기의 가장 큰 폭(진단·시험 — 재검증 7 차부터 C3a 는 이것을 VS 에 더하지 않는다, `jump_high`).
     back_max: i64 = 0,
+    /// 재검증 7 차(N19a): 뒤로 뛰기를 본 때의 「뛰기 전 벽시계」(그때까지 본 어떤 τ 보다 크거나 같다)의 최대. 뛰기 **뒤에** 올리는 VS 는 이 값보다
+    /// 앞에 서지 않는다(`raiseVisible`) — 뛰기 전의 메모 τ 는 모두 이 값 이하다. 뛰기 앞에 선 VS 는 그대로다(그 앞의 메모 τ 는 그 VS 보다 작다 —
+    /// 같은 벽시계로 쟀다). 벽시계가 이 값을 지나면 뜻이 없어진다. 전에는 뛴 폭(`back_max`)을 sidecar 가 끝날 때까지 모든 VS 에 더해, 5 분 뒤로
+    /// 뛰면 그 뒤 기록마다 붙은 뒤 5 분 동안의 서비스 워커 본문을 잃었다(v20m P19). 처음 판은 이 값을 모든 VS 에 씌워, 무거운 부하에서 벽·단조를
+    /// 잇달아 읽는 사이에 밀린 표본(뛰기로 보인다 — 폭은 ms)마다 앞에 선 VS 가 「지금」 으로 올라 그 앞의 응답을 모두 잃었다(판정 v20fa 의 SW
+    /// 사례가 차례로 0 — 실측).
+    jump_high: i64 = std.math.minInt(i64),
     /// 마지막 표본의 단조 시각(재검증 6 차 — 기준 `off_max` 를 느린 흐름만큼 따라 내린다).
     last_mono: i64 = 0,
 
@@ -501,6 +620,10 @@ pub const Link = struct {
     /// τ 는 지금의 벽시계보다 작다(C3a 가 막는 것은 「뒤로 뛰기 앞의 메모 τ 가 VS 보다 크다」 뿐). 전에는 그 흐름이 기준(`off_max`)과의 차로 끝없이
     /// 쌓여(시간당 약 0.1 초) sidecar 가 오래 돌수록 붙은 직후의 응답이 모두 C3a 로 버려졌다(판정 `v20l-ctrl`: 12 분 뒤 20/20 → 0/20). 그래서
     /// 기준을 `slew_ppm` 만큼 따라 내리고, 그보다 빠르게 내려간 폭(뛰기·표본 사이의 지연)만 남긴다.
+    ///
+    /// 재검증 7 차: 흐름의 몫은 표본 사이를 `slew_window_us` 까지만 친다(N19b — 한가한 한 시간이면 1.8 초 뒤로 뛰기를 흐름으로 삼켰다; 실제 흐름은
+    /// 그 사이 97 ms 남짓이라 그것은 뛰기로 치고 잃는 것은 그만큼이다). 뛰기를 보면 그때의 뛰기 전 벽시계를 `jump_high` 로 남기고 기준을 새
+    /// 벽시계로 다시 잡는다(그 뒤 표본마다 다시 뛰기로 보지 않는다).
     pub fn clockSample(self: *Link, wall_us: i64, mono_us: i64) void {
         const off = wall_us - mono_us;
         if (self.off_max == std.math.minInt(i64)) {
@@ -508,11 +631,18 @@ pub const Link = struct {
             self.last_mono = mono_us;
             return;
         }
-        const dt = @max(mono_us - self.last_mono, 0);
+        const dt = @min(@max(mono_us - self.last_mono, 0), slew_window_us);
         self.last_mono = @max(self.last_mono, mono_us);
-        const allowed = @divTrunc(@min(dt, std.math.maxInt(i64) / slew_ppm) * slew_ppm, 1_000_000);
-        self.off_max = @max(off, self.off_max - allowed);
-        self.back_max = @max(self.back_max, self.off_max - off);
+        const allowed = @divTrunc(dt * slew_ppm, 1_000_000);
+        const floor = self.off_max - allowed;
+        if (floor - off > jump_tolerance_us) {
+            // 뒤로 뛰었다 — 뛰기 전 벽시계(기준 + 지금 단조)까지의 τ 는 뛰기 앞의 것일 수 있다.
+            self.back_max = @max(self.back_max, floor - off);
+            self.jump_high = @max(self.jump_high, floor + mono_us);
+            self.off_max = off;
+            return;
+        }
+        self.off_max = @max(off, floor);
     }
 
     fn vsSlot(self: *Link, browser: BrowserId) ?*@TypeOf(self.vs[0]) {
@@ -527,11 +657,12 @@ pub const Link = struct {
     /// 기록을 켰다·워커 세션의 enable 답이 왔다 — VS 를 올린다(max — 새 타깃마다, 공격 1 M5·공격 2 A6).
     pub fn raiseVisible(self: *Link, browser: BrowserId, wall_us: i64) void {
         const v = self.vsSlot(browser) orelse return;
-        v.wall_us = @max(v.wall_us, wall_us);
+        // 재검증 7 차(N19a): 뛰기 뒤에 올리는 VS 는 뛰기 전 벽시계까지(`jump_high` — 뛰기가 없으면 최소).
+        v.wall_us = @max(v.wall_us, @max(wall_us, self.jump_high));
     }
 
     pub fn visibleSince(self: *const Link, browser: BrowserId) i64 {
-        for (self.vs) |v| if (v.browser == browser) return v.wall_us + self.back_max + visible_margin_us;
+        for (self.vs) |v| if (v.browser == browser) return v.wall_us + visible_margin_us;
         return std.math.maxInt(i64);
     }
 
@@ -711,23 +842,44 @@ test "S1: 붙이기는 켬 답 뒤에만 — 걸지 않은 탭에 온 세션은 
     try testing.expectEqual(@as(usize, 0), sw.sessionCount(5));
 }
 
-test "S1: 자리 상한 — 넘치면 새 세션은 떼고(탭마다 16·전체 64 — 재검증 6 차 F14c), 다시 뜬 타깃은 epoch 를 올린다, 떨어진 세션은 지운다" {
+test "S1: 자리 상한 — 넘치면 새 세션은 세워 두고(탭마다 16·전체 64 — 재검증 6 차 F14c, 재검증 7 차 N13: 곧 떼지 않고 시한 뒤), 세워 둘 자리도 없으면 뗀다, 다시 뜬 타깃은 epoch 를 올린다, 떨어진 세션은 지운다" {
     var sw: Sw = .{};
     var buf: [8]u8 = undefined;
-    // 탭 넷이 16 씩 — 다섯째 탭은 전체가 차 뗀다. 한 탭이 16 을 넘겨 쥐지 못해 다른 탭이 제 몫을 쓴다.
+    // 탭 넷이 16 씩 — 다섯째 탭은 전체가 차 세워 둔다. 한 탭이 16 을 넘겨 쥐지 못해 다른 탭이 제 몫을 쓴다.
     for (0..4) |b| {
         try testing.expect(sw.arm(5 + b));
         for (0..max_sessions_per_tab) |i| {
             const sid = try std.fmt.bufPrint(&buf, "{X:0>4}", .{b * 100 + i});
-            try testing.expectEqual(Attach.keep, sw.attached(5 + b, sid, "T"));
+            try testing.expectEqual(Attach.keep, sw.attachedAt(5 + b, sid, "T", 1_000));
         }
-        try testing.expectEqual(Attach.detach, sw.attached(5 + b, "EEEEE", "T"));
+        const extra = try std.fmt.bufPrint(&buf, "E{X:0>4}", .{b});
+        try testing.expectEqual(Attach.park, sw.attachedAt(5 + b, extra, "T", 1_000));
+        try testing.expectEqual(Attach.park, sw.attachedAt(5 + b, extra, "T", 1_000)); // 다시 알려져도 세운 그대로
     }
     try testing.expectEqual(max_sessions, sw.sessionCount(0));
     try testing.expect(sw.arm(9));
-    try testing.expectEqual(Attach.detach, sw.attached(9, "DDDDD", "T"));
-    try testing.expectEqual(Attach.detach, sw.attached(5, "FFFFF", "T"));
+    try testing.expectEqual(Attach.park, sw.attachedAt(9, "DDDDD", "T", 1_000));
+    try testing.expectEqual(@as(usize, 5), sw.parkedCount(0));
+    try testing.expect(sw.live("DDDDD") == null); // 세운 세션의 사건은 삼킨다
+    // 시한 뒤 뗀다(세운 것도 — 출처는 모른다).
+    var due: usize = 0;
+    while (sw.takeForeign(1_000 + foreign_grace_us)) |x| {
+        try testing.expect(x.origin == 0);
+        due += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), due);
+    // 세워 둘 자리도 차면 곧 뗀다(전의 길).
+    for (0..max_parked) |i| {
+        const sid = try std.fmt.bufPrint(&buf, "P{X:0>4}", .{i});
+        try testing.expectEqual(Attach.park, sw.attachedAt(9, sid, "T", 2_000));
+    }
+    try testing.expectEqual(Attach.detach, sw.attachedAt(9, "QQQQ", "T", 2_000));
+    _ = sw.detachAll(9); // 기록이 멈추면 세운 세션도 함께 떨어진다
+    try testing.expectEqual(@as(usize, 0), sw.parkedCount(0));
+    try testing.expectEqual(Attach.park, sw.attached(5, "FFFFF", "T"));
     sw.detached("0000");
+    sw.detached("FFFFF"); // 세운 세션이 떨어지면 그 자리도 비운다
+    try testing.expect(!sw.isParked("FFFFF"));
     try testing.expectEqual(Attach.keep, sw.attached(5, "FFFFF", "T"));
     sw.reloaded("FFFFF");
     try testing.expectEqual(@as(u32, 1), sw.find("FFFFF").?.epoch);
@@ -740,10 +892,16 @@ test "S1: 자리 상한 — 넘치면 새 세션은 떼고(탭마다 16·전체 
         try testing.expectEqual(Attach.keep, m.attached(5, sid, "T"));
         _ = m.noteOrigin(sid, 0x11, 0x11, 10);
     }
-    try testing.expectEqual(Attach.detach, m.attached(5, "CCCCC", "T"));
+    try testing.expectEqual(Attach.park, m.attached(5, "CCCCC", "T"));
     _ = m.retarget(5, 0x77, 1_000);
-    try testing.expectEqual(Attach.keep, m.attached(5, "CCCCC", "T"));
+    try testing.expectEqual(Attach.keep, m.attached(5, "CCCCD", "T"));
     try testing.expectEqual(@as(usize, 1), m.ownCount(5));
+    // 재검증 7 차(N13): 남의 것이 된 앞 출처 세션은 따로 묶은 몫(`max_foreign_per_tab`)까지만 남고 나머지는 곧 뗄 것으로 세워 둔다.
+    try testing.expectEqual(max_foreign_per_tab, m.foreignCount(5));
+    try testing.expectEqual(1 + max_sessions_per_tab - max_foreign_per_tab, m.parkedCount(5));
+    var now_due: usize = 0;
+    while (m.takeForeign(1_000)) |_| now_due += 1;
+    try testing.expectEqual(max_sessions_per_tab - max_foreign_per_tab, now_due); // 몫을 넘은 앞 출처 세션은 곧(시한을 지난 것으로)
 }
 
 test "재검증 6 차 F13: 맨 위 출처가 아닌 워커 세션은 시한 뒤 뗀다 — 맨 위 출처가 그 워커의 것이 되면 남기고 그때 VS 를 올릴 값을 준다, 떠난 출처의 워커는 시한을 세운다" {
@@ -754,15 +912,15 @@ test "재검증 6 차 F13: 맨 위 출처가 아닌 워커 세션은 시한 뒤 
     try testing.expect(sw.arm(5));
     // 맨 위 출처(o1)의 워커 — 남긴다.
     try testing.expectEqual(Attach.keep, sw.attached(5, "A1", "T1"));
-    try testing.expect(sw.noteOrigin("A1", o1, o1, 1_000));
+    try testing.expect(sw.noteOrigin("A1", o1, o1, 1_000) == .own);
     // iframe 출처(같은 사이트·다른 출처 o2, 다른 사이트 x2)의 워커 — 붙지만 남의 것.
     try testing.expectEqual(Attach.keep, sw.attached(5, "B2", "T2"));
-    try testing.expect(!sw.noteOrigin("B2", o2, o1, 2_000));
+    try testing.expect(sw.noteOrigin("B2", o2, o1, 2_000) != .own);
     try testing.expectEqual(Attach.keep, sw.attached(5, "C3", "T3"));
-    try testing.expect(!sw.noteOrigin("C3", x2, o1, 2_500));
+    try testing.expect(sw.noteOrigin("C3", x2, o1, 2_500) != .own);
     // 출처를 모르는 워커도 남의 것.
     try testing.expectEqual(Attach.keep, sw.attached(5, "D4", "T4"));
-    try testing.expect(!sw.noteOrigin("D4", 0, o1, 2_600));
+    try testing.expect(sw.noteOrigin("D4", 0, o1, 2_600) != .own);
     try testing.expect(sw.isForeign("B2") and !sw.isForeign("A1"));
     try testing.expectEqual(@as(?i64, 2_000), sw.nextForeign());
     // 시한 전에는 떼지 않는다.
@@ -778,7 +936,7 @@ test "재검증 6 차 F13: 맨 위 출처가 아닌 워커 세션은 시한 뒤 
     try testing.expect(sw.nextForeign() == null);
     // 이동 중: 새 출처(o2)의 워커가 주소가 바뀌기 전에 붙는다 — 남의 것으로 시작해 enable 답이 온다.
     try testing.expectEqual(Attach.keep, sw.attached(5, "E5", "T5"));
-    try testing.expect(!sw.noteOrigin("E5", o2, o1, 10_000));
+    try testing.expect(sw.noteOrigin("E5", o2, o1, 10_000) != .own);
     sw.noteEnable("E5", 9);
     _ = sw.result("E5", 9, true, 7_777);
     // 주소가 바뀐다(o1 → o2): E5 는 풀려 그 enable 답으로 VS 를 올리고, 앞 문서 출처의 A1 은 시한을 세운다.
@@ -791,7 +949,7 @@ test "재검증 6 차 F13: 맨 위 출처가 아닌 워커 세션은 시한 뒤 
     // 다른 탭의 세션은 건드리지 않는다.
     try testing.expect(sw.arm(6));
     try testing.expectEqual(Attach.keep, sw.attached(6, "F6", "T1"));
-    try testing.expect(sw.noteOrigin("F6", o2, o2, 12_000));
+    try testing.expect(sw.noteOrigin("F6", o2, o2, 12_000) == .own);
     _ = sw.retarget(5, x2, 12_000);
     try testing.expect(!sw.isForeign("F6"));
 }
@@ -861,11 +1019,15 @@ test "S2 C3a: 붙기 전에 받은 응답(메모)은 ambiguous — VS 는 새 �
     try l.notePair(gpa_t, k2, 10);
     try testing.expect(l.decide(5, 6_000_000 + visible_margin_us, .network) == .link);
     try testing.expectEqual(Reason.before_visible, l.decide(5, 6_000_000 + visible_margin_us - 1, .network).ambiguous.reason);
-    // 벽시계가 뒤로 2 초 뛰었다 — VS 가 그만큼 늦게 선다(뛰기 전의 메모 τ 가 VS 보다 클 수 있다).
+    // 벽시계가 뒤로 2 초 뛰었다 — 뛰기 앞에 선 VS 는 그대로(그 앞의 메모 τ 는 그 VS 보다 작다), 뛰기 뒤에 올리는 VS 는 뛰기 전 벽시계까지
+    // (재검증 7 차 N19a — 뛰기 전의 메모 τ 가 뛴 뒤의 VS 보다 클 수 있다).
     l.clockSample(10_000_000, 1_000);
     l.clockSample(8_000_000, 2_000);
     try testing.expectEqual(@as(i64, 2_001_000), l.back_max);
-    try testing.expectEqual(Reason.before_visible, l.decide(5, 6_000_000 + visible_margin_us, .network).ambiguous.reason);
+    try testing.expect(l.decide(5, 6_000_000 + visible_margin_us, .network) == .link);
+    l.raiseVisible(5, 8_000_500); // 뛴 뒤 새 타깃의 enable 답
+    try testing.expectEqual(@as(i64, 9_999_000 + 2_000 + visible_margin_us), l.visibleSince(5));
+    try testing.expectEqual(Reason.before_visible, l.decide(5, 9_000_000, .network).ambiguous.reason);
     l.forgetTab(5);
     try testing.expectEqual(Reason.before_visible, l.decide(5, 9_000_000_000, .network).ambiguous.reason);
 }
@@ -912,6 +1074,14 @@ test "재검증 6 차: 벽시계의 느린 흐름(slew)은 뒤로 뛴 폭으로 
     const after = l.back_max;
     for (1..100) |k| l.clockSample(wall0 + 3600 * 1_000_000 - 97_200 - 2_000_000 + @as(i64, @intCast(k)) * 1_000_000, mono + 1_000 + @as(i64, @intCast(k)) * 1_000_000);
     try testing.expectEqual(after, l.back_max);
+    // 재검증 7 차(N19a): 뛰기 전 벽시계가 남는다 — 그보다 앞의 VS 는 그 값까지 올라간다. 벽시계가 그 값을 지난 뒤 붙은 세션의 VS 는 그대로다
+    // (뛴 폭을 영영 더하지 않는다).
+    const high = l.jump_high;
+    try testing.expect(high >= wall0 + 3600 * 1_000_000 - 97_200 - 1_000);
+    l.raiseVisible(5, high - 1_500_000);
+    try testing.expectEqual(high + visible_margin_us, l.visibleSince(5));
+    l.raiseVisible(6, high + 10_000_000);
+    try testing.expectEqual(high + 10_000_000 + visible_margin_us, l.visibleSince(6));
 }
 
 test "S2 C4: τ 가 꼭 하나 — 같은 τ 의 디스크 아닌 W 둘은 영영 독, 디스크 적중은 걸러 네트워크 W 를, 홉 τ·빼는 꼴·나쁜 W·지평은 ambiguous, W·짝이 아직이면 기다린다" {
@@ -1082,4 +1252,105 @@ test "S2 퍼즈(세계 모의기 — τ 고리): 이은 기록의 본문은 늘 
     }
     std.debug.print("\n[S2 fuzz] links {d} · ambiguous {d} · wait {d}\n", .{ links, ambs, waits });
     try testing.expect(links > 1000);
+}
+
+// ── 재검증 7 차 기준: 재검증 6 차 적대 검증 11–20 회차(v20m-B)의 탐침 — 고치기 전에 실패했고 고친 뒤의 성질을 단언한다 ──
+
+test "재검증 7 차 기준 · 탐침 v20m P13a(F14c): 떼기를 기다리는 남의 출처 세션은 탭 몫에 세지 않는다 — iframe 출처 워커가 3 초 안에 잇달아 뜨는 탭 하나가 전체 64 를 쥐어 다른 탭의 제 워커가 붙지 못한다" {
+    var sw: Sw = .{};
+    var buf: [8]u8 = undefined;
+    const o1: u64 = 0x11; // 탭 5 의 맨 위 출처
+    const o2: u64 = 0x22; // 탭 5 의 iframe 출처
+    try testing.expect(sw.arm(5));
+    try testing.expect(sw.arm(6));
+    try testing.expectEqual(Attach.keep, sw.attached(5, "A000", "TA"));
+    try testing.expect(sw.noteOrigin("A000", o1, o1, 1_000) == .own);
+    // iframe 출처의 워커 80 개가 3 초 안에 뜬다(등록마다 새 타깃) — 붙을 때는 몫을 본 뒤 남의 것이 된다.
+    var kept: usize = 0;
+    for (0..80) |i| {
+        const sid = try std.fmt.bufPrint(&buf, "{X:0>4}", .{0x100 + i});
+        if (sw.attached(5, sid, sid) == .keep) {
+            _ = sw.noteOrigin(sid, o2, o1, 1_000 + @as(i64, @intCast(i)) * 30_000);
+            kept += 1;
+        }
+    }
+    const held = sw.sessionCount(5);
+    // 다른 탭(6)의 맨 위 출처 워커.
+    const other = sw.attached(6, "B000", "TB");
+    std.debug.print("\n[탐침 v20m P13a] tab 5 kept {d} foreign + 1 own → holds {d}/{d} sessions · tab 6's own worker: {s}\n", .{ kept, held, max_sessions, @tagName(other) });
+    // 바라는 것(문서 「한 탭에 붙는 워커는 16 개·sidecar 전체 64 개까지」·F14c 의 뜻): 한 탭이 전체를 쥐지 않고 다른 탭의 워커는 붙는다.
+    try testing.expect(held <= max_sessions_per_tab and other == .keep);
+}
+
+test "재검증 7 차 기준 · 탐침 v20m P13b(F14c·F13): 3 초 안에 맨 위 출처를 넷 바꾸면(출처마다 워커 16) 한 탭이 64 를 쥔다 — 앞 출처 세션은 떼기를 기다리며 몫에 세지 않는다" {
+    var sw: Sw = .{};
+    var buf: [8]u8 = undefined;
+    try testing.expect(sw.arm(5));
+    try testing.expect(sw.arm(6));
+    var now: i64 = 1_000;
+    for (0..4) |o| {
+        const origin: u64 = 0x10 + o;
+        _ = sw.retarget(5, origin, now); // 이동 — 앞 출처의 세션은 남의 것(떼기 기다림)
+        for (0..max_sessions_per_tab) |i| {
+            const sid = try std.fmt.bufPrint(&buf, "{X:0>4}", .{o * 0x100 + i});
+            if (sw.attached(5, sid, sid) == .keep) _ = sw.noteOrigin(sid, origin, origin, now);
+        }
+        now += 700_000; // 0.7 초마다 이동
+    }
+    const held = sw.sessionCount(5);
+    const other = sw.attached(6, "B000", "TB");
+    std.debug.print("\n[탐침 v20m P13b] after 4 origin changes in 2.1 s tab 5 holds {d}/{d} · tab 6's own worker: {s}\n", .{ held, max_sessions, @tagName(other) });
+    try testing.expect(other == .keep);
+}
+
+test "재검증 7 차 N19a·N19b(탐침 v20m P19): 벽시계가 X 뒤로 뛰어도 잃는 것은 그 뒤 X 동안뿐이다(전에는 sidecar 가 끝날 때까지 기록마다) — 한가한 동안의 뛰기도 흐름으로 삼키지 않는다" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    const wall0: i64 = 1_700_000_000_000_000;
+    var mono: i64 = 1_000_000;
+    l.clockSample(wall0, mono);
+    // 사용자가 시계를 5 분 뒤로(또는 잠에서 깬 뒤 NTP 가 한 번에 고친다).
+    mono += 1_000_000;
+    const jump_wall = wall0 + 1_000_000 - 300_000_000;
+    l.clockSample(jump_wall, mono);
+    try testing.expect(l.back_max >= 299_000_000);
+    // 뛴 직후 붙은 세션 — VS 는 뛰기 전 벽시계까지 오른다(뛰기 앞의 메모 τ 는 그보다 작다 — C3a 가 막는다).
+    l.raiseVisible(7, jump_wall + 1_000);
+    try testing.expect(l.visibleSince(7) >= wall0 + 1_000_000);
+    const memo = WKey.of(3, 0, "9.0");
+    try l.noteResponse(gpa_t, memo, wall0 + 900_000, false, false, 200);
+    try l.notePair(gpa_t, memo, 76);
+    try testing.expect(l.decide(7, wall0 + 900_000, .network) == .ambiguous);
+    // 한 시간 뒤 새 기록 — 워커 세션의 enable 답(지금 벽시계) 뒤 60 초의 응답은 잇는다(전에는 before_visible — v20m P19).
+    mono += 3600 * 1_000_000;
+    const now_wall = jump_wall + 3600 * 1_000_000;
+    l.clockSample(now_wall, mono);
+    l.raiseVisible(8, now_wall);
+    const k = WKey.of(3, 0, "9.1");
+    try l.noteResponse(gpa_t, k, now_wall + 60_000_000, false, false, 200);
+    try l.notePair(gpa_t, k, 77);
+    const v = l.decide(8, now_wall + 60_000_000, .network);
+    std.debug.print("\n[N19a] back_max {d} ms · P 60 s after enable (1 h after the jump) → {s}\n", .{ @divTrunc(l.back_max, 1000), @tagName(v) });
+    try testing.expect(v == .link);
+    // N19b: 한가한 한 시간 사이의 1.5 초 뒤로 뛰기 — 흐름의 몫은 표본 사이 10 초까지만(5 ms) 쳐서 뛰기로 본다(전에는 1.8 초까지 삼켰다).
+    var m: Link = .{};
+    defer m.deinit(gpa_t);
+    m.clockSample(wall0, 1_000_000);
+    m.clockSample(wall0 + 3600 * 1_000_000 - 1_500_000, 1_000_000 + 3600 * 1_000_000);
+    std.debug.print("[N19b] 1.5 s step back during a 1 h idle gap → back_max {d} µs\n", .{m.back_max});
+    try testing.expect(m.back_max >= 1_490_000);
+    try testing.expect(m.jump_high >= wall0 + 3600 * 1_000_000 - 10_000);
+    // 부하로 벽·단조를 읽는 사이가 밀린 표본(5 ms 뒤로 보인다 — 실제 뛰기가 아니다): 앞에 선 VS 는 그대로라 그 앞의 응답도 잇는다(처음 판은 VS 를
+    // 그 표본의 「지금」 으로 올려 앞 응답을 모두 잃었다 — 판정 v20fa).
+    var q: Link = .{};
+    defer q.deinit(gpa_t);
+    q.clockSample(wall0, 1_000_000);
+    q.raiseVisible(9, wall0 + 1_000);
+    const kq = WKey.of(3, 0, "9.9");
+    try q.noteResponse(gpa_t, kq, wall0 + 500_000, false, false, 200);
+    try q.notePair(gpa_t, kq, 99);
+    q.clockSample(wall0 + 600_000 - 5_000, 1_000_000 + 600_000);
+    q.clockSample(wall0 + 700_000, 1_000_000 + 700_000);
+    try testing.expect(q.back_max >= 4_000);
+    try testing.expect(q.decide(9, wall0 + 500_000, .network) == .link);
 }

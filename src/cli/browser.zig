@@ -2063,7 +2063,7 @@ fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
     if (intField(result.get("hidden_before_grant"))) |n| if (n > 0) try w.print("({d} earlier request{s} hidden — made before your permission)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("hidden_other_site_pages"))) |n| if (n > 0) try w.print("({d} request{s} hidden — made while the tab showed a site your permission does not cover)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("dropped"))) |n| if (n > 0) try w.print("({d} request{s} not recorded — the page made them faster than maru keeps)\n", .{ n, if (n == 1) "" else "s" });
-    if (intField(result.get("dropped_sw_inflight_cap"))) |n| if (n > 0) try w.print("({d} service-worker request{s} not recorded — sw_inflight_cap: the site's service workers held too many unfinished fetches — 128 per tab showing the site, 512 across all tabs)\n", .{ n, if (n == 1) "" else "s" });
+    if (intField(result.get("dropped_sw_inflight_cap"))) |n| if (n > 0) try w.print("({d} service-worker request{s} not recorded — sw_inflight_cap: the site's service workers held too many unfinished fetches: 128 per origin, 512 in total)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("cross_site_iframe_hidden"))) |n| if (n > 0) try w.print("({d} request{s} from cross-site iframes hidden — browser.agent-network-full is off)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("service_worker_shared_hidden"))) |n| if (n > 0) try w.print("({d} service-worker request{s} hidden — a tab without permission shows the same site and browser.agent-network-full is off)\n", .{ n, if (n == 1) "" else "s" });
     // 커서가 있으면 그것을 권한다 — 새 요청이 와도 다음 쪽이 밀리지 않는다(F7).
@@ -4492,7 +4492,7 @@ test "W9d①: network 결과 — 줄마다 번호·메서드·상태·종류·�
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[],\"hidden_before_grant\":0,\"dropped\":2,\"dropped_sw_inflight_cap\":3,\"full_details\":true}}", .network, &out.writer));
     try testing.expectEqualStrings("(no requests)\n(2 requests not recorded — the page made them faster than maru keeps)\n" ++
-        "(3 service-worker requests not recorded — sw_inflight_cap: the site's service workers held too many unfinished fetches — 128 per tab showing the site, 512 across all tabs)\n", out.written());
+        "(3 service-worker requests not recorded — sw_inflight_cap: the site's service workers held too many unfinished fetches: 128 per origin, 512 in total)\n", out.written());
     // W9d① 적대 리뷰 3 회차 T2: 엔진이 다시 떠 끝을 받지 못한 요청.
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":4,\"method\":\"GET\",\"url\":\"https://a.test/poll\",\"type\":\"xhr\",\"state\":\"canceled\",\"start_ms\":1,\"error_code\":-3,\"engine_restarted\":true}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));

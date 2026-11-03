@@ -1319,8 +1319,11 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             }
         }
         // 끝 없음(`missing`)은 CEF 가 끝낸 기록만 센다(`endCheckOf(.., true)`) — CEF 가 끝내지 않은 것은 판마다 앞 문서 favicon 하나까지만 받는다.
-        const ok = missing == 0 and doubled == 0 and cef_held_other == 0 and favicon_over == 0 and good[0] == rounds and good[1] == rounds and good[2] == rounds and good[3] == rounds;
-        report(ok, "v20i-xsite-nav-body-page", std.fmt.bufPrint(&detail, "{d} rounds (localhost cookie page → 127.0.0.1 page): png not_text {d} · cross-site credentialed script captured {d} · json captured {d} · 2 MiB json over_cap {d} · no end {d} · several ends {d} · no CEF end: previous page's favicon {d} (over one per round or not the previous page's {d}), other {d}{s}", .{ rounds, good[0], good[1], good[2], good[3], missing, doubled, cef_held_favicon, favicon_over, cef_held_other, bad_txt[0..bn] }) catch "");
+        // 재검증 7 차(v20m 20 회차 ②): 실행 전체로도 묶는다 — 그 꼴은 실측 실행마다 0–4 번(20 판)이었다. 늘어나는 회귀(예: 붙이기가 UI 를 더
+        // 늦춘다)를 놓치지 않게 판의 1/4 까지만 받는다.
+        const favicon_run_max = rounds / 4;
+        const ok = missing == 0 and doubled == 0 and cef_held_other == 0 and favicon_over == 0 and cef_held_favicon <= favicon_run_max and good[0] == rounds and good[1] == rounds and good[2] == rounds and good[3] == rounds;
+        report(ok, "v20i-xsite-nav-body-page", std.fmt.bufPrint(&detail, "{d} rounds (localhost cookie page → 127.0.0.1 page): png not_text {d} · cross-site credentialed script captured {d} · json captured {d} · 2 MiB json over_cap {d} · no end {d} · several ends {d} · no CEF end: previous page's favicon {d} (run cap {d}; over one per round or not the previous page's {d}), other {d}{s}", .{ rounds, good[0], good[1], good[2], good[3], missing, doubled, cef_held_favicon, favicon_run_max, favicon_over, cef_held_other, bad_txt[0..bn] }) catch "");
         try r.navigate(rec_tab, "/v20/blank?v20i");
         r.pump(2000);
     }
@@ -1440,7 +1443,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const ec = endCheck(&r, rec_tab, at);
             var el: [600]u8 = undefined;
             var sl2: [400]u8 = undefined;
-            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[1], "p2")) @as(usize, 30) else 15) and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
+            // 재검증 7 차(겹침 규칙): X·p1 은 같은 주소를 워커가 한꺼번에 받는다 — 둘 다 `ambiguous` 가 설계다. 하한은 p2(D ms 뒤 혼자 — 20 판, 워커가
+            // 막 붙은 눈먼 때의 판 둘을 둔다)만, s2(워커가 스스로 답한다 — 기록이 없다)는 하한이 없다(WRONG 0·끝 하나만).
+            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[1], "p2")) @as(usize, 18) else 0) and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
             try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swi");
             r.pump(2000);
@@ -1468,7 +1473,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const ec = endCheck(&r, rec_tab, at);
             var el: [600]u8 = undefined;
             var sl2: [400]u8 = undefined;
-            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.startsWith(u8, c[0], "swalt1")) @as(usize, 15) else 30) and ec.missing == 0 and ec.doubled == 0, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            // 재검증 7 차(겹침 규칙): swrev 는 같은 주소 두 요청을 워커가 넘기고 서버가 S ms 뒤에 답한다 — S > 0 이면 두 W 가 시작부터 응답까지 겹쳐
+            // 둘 다 `ambiguous` 가 설계다(하한 없음). S 0(곧 답한다)은 겹치지 않아 그대로 30.
+            const v20j_min: usize = comptime if (std.mem.startsWith(u8, c[0], "swalt1")) 15 else if (std.mem.startsWith(u8, c[0], "swrev") and !std.mem.eql(u8, c[2], "0")) 0 else 30;
+            report(done and all.wrong == 0 and all.sw_captured >= v20j_min and ec.missing == 0 and ec.doubled == 0, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
             try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swj");
             r.pump(2000);
@@ -1496,7 +1504,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const ec = endCheckOf(&r, rec_tab, at, comptime std.mem.eql(u8, c[2], "m2l"));
             var el: [600]u8 = undefined;
             var sl2: [400]u8 = undefined;
-            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[2], "fb")) @as(usize, 36) else 18) and ec.missing == 0 and ec.doubled == 0, "v20k-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            // 재검증 7 차(겹침 규칙): fb 는 워커의 대체 fetch(F — `&fb=1`)와 페이지의 같은 주소(pf)가 겹친다 — 둘 다 `ambiguous`, f1 은 제 주소를
+            // 받은 뒤 다른 주소로 답해 짝이 없다(`unmatched`). 하한 없음(WRONG 0·끝 하나만).
+            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[2], "fb")) @as(usize, 0) else 18) and ec.missing == 0 and ec.doubled == 0, "v20k-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
             try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swq");
             r.pump(2000);
@@ -1542,7 +1552,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             }
             var t2: Tally = .{};
             t2.states = st;
-            report(wrong == 0 and sw_own * 10 >= sw_total * 9 and missing == 0 and doubled == 0 and bad_loads == 0, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
+            // 재검증 7 차(겹침 규칙): 이 판은 같은 주소의 워커 fetch 넷을 한꺼번에 낸다 — 같은 열쇠의 W 가 시작→응답 창에서 겹치므로
+            // 그 창의 기록은 모두 `ambiguous` 로 끝나는 것이 설계다(잘못 붙이기 0 > 잃는 본문). 그래서 pass-through 의 own 비율은 하한이 아니라
+            // 보고용이고, 판정은 WRONG 0 · 끝 없음 0 · 여러 끝 0 · 모든 판 끝남이다.
+            report(wrong == 0 and missing == 0 and doubled == 0 and bad_loads == 0, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
         }
         // IO load between p1 and p2.
         inline for (.{ .{ "load-n100", "100" }, .{ "load-n400", "400" }, .{ "load-n1500", "1500" } }) |c| if (enabled("v20i-" ++ c[0])) {

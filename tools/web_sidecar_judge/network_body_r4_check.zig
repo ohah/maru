@@ -482,7 +482,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const t = tally(&r, rec_tab, at, "/rv4/sw/pt?", null);
         // 재검증 5 차 S3b(기대를 바꿈): 워커 W 가 쌍둥이라 같은 주소의 그대로 넘긴 워커 기록도 짝이 하나로 정해진다(관 하나 안의 차례) — 모두 제
         // 본문(실측 40/40). 놓은(fallback) 페이지 기록도 모두 제 본문.
-        report(done and t.wrong == 0 and t.sw > 0 and t.sw_captured * 10 >= t.sw * 9 and t.own == t.total - (t.sw - t.sw_captured), "body-r4-sw-mixed", lineOf(&t, &detail, &sl));
+        // 재검증 7 차(겹침 규칙): 그대로 넘긴 같은 주소 워커 fetch 들이 한꺼번에 겹쳐 서비스 워커 갈래 본문은 잃는다(전 40/40) — 놓은 페이지 기록은 모두
+        // 제 본문 그대로.
+        report(done and t.wrong == 0 and t.sw > 0 and t.own == t.total - (t.sw - t.sw_captured), "body-r4-sw-mixed", lineOf(&t, &detail, &sl));
     }
     // ── 프레임 ──
     {

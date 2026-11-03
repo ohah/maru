@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "source": "/Users/yoonhb/.cache/maru-agent-artifacts/fold-reuse-display-50ms-1/prepared/3000-50-typing-0-async",
+  "source_hashes": {
+    "app.json": "5469d00465f2aa576dd6e71199a737d845b5d0763e0039d0cb228258e13f9a35",
+    "posts.json": "26661210a7d3650c31fad8993a603cd684ad5a4d93bc0f4a0cbce95e22e9f36b",
+    "record.json": "6b8611dfc7f28b9cc8e3a43e01afeab9a0d7a3b8190de4a34fe36a9c4d983e79"
+  },
+  "rejected": [
+    {
+      "name": "source-not-restored",
+      "reason": "app failure"
+    },
+    {
+      "name": "foreground-lost",
+      "reason": "app failure"
+    },
+    {
+      "name": "document-tail-invalid",
+      "reason": "document tail"
+    },
+    {
+      "name": "document-prefix-invalid",
+      "reason": "document prefix"
+    },
+    {
+      "name": "key-token-invalid",
+      "reason": "key identity"
+    },
+    {
+      "name": "key-code-invalid",
+      "reason": "key identity"
+    },
+    {
+      "name": "key-missing",
+      "reason": "key admission"
+    },
+    {
+      "name": "key-duplicate",
+      "reason": "key admission"
+    },
+    {
+      "name": "native-arrival-missing",
+      "reason": "input/present clocks"
+    },
+    {
+      "name": "presentation-missing",
+      "reason": "input/present clocks"
+    },
+    {
+      "name": "stale-generation",
+      "reason": "frame prefix"
+    },
+    {
+      "name": "frame-prefix-absent",
+      "reason": "frame prefix"
+    },
+    {
+      "name": "callbacks-pending",
+      "reason": "observer incomplete"
+    },
+    {
+      "name": "final-color-absent",
+      "reason": "final color"
+    },
+    {
+      "name": "actual-mode-wrong",
+      "reason": "final state"
+    },
+    {
+      "name": "actual-view-count-wrong",
+      "reason": "final state"
+    },
+    {
+      "name": "producer-is-app",
+      "reason": "independent producer"
+    },
+    {
+      "name": "schedule-feedback",
+      "reason": "absolute schedule"
+    },
+    {
+      "name": "producer-late",
+      "reason": "producer lateness"
+    },
+    {
+      "name": "post-source-wrong",
+      "reason": "key admission"
+    },
+    {
+      "name": "provider-file-changed",
+      "reason": "provider configuration changed"
+    },
+    {
+      "name": "post-target-wrong",
+      "reason": "key admission"
+    },
+    {
+      "name": "input-count-missing",
+      "reason": "missing input"
+    },
+    {
+      "name": "suppression-in-normal",
+      "reason": "suppression mixed into measurements"
+    }
+  ],
+  "normal_controls": 48
+}

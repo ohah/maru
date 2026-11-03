@@ -143,3 +143,6 @@ GPU presentedTime을 혼동하지 않는다. 세대나 시각이 없는 자료�
 `fold_reuse_baseline_stats`는 시도·복사·우회·뷰 node 순회·뷰 record 순회를 기록한다.
 입력 구간의 증가량과 구문 표시 프레임을 함께 검사한다. 다른 control과 동시 사용하지 않는다.
 [채택한 100ms 결과와 제외한 모집단](fold-reuse-results.md)을 따른다.
+
+`--periods 50`의 별도 모집단은 [50ms 연타 결과](fold-reuse-50ms-results.md)를 따른다.
+100ms와 합치지 않으며 첫 표시의 지연 표본과 연타 중 남은 구문 지연도 보존한다.

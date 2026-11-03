@@ -32,9 +32,11 @@ positive/null, 원본 확정/Undo와 상대 문서 보존을 [계획](plans/lsp-
 history 명령 전후의 지연 positive/null, 본문·선택·이력 보존 및 새 확정/Undo를 대조한다.
 [검증 범위](plans/lsp-completion-history-reload.md)는 native controller와 fake LSP이며 HID/픽셀 증거가 아니다.
 
-Bounded process의 원자적 그룹 생성은 **부분 구현**: 제품 경로를 `macos_spawn.spawnGrouped`로
+Bounded process의 원자적 그룹 생성은 **구현**: 제품 경로를 `macos_spawn.spawnGrouped`로
 전환하고 로컬 집중 gate 38개 × Debug·ReleaseFast 및 원래 attestation fence를 검증한다.
-제품 변경 HEAD의 macOS 15 CI와 전체 gate 확인은 진행 중이다.
+제품 변경은 Linux CI·macOS 15 Debug와 로컬 전체 gate에서 검증하며, 머지 전 main 리베이스 뒤의
+필수 CI와 ReleaseFast 검증을 별도로 확인한다. 기존 OOM 검사는 OS remap에 따른 할당 횟수 변동을
+배제한 backing allocator로 모든 할당 실패 위치를 검사한다.
 [계약](session-host-bounded-process.md) · [진행](plans/bounded-process-spawn.md).
 
 Save As와 자동완성 수명: `test-editor-completion-save-as`는 실제 파일 쓰기/대상 적용과

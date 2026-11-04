@@ -65,6 +65,9 @@ pub const State = struct {
     any_error: bool = false,
     /// 모으는 중인 항목 — 다 모으면 `items` 와 바꾼다(열린 메뉴가 `items` 의 제목을 빌린다).
     pending: std.ArrayList(Owned) = .empty,
+    /// A newer listing must not refresh the version guard of the displayed menu.
+    pending_snaps: [64]editor_wse.VersionSnap = undefined,
+    pending_snaps_len: usize = 0,
     resolve_waiting: bool = false,
     resolve_seq: u32 = 0,
     resolve_owner: ?response_owner.Owner = null,
@@ -96,6 +99,7 @@ pub const State = struct {
     fn clearPending(self: *State, allocator: std.mem.Allocator) void {
         for (self.pending.items) |*it| it.deinit(allocator);
         self.pending.clearRetainingCapacity();
+        self.pending_snaps_len = 0;
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
@@ -157,7 +161,7 @@ pub fn quickFix(self: *AppSession) bool {
     st.any_error = false;
     st.error_len = 0;
     st.clearPending(self.allocator);
-    snapshotVersions(self);
+    snapshotPendingVersions(self);
     return true;
 }
 
@@ -252,6 +256,10 @@ fn finish(self: *AppSession) void {
     settings_ops.closeContextMenu(self);
     st.clearItems(self.allocator);
     std.mem.swap(std.ArrayList(Owned), &st.items, &st.pending);
+    // Rows and their document versions become selectable at the same boundary.
+    st.snaps_len = st.pending_snaps_len;
+    @memcpy(st.snaps[0..st.snaps_len], st.pending_snaps[0..st.snaps_len]);
+    st.pending_snaps_len = 0;
     // 메뉴 — caret 셀 **아래**(`at_anchor` 는 앵커에서 시작하므로 한 셀 내리고, 모달 quad 의 padding 이 caret 줄을 덮지 않게 그만큼 더 띄운다 —
     // 호버 상자와 같은 간격, 캡처 실측). 앵커가 없으면(아직 안 그려짐) 화면 원점 근처.
     const sel = term.rt.editor_selection orelse return;
@@ -382,14 +390,14 @@ fn applyEdit(self: *AppSession, edit: std.json.Value, enc: lsp.rpc.PositionEncod
     }
 }
 
-fn snapshotVersions(self: *AppSession) void {
+fn snapshotPendingVersions(self: *AppSession) void {
     const st = &self.editor_code_action;
-    st.snaps_len = 0;
+    st.pending_snaps_len = 0;
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |t| {
         if (t.kind != .editor or t.rt.editorDocument().opened == null) continue;
-        if (st.snaps_len >= st.snaps.len) return;
-        st.snaps[st.snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editorDocument().notifications.lsp_version };
-        st.snaps_len += 1;
+        if (st.pending_snaps_len >= st.pending_snaps.len) return;
+        st.pending_snaps[st.pending_snaps_len] = .{ .surface_id = t.surface.id, .version = t.rt.editorDocument().notifications.lsp_version };
+        st.pending_snaps_len += 1;
     };
 }
 

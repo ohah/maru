@@ -148,6 +148,7 @@ def read(root):
     fixture_kind=manifest.get('fixture_kind','flat')
     require(type(fixture_kind) is str and fixture_kind in ('flat','multiline'),'fixture kind')
     source = manifest['source']
+    require(source.get('parse_stages',False) is False, 'parse stage diagnostics are not baseline performance')
     require(source['harness'] == protocol.NAME and source['optimize'] == 'ReleaseFast', 'source harness')
     build = pathlib.Path(manifest['build'])
     require(sha(build/'source/zig-out/Maru.app/Contents/MacOS/maru-macos-app') == source['app_sha256'], 'app drift')

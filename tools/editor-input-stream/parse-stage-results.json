@@ -1,0 +1,111 @@
+{
+  "kind": "parse-stage-diagnostic",
+  "head": "3c992d23ef3067c55a6ebcaf0b15894a78deb63b",
+  "app_sha256": "f182643a03f5f8bae11854baa37bb3241e5dce3eae5841a3f4ebec821fdfd078",
+  "processes": 6,
+  "inputs": 180,
+  "runs": [
+    {
+      "path": "typing-0",
+      "revision": 30,
+      "serial": 30,
+      "views": 1,
+      "elapsed_ms": {
+        "post_to_submit": 2.797667,
+        "queue": 3.373875,
+        "worker": 43.106166,
+        "publication": 0.000167,
+        "delivery": 0.020833,
+        "views": 0.063417,
+        "display": 33.226625,
+        "view_native_copy": 0.004291,
+        "last_post_to_syntax": 82.58875
+      }
+    },
+    {
+      "path": "shared-0",
+      "revision": 30,
+      "serial": 30,
+      "views": 2,
+      "elapsed_ms": {
+        "post_to_submit": 5.062,
+        "queue": 0.0035,
+        "worker": 47.9685,
+        "publication": 0.000292,
+        "delivery": 0.016458,
+        "views": 0.136,
+        "display": 40.379625,
+        "view_native_copy": 0.004542,
+        "last_post_to_syntax": 93.566375
+      }
+    },
+    {
+      "path": "typing-1",
+      "revision": 30,
+      "serial": 30,
+      "views": 1,
+      "elapsed_ms": {
+        "post_to_submit": 6.11125,
+        "queue": 0.002584,
+        "worker": 34.3005,
+        "publication": 0.000333,
+        "delivery": 0.019333,
+        "views": 0.06675,
+        "display": 36.999667,
+        "view_native_copy": 0.002834,
+        "last_post_to_syntax": 77.500417
+      }
+    },
+    {
+      "path": "shared-1",
+      "revision": 30,
+      "serial": 30,
+      "views": 2,
+      "elapsed_ms": {
+        "post_to_submit": 3.575958,
+        "queue": 0.002375,
+        "worker": 35.29825,
+        "publication": 0.000375,
+        "delivery": 0.021292,
+        "views": 0.130625,
+        "display": 22.646125,
+        "view_native_copy": 0.0035,
+        "last_post_to_syntax": 61.675
+      }
+    },
+    {
+      "path": "typing-2",
+      "revision": 30,
+      "serial": 30,
+      "views": 1,
+      "elapsed_ms": {
+        "post_to_submit": 2.857917,
+        "queue": 0.002833,
+        "worker": 41.446625,
+        "publication": 0.00025,
+        "delivery": 0.017083,
+        "views": 0.05275,
+        "display": 20.837,
+        "view_native_copy": 0.002,
+        "last_post_to_syntax": 65.214458
+      }
+    },
+    {
+      "path": "shared-2",
+      "revision": 30,
+      "serial": 30,
+      "views": 2,
+      "elapsed_ms": {
+        "post_to_submit": 4.10425,
+        "queue": 0.003917,
+        "worker": 29.313416,
+        "publication": 0.000334,
+        "delivery": 0.021,
+        "views": 0.134541,
+        "display": 22.864042,
+        "view_native_copy": 0.003207,
+        "last_post_to_syntax": 56.4415
+      }
+    }
+  ]
+}

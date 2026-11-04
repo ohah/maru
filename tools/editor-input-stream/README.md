@@ -146,3 +146,9 @@ GPU presentedTime을 혼동하지 않는다. 세대나 시각이 없는 자료�
 
 `--periods 50`의 별도 모집단은 [50ms 연타 결과](fold-reuse-50ms-results.md)를 따른다.
 100ms와 합치지 않으며 첫 표시의 지연 표본과 연타 중 남은 구문 지연도 보존한다.
+
+## 워커·설치·표시 단계 진단
+
+`prepare.py --stream --fold-reuse-control --parse-stages`와 `parse_stage_study.py`는
+같은 마지막 요청의 워커·runtime 수락·각 뷰 설치·Metal 표시를 연결한다.
+계측 빌드는 일반 성능 집계에서 거절한다. [실행 명령·결과·한계](parse-stage-results.md)를 따른다.

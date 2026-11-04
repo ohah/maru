@@ -16,7 +16,8 @@ def output_lock(out):
         lock.close();raise ValueError('another preparation owns this output')
     return lock
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--stream',action='store_true');p.add_argument('--summary-control',action='store_true');p.add_argument('--fold-control',action='store_true');p.add_argument('--bracket-control',action='store_true');p.add_argument('--fold-reuse-control',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--stream',action='store_true');p.add_argument('--summary-control',action='store_true');p.add_argument('--fold-control',action='store_true');p.add_argument('--bracket-control',action='store_true');p.add_argument('--fold-reuse-control',action='store_true');p.add_argument('--parse-stages',action='store_true');a=p.parse_args()
+    if a.parse_stages and not a.fold_reuse_control:p.error('parse stages requires fold reuse stream control')
     if (a.summary_control or a.fold_control or a.bracket_control or a.fold_reuse_control) and not a.stream:p.error('cache control requires stream harness')
     if sum([a.summary_control,a.fold_control,a.bracket_control,a.fold_reuse_control])>1:p.error('one cache control per experiment')
     out=a.output.resolve();deps=a.deps.resolve()
@@ -32,6 +33,7 @@ def main():
         assert prior.get('fold_control',False)==a.fold_control, 'fold control changed'
         assert prior.get('bracket_control',False)==a.bracket_control, 'bracket control changed'
         assert prior.get('fold_reuse_control',False)==a.fold_reuse_control, 'fold reuse control changed'
+        assert prior.get('parse_stages',False)==a.parse_stages, 'parse stage diagnostics changed'
         assert prior['head']==subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(), 'HEAD changed'
         assert all(sha(ROOT/n)==h for n,h in prior['original'].items()), 'original source drift'
         assert all(sha(src/n)==h for n,h in prior['instrumented'].items()), 'private source drift'
@@ -48,6 +50,7 @@ def main():
     names=['src/platform/macos/'+x for x in ['app_session.zig','app_session/debug_fixtures.zig','app_host_abi.zig','MaruAppHost.swift','maru_metal_renderer.m']]
     if a.stream:names.append('src/platform/macos/app_session/agent.zig')
     if a.summary_control or a.fold_control or a.bracket_control or a.fold_reuse_control:names.append('src/platform/macos/app_session/editor/parse/worker.zig')
+    if a.parse_stages:names += ['src/platform/macos/app_session/editor/parse/'+n+'.zig' for n in ['runtime','view']]
     original={n:sha(src/n) for n in names}
     def patch(n,fn):
         path=src/'src/platform/macos'/n;path.write_text(fn(path.read_text()))
@@ -87,6 +90,10 @@ def main():
         sys.path.insert(0,str(stream_dir))
         import fold_reuse_control
         patch('app_session/editor/parse/worker.zig',lambda s:fold_reuse_control.worker(s,once))
+    if a.parse_stages:
+        import parse_stages
+        for name in ['worker','runtime','view']:
+            patch('app_session/editor/parse/'+name+'.zig',lambda s,name=name:getattr(parse_stages,name)(s,once))
     abi=(HERE/'abi.zig.inc').read_text().replace('session_mod.debug_fixtures','@import("app_session/debug_fixtures.zig")')
     if a.stream:
         abi=abi.replace('[0..7]','[0..8]')
@@ -103,10 +110,12 @@ def main():
     if a.fold_control:driver_text=fold_control.driver(driver_text,once)
     if a.bracket_control:driver_text=bracket_control.driver(driver_text,once)
     if a.fold_reuse_control:driver_text=fold_reuse_control.driver(driver_text,once)
+    if a.parse_stages:driver_text=parse_stages.driver(driver_text,once)
     present=snippet('present.m.inc')
     if a.stream:present+='\n#include <sys/resource.h>'+ (HERE/'present.m.inc').read_text().split('#include <sys/resource.h>',1)[1]
     if a.bracket_control:present=bracket_control.present(present,once)
     if a.fold_reuse_control:present=fold_reuse_control.present(present,once)
+    if a.parse_stages:present=parse_stages.present(present,once)
     width='8' if a.stream else '7'
     driver='InputStream' if a.stream else 'InputLatency'
     key='streamKeydown(event)' if a.stream else 'latencyKeydown(UInt64(event.keyCode),event.timestamp)'
@@ -115,7 +124,7 @@ def main():
     patch('app_host_abi.zig',lambda s:s+'\n'+abi)
     patch('maru_metal_renderer.m',lambda s:once(once(s,'#include <string.h>','#include <string.h>\n'+present),'    // 두 drawable을 같은 command buffer에 present','    latency_arm(terminal_drawable);\n    // 두 drawable을 같은 command buffer에 present'))
     patch('MaruAppHost.swift',lambda s:once(once(once(once(s,'        if isEditorIMESmokeMode {\n            guard let driver = EditorIMESmokeDriver()', '        if isEditorIMESmokeMode && ProcessInfo.processInfo.environment["MARU_LATENCY_OUTPUT"] == nil {\n            guard let driver = EditorIMESmokeDriver()'),'        maybeRunEditorIMESmoke()\n','        maybeRunEditorIMESmoke()\n        maybeRun'+driver+'()\n'),'    override func keyDown(with event: NSEvent) {','    override func keyDown(with event: NSEvent) {\n        '+key), '        let drew = maru_metal_renderer_draw(', '        var latencyStamp=[UInt64](repeating:0,count:'+width+')\n        latencyFrame(frame.generation,&latencyStamp)\n        latencyMark(latencyStamp)\n        let drew = maru_metal_renderer_draw(')+'\n'+driver_text)
-    manifest=dict(fold_reuse_control=a.fold_reuse_control,bracket_control=a.bracket_control,fold_control=a.fold_control,summary_control=a.summary_control,harness='independent-target-ascii-v1' if a.stream else 'closed-loop-v1',optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
+    manifest=dict(parse_stages=a.parse_stages,fold_reuse_control=a.fold_reuse_control,bracket_control=a.bracket_control,fold_control=a.fold_control,summary_control=a.summary_control,harness='independent-target-ascii-v1' if a.stream else 'closed-loop-v1',optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
     if a.stream:
         manifest['tools'].update({'stream/'+x.name:sha(x) for x in stream_dir.iterdir() if x.is_file()})
         (out/'producer.swift').write_text(protocol.expand((stream_dir/'producer.swift').read_text()))

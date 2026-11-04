@@ -198,7 +198,11 @@ test "EGS09 LSP closed stdout and stderr cannot overwrite mapping sources" {
 }
 fn allocationPath(allocator: std.mem.Allocator) !void {
     const before = fdCount();
-    if (lsp.spawn(allocator, "/usr/bin/true", &.{ "extra", "arguments" }, "/", &empty_env)) |result| {
+    // Force multiple arena blocks so failures after earlier argv strings are owned
+    // are exercised, in addition to failing the first backing allocation.
+    var extra: [4096]u8 = undefined;
+    @memset(&extra, 'x');
+    if (lsp.spawn(allocator, "/usr/bin/true", &.{ &extra, "arguments", &extra }, "/", &empty_env)) |result| {
         var p = result;
         lsp.stopNow(&p, allocator);
     } else |err| {

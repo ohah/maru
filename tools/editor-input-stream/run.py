@@ -31,6 +31,8 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     (target/'document.zig').write_bytes(data)
     (target/'config').write_text('session.keep-alive-after-quit = false\nlsp.enabled = false\neditor.wrap = false\n')
     state = json.loads((build/'source.json').read_text())
+    if state.get('parse_stages') and observer is None:
+        raise ValueError('parse stage build requires diagnostic observer')
     if summary_control is not None and (state.get('summary_control') is not True or summary_control not in ('disabled','prepared')):
         raise ValueError('verified summary control build/mode required')
     if fold_control is not None and (state.get('fold_control') is not True or fold_control not in ('disabled','prepared')):

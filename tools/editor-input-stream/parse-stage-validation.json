@@ -1,0 +1,107 @@
+{
+  "rejected": [
+    {
+      "name": "not-diagnostic",
+      "reason": "stage diagnostics required"
+    },
+    {
+      "name": "overflow",
+      "reason": "stage overflow/population"
+    },
+    {
+      "name": "wrong-population",
+      "reason": "stage overflow/population"
+    },
+    {
+      "name": "row-width",
+      "reason": "stage row shape"
+    },
+    {
+      "name": "boolean-stage",
+      "reason": "stage row shape"
+    },
+    {
+      "name": "unknown-stage",
+      "reason": "stage values"
+    },
+    {
+      "name": "missing-clock",
+      "reason": "stage values"
+    },
+    {
+      "name": "negative-owner",
+      "reason": "stage row shape"
+    },
+    {
+      "name": "serial-overflow",
+      "reason": "stage row shape"
+    },
+    {
+      "name": "missing-thread",
+      "reason": "stage values"
+    },
+    {
+      "name": "backwards-clock",
+      "reason": "stage time order"
+    },
+    {
+      "name": "missing-acceptance",
+      "reason": "unique final accepted request"
+    },
+    {
+      "name": "different-document",
+      "reason": "final request lifecycle"
+    },
+    {
+      "name": "different-request",
+      "reason": "final request lifecycle"
+    },
+    {
+      "name": "missing-view",
+      "reason": "final view population"
+    },
+    {
+      "name": "missing-view-identity",
+      "reason": "unique view installation"
+    },
+    {
+      "name": "acceptance-off-main",
+      "reason": "main thread stages"
+    },
+    {
+      "name": "worker-on-main",
+      "reason": "worker thread stages"
+    },
+    {
+      "name": "worker-not-ready",
+      "reason": "final ready outcome"
+    },
+    {
+      "name": "publication-not-ready",
+      "reason": "final ready outcome"
+    },
+    {
+      "name": "view-copy-order",
+      "reason": "final view population"
+    },
+    {
+      "name": "installation-before-acceptance",
+      "reason": "stage time order"
+    },
+    {
+      "name": "view-wrong-thread",
+      "reason": "main thread stages"
+    },
+    {
+      "name": "late-request-submission",
+      "reason": "stage time order"
+    }
+  ],
+  "normal_controls": 25,
+  "original_processes": 6,
+  "source_hashes": {
+    "app.json": "e7a5a2a379fab4f839426de00ca647d0572695c80f981a0a706eb04797a012bc",
+    "posts.json": "6474cc8aa25bb066a107037f664554a5c7b272965ecd04c16c59c81d2fd291f8",
+    "record.json": "414636936b6bf76a70dcac43d4b2acbe7e9522419fdb1cf9ba56ffc6e883d024"
+  }
+}

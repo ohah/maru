@@ -77,6 +77,7 @@ jobs:
       # **main push 에서 PR 이 같은 tree 로 이미 통과한 macOS 잡은 다시 돌리지 않는다.** macOS 러너(동시 5대)를 main push 가
       # 81분, PR 이 29분 썼고(2026-09-30 ~ 10-01 run 60개), PR 의 macOS 잡은 실행 시간만큼 러너를 기다렸다. 같은 tree 는 같은
       # 소스·같은 워크플로라 다시 돌려도 새로 아는 것이 없다. 확인하지 못하면 전부 false(잡이 돈다) — tools/ci/pr-proven-jobs.sh.
+      # macOS-only는 검사 재실행만 생략하고 compile-only로 main 캐시를 보충한다.
       # main 전용 잡(session host·editor ReleaseFast)은 PR 에서 안 돌아 증명이 없으므로 그대로 돈다.
       - run: sh tools/ci/pr-proven-jobs.test.sh
       - id: proven
@@ -200,6 +201,8 @@ jobs:
       - name: 중간 커밋 판정자 자신을 검증한다
         if: ${{ github.event_name == 'pull_request' }}
         run: sh tools/ci/per-commit-boundaries.test.sh
+      - name: macOS gate coverage and receipt failure controls
+        run: python3 -m unittest discover -s tools/ci -p test_macos_shards.py
       - name: 중간 커밋도 경계 게이트를 통과하는가
         if: ${{ github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
         env:
@@ -485,22 +488,21 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
-  macos-only-gates:
-    name: macOS-only gates
+  macos-only-shard:
+    name: macOS-only shard (${{ matrix.shard }}/3)
     needs: changes
-    # **`file explorer macOS product path` 에서 떼어 낸 잡이다(2026-09-30).** 그 잡이 PR 벽시계를 정했다 —
-    # #3901 이 macOS 러너 대기를 없앤 뒤(대기 중앙값 15.0 → 0.1분, PR 47 회) PR 벽시계 중앙값 17.9분 중 16.2분이
-    # 그 잡 하나였고, 그 안에서 AppSession 전수 스위트(약 6분)와 아래 `test-macos-only`(약 7분)가 **직렬**로 돌았다.
-    # 둘을 두 잡으로 나눠 병렬로 돌린다 — 대가는 PR 당 macOS 잡이 2 → 3(동시 5개 한도 안).
-    # 필수 체크다(branch protection) — 떼어 내기 전에도 필수 잡 안에 있었으므로 강제력을 그대로 유지한다.
-    #
-    # 캐시는 자기 그룹(`macos-only`)을 쓴다. file explorer 캐시를 빌려 읽기만 하면, 그쪽이 더는 이 바이너리들을
-    # 컴파일하지 않으므로 여기가 영영 콜드가 된다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_macos_only != 'true' }}
+    # Same-tree main still compiles: skipping the cache producer made every PR cold.
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        shard: [0, 1, 2]
     runs-on: macos-15
     # PR #4690 콜드 실행은 단언 실패 없이 진행하다 60분 제한으로 취소됐고,
     # 최근 정상 실행도 58분이었다. 빌드와 후속 소유권 검증을 포함한 예산을 둔다.
     # 개별 테스트의 timeout과 단언은 유지한다.
+
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -518,61 +520,46 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-macos-only-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v3-${{ runner.os }}-macos-only-s${{ matrix.shard }}of3-${{ hashFiles('.mise.toml', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
           restore-keys: |
-            zig-v2-${{ runner.os }}-macos-only-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
-            zig-v2-${{ runner.os }}-macos-only-
-      # **`mise run check` 를 도는 위 `check` job 은 ubuntu 다.** 그래서 `build.zig` 의
-      # `if (target.result.os.tag == .macos)` 안에서 만들어지는 게이트 열셋은 **컴파일조차 되지 않아**
-      # CI 어디에서도 안 돌았다 — `zig build test` 에 붙는 스텝 65개 중 20%가 개발자 로컬에만 있었다.
-      #
-      # **그 공백이 실제로 결함을 통과시켰다**(2026-08-31): `retention_app_tests` 의 `"G2"` 필터가
-      # 이미지 갤러리 판정자 아홉 개를 함께 끌어와 `--maru-expect-tests=6` 이 `compiled 15` 로
-      # 깨졌는데도 CI 는 계속 초록이었고, 로컬에서 `mise run check` 를 돌린 사람만 봤다.
-      #
-      # `test` 전체를 여기서 다시 돌리지 않는다 — 나머지 52개는 ubuntu `check` 가 이미 돌고, 겹쳐
-      # 돌리면 macOS 러너 시간만 먹는다. 등록 누락은 `tests/boundary/imports.zig` 가 센다.
-      # 🔥 **집계에 새로 붙인 `test-macos-editor-smoke` 가 웹 번들을 만든다**
-      # (`bun run --cwd web scripts/build-editor-smoke.ts`). 이 잡은 지금까지 웹 의존성을 안 깔았고,
-      # 그래서 그 스텝이 콜드 러너에서 exit 1 로 죽었다 — 로컬은 이미 깔려 있어 초록이었다.
-      # `session host bundled CLI macOS` 가 같은 이유로 이미 이 스텝을 든다.
-      - name: SSH output allocation ownership (Debug and ReleaseFast)
-        run: python3 tools/test-ssh-output-oom.py
+            zig-v3-${{ runner.os }}-macos-only-s${{ matrix.shard }}of3-${{ hashFiles('.mise.toml', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v3-${{ runner.os }}-macos-only-s${{ matrix.shard }}of3-
       - name: Install web bundle dependencies for the editor smoke
         run: bun install --cwd web --frozen-lockfile
-      - name: Run the gates that only exist on macOS
-        run: zig build test-macos-only
-      - name: SSH pipe failure ownership (Debug and ReleaseFast)
-        run: python3 tools/test-ssh-pipe-cleanup.py
-      - name: SSH interrupted wait ownership (Debug and ReleaseFast)
-        run: python3 tools/test-ssh-wait-retry.py
-      - name: PPM capture diagnostics and archive harness failure controls
+      - name: Run selected gates or warm the proven main compiler graph
+        env:
+          SHARD: ${{ matrix.shard }}
+          PROVEN_MACOS_ONLY: ${{ needs.changes.outputs.proven_macos_only }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
         run: |
-          sh tools/test-macos-capture-diagnostics.sh
-          python3 tools/test-macos-archive-harness.py
-          python3 -m unittest discover -s tools/shared-restore-app -p 'test_gui_launch.py'
-          python3 -m unittest discover -s tools/palette-ime -p 'test_*.py'
-          python3 -m unittest discover -s tools/address-ime -p 'test_*.py'
-          python3 -m unittest discover -s tools/rename-ime -p 'test_*.py'
-          python3 -m unittest discover -s tools/settings-ime -p 'test_*.py'
-      # 실패한 PID의 identity를 남겨 회수 지연과 오집계를 구분할 수 있게 한다.
-      # 재실행은 다른 이름으로 보존한다 — 최초 실패의 근거를 덮어쓰지 않는다.
+          set -euo pipefail
+          mkdir -p zig-out
+          python3 tools/ci/macos_shards.py run "$SHARD" 2>&1 | tee zig-out/macos-only-shard.log
+      - name: Preserve graph coverage and execution receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-only-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: |
+            zig-out/macos-only-manifest.json
+            zig-out/macos-only-receipt.json
+            zig-out/macos-only-shard.log
+          if-no-files-found: error
+          retention-days: 3
       - name: Preserve editor WebContent attribution diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: maru-editor-webcontent-artifacts-${{ github.run_attempt }}
+          name: maru-editor-webcontent-artifacts-shard-${{ matrix.shard }}-${{ github.run_attempt }}
           path: |
             zig-out/maru-macos-editor-smoke/editor.summary.txt
             zig-out/editor-webcontent-attribution/
           if-no-files-found: warn
-      - name: SSH descriptor isolation (Debug and ReleaseFast)
-        run: python3 tools/test-ssh-fd-isolation.py
       - name: Preserve project search adapter diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: maru-project-search-artifacts-${{ github.run_attempt }}
+          name: maru-project-search-artifacts-shard-${{ matrix.shard }}-${{ github.run_attempt }}
           # fixture 경로에는 줄바꿈 등 실제 Unix 파일명이 있다. 업로드는 안전한 보고서·로그만 한다.
           path: |
             zig-out/editor-project-search-adapter/latest.json
@@ -588,20 +575,9 @@ jobs:
             zig-out/editor-project-search-roots/run-*/*.stdout
             zig-out/editor-project-search-roots/run-*/*.stderr
           if-no-files-found: warn
-      # **원격 SCM 을 실물 SSH 위에서 돈다.** 그 판정자들은 control socket 이 없으면 `SkipZigTest` 라,
-      # 이 스텝이 없으면 RS1~RS4 는 CI 에서 **한 줄도 안 돈다** — 실제로 그 축의 결함 여섯이 사람이
-      # 손으로 잰 뒤에야 나왔다(docs/plans/remote-scm.md §7·§8·§9.2).
-      #
-      # 하네스가 키·sshd·저장소를 전부 소유한다(`tools/remote-scm/ssh_harness.sh`) — 러너의 `~/.ssh`
-      # 도 agent 도 안 건드린다. `--maru-expect-passed` 로 **건너뛰기가 초록으로 새는 것**을 막는다.
-      #
-      # p5d 에 얹지 않은 이유: 그쪽은 서명된 앱 번들을 요구하는 릴리스급 게이트라, 그 게이트가 빨간
-      # 동안 이 축도 못 돈다 — 원격 SCM 은 argv 와 파이프의 문제지 번들의 문제가 아니다.
-      - name: Run the remote SCM judges against a harness-owned sshd
-        run: zig build test-remote-scm
       - name: 저장 전에 캐시를 예산 안으로 줄인다
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        run: sh tools/ci/prune-zig-cache.sh 3072
+        run: sh tools/ci/prune-zig-cache.sh 1024
       - name: Save build cache (main만 — PR은 읽기만 한다)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -609,7 +585,32 @@ jobs:
           path: |
             .zig-cache
             ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-macos-only-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          key: zig-v3-${{ runner.os }}-macos-only-s${{ matrix.shard }}of3-${{ hashFiles('.mise.toml', 'build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+
+  macos-only-gates:
+    name: macOS-only gates
+    needs: [changes, macos-only-shard]
+    # A cancelled/failed prerequisite must produce a failed required check.
+    if: ${{ always() && github.event.pull_request.draft != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Download coverage and receipts, including earlier partial-rerun shards
+        if: ${{ needs.macos-only-shard.result == 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: macos-only-shard-*
+          path: macos-shards
+      - name: Verify every root and extra gate exactly once
+        env:
+          WORKERS_RESULT: ${{ needs.macos-only-shard.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUNTIME_CHANGED: ${{ needs.changes.outputs.runtime }}
+          PROVEN_MACOS_ONLY: ${{ needs.changes.outputs.proven_macos_only }}
+        run: python3 tools/ci/macos_shards.py verify macos-shards
 
   session-host-macos-debug:
     name: session host macOS (Debug)

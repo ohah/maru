@@ -15573,17 +15573,8 @@ test "LSPB15 서버 자식은 제 프로세스 그룹을 세우고, root 로 chd
         try readAll(&p, &out);
         try testing.expectEqualStrings(root, std.mem.trimEnd(u8, out.items, "\n"));
     }
-    // ⑵ 없는 root — 앱의 작업 디렉터리에서 엉뚱하게 돌지 않는다: 아무것도 출력하지 않고 끝난다.
-    {
-        var p = try lsp_process.spawn(allocator, "/bin/pwd", &.{}, "/nonexistent-maru-lsp-root", null);
-        defer {
-            lsp_process.stopNow(&p, allocator);
-        }
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(allocator);
-        try readAll(&p, &out);
-        try testing.expectEqual(@as(usize, 0), out.items.len);
-    }
+    // Missing cwd is a synchronous creation failure, so no process owner is issued.
+    try testing.expectError(error.Spawn, lsp_process.spawn(allocator, "/bin/pwd", &.{}, "/nonexistent-maru-lsp-root", null));
     try testing.expectEqual(fds_before, openFdCount()); // 내리기가 파이프 fd 를 새지 않는다
     // ⑶ 밀린 쓰기는 **순서대로 한 번씩** 나간다 — `cat` 이 받은 그대로 돌려준다. 파이프(64 KB)를 넘겨 밀리게 한다.
     {

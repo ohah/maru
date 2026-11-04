@@ -2093,7 +2093,7 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 
 ### Formatter/LSP descriptor isolation
 
-`mise exec -- zig build test-editor-process-isolation`과 같은 명령의 `-Doptimize=ReleaseFast`는 formatter 기본 동작·시한·상한 및 sibling exec의 descriptor 누수 회귀를 실행한다. 5 tests/5 passed를 요구하며 macOS-only CI도 같은 고리를 실행한다. 전체 출하 체제 회귀는 `mise exec -- zig build test-editor -Doptimize=ReleaseFast`다. 강제로 끼운 exec에서 sibling 생존 중 EOF·정확한 출력까지 확인하며 실행 횟수만 세지 않는다.
+`mise exec -- zig build test-editor-process-isolation`과 같은 명령의 `-Doptimize=ReleaseFast`는 formatter 기본 동작·시한·상한 및 sibling exec의 descriptor 누수 회귀를 실행한다. 7 tests/7 passed를 요구하며 macOS-only CI도 같은 고리를 실행한다. LSPB15의 그룹·cwd 회귀와 EFP4의 준비 시한을 포함한다. 전체 출하 체제 회귀는 `mise exec -- zig build test-editor -Doptimize=ReleaseFast`다. 강제로 끼운 exec에서 sibling 생존 중 EOF·정확한 출력까지 확인하며 실행 횟수만 세지 않는다.
 
 ### 편집 뒤 프레임 작업량 관측
 
@@ -2381,3 +2381,9 @@ ReleaseFast 외부 사본에서 실제 OS HID 게시·문서 판·Metal drawable
 `python3 tools/editor-input-attribution/analyze.py <수집 경로> --output <새 외부 분석 경로>`로 실행한다.
 SDK 없는 계약은 `python3 -m unittest discover -s tools/editor-input-attribution -p 'test_*.py'`다.
 기록 시작 통지·환경 허용 목록·주소 재해석·진단 모집단의 한계는 [조사 계약](../tools/editor-input-attribution/README.md)을 따른다.
+
+
+`mise exec -- zig build test-editor-process-spawn`은 macOS에서 LSP·formatter의 실제 자식 상태를
+Debug와 ReleaseFast 각각 20 compiled / 20 passed로 검사한다. 독립 C probe로 그룹·FD·cwd·argv·환경을
+확인하고, 누락 실행 파일/디렉터리·권한·NUL·닫힌 stdio·높은 주변 FD·FD 고정 중 자원 고갈·OOM·시한을 검사한다.
+macOS-only CI에는 선택된 optimize 모드가 포함된다. 이는 프로세스 계약 검사이며 GUI/LSP protocol 검증과 구별한다.

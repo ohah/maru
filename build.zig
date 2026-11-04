@@ -6643,12 +6643,28 @@ pub fn build(b: *std.Build) void {
         run_native_close_guards.addArg("--maru-expect-passed=9");
         macos_only_test_step.dependOn(&run_native_close_guards.step);
     }
-    const process_isolation_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.EFP", ".test.LSPI1" } });
+    const editor_spawn_step = b.step("test-editor-process-spawn", "Verify grouped LSP and formatter creation against actual child state");
+    if (macos_host_tests) for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |spawn_optimize| {
+        const lsp_spawn_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/lsp_process.zig"), .target = target, .optimize = spawn_optimize, .imports = &.{.{ .name = "maru", .module = maru_mod }} });
+        const format_spawn_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/format_process.zig"), .target = target, .optimize = spawn_optimize });
+        const probe = b.addExecutable(.{ .name = b.fmt("editor-spawn-probe-{s}", .{@tagName(spawn_optimize)}), .root_module = b.createModule(.{ .target = target, .optimize = spawn_optimize, .link_libc = true }) });
+        probe.root_module.addCSourceFile(.{ .file = b.path("tests/fixtures/editor_process_spawn_probe.c"), .flags = &.{} });
+        const options = b.addOptions();
+        options.addOptionPath("path", probe.getEmittedBin());
+        const judges = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/editor_process_spawn.zig"), .target = target, .optimize = spawn_optimize, .link_libc = true, .imports = &.{ .{ .name = "lsp_process", .module = lsp_spawn_mod }, .{ .name = "format_process", .module = format_spawn_mod }, .{ .name = "editor_process_probe", .module = options.createModule() } } }) });
+        const run_judges = b.addRunArtifact(judges);
+        run_judges.setCwd(b.path("."));
+        run_judges.addArg("--maru-expect-tests=20");
+        run_judges.addArg("--maru-expect-passed=20");
+        editor_spawn_step.dependOn(&run_judges.step);
+        if (spawn_optimize == optimize) macos_only_test_step.dependOn(&run_judges.step);
+    };
+    const process_isolation_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.EFP", ".test.LSPI1", ".test.LSPB15 " } });
     const run_process_isolation = b.addRunArtifact(process_isolation_tests);
     run_process_isolation.setCwd(b.path("."));
-    run_process_isolation.addArg("--maru-expect-tests=5");
+    run_process_isolation.addArg("--maru-expect-tests=7");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
-        run_process_isolation.addArg("--maru-expect-passed=5");
+        run_process_isolation.addArg("--maru-expect-passed=7");
         macos_only_test_step.dependOn(&run_process_isolation.step);
     }
     b.step("test-editor-process-isolation", "Run formatter and LSP descriptor inheritance regressions").dependOn(&run_process_isolation.step);

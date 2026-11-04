@@ -2,12 +2,13 @@
 //! 받는다. **메인 스레드를 막지 않는다**: 작업 스레드 하나가 실행하고 결과를 결과 목록에 남기면, 메인이 tick 에서 id 로 가져간다
 //! (`tool_env` 와 같은 모양 — 이 모듈엔 `Io` 가 없어 pthread 잠금).
 //!
-//! §8.1 의 실행 규칙: 셸 없이 argv 로(`execve`), cwd 는 저장소 루트, 환경은 호출자가 준 것(사용자 셸 환경 — 위생·제외 목록을 지난 것).
+//! §8.1 의 실행 규칙: 셸 없이 argv 로(`spawnGrouped`), cwd 는 저장소 루트, 환경은 호출자가 준 것(사용자 셸 환경 — 위생·제외 목록을 지난 것).
 //! 자식은 제 프로세스 그룹의 우두머리라 시한·상한에서 **그룹째** 끝낸다(`kill(-pid)`) — 포매터가 띄운 자식(Node 워커)도 남지 않는다.
-//! `std.process.run` 은 앱 Io 에서 못 쓴다(fork + execve — `tool_env`·`lsp_process` 와 같다).
+//! `std.process.run` 은 앱 Io 에서 못 쓴다(공통 `macos_spawn.spawnGrouped` 경계를 쓴다).
 
 const std = @import("std");
 const builtin = @import("builtin");
+const macos_spawn = @import("macos_spawn");
 
 /// 작업 스레드는 창(세션)보다 오래 살 수 있다 — 앱 전역 수명의 allocator.
 const gpa = std.heap.smp_allocator;
@@ -37,7 +38,7 @@ pub const Outcome = union(enum) {
     timeout,
     /// stdout 이 상한을 넘어 그룹째 끝냈다.
     too_large,
-    /// 띄우지 못했다(fork·파이프·메모리). 실행 파일이 없거나 실행할 수 없으면 자식이 127·126 으로 끝난다(`exited`).
+    /// 띄우지 못했다(실행 파일·cwd·파이프·메모리). 실제 프로그램의 nonzero exit와 구분한다.
     spawn_failed,
 };
 
@@ -187,7 +188,6 @@ fn discardOutcome(o: Outcome) void {
     }
 }
 
-extern "c" fn getdtablesize() c_int;
 const f_setnosigpipe: c_int = 73; // macOS `F_SETNOSIGPIPE` — 닫힌 stdin 에 쓰다 SIGPIPE 로 앱이 죽지 않게
 
 fn run(job: *Job) Outcome {
@@ -197,9 +197,16 @@ fn run(job: *Job) Outcome {
 }
 
 // A comptime probe lets the regression force a sibling exec between pipe creation
-// and formatter fork. The product instantiation has no callback or test state.
+// and native formatter creation. The product instantiation has no callback or test state.
 fn runWithProbe(job: *Job, comptime Probe: type) Outcome {
-    // argv·envp 포인터 배열을 fork 전에 만든다 — 자식에서 할당하지 않는다.
+    if (comptime builtin.os.tag != .macos) return .spawn_failed;
+    const clock = if (@hasDecl(Probe, "nowMs")) Probe.nowMs else nowMs;
+    // Preparation and native creation share the same operation deadline.
+    const deadline = clock() + job.timeout_ms;
+    if (job.argv.len == 0 or !std.fs.path.isAbsolute(job.argv[0]) or job.cwd.len == 0 or
+        std.mem.indexOfScalar(u8, job.cwd, 0) != null) return .spawn_failed;
+    for (job.argv) |arg| if (std.mem.indexOfScalar(u8, arg, 0) != null) return .spawn_failed;
+    // argv·envp 포인터 배열은 native 생성 호출이 끝날 때까지 보존한다.
     const argv = gpa.alloc(?[*:0]const u8, job.argv.len + 1) catch return .spawn_failed;
     defer gpa.free(argv);
     for (job.argv, 0..) |a, i| argv[i] = a.ptr;
@@ -228,9 +235,9 @@ fn runWithProbe(job: *Job, comptime Probe: type) Outcome {
         return .spawn_failed;
     }
     // Both ends must close in a sibling exec. An LSP launched while this worker
-    // prepares its fork can otherwise retain stdout/stderr writers: the formatter
+    // prepares its launch can otherwise retain stdout/stderr writers: the formatter
     // exits successfully but the parent never receives EOF and reports a timeout.
-    // dup2 below gives only this formatter its intended standard descriptors.
+    // Pinned spawn actions give only this formatter its standard descriptors.
     for ([_]std.c.fd_t{ in_fds[0], in_fds[1], out_fds[0], out_fds[1], err_fds[0], err_fds[1] }) |fd| {
         if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) {
             closeBoth(in_fds);
@@ -240,31 +247,35 @@ fn runWithProbe(job: *Job, comptime Probe: type) Outcome {
         }
     }
 
-    Probe.afterPipes();
-    const pid = std.c.fork();
-    if (pid < 0) {
+    // Prepare parent endpoints before publishing a child; a blocking fallback
+    // could otherwise make stdin writes outlive the formatter deadline.
+    if (std.c.fcntl(in_fds[1], f_setnosigpipe, @as(c_int, 1)) != 0 or
+        !setNonBlocking(in_fds[1]) or !setNonBlocking(out_fds[0]) or !setNonBlocking(err_fds[0]))
+    {
         closeBoth(in_fds);
         closeBoth(out_fds);
         closeBoth(err_fds);
         return .spawn_failed;
     }
-    if (pid == 0) {
-        if (std.c.setpgid(0, 0) != 0) std.c._exit(126);
-        if (std.c.dup2(in_fds[0], 0) < 0 or std.c.dup2(out_fds[1], 1) < 0 or std.c.dup2(err_fds[1], 2) < 0) std.c._exit(126);
-        // 앱의 fd 를 포매터에 넘기지 않는다(CLOEXEC 가 없는 것이 있다 — `tool_env` 와 같은 규율).
-        const max_fd = getdtablesize();
-        var fd: c_int = 3;
-        while (fd < max_fd) : (fd += 1) _ = std.c.close(fd);
-        if (std.c.chdir(job.cwd.ptr) != 0) std.c._exit(126);
-        _ = std.c.execve(job.argv[0].ptr, @ptrCast(argv.ptr), envp);
-        std.c._exit(127);
+
+    Probe.afterPipes();
+    const directory_fd = std.c.open(job.cwd.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    if (directory_fd < 0) {
+        closeBoth(in_fds);
+        closeBoth(out_fds);
+        closeBoth(err_fds);
+        return .spawn_failed;
     }
-    _ = std.c.setpgid(pid, pid); // 자식이 exec 하기 전에 kill(-pid) 가 닿게(경쟁 막기 — `lsp_process` 와 같다)
+    defer _ = std.c.close(directory_fd);
+    const pid = macos_spawn.spawnGrouped(job.argv[0].ptr, @ptrCast(argv.ptr), envp, .{ in_fds[0], out_fds[1], err_fds[1], null }, directory_fd) catch {
+        closeBoth(in_fds);
+        closeBoth(out_fds);
+        closeBoth(err_fds);
+        return .spawn_failed;
+    };
     _ = std.c.close(in_fds[0]);
     _ = std.c.close(out_fds[1]);
     _ = std.c.close(err_fds[1]);
-    _ = std.c.fcntl(in_fds[1], f_setnosigpipe, @as(c_int, 1));
-    for ([_]std.c.fd_t{ in_fds[1], out_fds[0], err_fds[0] }) |fd| setNonBlocking(fd);
 
     var stdin_fd: std.c.fd_t = in_fds[1];
     var stdout_fd: std.c.fd_t = out_fds[0];
@@ -287,7 +298,6 @@ fn runWithProbe(job: *Job, comptime Probe: type) Outcome {
     var written: usize = 0;
     var status: c_int = 0;
     var exited = false;
-    const deadline = nowMs() + job.timeout_ms;
     var buf: [64 * 1024]u8 = undefined;
     while (true) {
         if (!exited) {
@@ -296,7 +306,7 @@ fn runWithProbe(job: *Job, comptime Probe: type) Outcome {
         }
         // 자식이 끝났고 파이프도 다 닫혔으면 끝. 끝났는데 파이프를 쥔 손자가 있으면 시한까지 읽다가 그룹째 끝낸다.
         if (exited and stdout_fd < 0 and stderr_fd < 0) break;
-        const now = nowMs();
+        const now = clock();
         if (now >= deadline) return killGroup(pid, exited, .timeout);
         var fds: [3]std.c.pollfd = undefined;
         var n: usize = 0;
@@ -378,10 +388,9 @@ fn closeBoth(fds: [2]std.c.fd_t) void {
     _ = std.c.close(fds[1]);
 }
 
-fn setNonBlocking(fd: std.c.fd_t) void {
+fn setNonBlocking(fd: std.c.fd_t) bool {
     const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
-    if (flags < 0) return;
-    _ = std.c.fcntl(fd, std.c.F.SETFL, flags | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    return flags >= 0 and std.c.fcntl(fd, std.c.F.SETFL, flags | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true }))) == 0;
 }
 
 fn nowMs() u64 {
@@ -420,7 +429,7 @@ fn runAndWait(req: Request) !*Result {
     return error.NoResult;
 }
 
-test "EFP1 실행기 — stdin 을 넣고 stdout 을 받는다(파이프 버퍼보다 큰 입력도 막히지 않는다), 0 이 아닌 종료와 stderr, 실행 파일 없음은 127, cwd·환경은 준 것 (tooling §8.2t)" {
+test "EFP1 실행기 — stdin 을 넣고 stdout 을 받는다(파이프 버퍼보다 큰 입력도 막히지 않는다), 0 이 아닌 종료와 stderr, 실행 파일 없음은 생성 실패, cwd·환경은 준 것 (tooling §8.2t)" {
     // `cat` — 1 MiB(파이프 버퍼 64 KiB 의 열여섯 배)를 그대로.
     const big = try testing.allocator.alloc(u8, 1 << 20);
     defer testing.allocator.free(big);
@@ -441,7 +450,7 @@ test "EFP1 실행기 — stdin 을 넣고 stdout 을 받는다(파이프 버퍼�
     {
         const r = try runAndWait(.{ .argv = &.{"/nonexistent/prettier"}, .cwd = "/", .envp = null, .stdin = "x" });
         defer r.deinit();
-        try testing.expectEqual(@as(?u8, 127), r.outcome.exited.code);
+        try testing.expect(r.outcome == .spawn_failed);
     }
     {
         // cwd 와 환경 — 준 것만(앱 환경의 변수는 안 샌다).
@@ -537,4 +546,23 @@ test "EFP3 sibling exec cannot keep formatter pipes alive after formatter exits"
     try testing.expect(result.outcome == .exited);
     try testing.expectEqual(@as(?u8, 0), result.outcome.exited.code);
     try testing.expectEqualStrings("x = 1\n", result.outcome.exited.stdout);
+}
+
+test "EFP4 preparation and native launch do not reset the formatter deadline" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    const Probe = struct {
+        var time: u64 = 0;
+        pub fn nowMs() u64 {
+            return time;
+        }
+        fn afterPipes() void {
+            time = 200;
+        }
+    };
+    Probe.time = 0;
+    const job = try copyJob(.{ .argv = &.{"/usr/bin/true"}, .cwd = "/", .envp = null, .stdin = "", .timeout_ms = 100 });
+    defer job.destroy();
+    const outcome = runWithProbe(job, Probe);
+    defer discardOutcome(outcome);
+    try testing.expect(outcome == .timeout);
 }

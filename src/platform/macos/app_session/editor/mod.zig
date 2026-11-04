@@ -75683,6 +75683,107 @@ fn resolvePrimaryDeathForTest(pending: bool) !void {
 // Keys can arrive in this interval, including with A still visible in a split.
 // Phases use real requests: 0=list wait, 1=resolved display, 2=prefetch, 3=pending Enter.
 // Retry clock seams below are explicit: these tests verify ordering, not elapsed time.
+fn locationRequestPublicationForTest(index: usize) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_DECLCAP");
+    const chosen = location_kind_cases_for_test[index];
+    for (location_kind_cases_for_test) |next| for (0..3) |mode| {
+        const source = "int source; // REFSTALL\n";
+        var f = (try SmtFixture.openRepo(testing.allocator, "source.c", source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        f.term.rt.editor_selection = editor_selection.Selection.at(1);
+        const origin = lsp_client.readyClientFor(s, f.term).?;
+        const pid = origin.proc.?.pid;
+        try testing.expect(references_client.gotoLocationsAtCaret(s, chosen.kind));
+        const st = &s.editor_references;
+        const seq = st.waiting_seq;
+        const owner = st.owner;
+        const sent = s.editor_lsp.sent_references;
+        if (mode == 2) {
+            references_client.onClientResponse(s, origin, chosen.kind, seq, null, true);
+            try testing.expect(!st.waiting and st.retry_at_ms != 0 and st.retries == 1);
+        }
+        const forwarded = blk: {
+            // Fail only the new command's allocation, restoring the session allocator on every exit.
+            var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+            const allocator = s.allocator;
+            s.allocator = failing.allocator();
+            defer s.allocator = allocator;
+            const ok = references_client.gotoLocationsAtCaret(s, next.kind);
+            try testing.expect(failing.has_induced_failure);
+            break :blk ok;
+        };
+        try testing.expect(!forwarded);
+        try testing.expectEqual(sent, s.editor_lsp.sent_references);
+        try testing.expectEqual(pid, lsp_client.readyClientFor(s, f.term).?.proc.?.pid);
+        try testing.expectEqual(seq, st.waiting_seq);
+        try testing.expect(std.meta.eql(owner, st.owner));
+        try testing.expectEqual(mode != 2, st.waiting);
+        // A new manual command still cancels the prior retry reservation, including when unsent.
+        try testing.expectEqual(@as(u64, 0), st.retry_at_ms);
+        try testing.expectEqual(@as(u8, 0), st.retries);
+        const uri = try maru.session.editor.lsp.rpc.fileUri(testing.allocator, f.path);
+        defer testing.allocator.free(uri);
+        const raw = try locationKindRawForTest(uri, true);
+        defer testing.allocator.free(raw);
+        var reply = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+        defer reply.deinit();
+        if (mode < 2) {
+            references_client.onClientResponse(s, origin, chosen.kind, seq, if (mode == 0) reply.value else null, false);
+            try testing.expect(!st.waiting);
+            if (mode == 0) {
+                try testing.expect(s.chrome_host.reference_picker.open);
+                try testing.expectEqual(chosen.kind, st.result_kind);
+                s.chrome_host.reference_picker.selected = 1;
+                try pressKey(&f.fx, .enter, .{});
+                try testing.expectEqual(@as(usize, 4), f.term.rt.editor_selection.?.focus);
+                try testing.expectEqual(@as(u64, 1), st.navigated);
+            } else {
+                try testing.expect(s.chrome_host.notice.open);
+                try testing.expectEqualStrings(maru.i18n.t(chosen.notice_key), s.chrome_host.notice.message);
+                try testing.expectEqual(@as(u64, 1), st.notified_none);
+                s.chrome_host.notice.dismiss();
+            }
+        }
+        try testing.expectEqual(chosen.kind, st.waiting_kind);
+        // The same new kind succeeds once allocation is available again.
+        try testing.expect(references_client.gotoLocationsAtCaret(s, next.kind));
+        try testing.expectEqual(next.kind, st.waiting_kind);
+        try testing.expect(st.waiting);
+        try testing.expectEqual(sent + 1, s.editor_lsp.sent_references);
+        references_client.onClientResponse(s, origin, next.kind, st.waiting_seq, reply.value, false);
+        try testing.expect(s.chrome_host.reference_picker.open);
+        try testing.expectEqual(next.kind, st.result_kind);
+        s.chrome_host.reference_picker.selected = 1;
+        try pressKey(&f.fx, .enter, .{});
+        try testing.expectEqual(@as(usize, 4), f.term.rt.editor_selection.?.focus);
+        try testing.expectEqual(@as(u64, if (mode == 0) 2 else 1), st.navigated);
+        try testing.expectEqual(@as(u64, if (mode == 1) 1 else 0), st.notified_none);
+        try testing.expect(!st.waiting and st.retry_at_ms == 0);
+        try testing.expectEqualStrings(source, f.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), f.term.rt.editorDocument().history.undo_len);
+        try batchApplyDisk(&f.fx, "source.c", source);
+        std.debug.print("LOCREQ case old={s} new={s} mode={d} none={d} navigated={d} failed=true preserved=true\n", .{
+            @tagName(chosen.kind), @tagName(next.kind), mode, st.notified_none, st.navigated,
+        });
+    };
+}
+test "LOCREQ1 failed commands preserve pending references" {
+    try locationRequestPublicationForTest(0);
+}
+test "LOCREQ2 failed commands preserve pending implementations" {
+    try locationRequestPublicationForTest(1);
+}
+test "LOCREQ3 failed commands preserve pending type definitions" {
+    try locationRequestPublicationForTest(2);
+}
+test "LOCREQ4 failed commands preserve pending declarations" {
+    try locationRequestPublicationForTest(3);
+}
+
 fn locationServerLifecycleForTest(index: usize) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);

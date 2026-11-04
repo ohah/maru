@@ -498,9 +498,10 @@ jobs:
     # 컴파일하지 않으므로 여기가 영영 콜드가 된다.
     if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_macos_only != 'true' }}
     runs-on: macos-15
-    # PR #4523의 콜드 실행은 테스트가 진행 중인데 30분 제한으로 취소됐다.
-    # 컴파일을 포함한 콜드 실행을 수용한다. 개별 테스트의 timeout과 단언은 유지한다.
-    timeout-minutes: 60
+    # PR #4690 콜드 실행은 단언 실패 없이 진행하다 60분 제한으로 취소됐고,
+    # 최근 정상 실행도 58분이었다. 빌드와 후속 소유권 검증을 포함한 예산을 둔다.
+    # 개별 테스트의 timeout과 단언은 유지한다.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

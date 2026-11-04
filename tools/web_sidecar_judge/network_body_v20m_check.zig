@@ -13,6 +13,7 @@
 //!   r14-cap512     네 탭이 각자 몫 128 을 채워 전체 512 — 그 탭들을 닫은 뒤 다른 탭이 언제 되찾는가
 //!   r15-forms      getTargetInfo 의 인자 꼴(빈 객체·공백·같은 열쇠 둘·유니코드 이스케이프·잘린 JSON·크기 속이기)
 //!   r19-big        큰 본문(0.9 MB × 30 + 3 MB × 10)을 서비스 워커로 넘기는 동안 판정자가 10 초 읽지 않는다 — host 메모리·끝·틀림
+//!   v20o-r12rec    (재검증 9 차 — 검증 v20o 3 회차 탐침) v20n-r12-hop 을 A 가 기록하며 — 비운 놓은 요청의 기록이 틀린 본문·끝 둘·끝 없음 없이 끝나는가
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -996,6 +997,59 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         while (hang_open.load(.monotonic) > 0 and os.nowMs() < deadline) r.pump(300);
         r.pump(3000);
         hang_release.store(false, .monotonic);
+    }
+    if (enabled("v20o-r12rec")) {
+        // 재검증 9 차(검증 v20o 3 회차 탐침 → 기준): v20n-r12-hop 를 A 가 **기록하며** 아홉 출처로 — A 가 떠난 출처의 매달린 fetch(시작을 보냈다)는 놓은 요청이 되고, 자리
+        // 1 024 가 차면 가장 오래된 것부터 비워(`evictOrphan`) A 의 표에 잃은 것으로 알린다. 그 뒤 매달린 fetch 를 모두 풀어(비운 요청의 뒤 기록은
+        // 보내지 않는다) A 의 기록마다: 틀린 본문 0, 끝은 하나(둘 이상 없음), CEF 가 끝냈는데 본문의 끝이 없는 기록 0. B 는 그 뒤 20/20.
+        const hs0 = hang_seen.load(.monotonic);
+        _ = recordOn(&r, tab_a);
+        const at_a = r.begins.items.len;
+        var held: usize = 0;
+        var hops: usize = 0;
+        const n_hops: usize = if (std.c.getenv("V20O_HOPS")) |v| (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 9) else 9;
+        for (0..n_hops) |i| {
+            const port = ports[2 + (i % 4)];
+            const host_name: []const u8 = if ((i / 4) % 2 == 0) "127.0.0.1" else "localhost";
+            var u: [256]u8 = undefined;
+            try r.go(tab_a, try std.fmt.bufPrint(&u, "http://{s}:{d}/g/p?b={d}&n=0", .{ host_name, port, 10 + (i % 4) }));
+            _ = r.pumpTitle(tab_a, "ready", 20_000);
+            try r.go(tab_a, try std.fmt.bufPrint(&u, "http://{s}:{d}/g/swhold?n=150&s=600", .{ host_name, port }));
+            if (r.pumpTitle(tab_a, "sheld", 10_000)) held += 1;
+            hops += 1;
+        }
+        try r.goO(tab_a, 0, "/blank");
+        r.pump(1500);
+        _ = recordOn(&r, tab_b);
+        const at = r.begins.items.len;
+        const d10 = r.dropped_sw.get(tab_b) orelse 0;
+        try r.goO(tab_b, 0, "/g/p?b=1&n=20&k=hpr_");
+        const ready1 = r.pumpTitle(tab_b, "ready", 25_000);
+        r.pump(2000);
+        const sw1 = swRecords(&r, tab_b, at, "k=hpr_");
+        const dr1 = (r.dropped_sw.get(tab_b) orelse 0) - d10;
+        const t1 = tally(&r, tab_b, at, "/g/x?k=hpr_");
+        recordOff(&r, tab_b);
+        try r.goO(tab_b, 0, "/blank");
+        // 매달린 fetch 를 모두 끝낸다 — A 는 아직 기록한다.
+        hang_release.store(true, .monotonic);
+        const deadline = os.nowMs() + 120_000;
+        while (hang_open.load(.monotonic) > 0 and os.nowMs() < deadline) r.pump(300);
+        r.pump(12_000); // 시한(끝 없는 기록 10 초)까지
+        hang_release.store(false, .monotonic);
+        const ta = tally(&r, tab_a, at_a, "/g/hang");
+        var multi: usize = 0;
+        var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer seen.deinit(r.gpa);
+        for (r.begins.items[at_a..]) |b| if (b.browser == tab_a and std.mem.indexOf(u8, b.url, "/g/hang") != null) {
+            if (seen.contains(b.request)) continue;
+            seen.put(r.gpa, b.request, {}) catch {};
+            if (r.body(tab_a, b.request).ends > 1) multi += 1;
+        };
+        recordOff(&r, tab_a);
+        var tb: [600]u8 = undefined;
+        var ta_l: [600]u8 = undefined;
+        report(ready1 and sw1 >= 20 and dr1 == 0 and t1.wrong == 0 and ta.wrong == 0 and multi == 0 and ta.no_end == 0, "v20o-r12rec", std.fmt.bufPrint(&detail, "tab A (recording) hopped {d} origins (held {d}) · A's /g/hang: {s} · several ends {d} || B after: SW records {d}/20 · dropped +{d} · {s} · hangs seen {d}", .{ hops, held, tallyLine(&ta, &ta_l), multi, sw1, dr1, tallyLine(&t1, &tb), hang_seen.load(.monotonic) - hs0 }) catch "");
     }
 
     // ── 15 회차: getTargetInfo 의 인자 꼴 ──────────────────────────────────────────────────────────────

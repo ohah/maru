@@ -189,7 +189,7 @@ pub fn record(v: msg.NetRecord) void {
 
 /// 렌더러가 죽었다(`on_render_process_terminated` — `renderer_gone` 보다 먼저). 보낸 호출은 답이 없다(J5) — 곧 `detached`.
 pub fn rendererGone(browser: BrowserId) void {
-    table.rendererGone(gpa, browser) catch {};
+    table.rendererGone(gpa, browser, machUs()) catch {};
     runActions();
 }
 

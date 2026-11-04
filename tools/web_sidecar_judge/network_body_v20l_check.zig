@@ -55,6 +55,9 @@ var ports: [2]u16 = .{ 0, 0 };
 var counter = std.atomic.Value(u64).init(1);
 var boots: [16]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0));
 var hang_open = std.atomic.Value(i64).init(0);
+/// 재검증 9 차(LOW-T3): 서버에 닿은 `/g/hang` 의 수(끝난 것 포함)와 「곧 풀기」 — 참이면 매달린 것·새로 닿는 것을 곧 끝낸다(v20m 과 같은 꼴).
+var hang_seen = std.atomic.Value(u64).init(0);
+var hang_release = std.atomic.Value(bool).init(false);
 
 fn startServer(which: usize) !void {
     const fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -207,8 +210,10 @@ fn serveOne(conn: c_int) void {
         "Promise.all([navigator.serviceWorker.register('/g/sw.js?b=1',{scope:'/g/'}).then(act),navigator.serviceWorker.register('/g/sw.js?b=4',{scope:'/g/q/'}).then(act)]).then(async function(ws){if(!navigator.serviceWorker.controller){location.reload();return}await S(800);" ++
         "for(var r=0;r<R;r++){ws[1].postMessage({op:'same',r:r});await fetch('/g/x?k=same&r='+r,{cache:'no-store'}).then(function(x){return x.text()}).catch(function(){});await S(25)}await S(2500);document.title='sdone'})</script>s2b");
     if (std.mem.eql(u8, path, "/g/hang")) {
+        _ = hang_seen.fetchAdd(1, .monotonic);
         _ = hang_open.fetchAdd(1, .monotonic);
-        os.sleepMs(45_000);
+        const until = os.nowMs() + 45_000;
+        while (os.nowMs() < until and !hang_release.load(.monotonic)) os.sleepMs(50);
         _ = hang_open.fetchSub(1, .monotonic);
         return reply(conn, "application/json", "{\"n\":\"hang\"}");
     }
@@ -784,10 +789,24 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         recordOff(&r, tab_a);
         try r.goO(tab_c, 0, "/blank");
         try r.goO(tab_a, 0, "/blank");
-        // 서버가 45 초 뒤 끝낸다 — 그때까지 기다린다(뒤 회차의 몫을 비운다).
-        const deadline = os.nowMs() + 60_000;
-        while (hang_open.load(.monotonic) > 0 and os.nowMs() < deadline) r.pump(500);
-        r.pump(2000);
+        // 재검증 9 차(LOW-T3): 매달린 fetch 를 곧 푼다 — 서버에 닿는 것은 연결 6 개뿐이고 나머지 134 개는 Chromium 의 같은 호스트 연결 줄(6)에 서서
+        // 45 초마다 6 개씩(약 17 분) O2 의 연결을 쥐었다; 전에는 첫 6 개가 끝나 `hang_open` 이 잠깐 0 이 되면 나가 뒤 회차(`r14-many`·`r14-stall`)의
+        // O2 페이지가 서지 않았다(전체 차례에서만 FAIL — 검증 v20o 10 회차). 줄에 선 것까지 모두 서버에 닿아 끝날 때까지(닿은 수가 3 초 동안 오르지
+        // 않을 때까지) 기다린다.
+        hang_release.store(true, .monotonic);
+        const deadline = os.nowMs() + 120_000;
+        var last = hang_seen.load(.monotonic);
+        var still_since = os.nowMs();
+        while (os.nowMs() < deadline) {
+            r.pump(300);
+            const now_seen = hang_seen.load(.monotonic);
+            if (now_seen != last) {
+                last = now_seen;
+                still_since = os.nowMs();
+            } else if (hang_open.load(.monotonic) == 0 and os.nowMs() - still_since >= 3_000) break;
+        }
+        hang_release.store(false, .monotonic);
+        r.pump(1000);
     }
 
     // ── 14 회차: 한 출처에 SW 70 개 ───────────────────────────────────────────────────────────────────

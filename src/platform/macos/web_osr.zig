@@ -1149,6 +1149,24 @@ test "engine decision: env first, then an installed maru-chromium, else WebKit w
     try std.testing.expectEqual(Decision{ .chromium = false, .not_installed = true }, decideFrom(true, null, null));
 }
 
+test "W9d② 재검증 9 차: a hardened (release) build does not pass the sidecar's test and diagnostic env vars to the host" {
+    const gpa = std.testing.allocator;
+    const env = [_:null]?[*:0]const u8{ "HOME=/Users/x", "MARU_WEB_TEST_SW_LOSE=lose1", "MARU_WEB_TEST_BODY_LOG=1", "MARU_WEB_SW_CDP=0", "MARU_WEB_SW_CDPX=1", "MARU_WEB_OSR_DIR=/dev", "PATH=/usr/bin", "MARU_WEB_TESTX=1" };
+    var list: std.ArrayList(?[*:0]const u8) = .empty;
+    defer list.deinit(gpa);
+    const out = (try hostEnv(gpa, &list, &env)).?;
+    var kept: std.ArrayList([]const u8) = .empty;
+    defer kept.deinit(gpa);
+    var i: usize = 0;
+    while (out[i]) |e| : (i += 1) try kept.append(gpa, std.mem.span(e));
+    try std.testing.expectEqual(@as(usize, 5), kept.items.len);
+    try std.testing.expectEqualStrings("HOME=/Users/x", kept.items[0]);
+    try std.testing.expectEqualStrings("MARU_WEB_SW_CDPX=1", kept.items[1]);
+    try std.testing.expectEqualStrings("MARU_WEB_OSR_DIR=/dev", kept.items[2]);
+    try std.testing.expectEqualStrings("PATH=/usr/bin", kept.items[3]);
+    try std.testing.expectEqualStrings("MARU_WEB_TESTX=1", kept.items[4]);
+}
+
 test "a hardened (release) build ignores the development env overrides" {
     const allocator = std.testing.allocator;
     const Saved = struct {
@@ -1568,6 +1586,25 @@ pub fn enabled() bool {
 
 fn envDir() ?[]const u8 {
     return envDirFor(install.hardenedRuntime());
+}
+
+/// W9d② 재검증 9 차(LOW-C·E1): sidecar 의 판정자·진단 전용 환경 변수(`MARU_WEB_TEST_*` — 본문 맞추기 로그·서비스 워커 응답 버리기·CPU 그리기·
+/// 판정자 클립보드 등, `MARU_WEB_SW_CDP` — 워커 CDP 끄기). sidecar 는 앱의 환경을 물려받아(`lsp_process.spawn` 의 `envp` null) 그 변수가 든
+/// 셸에서 띄운 릴리스 maru 의 sidecar 에서도 켜졌다(서비스 워커 본문을 잃는다 — 틀린 본문은 아니다). `MARU_WEB_OSR_DIR` 처럼 릴리스 판은 넘기지 않는다.
+fn devOnlyHostEnv(entry: []const u8) bool {
+    return std.mem.startsWith(u8, entry, "MARU_WEB_TEST_") or std.mem.startsWith(u8, entry, "MARU_WEB_SW_CDP=");
+}
+
+/// 릴리스 판의 sidecar 환경 — `environ` 에서 `devOnlyHostEnv` 를 뺀 것(null 로 끝난다, `list` 가 쥔다 — 띄운 뒤 놓는다).
+fn hostEnv(gpa: std.mem.Allocator, list: *std.ArrayList(?[*:0]const u8), environ: [*:null]const ?[*:0]const u8) !?[*:null]const ?[*:0]const u8 {
+    var i: usize = 0;
+    while (environ[i]) |entry| : (i += 1) {
+        if (devOnlyHostEnv(std.mem.span(entry))) continue;
+        try list.append(gpa, entry);
+    }
+    try list.append(gpa, null);
+    const z: [:null]const ?[*:0]const u8 = list.items[0 .. list.items.len - 1 :null];
+    return z.ptr;
 }
 
 /// 릴리스 판(hardened runtime)은 환경변수로 실행 파일을 고르지 않는다(W7a2 — `web_osr_install.zig`).
@@ -4461,7 +4498,11 @@ fn start(gpa: std.mem.Allocator, now_ms: i64) void {
     var arg_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
     const arg = std.fmt.bufPrint(&arg_buf, "--profile-dir={s}", .{profile}) catch return startFailedAfterCopy();
     if (receiver == null) receiver = ring_receiver.Receiver.open() catch return startFailedAfterCopy();
-    const spawned = lsp_process.spawn(gpa, host_path, &.{arg}, dir, null) catch return startFailedAfterCopy();
+    // W9d② 재검증 9 차(LOW-C·E1): 릴리스 판은 판정자·진단 전용 환경 변수를 sidecar 에 넘기지 않는다(`hostEnv`).
+    var env_list: std.ArrayList(?[*:0]const u8) = .empty;
+    defer env_list.deinit(gpa);
+    const envp = if (hardened) hostEnv(gpa, &env_list, std.c.environ) catch return startFailedAfterCopy() else null;
+    const spawned = lsp_process.spawn(gpa, host_path, &.{arg}, dir, envp) catch return startFailedAfterCopy();
     process = spawned;
     // 새 sidecar 의 pid 만 받는다. pid 버전은 그 첫 알림에서 다시 고정한다(옛 sidecar 의 고정값은 버린다).
     receiver.?.expected_pid = spawned.pid;

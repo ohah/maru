@@ -6729,6 +6729,16 @@ pub fn build(b: *std.Build) void {
         run_definition_origins.addArg("--maru-expect-passed=8");
         macos_only_test_step.dependOn(&run_definition_origins.step);
     }
+    const action_encoding_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CAENC"} });
+    const run_action_encoding = b.addRunArtifact(action_encoding_tests);
+    run_action_encoding.setCwd(b.path("."));
+    run_action_encoding.addArg("--maru-expect-tests=8");
+    run_action_encoding.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-code-action-encoding", "Verify copied code action edits retain their response encoding across server restart").dependOn(&run_action_encoding.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_action_encoding.addArg("--maru-expect-passed=8");
+        macos_only_test_step.dependOn(&run_action_encoding.step);
+    }
     const action_menu_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CAMENU"} });
     const run_action_menu = b.addRunArtifact(action_menu_tests);
     run_action_menu.setCwd(b.path("."));

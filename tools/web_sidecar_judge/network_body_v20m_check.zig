@@ -1005,6 +1005,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const hs0 = hang_seen.load(.monotonic);
         _ = recordOn(&r, tab_a);
         const at_a = r.begins.items.len;
+        const log_a = logSize(stderr_path);
         var held: usize = 0;
         var hops: usize = 0;
         const n_hops: usize = if (std.c.getenv("V20O_HOPS")) |v| (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 9) else 9;
@@ -1047,9 +1048,14 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             if (r.body(tab_a, b.request).ends > 1) multi += 1;
         };
         recordOff(&r, tab_a);
+        // 재검증 10 차(LOW-J2): 이 판의 목적(비운 놓은 요청의 기록)이 정말 섰는지 — A 가 옮겨 다니며 매달린 fetch 를 쥐었고(`held ≥ hops − 1`, 출처 아홉),
+        // A 의 `/g/hang` 기록이 자리 상한(1 024 — `max_sw_slots`)에 닿았고, 비운 요청의 잃음(`cef-lost b=151`)이 하나 이상. 전에는 `V20O_HOPS=0`(빈 판)도
+        // 통과했다(검증 v20p-B 20 회차).
+        const lg_a = readLog(gpa, stderr_path, log_a);
+        const evicted = countLines(lg_a, "cef-lost b=151 ");
         var tb: [600]u8 = undefined;
         var ta_l: [600]u8 = undefined;
-        report(ready1 and sw1 >= 20 and dr1 == 0 and t1.wrong == 0 and ta.wrong == 0 and multi == 0 and ta.no_end == 0, "v20o-r12rec", std.fmt.bufPrint(&detail, "tab A (recording) hopped {d} origins (held {d}) · A's /g/hang: {s} · several ends {d} || B after: SW records {d}/20 · dropped +{d} · {s} · hangs seen {d}", .{ hops, held, tallyLine(&ta, &ta_l), multi, sw1, dr1, tallyLine(&t1, &tb), hang_seen.load(.monotonic) - hs0 }) catch "");
+        report(ready1 and sw1 >= 20 and dr1 == 0 and t1.wrong == 0 and ta.wrong == 0 and multi == 0 and ta.no_end == 0 and hops >= 9 and held + 1 >= hops and ta.total >= 1024 and evicted >= 1, "v20o-r12rec", std.fmt.bufPrint(&detail, "tab A (recording) hopped {d} origins (held {d}) · A's /g/hang: {s} · evicted (cef-lost) {d} · several ends {d} || B after: SW records {d}/20 · dropped +{d} · {s} · hangs seen {d}", .{ hops, held, tallyLine(&ta, &ta_l), evicted, multi, sw1, dr1, tallyLine(&t1, &tb), hang_seen.load(.monotonic) - hs0 }) catch "");
     }
 
     // ── 15 회차: getTargetInfo 의 인자 꼴 ──────────────────────────────────────────────────────────────

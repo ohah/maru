@@ -134,7 +134,8 @@ const sw_js = "var Q=new URL(location.href).searchParams;var B=Q.get('b')||'0';"
     "var LOOP=0;self.addEventListener('message',function(e){var d=e.data||{};" ++
     "if(d.op=='loop'){LOOP=1;e.waitUntil((async function(){var i=0;while(LOOP&&i<d.n){await fetch('/g/x?k=loop'+B+'_'+(i++),{cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}})())}" ++
     "if(d.op=='stop'){LOOP=0}" ++
-    "if(d.op=='same'){e.waitUntil(fetch('/g/x?k=same&r='+d.r,{headers:{'x-who':'S'+B},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){}))}});";
+    "if(d.op=='same'){e.waitUntil(fetch('/g/x?k=same&r='+d.r,{headers:{'x-who':'S'+B},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){}))}" ++
+    "if(d.op=='solo'){e.waitUntil(fetch('/g/x?k=solo&r='+d.r,{headers:{'x-who':'S'+B},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){}))}});";
 
 /// 페이지: SW(`/g/sw.js?b=B`, 범위 `/g/`)를 깔고 다스릴 때까지 다시 불러온 뒤, 고른 것(공유·전용 worker, iframe, fetch n 개)을 하고 `ready`.
 const page_js = "var P=new URLSearchParams(location.search);" ++
@@ -194,7 +195,7 @@ fn serveOne(conn: c_int) void {
         "var R=+new URLSearchParams(location.search).get('r');function S(ms){return new Promise(function(r){setTimeout(r,ms)})}" ++
         "function act(r){return new Promise(function(res){var w=r.installing||r.waiting||r.active;if(w&&w.state=='activated')return res(w);w.addEventListener('statechange',function(){if(w.state=='activated')res(w)})})}" ++
         "Promise.all([navigator.serviceWorker.register('/g/sw.js?b=1',{scope:'/g/'}).then(act),navigator.serviceWorker.register('/g/sw.js?b=4',{scope:'/g/q/'}).then(act)]).then(async function(ws){await S(800);" ++
-        "for(var r=0;r<R;r++){ws[0].postMessage({op:'same',r:r});ws[1].postMessage({op:'same',r:r});await S(25)}await S(2500);document.title='sdone'})</script>s2");
+        "for(var r=0;r<R;r++){ws[0].postMessage({op:'same',r:r});ws[1].postMessage({op:'same',r:r});ws[r%2].postMessage({op:'solo',r:r});await S(25)}await S(2500);document.title='sdone'})</script>s2");
     // 실패한 워커 fetch 하나(m=dead — 닫힌 포트로 거절, m=abort — 응답 전에 페이지가 끊음, m=none — 대조) 뒤 그대로 넘김 20 번.
     if (std.mem.eql(u8, path, "/g/fail")) return reply(conn, html, "<!doctype html><title>fl</title><script>" ++
         "var P=new URLSearchParams(location.search);var M=P.get('m');var K=P.get('k');function S(ms){return new Promise(function(r){setTimeout(r,ms)})}" ++
@@ -1145,7 +1146,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         r.pump(3000);
         const log = readLog(gpa, stderr_path, log_at);
         const res = reversal(&r, gpa, log, at);
-        report(on and done and res.wrong_pairs == 0, "v20l-r20-xtarget", std.fmt.bufPrint(&detail, "rounds with both records and both W {d} · CEF order != CDP order (reversed) {d} · CDP start gap < 1 ms {d} (reversed among them {d}) · sw-pair lines {d} (correct {d} · WRONG {d}) · w_cross_target notes {d}", .{ res.both, res.reversed, res.close, res.close_rev, res.pairs, res.correct_pairs, res.wrong_pairs, countLines(log, "reason=w_cross_target") }) catch "");
+        // 재검증 10 차(LOW-J): 7 차 겹침 규칙 뒤로 같은 주소 W 둘(두 타깃)은 짝을 맺지 않아 sw-pair 줄이 판마다 0 이었다(짝의 옳음을 보는 힘이 없다 —
+        // 검증 v20p 7 회차). 판마다 한 타깃만 받는 다른 주소(`k=solo`)를 더해 짝이 서고, 그 짝이 옳은지(X-Served)와 짝 수의 아래 끝을 함께 본다.
+        report(on and done and res.wrong_pairs == 0 and res.correct_pairs >= 100, "v20l-r20-xtarget", std.fmt.bufPrint(&detail, "rounds with both records and both W {d} · CEF order != CDP order (reversed) {d} · CDP start gap < 1 ms {d} (reversed among them {d}) · sw-pair lines {d} (correct {d} · WRONG {d}) · w_cross_target notes {d}", .{ res.both, res.reversed, res.close, res.close_rev, res.pairs, res.correct_pairs, res.wrong_pairs, countLines(log, "reason=w_cross_target") }) catch "");
         recordOff(&r, tab_a);
         r.pump(500);
         try r.goO(tab_a, 0, "/blank");

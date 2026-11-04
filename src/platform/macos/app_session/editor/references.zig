@@ -68,8 +68,7 @@ pub fn gotoLocationsAtCaret(self: *AppSession, kind: lsp.rpc.LocationKind) bool 
     }
     st.retry_at_ms = 0;
     st.retries = 0;
-    st.waiting_kind = kind;
-    return request(self, term, @min(sel.focus, doc.file.content.len));
+    return request(self, term, kind, @min(sel.focus, doc.file.content.len));
 }
 
 fn commandName(kind: lsp.rpc.LocationKind) []const u8 {
@@ -99,11 +98,14 @@ fn promptKey(kind: lsp.rpc.LocationKind) maru.i18n.Key {
     };
 }
 
-fn request(self: *AppSession, term: *Term, offset: usize) bool {
+fn request(self: *AppSession, term: *Term, kind: lsp.rpc.LocationKind, offset: usize) bool {
     const st = &self.editor_references;
-    const seq = editor_lsp.requestLocations(self, term, st.waiting_kind, offset) orelse return false;
+    const seq = editor_lsp.requestLocations(self, term, kind, offset) orelse return false;
+    // An unsent command must not relabel the previous request's response.
+    // Publish the kind together with its sequence and source only after sending.
     st.waiting = true;
     st.waiting_seq = seq;
+    st.waiting_kind = kind;
     st.owner = ownerFor(term);
     return true;
 }
@@ -122,7 +124,7 @@ pub fn tick(self: *AppSession) void {
     const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
     st.retried += 1;
-    if (!request(self, term, @min(sel.focus, doc.file.content.len))) {
+    if (!request(self, term, st.waiting_kind, @min(sel.focus, doc.file.content.len))) {
         st.notified_none += 1;
         self.showNoticeKey(noneKey(st.waiting_kind));
     }

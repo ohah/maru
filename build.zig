@@ -6755,6 +6755,16 @@ pub fn build(b: *std.Build) void {
         run_feature_stop.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_feature_stop.step);
     }
+    const location_request_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LOCREQ"} });
+    const run_location_request = b.addRunArtifact(location_request_tests);
+    run_location_request.setCwd(b.path("."));
+    run_location_request.addArg("--maru-expect-tests=8");
+    run_location_request.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-location-request", "Verify failed location requests preserve the previous response owner and kind").dependOn(&run_location_request.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_location_request.addArg("--maru-expect-passed=8");
+        macos_only_test_step.dependOn(&run_location_request.step);
+    }
     const location_server_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LOCSERVER"} });
     const run_location_server = b.addRunArtifact(location_server_tests);
     run_location_server.setCwd(b.path("."));

@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+위치 요청 실패: `test-editor-location-request`는 네 기존 종류·네 새 종류와
+positive/null/예약의 48조건에서 실제 할당 실패 뒤 원본 응답과 다음 정상 요청을 검사한다.
+[검증 범위](plans/lsp-location-request-publication.md)는 native 명령·fake 요청·직접 응답과 실패 주입이다.
+
 위치 검색 서버 재시작: `test-editor-location-server`는 네 종류에서 실제 fake LSP 종료·
 새 PID의 정상 응답·다른 root 종료·끄기/켜기를 24조건으로 대조한다.
 [실행 범위](plans/lsp-location-server-restart.md)는 실제 프로세스/wire와 직접 callback·시계 seam을 구분한다.

@@ -1867,6 +1867,10 @@ Save As를 검사한다. 검색용 `--physical-ime`와 함께 쓰지 않는다. 
 
 ### 자동완성 확정의 Undo 보존
 
+`mise exec -- zig build test-editor-location-request -j2`와 `-Doptimize=ReleaseFast`는
+새 메시지 할당 실패 뒤 기존 위치 응답·안내·재시도 예약 정책과 다음 정상 요청을 48조건으로 검사한다.
+행동 4개와 초기화 4개(총 8개)이며 [요청 게시 검증](plans/lsp-location-request-publication.md)을 따른다.
+
 `mise exec -- zig build test-editor-location-server -j2`와 `-Doptimize=ReleaseFast`는
 네 위치 검색의 실제 서버 종료·재시작, 다른 root 종료, LSP 끄기/켜기를 24조건으로 검사한다.
 행동 4개와 초기화 4개(총 8개)이며 [실제 프로세스와 직접 응답의 범위](plans/lsp-location-server-restart.md)를 따른다.

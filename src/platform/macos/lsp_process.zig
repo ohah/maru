@@ -1,16 +1,17 @@
-//! 언어 서버 자식 프로세스(docs/editor-surface-tooling.md §8.2a) — **posix fork+execve + 파이프 둘**(stdin 쓰기·stdout 읽기), stderr 는
+//! 언어 서버 자식 프로세스(docs/editor-surface-tooling.md §8.2a) — **grouped posix_spawn + 파이프 둘**(stdin 쓰기·stdout 읽기), stderr 는
 //! `/dev/null`. `std.process.Child` 를 안 쓰는 것은 이 저장소의 결(`ssh_upload`·`git_backend`·`update_check` — 0.16 의 io 기반 Child 는
 //! io 없는 자리에서 못 쓴다). 오래 사는 자식이라 **읽기는 비차단 fd 를 세션 tick 에서 drain** 하고(원격 스트리머와 같은 모양), 쓰기는
 //! 작은 메시지라 그 자리에서 다 쓴다(파이프 버퍼 64 KB — 전문 didChange 가 그보다 크면 막히지 않게 `EAGAIN` 이면 남긴다).
 //!
-//! **서버는 자기 프로세스 그룹의 우두머리다**(`setpgid(0, 0)`) — 서버가 띄운 빌드(zls 의 `zig build`·rust-analyzer 의 `cargo check`)는
+//! **서버는 자기 프로세스 그룹의 우두머리다**(`spawnGrouped`의 `SETPGROUP`) — 서버가 띄운 빌드(zls 의 `zig build`·rust-analyzer 의 `cargo check`)는
 //! 그 그룹에 들어가므로, 내릴 때 **그룹째**(`killpg`) 죽여야 손자가 고아로 남지 않는다(§8.2a 「수명·재시작」).
 //!
-//! **찾기는 우리가 한다**(`session.git_locate.candidates` 와 같은 순회 — PATH 다음 통상 설치 위치) — execve 는 절대 경로를 받는다. 못 찾으면 `null` 이고
+//! **찾기는 우리가 한다**(`session.git_locate.candidates` 와 같은 순회 — PATH 다음 통상 설치 위치) — native 생성은 절대 경로를 받는다. 못 찾으면 `null` 이고
 //! 그것이 곧 「없음 — 설치」다. PATH 와 서버 환경은 호출자가 준다 — 사용자 셸 환경(`tool_env.zig`, 계획 workspace-trust WT3b)이다.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const macos_spawn = @import("macos_spawn");
 const git_locate = @import("maru").session.git_locate;
 
 pub const Process = struct {
@@ -111,88 +112,64 @@ fn envValue(name: []const u8) ?[]const u8 {
 /// 재시작한다 — 상한이 없으면 멈춘 서버 하나가 편집마다 메모리를 키운다.
 pub const max_pending_bytes: usize = 64 * 1024 * 1024;
 
-extern "c" fn getdtablesize() c_int;
-
-pub const SpawnError = error{ Pipe, Fork, OutOfMemory };
-
-/// 자식이 `execve` 전에 그만둔 종료 코드 — 프로세스 그룹을 못 만들었거나 root 로 `chdir` 하지 못했다. 그 상태로 서버를 띄우면
-/// 그룹째 내릴 수 없거나(손자가 남는다) 앱의 작업 디렉터리에서 엉뚱한 root 를 보게 된다(§8.1 「canonical cwd=root」). 부모에게는
-/// 「곧 죽은 서버」로 보여 재시작 경로(backoff → 「실패」)를 탄다.
-pub const exit_setup_failed: u8 = 126;
+pub const SpawnError = error{ Pipe, Spawn, OutOfMemory };
 
 /// 서버를 띄운다. `exe_path` 는 절대 경로(`locate` 의 결과), `args` 는 나머지 인자, `cwd` 는 root(서버가 상대 경로를 root 기준으로 풀게).
 /// 환경은 `envp`(사용자 셸 환경을 거른 것 — `tool_env.envp()`, §8.1)이고 `null` 이면 앱 환경을 그대로 물려받는다(판정자). 자식은
 /// **새 프로세스 그룹**의 우두머리다(파일 머리 주석).
 pub fn spawn(allocator: std.mem.Allocator, exe_path: []const u8, args: []const []const u8, cwd: []const u8, envp: ?[*:null]const ?[*:0]const u8) SpawnError!Process {
-    var in_fds: [2]c_int = undefined; // 부모 → 자식(자식 stdin)
-    var out_fds: [2]c_int = undefined; // 자식 → 부모(자식 stdout)
+    if (comptime builtin.os.tag != .macos) return error.Spawn;
+    if (!std.fs.path.isAbsolute(exe_path) or std.mem.indexOfScalar(u8, exe_path, 0) != null or
+        std.mem.indexOfScalar(u8, cwd, 0) != null) return error.Spawn;
+    for (args) |arg| if (std.mem.indexOfScalar(u8, arg, 0) != null) return error.Spawn;
+
+    // All temporary argv memory belongs to this synchronous creation call. An
+    // arena also revokes earlier strings if a later argument allocation fails.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const owned = arena.allocator();
+    const exe_z = try owned.dupeSentinel(u8, exe_path, 0);
+    const argv = try owned.allocSentinel(?[*:0]const u8, args.len + 1, null);
+    argv[0] = exe_z.ptr;
+    for (args, 0..) |arg, index| argv[index + 1] = (try owned.dupeSentinel(u8, arg, 0)).ptr;
+    const directory_fd: ?std.c.fd_t = if (cwd.len == 0) null else blk: {
+        const cwd_z = try owned.dupeSentinel(u8, cwd, 0);
+        const fd = std.c.open(cwd_z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+        if (fd < 0) return error.Spawn;
+        break :blk fd;
+    };
+    defer if (directory_fd) |fd| {
+        _ = std.c.close(fd);
+    };
+    var in_fds: [2]c_int = undefined;
     if (std.c.pipe(&in_fds) != 0) return error.Pipe;
-    if (std.c.pipe(&out_fds) != 0) {
-        _ = std.c.close(in_fds[0]);
-        _ = std.c.close(in_fds[1]);
-        return error.Pipe;
-    }
-    for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1] }) |fd| _ = std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
-    _ = std.c.fcntl(in_fds[1], std.c.F.SETNOSIGPIPE, @as(c_int, 1)); // 서버가 먼저 죽어도 우리는 안 죽는다(ssh_upload 와 같은 실측)
+    errdefer closePipe(in_fds);
+    var out_fds: [2]c_int = undefined;
+    if (std.c.pipe(&out_fds) != 0) return error.Pipe;
+    errdefer closePipe(out_fds);
+    for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1] }) |fd|
+        if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) != 0) return error.Pipe;
+    if (std.c.fcntl(in_fds[1], std.c.F.SETNOSIGPIPE, @as(c_int, 1)) != 0 or
+        !setNonBlocking(in_fds[1]) or !setNonBlocking(out_fds[0])) return error.Pipe;
+    const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    if (dev_null < 0) return error.Pipe;
+    defer _ = std.c.close(dev_null);
 
-    // argv/envp 를 fork 전에 만든다 — 자식에서 할당하면 안 된다.
-    var argv: std.ArrayList(?[*:0]const u8) = .empty;
-    defer argv.deinit(allocator);
-    var owned: std.ArrayList([:0]u8) = .empty;
-    defer {
-        for (owned.items) |s| allocator.free(s);
-        owned.deinit(allocator);
-    }
-    const exe_z = try allocator.dupeSentinel(u8, exe_path, 0);
-    try owned.append(allocator, exe_z);
-    try argv.append(allocator, exe_z.ptr);
-    for (args) |a| {
-        const z = try allocator.dupeSentinel(u8, a, 0);
-        try owned.append(allocator, z);
-        try argv.append(allocator, z.ptr);
-    }
-    try argv.append(allocator, null);
-    const cwd_z = try allocator.dupeSentinel(u8, cwd, 0);
-    defer allocator.free(cwd_z);
-
-    const max_fd = getdtablesize();
-    const pid = std.c.fork();
-    if (pid < 0) {
-        for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1] }) |fd| _ = std.c.close(fd);
-        return error.Fork;
-    }
-    if (pid == 0) {
-        // 그룹을 먼저 만든다 — 부모도 같은 호출을 한다(아래). 어느 쪽이 먼저 돌든 `execve` 전에 그룹이 선다.
-        if (std.c.setpgid(0, 0) != 0) std.c._exit(exit_setup_failed);
-        _ = std.c.dup2(in_fds[0], 0);
-        _ = std.c.dup2(out_fds[1], 1);
-        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDWR });
-        if (devnull >= 0) {
-            _ = std.c.dup2(devnull, 2); // §8.2a: 서버 로그는 우리 것이 아니다
-            _ = std.c.close(devnull);
-        }
-        // A formatter worker may be between pipe() and fcntl(CLOEXEC) when
-        // this fork occurs. Close every non-standard descriptor in the child,
-        // so that even that window cannot retain another process's pipe ends.
-        var fd: c_int = 3;
-        while (fd < max_fd) : (fd += 1) _ = std.c.close(fd);
-        if (cwd_z.len > 0 and std.c.chdir(cwd_z.ptr) != 0) std.c._exit(exit_setup_failed);
-        _ = std.c.execve(exe_z.ptr, @ptrCast(argv.items.ptr), if (envp) |e| @ptrCast(e) else @ptrCast(std.c.environ));
-        std.c._exit(127);
-    }
-    // 자식이 아직 `setpgid` 에 닿기 전이어도 그룹이 서게 부모가 한 번 더 한다(경쟁을 닫는 관례). 자식이 이미 exec 했으면 EACCES,
-    // 이미 끝났으면 ESRCH — 둘 다 자식 쪽 호출이 이미 그룹을 세웠거나 그럴 필요가 없어진 경우라 무시한다.
-    _ = std.c.setpgid(pid, pid);
+    // Darwin creates the group before running the server. The common boundary
+    // pins mapping sources and closes every unspecified descriptor atomically.
+    const pid = macos_spawn.spawnGrouped(exe_z.ptr, argv.ptr, envp orelse std.c.environ, .{ in_fds[0], out_fds[1], dev_null, null }, directory_fd) catch return error.Spawn;
     _ = std.c.close(in_fds[0]);
     _ = std.c.close(out_fds[1]);
-    setNonBlocking(in_fds[1]);
-    setNonBlocking(out_fds[0]);
     return .{ .pid = pid, .in_fd = in_fds[1], .out_fd = out_fds[0] };
 }
 
-fn setNonBlocking(fd: c_int) void {
-    const fl = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
-    if (fl >= 0) _ = std.c.fcntl(fd, std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+fn closePipe(fds: [2]c_int) void {
+    for (fds) |fd| _ = std.c.close(fd);
+}
+
+fn setNonBlocking(fd: c_int) bool {
+    const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
+    return flags >= 0 and std.c.fcntl(fd, std.c.F.SETFL, flags | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true }))) == 0;
 }
 
 /// 쓴다 — 파이프가 차면 남은 것을 `pending_out` 에 두고 다음 `flush` 가 잇는다. 상대가 닫혔거나 밀린 것이 상한을 넘으면
@@ -333,7 +310,7 @@ pub fn lowerAll(items: []Lowering, grace_ms: u64) void {
     for (items) |*l| _ = std.c.kill(-l.pid, std.c.SIG.KILL); // 음수 pid = 그 그룹 전체(`killpg`)
     for (items) |*l| {
         if (!l.reaped) {
-            _ = std.c.kill(l.pid, std.c.SIG.KILL); // 그룹이 서기 전에 끝난 경계(자식이 `setpgid` 전에 죽었다)에서도 서버 자신은 죽인다
+            _ = std.c.kill(l.pid, std.c.SIG.KILL); // 그룹 정산 뒤에도 소유 중인 direct child를 끝낸다
             var ms: u64 = 0;
             while (!reapNoHang(l) and ms < reap_after_kill_ms) : (ms += 1) sleepMs(1);
         }

@@ -1804,3 +1804,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [위치 검색 서버 재시작](plans/lsp-location-server-restart.md): 실제 종료·새 PID의 재검색과 다른 root 종료·끄기/켜기를 검증한다.
 - [위치 검색 재시도 수명](plans/lsp-location-retry-lifecycle.md): 예약·상한·새 명령과 실제 문서 전환의 기존 계약을 검증한다.
 - [위치 결과의 검색 종류와 실패 안내](plans/lsp-location-result-kind.md): 새 검색 대기가 기존 목록의 실패 안내 종류를 바꾸는 결함을 수정한다.
+
+- [LSP·formatter 그룹 생성 경쟁 제거](plans/editor-grouped-spawn.md) — native 생성·실패 구분·FD/OOM·단일 시한.

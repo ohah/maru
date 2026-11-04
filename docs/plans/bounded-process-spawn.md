@@ -10,6 +10,6 @@ PoC 비교와 추가 적대 검증은 [Draft #4671](https://github.com/ohah/maru
 - 머지 게이트: main 리베이스 뒤 집중·경계·앱 빌드와 필수 CI를 다시 확인한다.
 - ReleaseFast 검증 보강: OS remap 성공 여부에 따라 OOM 실패 주입 위치가 달라지던 기존 검사는
   alloc/free 추적을 유지하면서 resize/remap을 거부하는 backing allocator로 검증한다.
-- 미착수: PTY/LSP/formatter 등 다른 fork 호출의 이관. 이 변경은 bounded-process 소비자만 대상으로 한다.
+- 별도 후속: [LSP·formatter 이관](editor-grouped-spawn.md). PTY fork 호출 이관은 미착수다. 이 계획의 범위는 bounded-process 소비자다.
 
-PoC의 CI 통과를 제품 변경의 CI 통과로 대신하지 않는다. 제품 변경은 PR #4677에서 별도로 검토하며, 사용자 승인 뒤 필수 CI를 확인하고 머지한다.
+PoC의 CI 통과를 제품 변경의 CI 통과로 대신하지 않는다. 제품 변경은 PR #4677에서 별도로 검증했고 사용자 승인 뒤 필수 CI를 확인하여 머지했다.

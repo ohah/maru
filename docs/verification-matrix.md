@@ -5550,3 +5550,12 @@ byte 후보와 현재 줄 투영, 원본 불변과 연속 기준 퇴역을 대�
 [실측](../tools/editor-parse-incremental/fold-results.md)은 같은 실행 파일의 접힘 전체/증분
 준비 32프로세스/640편집이며 괄호 재사용은 양쪽에서 유지한다. 성능/정확성·fixture를
 구분한다. GUI 표시·HID/IME·CPU 시간·RSS 또는 모든 언어의 개선으로 일반화하지 않는다.
+
+
+## LSP·formatter grouped native spawn (2026-11-04)
+
+`test-editor-process-spawn`은 독립 C child probe를 사용해 Debug·ReleaseFast 각각 20개를 강제한다.
+그룹·argv/env/cwd·stdio·주변 FD 차단·실제 종료와 생성 오류 구분·OOM·FD 자원 고갈·시한·회수를 검사한다.
+`test-editor-process-isolation`은 기존 5개에 LSPB15와 EFP4를 포함한 7개를 강제한다.
+이는 native 프로세스 계약 증거다. GUI 입력이나 실제 언어 서버의 진단 수신을 검증한 것으로 세지 않는다.
+최종 결과와 원격 CI 상태는 해당 Draft PR 본문/checks를 따른다.

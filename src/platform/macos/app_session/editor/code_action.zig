@@ -39,6 +39,8 @@ pub const Owned = struct {
     /// 그 항목을 낸 서버(서버 표의 정적 이름 — §8.2u)와 그 서버의 순서(주 서버 0 — 합칠 때 앞).
     exe: []const u8 = "",
     origin: u8 = 0,
+    /// Copied edit ranges keep the response encoding even if this server restarts.
+    encoding: lsp.rpc.PositionEncoding,
 
     fn deinit(self: *Owned, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
@@ -203,7 +205,14 @@ pub fn onResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, result: ?s
                 self.allocator.free(raw);
                 break;
             };
-            st.pending.append(self.allocator, .{ .title = title, .raw = raw, .has_edit = it.edit != null, .exe = c.server.exe, .origin = @intCast(w[1]) }) catch {
+            st.pending.append(self.allocator, .{
+                .title = title,
+                .raw = raw,
+                .has_edit = it.edit != null,
+                .exe = c.server.exe,
+                .origin = @intCast(w[1]),
+                .encoding = c.encoding,
+            }) catch {
                 self.allocator.free(raw);
                 self.allocator.free(title);
                 break;
@@ -287,7 +296,7 @@ pub fn accept(self: *AppSession, index: usize) void {
         return;
     };
     if (item.has_edit) {
-        applyRaw(self, item.raw, c.encoding);
+        applyRaw(self, item.raw, item.encoding);
         return;
     }
     // resolve — 항목 JSON 그대로, 그 서버에.

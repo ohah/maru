@@ -76358,6 +76358,119 @@ test "LOCSAVE5 pending location responses retain target lifetime guards after ac
 }
 
 const action_save_source = "int a; // CASTALL\n";
+// Non-BMP document bytes exercise UTF-8/UTF-16 offsets, not localized UI text.
+const action_encoding_source = "a\xf0\x9f\x98\x80target; // CASTALL\n";
+const action_encoding_fixed = "a\xf0\x9f\x98\x80FIXED; // CASTALL\n";
+fn actionEncodingReplyForTest(probe: ActionSaveProbe, lazy: bool, utf16: bool) ![]u8 {
+    if (lazy) {
+        var p = probe;
+        p.phase = 2;
+        return actionSaveReplyForTest(p);
+    }
+    const start: u32 = if (utf16) 3 else 5;
+    return std.json.Stringify.valueAlloc(testing.allocator, .{.{ .title = "encoded_edit", .edit = .{ .documentChanges = .{.{ .textDocument = .{ .uri = probe.uri_buf[0..probe.uri_len], .version = @as(?u32, null) }, .edits = .{.{ .range = .{ .start = .{ .line = 0, .character = start }, .end = .{ .line = 0, .character = start + 6 } }, .newText = "FIXED" }} }} } }}, .{});
+}
+fn actionEncodingForTest(old_utf16: bool, lazy: bool) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |new_utf16| for (0..@as(usize, if (lazy) 1 else 5)) |mode| {
+        locationSaveEncodingForTest(old_utf16);
+        defer _ = unsetenv("MARU_FAKE_LSP_UTF16");
+        var f = (try SmtFixture.openRepo(testing.allocator, "source.c", action_encoding_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const probe = try prepareActionSaveForTest(&f.fx, f.term, 0);
+        try testing.expectEqual(@as(maru.session.editor.lsp.rpc.PositionEncoding, if (old_utf16) .utf16 else .utf8), probe.owner.encoding);
+        const raw = try actionEncodingReplyForTest(probe, lazy, old_utf16);
+        defer testing.allocator.free(raw);
+        var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+        defer result.deinit();
+        code_action_client.onResponse(s, probe.owner, probe.seq, result.value, false, null);
+        try testing.expect(s.code_action_menu and s.chrome_host.context_menu.open);
+        const pid = probe.owner.proc.?.pid;
+        locationSaveEncodingForTest(new_utf16);
+        try testing.expect(pid > 0);
+        try testing.expectEqual(@as(c_int, 0), std.c.kill(pid, std.c.SIG.KILL));
+        try testing.expect(pumpLspUntil(&f.fx, 3000, probe.owner, struct {
+            fn down(c: *lsp_client.Client) bool {
+                return c.phase == .restarting;
+            }
+        }.down));
+        probe.owner.retry_at_ms = 0; // Explicit backoff seam; new PID and encoding negotiation are real.
+        const Ctx = struct { s: *AppSession, term: *Term, pid: std.c.pid_t };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = s, .term = f.term, .pid = pid }, struct {
+            fn ready(c: Ctx) bool {
+                return (lsp_client.readyClientFor(c.s, c.term) orelse return false).proc.?.pid != c.pid;
+            }
+        }.ready));
+        const current = lsp_client.readyClientFor(s, f.term).?;
+        try testing.expectEqual(@as(maru.session.editor.lsp.rpc.PositionEncoding, if (new_utf16) .utf16 else .utf8), current.encoding);
+        try testing.expect(s.code_action_menu and s.chrome_host.context_menu.open);
+        if (mode != 0) {
+            try testing.expect(code_action_client.quickFix(s));
+            if (mode != 1) {
+                const fresh_raw = try actionEncodingReplyForTest(probe, false, new_utf16);
+                defer testing.allocator.free(fresh_raw);
+                var fresh = try std.json.parseFromSlice(std.json.Value, testing.allocator, fresh_raw, .{});
+                defer fresh.deinit();
+                const dropped = s.editor_code_action.dropped_behind_overlay;
+                code_action_client.onResponse(s, current, s.editor_code_action.waits[0].seq, if (mode == 2) fresh.value else null, mode == 4, "new encoding error");
+                try testing.expectEqual(dropped + 1, s.editor_code_action.dropped_behind_overlay);
+            }
+        }
+        settings_ops.acceptContextMenu(s);
+        if (lazy) {
+            try testing.expect(s.editor_code_action.resolve_waiting);
+            const resolved_raw = try actionEncodingReplyForTest(probe, false, new_utf16);
+            defer testing.allocator.free(resolved_raw);
+            var resolved = try std.json.parseFromSlice(std.json.Value, testing.allocator, resolved_raw, .{});
+            defer resolved.deinit();
+            // A new resolve response uses its responding connection's new encoding.
+            code_action_client.onResolveResponse(s, current, s.editor_code_action.resolve_seq, resolved.value.array.items[0], false, null);
+        }
+        const doc = f.term.rt.editorDocument();
+        if (!std.mem.eql(u8, action_encoding_fixed, doc.opened.?.file.content)) std.debug.print("CAENC wrong old_utf16={any} new_utf16={any} lazy={any} mode={d} applied={d} body={s}\n", .{
+            old_utf16, new_utf16, lazy, mode, s.editor_code_action.applied, doc.opened.?.file.content,
+        });
+        try testing.expectEqualStrings(action_encoding_fixed, doc.opened.?.file.content);
+        try testing.expectEqual(@as(u64, 1), s.editor_code_action.applied);
+        try testing.expectEqual(@as(usize, 1), doc.history.undo_len);
+        s.chrome_host.notice.dismiss();
+        try testing.expect(undoEdit(s, f.term));
+        try testing.expectEqualStrings(action_encoding_source, doc.opened.?.file.content);
+        // A genuinely new menu must own the new encoding, without affecting copied old items.
+        try testing.expect(code_action_client.quickFix(s));
+        const fresh_raw = try actionEncodingReplyForTest(probe, false, new_utf16);
+        defer testing.allocator.free(fresh_raw);
+        var fresh = try std.json.parseFromSlice(std.json.Value, testing.allocator, fresh_raw, .{});
+        defer fresh.deinit();
+        code_action_client.onResponse(s, current, s.editor_code_action.waits[0].seq, fresh.value, false, null);
+        try testing.expect(s.code_action_menu);
+        settings_ops.acceptContextMenu(s);
+        try testing.expectEqualStrings(action_encoding_fixed, doc.opened.?.file.content);
+        try testing.expectEqual(@as(u64, 2), s.editor_code_action.applied);
+        try testing.expectEqual(@as(usize, 1), doc.history.undo_len);
+        s.chrome_host.notice.dismiss();
+        try testing.expect(undoEdit(s, f.term));
+        try testing.expectEqualStrings(action_encoding_source, doc.opened.?.file.content);
+        try batchApplyDisk(&f.fx, "source.c", action_encoding_source);
+        std.debug.print("CAENC case old_utf16={any} new_utf16={any} lazy={any} mode={d} old_pid={d} new_pid={d} preserved=true\n", .{
+            old_utf16, new_utf16, lazy, mode, pid, current.proc.?.pid,
+        });
+    };
+}
+test "CAENC1 ready UTF8 results retain their encoding across actual server restart" {
+    try actionEncodingForTest(false, false);
+}
+test "CAENC2 ready UTF16 results retain their encoding across actual server restart" {
+    try actionEncodingForTest(true, false);
+}
+test "CAENC3 lazy results from UTF8 server use the new resolve response encoding" {
+    try actionEncodingForTest(false, true);
+}
+test "CAENC4 lazy results from UTF16 server use the new resolve response encoding" {
+    try actionEncodingForTest(true, true);
+}
 fn actionMenuEditForTest(probe: ActionSaveProbe, start: u32) ![]u8 {
     return std.json.Stringify.valueAlloc(testing.allocator, .{.{ .title = "menu_edit", .edit = .{ .documentChanges = .{.{ .textDocument = .{ .uri = probe.uri_buf[0..probe.uri_len], .version = @as(?u32, null) }, .edits = .{.{ .range = .{ .start = .{ .line = 0, .character = start }, .end = .{ .line = 0, .character = start + 3 } }, .newText = "FIXED" }} }} } }}, .{});
 }

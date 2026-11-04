@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+코드 액션 결과 인코딩: `test-editor-code-action-encoding`은 실제 새 PID의 UTF-8/UTF-16
+협상 뒤 이전 edit·새 resolve·새 메뉴의 정확한 본문과 Undo를 24조건으로 검사한다.
+[검증 범위](plans/lsp-code-action-result-encoding.md)는 실제 프로세스/협상과 직접 응답을 구분한다.
+
 코드 액션 메뉴 버전: `test-editor-code-action-menu-snapshot`은 실제 편집 뒤 ready/lazy
 이전 항목의 거절과 새 메뉴의 정상 적용·Undo를 24조건으로 대조한다.
 [계획](plans/lsp-code-action-menu-snapshot.md)의 native controller·직접 응답·파일 증거를 따른다.

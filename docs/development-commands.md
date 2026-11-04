@@ -2353,6 +2353,10 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 
 ### 코드 액션 응답 출처
 
+`mise exec -- zig build test-editor-code-action-encoding -j2`와 `-Doptimize=ReleaseFast`는
+실제 재시작과 UTF-8/UTF-16 협상 뒤 ready 항목의 원래 인코딩·새 resolve·새 메뉴를 24조건으로 검사한다.
+행동 4개와 초기화 4개(총 8개)이며 [결과 인코딩 범위](plans/lsp-code-action-result-encoding.md)를 따른다.
+
 `mise exec -- zig build test-editor-code-action-menu-snapshot -j2`와 `-Doptimize=ReleaseFast`는
 표시된 ready/lazy 메뉴와 새 목록 대기·버려진 응답·할당 실패·정상 게시를 24조건으로 검사한다.
 행동 2개와 초기화 4개(총 6개)이며 [메뉴 버전 검증](plans/lsp-code-action-menu-snapshot.md)을 따른다.

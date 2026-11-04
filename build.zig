@@ -6713,6 +6713,16 @@ pub fn build(b: *std.Build) void {
         run_definition_origins.addArg("--maru-expect-passed=8");
         macos_only_test_step.dependOn(&run_definition_origins.step);
     }
+    const action_menu_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CAMENU"} });
+    const run_action_menu = b.addRunArtifact(action_menu_tests);
+    run_action_menu.setCwd(b.path("."));
+    run_action_menu.addArg("--maru-expect-tests=6");
+    run_action_menu.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-code-action-menu-snapshot", "Verify displayed code actions retain their document version snapshot").dependOn(&run_action_menu.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_action_menu.addArg("--maru-expect-passed=6");
+        macos_only_test_step.dependOn(&run_action_menu.step);
+    }
     const code_action_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CA1 ", ".test.CA2 ", ".test.ASB3 ", ".test.ASB4 ", ".test.ASB6 ", ".test.LATE3 " } });
     const run_code_action_origin_tests = b.addRunArtifact(code_action_origin_tests);
     run_code_action_origin_tests.setCwd(b.path("."));

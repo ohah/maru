@@ -1932,7 +1932,7 @@ resolve·같은 원본 토글/확정/Undo를 검사한다. 9개(행동 5개, 초
 ### LSP WorkspaceEdit 사전 준비
 
 `mise exec -- zig build test-editor-workspace-edit`와 `-Doptimize=ReleaseFast`는
-이름 바꾸기·코드 액션·공유 뷰 제품 회귀와 WEOOM1 실패 주입을 실행한다(총 20개).
+이름 바꾸기·코드 액션·공유 뷰 제품 회귀와 WEOOM1 실패 주입을 실행한다(총 21개).
 단일/여러 열린 문서·닫힌 파일 혼합, Undo/Redo·선택·revision 보존, 동일 본문 편집,
 선택 없는 뷰, 이력 ID 고갈, 공유 정본의 작업 되돌리기를 검사한다.
 물리 IME·실제 메모리 고갈·전원 손실의 검증을 대신하지 않는다.
@@ -2352,6 +2352,10 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 - 공유 파싱 요청: `tools/editor-parse-runtime/review.py --scope sharing`은 Runtime 12개·host 6개와 실제 Apple 전달에서 동일 입력 재사용·입력 변경 게시·닫기 뒤 재요청을 검사한다. 새 외부 output/deps/cache 인자는 기존 runtime 안내를 따른다.
 
 ### 코드 액션 응답 출처
+
+`mise exec -- zig build test-editor-code-action-menu-snapshot -j2`와 `-Doptimize=ReleaseFast`는
+표시된 ready/lazy 메뉴와 새 목록 대기·버려진 응답·할당 실패·정상 게시를 24조건으로 검사한다.
+행동 2개와 초기화 4개(총 6개)이며 [메뉴 버전 검증](plans/lsp-code-action-menu-snapshot.md)을 따른다.
 
 `mise exec -- zig build test-editor-code-action-origins test-editor-save-pipeline -j2` — 같은 exe/seq의 다른 root 응답 격리와 주/보조 서버 합산·resolve·저장 회귀. [계획](plans/code-action-response-origin.md)을 따른다.
 

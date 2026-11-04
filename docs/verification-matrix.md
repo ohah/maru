@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+코드 액션 메뉴 버전: `test-editor-code-action-menu-snapshot`은 실제 편집 뒤 ready/lazy
+이전 항목의 거절과 새 메뉴의 정상 적용·Undo를 24조건으로 대조한다.
+[계획](plans/lsp-code-action-menu-snapshot.md)의 native controller·직접 응답·파일 증거를 따른다.
+
 위치 요청 실패: `test-editor-location-request`는 네 기존 종류·네 새 종류와
 positive/null/예약의 48조건에서 실제 할당 실패 뒤 원본 응답과 다음 정상 요청을 검사한다.
 [검증 범위](plans/lsp-location-request-publication.md)는 native 명령·fake 요청·직접 응답과 실패 주입이다.

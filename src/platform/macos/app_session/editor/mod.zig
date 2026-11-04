@@ -76358,6 +76358,83 @@ test "LOCSAVE5 pending location responses retain target lifetime guards after ac
 }
 
 const action_save_source = "int a; // CASTALL\n";
+fn actionMenuEditForTest(probe: ActionSaveProbe, start: u32) ![]u8 {
+    return std.json.Stringify.valueAlloc(testing.allocator, .{.{ .title = "menu_edit", .edit = .{ .documentChanges = .{.{ .textDocument = .{ .uri = probe.uri_buf[0..probe.uri_len], .version = @as(?u32, null) }, .edits = .{.{ .range = .{ .start = .{ .line = 0, .character = start }, .end = .{ .line = 0, .character = start + 3 } }, .newText = "FIXED" }} }} } }}, .{});
+}
+fn actionMenuSnapshotForTest(lazy: bool) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |edited| for (0..6) |mode| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "source.c", action_save_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const probe = try prepareActionSaveForTest(&f.fx, f.term, if (lazy) 2 else 1);
+        if (edited) {
+            f.term.rt.editor_selection = editor_selection.Selection.at(0);
+            try testing.expect(insertText(s, f.term, "Z"));
+        }
+        try testing.expect(s.code_action_menu and s.chrome_host.context_menu.open);
+        const content = if (edited) "Zint a; // CASTALL\n" else action_save_source;
+        const undo = f.term.rt.editorDocument().history.undo_len;
+        const dropped = s.editor_code_action.dropped_behind_overlay;
+        if (mode == 4) {
+            var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+            const allocator = s.allocator;
+            const sent = blk: {
+                s.allocator = failing.allocator();
+                defer s.allocator = allocator;
+                break :blk code_action_client.quickFix(s);
+            };
+            try testing.expect(failing.has_induced_failure and !sent);
+        } else {
+            try testing.expect(code_action_client.quickFix(s));
+            const seq = s.editor_code_action.waits[0].seq;
+            if (mode != 0) {
+                const raw = if (lazy) try actionSaveReplyForTest(probe) else try actionMenuEditForTest(probe, if (edited and mode == 5) 1 else 0);
+                defer testing.allocator.free(raw);
+                var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+                defer result.deinit();
+                if (mode == 5) settings_ops.closeContextMenu(s);
+                code_action_client.onResponse(s, probe.owner, seq, if (mode == 2 or mode == 3) null else result.value, mode == 3, "new listing error");
+                try testing.expectEqual(dropped + @as(u64, if (mode == 5) 0 else 1), s.editor_code_action.dropped_behind_overlay);
+            }
+        }
+        try testing.expect(s.code_action_menu and s.chrome_host.context_menu.open);
+        settings_ops.acceptContextMenu(s);
+        if (lazy) {
+            try testing.expect(s.editor_code_action.resolve_waiting);
+            const raw = try actionMenuEditForTest(probe, if (edited and mode == 5) 1 else 0);
+            defer testing.allocator.free(raw);
+            var result = try std.json.parseFromSlice(std.json.Value, testing.allocator, raw, .{});
+            defer result.deinit();
+            code_action_client.onResolveResponse(s, probe.owner, s.editor_code_action.resolve_seq, result.value.array.items[0], false, null);
+        }
+        const rejected = edited and mode != 5;
+        if (rejected and s.editor_code_action.applied != 0) std.debug.print("CAMENU stale applied lazy={any} mode={d} body={s}undo={d}\n", .{
+            lazy, mode, f.term.rt.editorDocument().opened.?.file.content, f.term.rt.editorDocument().history.undo_len,
+        });
+        try testing.expectEqual(@as(u64, if (rejected) 0 else 1), s.editor_code_action.applied);
+        try testing.expectEqual(@as(u64, if (rejected) 1 else 0), s.editor_workspace_edit.refused_stale);
+        if (rejected) {
+            try testing.expectEqualStrings(content, f.term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(undo, f.term.rt.editorDocument().history.undo_len);
+        } else {
+            try testing.expectEqualStrings(if (edited) "ZFIXED a; // CASTALL\n" else "FIXED a; // CASTALL\n", f.term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(undo + 1, f.term.rt.editorDocument().history.undo_len);
+            s.chrome_host.notice.dismiss();
+            try testing.expect(undoEdit(s, f.term));
+            try testing.expectEqualStrings(content, f.term.rt.editorDocument().opened.?.file.content);
+        }
+        try batchApplyDisk(&f.fx, "source.c", action_save_source);
+        std.debug.print("CAMENU case lazy={any} edited={any} mode={d} rejected={any} preserved=true\n", .{ lazy, edited, mode, rejected });
+    };
+}
+test "CAMENU1 ready menu retains its original document snapshot" {
+    try actionMenuSnapshotForTest(false);
+}
+test "CAMENU2 lazy menu retains its original document snapshot" {
+    try actionMenuSnapshotForTest(true);
+}
 const ActionSaveProbe = struct { term: *Term, owner: *lsp_client.Client, seq: u32, phase: u8, uri_buf: [std.fs.max_path_bytes + 16]u8 = undefined, uri_len: usize = 0 };
 fn actionSaveReplyForTest(probe: ActionSaveProbe) ![]u8 {
     const uri = probe.uri_buf[0..probe.uri_len];

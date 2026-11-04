@@ -56,7 +56,8 @@ test "check-boundaries runs as four index shards behind one aggregate check that
     try std.testing.expectEqual(@as(usize, 1), count(workflow, "[ \"$sum\" -eq \"$total\" ] ||"));
     // 샤드 캐시는 샤드별 키에 저장하고 예산은 전체의 1/3 이다 — 저장소 캐시가 10 GB 상한에 닿아 있다.
     try std.testing.expectEqual(@as(usize, 2), count(workflow, "check-boundaries-s${{ matrix.shard }}of4-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}"));
-    try std.testing.expectEqual(@as(usize, 1), count(workflow, "prune-zig-cache.sh 1024"));
+    const shard_job = workflow[std.mem.indexOf(u8, workflow, "  check-boundaries-shard:\n").?..std.mem.indexOf(u8, workflow, "  check-boundaries:\n").?];
+    try std.testing.expectEqual(@as(usize, 1), count(shard_job, "prune-zig-cache.sh 1024"));
 
     // 문서는 같은 이름을 안다.
     try std.testing.expect(count(docs, "boundary-shard") >= 1);

@@ -2393,3 +2393,20 @@ SDK 없는 계약은 `python3 -m unittest discover -s tools/editor-input-attribu
 Debug와 ReleaseFast 각각 20 compiled / 20 passed로 검사한다. 독립 C probe로 그룹·FD·cwd·argv·환경을
 확인하고, 누락 실행 파일/디렉터리·권한·NUL·닫힌 stdio·높은 주변 FD·FD 고정 중 자원 고갈·OOM·시한을 검사한다.
 macOS-only CI에는 선택된 optimize 모드가 포함된다. 이는 프로세스 계약 검사이며 GUI/LSP protocol 검증과 구별한다.
+
+## macOS CI 게이트 분할
+
+`mise exec -- zig build test-macos-only`는 로컬 전체 검사를 유지한다.
+`-Dmacos-only-shard=0/3`으로 CI의 한 샤드를 선택한다(인덱스 0·1·2).
+`zig build plan-macos-only`는 실행 없이 실제 그래프를
+`zig-out/macos-only-manifest.json`에 기록한다. 전체 plan과 세 샤드 plan을 각각 보관한 뒤
+`python3 tools/ci/macos_shards.py plans full.json part0.json part1.json part2.json`으로
+누락·중복을 확인한다. `compile-macos-only`는 같은 선택의 Zig compile prerequisites만
+빌드한다. 테스트 실행이 warm 그래프에 포함되면 빌드 설정이 실패한다.
+
+CI의 `macOS-only gates`는 세 worker의 manifest와 실행 receipt를 검증하는 필수 집계다.
+검증된 같은 tree의 main push만 compile-only로 캐시를 보충한다. PR·수동·미검증 main은
+실제 검사와 SSH/진단/원격 SCM 추가 검사를 실행한다. 캐시는 샤드당 1 GiB로 main만 저장한다.
+`mise exec -- python3 -m unittest discover -s tools/ci -p test_macos_shards.py`는
+신뢰 조건·누락/중복·실패/취소·부분 재실행·캐시 writer 조건을 검사한다.
+[설계와 검증 범위](plans/ci-macos-gates-shards.md)를 따른다.

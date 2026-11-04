@@ -12632,6 +12632,7 @@ pub fn build(b: *std.Build) void {
 
     // 모든 스텝이 생긴 **뒤**여야 한다 — 호출자가 테스트를 좁혔으면 테스트 run 스텝이 캐시된 결과를 주고받지 않게
     // 한다(`build/support.zig` `uncacheTestRunsWhenNarrowed`).
+    @import("build/macos_gates.zig").register(b, macos_only_test_step);
     support.uncacheTestRunsWhenNarrowed(b);
 }
 

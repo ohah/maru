@@ -1806,3 +1806,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [위치 결과의 검색 종류와 실패 안내](plans/lsp-location-result-kind.md): 새 검색 대기가 기존 목록의 실패 안내 종류를 바꾸는 결함을 수정한다.
 
 - [LSP·formatter 그룹 생성 경쟁 제거](plans/editor-grouped-spawn.md) — native 생성·실패 구분·FD/OOM·단일 시한.
+
+- [macOS CI 게이트 분할·신뢰된 캐시 보충](plans/ci-macos-gates-shards.md): 기존 검사 범위와 필수 체크를 유지하며 세 worker로 분배한다.

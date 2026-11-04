@@ -5559,3 +5559,11 @@ byte 후보와 현재 줄 투영, 원본 불변과 연속 기준 퇴역을 대�
 `test-editor-process-isolation`은 기존 5개에 LSPB15와 EFP4를 포함한 7개를 강제한다.
 이는 native 프로세스 계약 증거다. GUI 입력이나 실제 언어 서버의 진단 수신을 검증한 것으로 세지 않는다.
 최종 결과와 원격 CI 상태는 해당 Draft PR 본문/checks를 따른다.
+
+## macOS CI 집계의 실행 증거
+
+`macOS-only gates`는 세 macOS worker의 전체 catalog 일치·선택 root의 정확한 합집합·
+추가 검사 성공 receipt를 Linux에서 검증한다. receipt는 커밋·workflow run·attempt·manifest
+해시와 묶인다. 실패/취소/누락은 실패이며 명시적 비 runtime 분류만 worker 생략을 허용한다.
+검증된 같은 tree의 main compile-only는 테스트 통과 증거가 아니라 캐시 보충 증거다.
+[계획](plans/ci-macos-gates-shards.md)과 `tools/ci/test_macos_shards.py`를 따른다.

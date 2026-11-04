@@ -1751,10 +1751,11 @@ fn v20nRun(r: *Run, report: Report, session: *u32, log_path: ?[:0]const u8) !voi
         // 재검증 8 차(R-1): `v20n-r1h` 는 τ 를 나눈 HEAD·Range 기록이 판마다 생겨야 한다(빈 판이 통과하지 않게).
         // 재검증 9 차(LOW-H): 위험 꼴이 정말 생겼는지도 — host 가 판마다 W1 응답을 버렸고(`sw-lose` 줄 ≥ 판 수 — 진단이 조용히 꺼지면 선다), 보인 것은
         // τ 를 나눈 HEAD·Range W 라 페이지 GET 을 머리·부분 응답·독 τ 로 막았다(`sig`·`partial`·`mixed` 까닭 ≥ 1 — Chromium 이 τ 를 나누지 않게 바뀌면 선다).
+        // 재검증 10 차(LOW-J): 막은 까닭도 판마다(≥ 성공한 판 수) — 한 판에서만 위험 꼴이 서도 통과하던 것을 조였다(검증 v20p 7 회차 — 실측은 10).
         const is_r1h = comptime std.mem.eql(u8, nm, "v20n-r1h");
         const lost = if (is_r1h) logLines(log_path, log0, &.{"body: sw-lose "}) else 0;
         const shared = if (is_r1h) logLines(log_path, log0, &.{ "reason=sig", "reason=partial", "reason=mixed" }) else 0;
-        report(p0 and ok == 10 and tot.wrong == 0 and tot.multi_end == 0 and (!is_r1h or (tot.sw >= 8 and lost >= ok and shared >= 1)), nm, std.fmt.bufPrint(&detail, "trials {d}/10: {s}{s}", .{ ok, bodyLine(&tot, ok == 10, &lb2), if (is_r1h) (std.fmt.bufPrint(&lb_r1h, " · host dropped W1 responses {d} (sw-lose) · page GETs held off by a shared-τ HEAD/Range W {d} (sig/partial/mixed)", .{ lost, shared }) catch "") else "" }) catch "");
+        report(p0 and ok == 10 and tot.wrong == 0 and tot.multi_end == 0 and (!is_r1h or (tot.sw >= 8 and lost >= ok and shared >= ok)), nm, std.fmt.bufPrint(&detail, "trials {d}/10: {s}{s}", .{ ok, bodyLine(&tot, ok == 10, &lb2), if (is_r1h) (std.fmt.bufPrint(&lb_r1h, " · host dropped W1 responses {d} (sw-lose) · page GETs held off by a shared-τ HEAD/Range W {d} (sig/partial/mixed)", .{ lost, shared }) catch "") else "" }) catch "");
         try r.navigate(tab_a, "/blank");
         r.pump(500);
     };

@@ -502,6 +502,9 @@ pub fn explainable(rid: []const u8, method: []const u8, kind: []const u8, url: [
 /// 같은 τ 를 GET(200)·HEAD(200, 빈 본문)·Range(206, 앞부분)가 함께 나눈다(실측 v20n-r2h 10/10 — 1–10 회차 2 회차). 그래서 「τ 가 같으면 본문이
 /// 같다」 는 머리가 같을 때만 선다.
 pub const Sig = struct { method: u64 = 0, range: u64 = 0 };
+/// 재검증 9 차(LOW-A): 머리의 표 칸 — 적은 차례 번호와 함께(오래된 것부터 잊는다).
+pub const SigSlot = struct { sig: Sig, seq: u64 };
+pub const SigOrder = struct { key: WKey, seq: u64 };
 
 pub const W = struct {
     tau: i64 = 0,
@@ -600,9 +603,15 @@ pub const jump_tolerance_us: i64 = 1_000;
 
 pub const Link = struct {
     ws: std.AutoHashMapUnmanaged(WKey, W) = .empty,
-    /// 재검증 8 차(R-1): 응답을 기다리는 W 의 머리(시작 사건 때 — 응답 때 `ws` 로 옮긴다). `max_ws` 에 닿으면 비운다(그 W 들은 머리를 몰라
-    /// 잇지 않는다 — 잃는 쪽).
-    sigs: std.AutoHashMapUnmanaged(WKey, Sig) = .empty,
+    /// 재검증 8 차(R-1): 응답을 기다리는 W 의 머리(시작 사건 때 — 응답 때 `ws` 로 옮긴다, 실패하면 지운다). 재검증 9 차(LOW-A): `max_ws` 에 닿으면
+    /// 가장 오래된 것부터 `evict_batch` 만큼 잊는다(그 W 들은 머리를 몰라 잇지 않는다 — 잃는 쪽). 전에는 통째로 비워 그때 응답을 기다리던 W 를
+    /// 모두 잃었고, 실패한 W 의 칸은 지우지 않아 쌓였다(검증 v20o-B P11-s·P19-s).
+    sigs: std.AutoHashMapUnmanaged(WKey, SigSlot) = .empty,
+    /// 재검증 9 차(LOW-A): 머리를 적은 차례(`sig_head` 앞은 잊었다). 칸의 `seq` 가 표의 것과 다르면 지운 뒤 다시 적은 것이라 건너뛴다. 길이는
+    /// `2 * max_ws` 에 닿으면 산 칸만 남겨 줄인다(산 칸은 `max_ws` 이하).
+    sig_order: std.ArrayList(SigOrder) = .empty,
+    sig_head: usize = 0,
+    sig_seq: u64 = 0,
     taus: std.AutoHashMapUnmanaged(i64, TauEntry) = .empty,
     /// 넣은 차례(쫓아내기 — 홉 τ 는 `hop_order`).
     order: std.ArrayList(WKey) = .empty,
@@ -631,6 +640,7 @@ pub const Link = struct {
     pub fn deinit(self: *Link, gpa: std.mem.Allocator) void {
         self.ws.deinit(gpa);
         self.sigs.deinit(gpa);
+        self.sig_order.deinit(gpa);
         self.taus.deinit(gpa);
         self.order.deinit(gpa);
         self.hop_order.deinit(gpa);
@@ -699,6 +709,8 @@ pub const Link = struct {
     pub fn clear(self: *Link) void {
         self.ws.clearRetainingCapacity();
         self.sigs.clearRetainingCapacity();
+        self.sig_order.clearRetainingCapacity();
+        self.sig_head = 0;
         self.taus.clearRetainingCapacity();
         self.order.clearRetainingCapacity();
         self.hop_order.clearRetainingCapacity();
@@ -724,17 +736,52 @@ pub const Link = struct {
     }
 
     /// 재검증 8 차(R-1): 워커 요청의 시작 사건(리다이렉트 홉이 아닌 것) — 그 머리를 응답 때까지 둔다. 탭 사이 사본이 다른 머리로 오면 모르는 것으로.
+    /// 재검증 9 차(LOW-A): 부른 쪽은 맨 위 출처 세션의 W 만 적는다(남의 출처 세션의 W 는 맞추기에 들지 않아 쓸 데가 없고, 쏟아짐 밸브에 세지 않아
+    /// 표를 빠르게 채운다 — P11-s).
     pub fn noteSent(self: *Link, gpa: std.mem.Allocator, key: WKey, sig: Sig) std.mem.Allocator.Error!void {
         if (self.ws.getPtr(key)) |w| {
             // 응답 뒤의 늦은 사본 — 다르면 그 W 의 머리를 모르는 것으로(잇지 않는다).
             if (w.sig.method != sig.method or w.sig.range != sig.range) w.sig = .{};
             return;
         }
-        if (self.sigs.count() >= max_ws) self.sigs.clearRetainingCapacity();
-        const g = try self.sigs.getOrPut(gpa, key);
-        if (!g.found_existing) {
-            g.value_ptr.* = sig;
-        } else if (g.value_ptr.method != sig.method or g.value_ptr.range != sig.range) g.value_ptr.* = .{};
+        if (self.sigs.getPtr(key)) |e| {
+            if (e.sig.method != sig.method or e.sig.range != sig.range) e.sig = .{};
+            return;
+        }
+        if (self.sigs.count() >= max_ws) self.evictSigs();
+        if (self.sig_order.items.len >= 2 * max_ws) self.compactSigs();
+        try self.sigs.ensureUnusedCapacity(gpa, 1);
+        try self.sig_order.ensureUnusedCapacity(gpa, 1);
+        self.sig_seq +%= 1;
+        self.sigs.putAssumeCapacityNoClobber(key, .{ .sig = sig, .seq = self.sig_seq });
+        self.sig_order.appendAssumeCapacity(.{ .key = key, .seq = self.sig_seq });
+    }
+
+    /// 재검증 9 차(LOW-A): 워커 요청이 응답 없이 끝났다(`loadingFailed`) — 그 머리를 지운다(전에는 응답 때에만 지워 실패한 W 의 칸이 쌓였다 — P19-s).
+    pub fn forgetSig(self: *Link, key: WKey) void {
+        _ = self.sigs.remove(key);
+    }
+
+    /// 재검증 9 차(LOW-A): 머리의 표가 찼다 — 가장 오래된 것부터 `evict_batch` 만큼 잊는다(그 W 들은 머리를 몰라 잇지 않는다 — 잃는 쪽).
+    fn evictSigs(self: *Link) void {
+        while (self.sigs.count() > max_ws - evict_batch and self.sig_head < self.sig_order.items.len) : (self.sig_head += 1) {
+            const o = self.sig_order.items[self.sig_head];
+            const e = self.sigs.get(o.key) orelse continue;
+            if (e.seq == o.seq) _ = self.sigs.remove(o.key);
+        }
+    }
+
+    /// 재검증 9 차(LOW-A): 차례 목록을 산 칸만으로 줄인다(자리를 이미 쥐고 있어 할당하지 않는다).
+    fn compactSigs(self: *Link) void {
+        var n: usize = 0;
+        for (self.sig_order.items[self.sig_head..]) |o| {
+            const e = self.sigs.get(o.key) orelse continue;
+            if (e.seq != o.seq) continue;
+            self.sig_order.items[n] = o;
+            n += 1;
+        }
+        self.sig_order.shrinkRetainingCapacity(n);
+        self.sig_head = 0;
     }
 
     /// 워커 응답(`responseReceived`) — τ 색인에 넣는다. 같은 W 가 다른 탭 세션으로 다시 오면 같은 값이면 둔다(다르면 그 W 는 `bad`).
@@ -745,7 +792,7 @@ pub const Link = struct {
             return;
         }
         if (self.order.items.len >= max_ws) self.evict();
-        const sig: Sig = if (self.sigs.fetchRemove(key)) |kv| kv.value else .{};
+        const sig: Sig = if (self.sigs.fetchRemove(key)) |kv| kv.value.sig else .{};
         try self.ws.put(gpa, key, .{ .tau = tau, .disk = disk, .excluded = excl, .status = status, .sig = sig });
         try self.order.append(gpa, key);
         if (tau == 0 or tau <= self.horizon) return; // τ 없음(data:·blob:) — C2 / 지평 이하는 넣지 않는다(그 τ 의 P 는 지평으로 막힌다)
@@ -1480,6 +1527,46 @@ test "재검증 8 차 R-1: τ 를 나눈 W 는 머리(메서드·Range)가 P 와
     try testing.expectEqual(@as(?Reason, .sig), reasonOf(l.decide(5, 7_000, .network, get)));
     // 머리의 표는 응답 때 옮겨 비운다.
     try testing.expectEqual(@as(u32, 0), l.sigs.count());
+}
+
+test "재검증 9 차(LOW-A·M2): 머리의 표가 차면 가장 오래된 것부터 잊는다 — 막 적은 W 의 머리는 남아 잇고, 실패한 W 의 칸은 지우며, 차례 목록은 2 × max_ws 를 넘지 않는다" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    l.raiseVisible(5, 1);
+    const get: Sig = .{ .method = 0x6e7 };
+    var buf: [16]u8 = undefined;
+    for (0..max_ws) |i| try l.noteSent(gpa_t, WKey.of(1, 0, try std.fmt.bufPrint(&buf, "s{d}", .{i})), get);
+    try testing.expectEqual(@as(u32, max_ws), l.sigs.count());
+    // 하나 더 — 가장 오래된 `evict_batch` 를 잊고 새것과 그 앞의 것들은 남는다(전에는 표를 통째로 비웠다).
+    const late = WKey.of(1, 0, "late");
+    try l.noteSent(gpa_t, late, get);
+    try testing.expectEqual(@as(u32, max_ws - evict_batch + 1), l.sigs.count());
+    try testing.expect(l.sigs.contains(late));
+    try testing.expect(!l.sigs.contains(WKey.of(1, 0, "s0")));
+    try testing.expect(!l.sigs.contains(WKey.of(1, 0, try std.fmt.bufPrint(&buf, "s{d}", .{evict_batch - 1}))));
+    try testing.expect(l.sigs.contains(WKey.of(1, 0, try std.fmt.bufPrint(&buf, "s{d}", .{evict_batch}))));
+    // 넘친 뒤에도 남은 W 가 응답하면 머리가 같은 P 를 잇는다.
+    const mid = WKey.of(1, 0, try std.fmt.bufPrint(&buf, "s{d}", .{max_ws - 2}));
+    try l.noteResponse(gpa_t, mid, 9_000, false, false, 200);
+    try l.notePair(gpa_t, mid, 91);
+    try testing.expect(l.decide(5, 9_000, .network, get) == .link);
+    // 잊은 W 는 머리를 모른다 — 잇지 않는다(잃는 쪽).
+    const old = WKey.of(1, 0, "s1");
+    try l.noteResponse(gpa_t, old, 9_100, false, false, 200);
+    try l.notePair(gpa_t, old, 92);
+    try testing.expectEqual(@as(?Reason, .sig), reasonOf(l.decide(5, 9_100, .network, get)));
+    // 실패한 W 의 칸은 지운다.
+    l.forgetSig(late);
+    try testing.expect(!l.sigs.contains(late));
+    // 시작·실패가 오래 이어져도 표는 늘지 않고 차례 목록은 2 × max_ws 를 넘지 않는다.
+    const n0 = l.sigs.count();
+    for (0..3 * max_ws) |i| {
+        const k = WKey.of(2, 0, try std.fmt.bufPrint(&buf, "f{d}", .{i}));
+        try l.noteSent(gpa_t, k, get);
+        l.forgetSig(k);
+    }
+    try testing.expectEqual(n0, l.sigs.count());
+    try testing.expect(l.sig_order.items.len <= 2 * max_ws);
 }
 
 /// 재검증 8 차: 판정의 까닭(잇거나 기다리면 null) — 시험이 union 칸을 곧바로 읽어 변이에서 panic 으로 멈추지 않게.

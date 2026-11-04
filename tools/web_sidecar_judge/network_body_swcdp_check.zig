@@ -261,8 +261,10 @@ fn serveOne(conn: c_int) void {
 // ── 모으기 ────────────────────────────────────────────────────────────────────────────────────────────────
 
 /// 재검증 8 차(R-1): `head` — 기록의 메서드가 HEAD 다. `status`·`crange` — 기록 제 응답의 상태와 `Content-Range`(본문 길이의 참값을 가른다).
-const Begin = struct { browser: u64, request: u64, url: []u8, expected: bool, sw: bool, head: bool = false };
-const Body = struct { browser: u64, request: u64, data: std.ArrayList(u8) = .empty, ends: usize = 0, state: msg.NetBodyState = .unavailable, xbody: []u8 = &.{}, xwho: []u8 = &.{}, cef_end: bool = false, status: u16 = 0, crange: []u8 = &.{} };
+/// 재검증 9 차(LOW-J1): `slot` — 이 시작의 본문 칸(`Run.bodies` 의 자리). CEF 요청 번호는 다시 쓰인다 — 셈은 (번호, 생) 단위로 이 칸을 본다.
+const Begin = struct { browser: u64, request: u64, url: []u8, expected: bool, sw: bool, head: bool = false, slot: usize = std.math.maxInt(usize) };
+/// `begun` — 이 칸에 시작(`net_begin`)이 왔다(같은 번호의 새 시작은 새 칸).
+const Body = struct { browser: u64, request: u64, data: std.ArrayList(u8) = .empty, ends: usize = 0, state: msg.NetBodyState = .unavailable, xbody: []u8 = &.{}, xwho: []u8 = &.{}, cef_end: bool = false, status: u16 = 0, crange: []u8 = &.{}, begun: bool = false };
 
 const Run = struct {
     host: *Host,
@@ -307,9 +309,14 @@ const Run = struct {
             .net_begin => |v| {
                 if (v.flags.service_worker) self.sw_begin.put(self.gpa, v.request, {}) catch {};
                 // 재검증 8 차: CEF 요청 번호는 긴 실행에서 다시 쓰인다(실측 — 300 초 뒤 다른 주소가 같은 번호) — 앞 생의 본문이 끝났으면 새 칸으로(같은
-                // 칸에 끝이 둘로 세여 「several ends」 가 되었다 — `v20m-navn`).
-                if (self.findBody(v.browser, v.request)) |old| if (old.ends > 0) self.bodies.append(self.gpa, .{ .browser = v.browser, .request = v.request }) catch {};
-                self.begins.append(self.gpa, .{ .browser = v.browser, .request = v.request, .url = self.gpa.dupe(u8, v.url) catch &.{}, .expected = v.flags2.body_expected, .sw = v.flags.service_worker, .head = std.ascii.eqlIgnoreCase(v.method, "HEAD") }) catch {};
+                // 칸에 끝이 둘로 세여 「several ends」 가 되었다 — `v20m-navn`). 재검증 9 차(LOW-J1): 앞 생이 끝나지 않았어도 새 시작이면 새 칸이고, 시작은
+                // 제 칸을 적는다 — 셈은 (번호, 생)마다 그 칸을 본다(전에는 번호로 겹침을 지우고 가장 뒤 칸을 봐 한 셈 창에 두 생이 들면 앞 생의 본문을
+                // 보지 않았다 — 검증 v20o 6 회차).
+                const reuse = if (self.findBody(v.browser, v.request)) |old| !old.begun and old.ends == 0 else false;
+                if (!reuse) self.bodies.append(self.gpa, .{ .browser = v.browser, .request = v.request }) catch {};
+                const slot = self.bodies.items.len - 1;
+                self.bodies.items[slot].begun = true;
+                self.begins.append(self.gpa, .{ .browser = v.browser, .request = v.request, .url = self.gpa.dupe(u8, v.url) catch &.{}, .expected = v.flags2.body_expected, .sw = v.flags.service_worker, .head = std.ascii.eqlIgnoreCase(v.method, "HEAD"), .slot = slot }) catch {};
             },
             .net_response => |v| {
                 const b = self.body(v.browser, v.request);
@@ -667,7 +674,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     }
     try v20lRun(&r, report, &session);
     try v20mRun(&r, report, &session);
-    try v20nRun(&r, report, &session);
+    try v20nRun(&r, report, &session, stderr_path);
     host.send(.shutdown) catch {};
     host_alive = false;
     _ = host.wait(wait_ms);
@@ -683,6 +690,31 @@ fn logSize(path: ?[:0]const u8) usize {
 }
 
 const PairResult = struct { log_ok: bool = false, pairs: usize = 0, correct: usize = 0, wrong: usize = 0, no_w: usize = 0, no_rec: usize = 0 };
+
+/// 재검증 9 차(LOW-H): host 로그의 `from` 뒤에서 `needles` 가운데 하나가 든 줄 수(로그가 없으면 0 — 판정이 서지 않는다).
+fn logLines(path: ?[:0]const u8, from: usize, needles: []const []const u8) usize {
+    const gpa = std.heap.c_allocator;
+    const p = path orelse return 0;
+    const fd = std.c.open(p, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    if (fd < 0) return 0;
+    defer _ = std.c.close(fd);
+    var all: std.ArrayList(u8) = .empty;
+    defer all.deinit(gpa);
+    var buf: [65536]u8 = undefined;
+    _ = std.c.lseek(fd, @intCast(from), std.c.SEEK.SET);
+    while (true) {
+        const got = std.c.read(fd, &buf, buf.len);
+        if (got <= 0) break;
+        all.appendSlice(gpa, buf[0..@intCast(got)]) catch break;
+    }
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, all.items, '\n');
+    while (it.next()) |line| for (needles) |nd| if (std.mem.indexOf(u8, line, nd) != null) {
+        n += 1;
+        break;
+    };
+    return n;
+}
 
 fn field(line: []const u8, key: []const u8) ?[]const u8 {
     const at = std.mem.indexOf(u8, line, key) orelse return null;
@@ -758,12 +790,13 @@ fn tally(r: *Run, browser: u64, at: usize) Tally {
 /// 두 표에 모두 든다; 한 탭의 대조가 모두 잃어도 다른 탭의 대조로 서지 않게 탭마다 제 대조만 센다).
 fn tallyCtl(r: *Run, browser: u64, at: usize, ctl_needle: []const u8) Tally {
     var t: Tally = .{};
-    var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    // 재검증 9 차(LOW-J1): (번호, 생) — 시작마다 제 칸(`Begin.slot`)이 있다(같은 칸의 시작이 둘이면 한 번만).
+    var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
     defer seen.deinit(r.gpa);
     for (r.begins.items[at..]) |b| if (b.browser == browser and (std.mem.indexOf(u8, b.url, "/swp/x") != null or std.mem.indexOf(u8, b.url, "/swp/c") != null or v20lTallied(b.url))) {
-        if (seen.contains(b.request)) continue;
-        seen.put(r.gpa, b.request, {}) catch {};
-        const x = r.body(browser, b.request);
+        if (seen.contains(b.slot)) continue;
+        seen.put(r.gpa, b.slot, {}) catch {};
+        const x: *Body = if (b.slot < r.bodies.items.len) &r.bodies.items[b.slot] else r.body(browser, b.request);
         t.total += 1;
         if (b.sw) t.sw += 1;
         const ctl = b.sw and std.mem.indexOf(u8, b.url, ctl_needle) != null;
@@ -1591,6 +1624,9 @@ const swz_page_body = "reg('/swz/sw.js','/swz/').then(async function(){if(!navig
     "if(C=='r8'){await CTL();for(var j=0;j<10;j++){var cu='/swz/c?k='+K+'g'+j;await F(cu,{'x-who':'pt'},{cache:'default'});await S(30);" ++
     "await Promise.all([W(cu,'rv'),F(cu,{'x-who':'hit'},{cache:'default'}),F(cu,{'x-who':'pt'},{method:'HEAD',cache:'default'}),F(cu,{'x-who':'pt'},{method:'OPTIONS'}),F('/swz/rc?k='+K+'g'+j,{'x-who':'pt'},{cache:'default'})]);await S(50)}" ++
     "await S(500);await CTL()}" ++
+    // 재검증 9 차(검증 v20o 5 회차 탐침 → 기준): 기록 중 지켜보기 끔·켬을 빠르게 — 판정자가 `w0` 뒤에 A 의 net_watch 를 여섯 번 끔·켬, 그동안·그 뒤
+    // 다른 주소 fetch 40 과 대조.
+    "if(C=='wof'){await CTL();document.title='w0';await SIG(N+1);for(var j=0;j<40;j++){await W('/swz/x?k='+K+'o'+j,'pt');await S(25)}await CTL()}" ++
     "await S(1500);document.title='bdone'})";
 
 fn v20nServe(conn: c_int, req: []const u8, target: []const u8, path: []const u8) bool {
@@ -1658,8 +1694,9 @@ fn v20nCase(r: *Run, report: Report, session: *u32, comptime name: []const u8, c
     r.pump(500);
 }
 
-fn v20nRun(r: *Run, report: Report, session: *u32) !void {
+fn v20nRun(r: *Run, report: Report, session: *u32, log_path: ?[:0]const u8) !void {
     var detail: [6000]u8 = undefined;
+    var lb_r1h: [200]u8 = undefined;
     var pb: [256]u8 = undefined;
     if (v20nPicked("v20n-r1")) try v20nCase(r, report, session, "v20n-r1", "r1", "", 120_000, 150, 12);
     // 재검증 8 차(R-1): `v20n-r1h` 는 기준 판정이다(고르지 않아도 돈다).
@@ -1677,6 +1714,7 @@ fn v20nRun(r: *Run, report: Report, session: *u32) !void {
         var tot: Tally = .{};
         var ok: usize = 0;
         const at_all = r.begins.items.len;
+        const log0 = logSize(log_path);
         for (1..11) |j| {
             var tb: [8]u8 = undefined;
             if (!r.pumpTitle(tab_a, std.fmt.bufPrint(&tb, "a{d}", .{j}) catch "", 15_000)) break;
@@ -1711,8 +1749,12 @@ fn v20nRun(r: *Run, report: Report, session: *u32) !void {
         _ = at_all;
         var lb2: [2400]u8 = undefined;
         // 재검증 8 차(R-1): `v20n-r1h` 는 τ 를 나눈 HEAD·Range 기록이 판마다 생겨야 한다(빈 판이 통과하지 않게).
-        const r1h_ok = comptime !std.mem.eql(u8, nm, "v20n-r1h");
-        report(p0 and ok == 10 and tot.wrong == 0 and tot.multi_end == 0 and (r1h_ok or tot.sw >= 8), nm, std.fmt.bufPrint(&detail, "trials {d}/10: {s}", .{ ok, bodyLine(&tot, ok == 10, &lb2) }) catch "");
+        // 재검증 9 차(LOW-H): 위험 꼴이 정말 생겼는지도 — host 가 판마다 W1 응답을 버렸고(`sw-lose` 줄 ≥ 판 수 — 진단이 조용히 꺼지면 선다), 보인 것은
+        // τ 를 나눈 HEAD·Range W 라 페이지 GET 을 머리·부분 응답·독 τ 로 막았다(`sig`·`partial`·`mixed` 까닭 ≥ 1 — Chromium 이 τ 를 나누지 않게 바뀌면 선다).
+        const is_r1h = comptime std.mem.eql(u8, nm, "v20n-r1h");
+        const lost = if (is_r1h) logLines(log_path, log0, &.{"body: sw-lose "}) else 0;
+        const shared = if (is_r1h) logLines(log_path, log0, &.{ "reason=sig", "reason=partial", "reason=mixed" }) else 0;
+        report(p0 and ok == 10 and tot.wrong == 0 and tot.multi_end == 0 and (!is_r1h or (tot.sw >= 8 and lost >= ok and shared >= 1)), nm, std.fmt.bufPrint(&detail, "trials {d}/10: {s}{s}", .{ ok, bodyLine(&tot, ok == 10, &lb2), if (is_r1h) (std.fmt.bufPrint(&lb_r1h, " · host dropped W1 responses {d} (sw-lose) · page GETs held off by a shared-τ HEAD/Range W {d} (sig/partial/mixed)", .{ lost, shared }) catch "") else "" }) catch "");
         try r.navigate(tab_a, "/blank");
         r.pump(500);
     };
@@ -1723,4 +1765,41 @@ fn v20nRun(r: *Run, report: Report, session: *u32) !void {
     }
     if (v20nPicked("v20n-r2h")) try v20nCase(r, report, session, "v20n-r2h", "r2h", "", 120_000, 10, 0);
     if (v20nPicked("v20n-r8")) try v20nCase(r, report, session, "v20n-r8", "r8", "", 120_000, 30, 0);
+    if (enabled("v20o-woff")) {
+        // 재검증 9 차(검증 v20o 5 회차 탐침 → 기준 — `Table.watchOff` 를 실제 CEF 로 보는 판정이 없었다): A·B 가 같은 워커 출처를 기록 — A 는
+        // 지켜보기를 기록 중에 여섯 번 끔·켬(B 는 그대로). 끈 탭은 그때부터 다시 기록할 때까지 서비스 워커 본문이 어둠이다(설계). 틀린 본문 0, 끝은
+        // 기록마다 하나, A 의 끄기 앞 대조 ≥ 6, B 의 대조 ≥ 6(A 의 끔이 B 를 해치지 않는다).
+        const n0 = sig.load(.monotonic);
+        session.* += 1;
+        const on_a = recordOn(r, tab_a, session.*);
+        session.* += 1;
+        const on_b = recordOn(r, tab_b, session.*);
+        const at = r.begins.items.len;
+        _ = r.titles.remove(tab_a);
+        _ = r.titles.remove(tab_b);
+        try r.navigate(tab_b, std.fmt.bufPrint(&pb, "/swz/p?c=wof&k=zwofb{d}&x=b&n={d}", .{ session.*, n0 }) catch "");
+        try r.navigate(tab_a, std.fmt.bufPrint(&pb, "/swz/p?c=wof&k=zwofa{d}&x=a&n={d}", .{ session.*, n0 }) catch "");
+        const w0a = r.pumpTitle(tab_a, "w0", 30_000);
+        const toggles: usize = if (std.c.getenv("V20O_TOGGLES")) |v| (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 6) else 6;
+        for (0..toggles) |_| {
+            try watchSet(r, tab_a, false);
+            r.pump(40);
+            try watchSet(r, tab_a, true);
+            r.pump(60);
+        }
+        sig.store(n0 + 1, .monotonic);
+        const da = r.pumpTitle(tab_a, "bdone", 60_000);
+        const db = r.pumpTitle(tab_b, "bdone", 60_000);
+        r.pump(4000);
+        const ta = tallyCtl(r, tab_a, at, "actl");
+        const tb = tallyCtl(r, tab_b, at, "bctl");
+        var la: [2400]u8 = undefined;
+        var lbb: [2400]u8 = undefined;
+        report(on_a and on_b and w0a and da and db and ta.wrong == 0 and tb.wrong == 0 and ta.multi_end == 0 and tb.multi_end == 0 and ta.ctl_own >= 6 and tb.ctl_own >= ctl_min, "v20o-woff", std.fmt.bufPrint(&detail, "toggles {d} · tab A: {s} || tab B: {s}", .{ toggles, bodyLine(&ta, da, &la), bodyLine(&tb, db, &lbb) }) catch "");
+        for ([_]u64{ tab_a, tab_b }) |b| try r.host.send(.{ .net_record = .{ .browser = b, .on = false, .session = 0 } });
+        r.pump(500);
+        try r.navigate(tab_a, "/blank");
+        try r.navigate(tab_b, "/blank");
+        r.pump(500);
+    }
 }

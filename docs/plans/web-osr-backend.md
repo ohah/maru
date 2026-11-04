@@ -3080,7 +3080,7 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         | `swcdp-body-k2` fetch 뒤 대체 + 페이지도 대체 주소 | 60 | 40 | 0 | 대체 fetch 와 페이지의 같은 주소가 겹친다 |
         | `swcdp-body-cache` · `hb` | 30 · 15 | 10 · 0 | 10 · 0 | |
         | `swcdp-body-k3` 다른 탭의 메모 A · B | 10 · 10 | 10 · 10 | 10 · 10 | |
-        | `swcdp-body-scopes` 두 범위 SW 가 같은 주소를 0–9 ms 차로 | 160 | 0 | 64–92(재검증 8 차 17 회차 — 실측 64·86, 처음 적은 82–92 보다 넓게 갈린다) | 겹치지 않는 판(차 > 5 ms 남짓)은 잇는다 — 6 차의 C5(창 2 초)보다 좁다; 몇 판이 겹치는지가 타이밍에 달린다 |
+        | `swcdp-body-scopes` 두 범위 SW 가 같은 주소를 0–9 ms 차로 | 160 | 0 | 64–102(재검증 9 차 LOW-E — 판마다 갈린다; 실측 64·86(8 차 17 회차)·92·94(8 차 검증 v20o 단독)·102·90(9 차 최종 빌드 전체 차례), 처음 적은 82–92 보다 넓다) | 겹치지 않는 판(차 > 5 ms 남짓)은 잇는다 — 6 차의 C5(창 2 초)보다 좁다; 몇 판이 겹치는지가 타이밍에 달린다 |
         | `swcdp-body-xtarget` 두 타깃 같은 때 300 판 | 600 | 0 | 0 | |
         | `v20l-pre` · `-tog` 기록 전 W1 + 켬 직후 같은 주소 W2(다섯 판) | 111 · 110 | 70 · 70 | 0 · 0 | 켬 직후는 눈먼 때(세션이 붙는 중)·W2 는 시작을 잃는다 |
         | `v20l-rng` HTTP 캐시 Range·적중·재검증 | 40 | 10 | 0 | 같은 주소 데우기·Range 가 이어 겹친다 |
@@ -3100,8 +3100,8 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         | `--network`·`--network-body` 의 `body-r4-sw-mixed` | 40 | 40 | 0 | 같은 주소 그대로 넘김 한꺼번에 |
         | `body-r5-sw-other-url` | 40 | 40 | 0 | 워커의 대체 fetch 와 페이지의 같은 주소 |
         | `body-r5-sw-http-cache` | 30 | 15 | 0 | 받자마자(5 ms 안) 같은 주소를 다시 — 판정 창이 겹친다 |
-        | `body-r5-sw-two-tabs` A · B | 180 · 180 | 120 · 60 | 0 · 26–29(재검증 8 차 17 회차 — 실측 28·26·29, 처음 적은 3–5 는 틀렸다) | 두 탭이 같은 주소를 거의 같이(B 의 뒤 판은 겹치지 않는다) |
-        | `body-r5-sw-update` | 400 | 0 | 40–55(재검증 8 차 17 회차 — 실측 40·46) | 두 판 워커가 겹치지 않은 판은 잇는다(틀림 0) |
+        | `body-r5-sw-two-tabs` A · B | 180 · 180 | 120 · 60 | 0 · 0–29(재검증 9 차 LOW-E — 판마다 겹침이 갈린다; `--network-body` 실측 28·26·29·1·0·24, `--network` 0·0·0·0, 처음 적은 3–5 는 틀렸다) | 두 탭이 같은 주소를 거의 같이(B 의 뒤 판은 겹치지 않는다) |
+        | `body-r5-sw-update` | 400 | 0 | 40–55(재검증 8 차 17 회차 — 실측 40·46; 8 차 뒤로는 10–17 — 아래 「재검증 8 차」 표) | 두 판 워커가 겹치지 않은 판은 잇는다(틀림 0) |
         | `--review-body-v20fa` v20i `swlag` X·p1·p2(20 판씩) | 60 | 하한 30 이상 | 0 · 0 · 20 | X·p1 은 같은 주소를 워커가 한꺼번에 — p2 는 혼자라 잇는다 |
         | v20i `swsyn`(s2 는 워커가 스스로 답한다 — 기록 없음) | 40 | 하한 15 이상 | 0 | X·p1 겹침 |
         | v20j `swrev` S 400·600 / S 0 | 40 | 하한 30 이상 | 0 / 38 | 서버가 늦으면 같은 주소 둘이 겹친다 |
@@ -3138,8 +3138,8 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         시계 N19a·N19a2·N19b·N19c·N19d, 설명 미루기 D1–D10 10/10, CEF 변이 N11(밸브가 남의 세션 사건을 센다 — r11-valve FAIL) 1/1. 합 37 중 35.
         게이트 12(`fmt-check`·`check-task-split`·`check-doc-links`·`check-doc-line-refs`·`check-config-docs`·`check-mobile-contract`·
         `check-macos-app-host`·`macos-app-host-swift-check`·`check-boundaries`·`check-targets`·`check-wasm-sync`·`web-sidecar`) 모두 통과.
-      - **리베이스 주의(18 회차 — W9d③ `feat/web-osr-w9d3`·W9d④·W9e①·② 와 합칠 때)**: 넷 모두 이 갈래의 5 차·6 차·7 차·8 차를 품지 않는다(`git merge-tree`
-        로 본 충돌: W9d③ — `build/web_sidecar.zig`·`control-plane-browser.md`·이 계획·`devtools_table.zig`·`net_body.zig`·`wire.zig`; W9d④·W9e — 그에
+      - **리베이스 주의(18 회차 — W9d③ `feat/web-osr-w9d3`·W9d④·W9e①·② 와 합칠 때)**: 넷 모두 이 갈래의 5 차·6 차·7 차·8 차·9 차를 품지 않는다(`git merge-tree`
+        로 본 충돌: W9d③ — `build/web_sidecar.zig`·`control-plane-browser.md`·이 계획·`devtools_table.zig`·`net_body.zig`·`network.zig`(8 차부터 — 아래)·`wire.zig`; W9d④·W9e — 그에
         더해 `cli/browser.zig`·`cli/mcp.zig`·`app_host_abi.zig`·`web_osr.zig`, 그리고 재검증 8 차 18 회차가 다시 잰 다섯 — `net_gate.zig`·
         `session/control_browser.zig`·`session/control_pane_grant.zig`·`session/web_osr_network.zig`·판정자 `tools/web_sidecar_judge/main.zig`(앞 목록에서
         빠졌다). `net_gate.zig` 의 충돌 덩어리는 `Track` 의 필드다 — 이쪽 `site`/`site_len`(과 8 차의 `sw_seq`) ↔ 저쪽 `block_kind`·`block_rules:
@@ -3161,6 +3161,14 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
           `swOriginCount`, `trackServiceWorker` 는 출처 열쇠를 받는다 — 다른 갈래가 그 옛 이름을 쓰면 컴파일이 깨진다(잡힌다). `network.send` 의 덜어
           내기 비트(`u32`)도 같다. `net_body_sw.Origin`·`Attach.park` 를 다른 갈래의 `onTarget` 이 모르면 세워 둔 세션을 enable 하는 길이 생기지 않게
           `switch` 를 빠짐없이 한다.
+        - **`network.zig` `watch()` 끝(재검증 9 차 LOW-F — 8 차가 새로 만든 충돌, 넷 모두)**: 이쪽 `if (!v.on) net_body.watchOff(v.browser);`(8 차 —
+          기록 중 지켜보기 끔은 그때부터 어둠) ↔ W9d③ 의 `blocking.setFull(…)`·`blocking.watchOff(…)`·새 fn `watching`, W9d④·W9e①·② 는 그에 더해
+          `mocking.watchOff`. **둘 다 남긴다**. 저쪽만 고르면 컴파일은 되고(`net_body.watchOff` 는 쓰이지 않는 pub fn 으로 남는다) 순수 `Table.watchOff`
+          시험도 통과해 잡는 시험이 없다(판정 `--review-body-swcdp` 의 `v20o-woff` 는 지켜보기 끔 뒤 틀린 본문 0 만 보고 어둠 자체는 단언하지 않는다).
+          합친 뒤 `git grep -n "net_body.watchOff(" -- src/platform/macos/web_sidecar/network.zig` 가 한 줄인지 본다. 지금 maru 는 기록을 먼저 끄고
+          지켜보기를 끄므로(`reconcileNetwork`) 닿지 않는 길이지만 막아 둔 방어가 소리 없이 사라진다.
+        - **`docs/development-commands.md` 의 판정자 줄(재검증 9 차가 새로 만든 충돌, 넷 모두)**: 이쪽이 `--network` 판정 줄 끝에 sidecar 진단 변수(LOW-E1)를
+          더했다 — 저쪽도 같은 긴 줄을 고쳤다. 두 쪽의 글을 모두 남긴다(이쪽 몫은 `MARU_WEB_TEST_SW_NOTES` 부터 「W9d② 재검증 9 차)」 까지).
         - 공통: 리베이스 뒤 `zig build test-web-sidecar`(시험 수 원장 `pure_test_count` — 두 쪽의 시험을 모두 더한다)와 게이트 12 를 다시 돈다.
     - **재검증 8 차(7 차 고침 `34df5f03c` 의 재검증 1–20 회차 — 검증자 v20n, 2026-11-03)**: 결함 하나(D-v20n-1)와 위험 하나(R-1), 가정·시험·글의
       LOW 들을 찾았다. 「틀린 본문 0 이 잃는 본문보다 앞선다」 에 따라 구조적으로 보수적인 규칙을 골랐다. 검증 기록은 `scratchpad/w9d2_v20n/ROUNDS_{1-10,11-20}.md`,
@@ -3215,8 +3223,8 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         |---|---|---|---|
         | `v20n-r1`(열쇠 가장자리 — 탐침) | 188 | 173 | 워커 GET 으로 답한 페이지 HEAD 15 — 머리가 달라 잇지 않는다(본문은 맞았다) |
         | `v20n-r12-hop` 다른 탭 B(D-v20n-1) | 0/20 | 20/20 | 떠난 출처의 요청을 언제나 놓는다 |
-        | `body-r5-sw-update`(`--network-body` · `--network`) | 40 · 62 | 12 · 18 | 새 판 워커가 기록 중 붙을 때 그 앞 1 초의 P 를 기다리던 짝을 되돌린다(늦게 안 눈먼 때) |
-        | `body-r5-sw-two-tabs` B | 28 · 0 | 0 · 29 | 그대로(두 갈래 — 0 이거나 26–29, 판마다 겹침이 갈린다) |
+        | `body-r5-sw-update`(`--network-body` · `--network`) | 40 · 62 | 12–17 · 10–18 | 새 판 워커가 기록 중 붙을 때 그 앞 1 초의 P 를 기다리던 짝을 되돌린다(늦게 안 눈먼 때). 판·모드마다 갈린다(재검증 9 차 LOW-E — `--network-body` 실측 12(8 차)·17·17(검증 v20o)·15·12(9 차), `--network` 18(8 차)·12·15(v20o)·17·10(9 차)) |
+        | `body-r5-sw-two-tabs` B | 28 · 0 | 0–29 · 0 | 그대로 — 판마다 겹침이 갈린다(재검증 9 차 LOW-E: 「두 갈래 — 0 이거나 26–29」 는 틀렸다; `--network-body` 실측 0·29(8 차)·1·28(검증 v20o)·0·24(9 차), `--network` 0·0(v20o)·0·0(9 차)) |
         | `swcdp-body-*`·`v20l-*`·`v20m-*`·`--review-body-v20fa` 서비스 워커 사례 | — | 같다 | `swcdp-body-scopes` 72·80 → 82·76(타이밍) 말고는 같은 수 |
         | 퍼즈 눈먼 때 세계 둘의 이은 수(30 000 판) | 42 341 · 46 151 | 39 674 · 43 346 | 늦게 안 눈먼 때 |
 
@@ -3242,3 +3250,91 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
       - **8 차가 바꾼 형(리베이스)**: `sw_mod.Link.decide` 가 머리(`Sig`)를 받는다, `Event.will_be_sent`·`WorkerEvent.sent` 에 `range_hash`, `Candidate.cef_status`·
         `Table.cefStatus`, `net_body.cefCovered` 가 상태를 받는다, `net_gate.max_sw_slots`·`Track.sw_seq`·`State.evictOrphan`, `Table.watchOff`·
         `net_body.watchOff`, 판정자 진단 `MARU_WEB_TEST_SW_LOSE`(sidecar — 판정자만 켠다).
+    - **재검증 9 차(8 차 고침 `e48f01493` 의 재검증 1–20 회차 — 검증자 v20o, 2026-11-04)**: 틀린 본문 하나(D-v20o-1 — 이중 방어의 한 겹)와 잃는 꼴·
+      위생·글·문서·판정의 LOW 들을 찾았다. 검증 기록은 `scratchpad/w9d2_v20o/ROUNDS_{1-10,11-20}.md`(탐침 `tests_a.patch`·`tests_b.patch`), 고침의 실행
+      기록은 `scratchpad/w9d2_v9/`.
+      - **D-v20o-1(LOW — 틀린 본문)**: 8 차의 「늦게 안 눈먼 때」 되돌림(`openBlind`)은 그 탭의 사본만 끝냈다. 짝(`Link` — W 의 `pair`·`explained`)은 탭
+        사이에 나누므로, 같은 출처를 기록하는 다른 탭의 같은 번호 사본(그 탭은 그 W 를 맞추지 않았다 — 기록을 늦게 켰거나 그 W 의 세션을 보지 못했다)에
+        그 W 의 응답 사본을 받은 P 가 되돌린 짝으로 이었다(순수 R2-a·R2-b WRONG). 7 차 겹침 규칙의 「앞 판정이 짝을 맺어 P 를 기다리는 기록」 끝내기
+        (`endWorkerWindow`)도 같은 꼴이었다. 고침(`retractPair`·`retractCopies`): 짝을 되돌리면 그 짝의 W 를 나쁜 것으로 두고(`Candidate.pair_w` —
+        이 탭의 판정이 짝을 맺은 W; 어느 탭의 P 도 그 W 로 잇지 않는다), 다른 탭의 같은 번호 사본도 끝낸다(이미 이어 받으러 간 사본은 그대로 두고
+        그 사본과 짝을 맺은 W 도 나쁜 것으로). 두 겹은 서로를 덮는다 — 사본을 끝내지 않아도 W 가 나쁘면 그 P 는 `bad_worker`, W 를 그대로 두어도 사본이
+        없으면 `not_in_tab`(변이 V2·V3 이 한쪽만 되돌리면 R2-a 의 「되돌린 때 W 가 나쁘다·사본이 끝났다」 단언으로 잡는다).
+        - 퍼즈의 둘째 탭 세계(아래 LOW-T1)가 8 차 코드에서 이 꼴을 낸다: `two-tabs+blind+share+lose` 30 000 판 WRONG 2(씨앗 6499·17729 — 둘 다 둘째
+          탭의 P), 고친 뒤 0.
+        - **같은 「다른 탭 사본」 가정을 훑은 자리**: ① 늦게 안 눈먼 때(고쳤다), ② 7 차 겹침 규칙이 끝내는 짝 맺은 기록(고쳤다), ③ 7 차 겹침 규칙이
+          끝내는 **짝 없는** 기록 — 다른 탭이 제 판정으로 그 사본과 짝을 맺었을 수 있다; 그 판정은 그 탭의 세션·눈먼 때·자리로 섰고(같은 출처의 워커는
+          두 탭이 같은 사건을 본다 — 다른 것은 붙은 때와 기록을 켠 때뿐이고 그 앞은 그 탭의 눈먼 때·경계가 막는다) 되돌리면 그 탭의 맞는 본문을
+          잃으므로 넘기지 않았다(남는 가정), ④ C3b′ 의 「설명됨」(`isExplained` — 어느 탭의 짝이든)은 되돌린 뒤에도 남는다(그 기록은 끝났고 그 W 는
+          나쁘다 — 그 기록으로 잇는 길이 없다; 지우면 그 탭이 어둠이 되어 잃음만 는다), ⑤ `swPointedAmbiguous`(P 마다의 까닭 — 상태·어둠·시한)는 짝을
+          의심하는 것이 아니라 그대로, ⑥ 두 탭이 같은 W 에 다른 기록을 주면 그 W 는 나쁜 것(`notePair` — 3 차부터).
+      - **LOW-A(잃는 쪽)**: W 의 머리 표 `Link.sigs` 가 `max_ws` 에 닿으면 통째로 비워 그때 응답을 기다리던 W 의 머리를 모두 잊었고, 실패한 W 의 칸은 응답
+        때에만 지워 쌓였다. 이제 실패(`loadingFailed`)에서 지우고, 차면 **가장 오래된 것부터** `evict_batch` 만큼 잊는다(차례 목록 `sig_order` — 2 ×
+        `max_ws` 에 닿으면 산 칸만 남긴다), **남의 출처 세션의 W 는 적지 않는다**(맞추기에 들지 않아 쓸 데가 없고, 밸브에 세지 않아 표를 빠르게 채웠다 —
+        P11-s: 남의 세션이 응답 없는 fetch 16 384 를 내도 맨 위 출처 W 의 P 를 잇는다, P19-s: 보냄 + 실패 1 000 뒤 표 0).
+      - **LOW-B(잃는 쪽, 7 차부터)**: enable 답 전에 렌더러가 죽으면 `sw.detachAll` 이 세션 표를 비워 그 답·떨어짐이 눈먼 때를 닫지 못해 기록 내내 그 탭의
+        서비스 워커 본문 0 이었다. `Table.rendererGone` 이 그 탭의 열린 눈먼 때를 그 시각으로 닫는다(닫힌 눈먼 때는 그대로 — P14-r).
+      - **LOW-C·E1(위생)**: sidecar 는 앱의 환경을 물려받아 판정자·진단 변수(`MARU_WEB_TEST_SW_LOSE`·`_SW_NOTES`·`_BODY_LOG`·`MARU_WEB_SW_CDP` 등)가 든
+        셸에서 띄운 릴리스 maru 에서도 켜졌다. 릴리스 판(hardened runtime)은 `MARU_WEB_TEST_*`·`MARU_WEB_SW_CDP` 를 sidecar 환경에서 뺀다(`web_osr.hostEnv` —
+        `MARU_WEB_OSR_DIR` 선례). 개발 명령 문서에 빠진 변수를 적었다.
+      - **LOW-D(글)**: MCP `browser_network_record`·control-plane 의 눈먼 때 글을 실제 범위(그 탭의 다른 출처 iframe 의 워커도)로, 206 은 `Range` 가 같아도
+        잇지 않는다고 분명히.
+      - **LOW-E(문서)**: 잃는 본문 표(7 차·8 차)의 값을 이 회차 고친 뒤 다시 잰 폭으로(위 표들).
+      - **LOW-F(리베이스 문서)**: 「리베이스 주의」 에 `network.zig` `watch()` 끝을 더했다(위).
+      - **LOW-G(값)**: 맨 위 출처 세션 붙음의 되돌리기가 `orderedRemove` 를 거듭하던 O(후보²)를 한 번 훑는 압축으로 — 후보 4 096 이 모두 되돌릴 짝일 때
+        ReleaseFast 11.3 ms(검증 v20o P19-t) → 0.39 ms, Debug 13.4 → 5.0–5.4 ms(남은 값은 끝 알림 두 개씩 8 192 개를 쌓는 것 — 순수 시험 「재검증 9 차(LOW-G — 값)」).
+      - **LOW-H·판정 들이기**: `v20n-r1h` 는 host 로그의 `sw-lose` 줄 ≥ 판 수와 `sig`·`partial`·`mixed` 까닭 ≥ 1 을 함께 단언한다(빈 판 통과 금지 — 진단이
+        조용히 꺼지거나 Chromium 이 τ 를 나누지 않게 바뀌면 FAIL). 검증자 탐침 `v20o-woff`(`--review-body-swcdp` — 기록 중 지켜보기 끔·켬 여섯 번)와
+        `v20o-r12rec`(`--review-body-v20m` — v20n-r12-hop 을 A 가 기록하며; 비운 놓은 요청의 기록이 틀림·끝 둘·끝 없음 없이 끝난다)를 기준으로 들였다.
+        `V20O-HANG`(v20l 진단)은 LOW-T3 의 셈(`hang_seen`)으로 갈음했다.
+      - **LOW-J1(판정 품질)**: swcdp 판정자는 시작마다 제 본문 칸(`Begin.slot`)을 적고 (CEF 번호, 생)으로 센다 — 같은 번호의 새 시작은 앞 생이 끝나지
+        않았어도 새 칸(전에는 번호로 겹침을 지우고 가장 뒤 칸을 봐 한 셈 창에 두 생이 들면 앞 생의 본문을 보지 않았다).
+      - **LOW-T1(시험 품질)**: 퍼즈 `swFuzz` 에 둘째 탭 세계(`tab2` — 같은 출처를 기록하는 탭 6: 기록은 두 탭에 같은 번호로, 판의 절반은 40 ms 까지 늦게
+        켜고, 워커 세션·눈먼 때는 탭마다, 둘째 탭의 페이지도 아무 fetch 의 응답 사본을 받는다; 끝은 사본마다 하나)와 어둠 판 비율의 위 끝 단언(세계마다 —
+        아래 표)을 넣었다.
+      - **LOW-T2(시험 빈칸)**: 되돌리기의 「이미 이은 것은 그대로」(R9-a), 되돌리는 창 앞 50 ms 여유(M8 — 안·여유 안·밖), 파서의 `Range` 읽기(M5·M6·M7 —
+        페이지·워커, 대소문자·공백), 머리 표의 상한(M2 — 오래된 것부터·차례 목록 길이).
+      - **LOW-T3(판정)**: `--review-body-v20l` 의 `r14-cap` 끝에서 서버가 매달린 `/g/hang` 을 곧 푼다(`hang_release` — 줄에 선 134 개까지 서버에 닿아 끝날
+        때까지, 닿은 수가 3 초 오르지 않을 때까지 기다린다). 전에는 첫 6 개가 끝나 `hang_open` 이 잠깐 0 이 되면 나가 뒤 회차의 O2 페이지가 서지 않았다.
+      - **퍼즈 어둠 판 비율(30 000 판 · ReleaseSafe — 위 끝 단언)**:
+
+        | 세계(30 000 판) | 이은 수 | 어둠 판 | 비율 | 단언(위 끝) |
+        |---|---|---|---|---|
+        | `rough` · `rough+clock` | 7 376 · 6 514 | 15 265 · 14 903 | 51 % · 50 % | 60 % |
+        | `gentle+gap` · `gentle+skew` | 45 392 · 64 290 | 2 622 · 4 344 | 8.7 % · 14.5 % | 20 % · 25 % |
+        | `gentle+blind+clock+omit` · `gentle+blind+gap` | 39 674 · 43 346 | 175 · 77 | 0.6 % · 0.3 % | 5 % |
+        | `gentle+blind+share+lose` | 13 110 | 14 575 | 49 % | 60 % |
+        | `two-tabs+blind+share+lose`(새 — 탭 5 · 탭 6) | 15 027 | 14 234 · 18 519 | 47 % · 62 % | 70 % |
+
+        모두 WRONG 0(8 차 코드는 새 세계에서 WRONG 2). 단일 탭 일곱 세계의 수는 8 차와 같다(씨앗·난수 차례를 바꾸지 않았다). τ 나누기 세계의 어둠이
+        여전히 판의 절반 남짓인 까닭은 그대로다(W 응답을 잃으면 그 자리가 열린 채 10 초 뒤 어둠 — 8 차 검증 v20o 8 회차); 둘째 탭은 판의 절반이 기록을
+        늦게 켜 그 앞에 시작한 W 의 기록이 설명되지 않아 더 어둡다.
+
+      - **잃는 본문(8 차 → 9 차)**: 서비스 워커 갈래 기록의 제 본문(9 차 최종 빌드 `scratchpad/w9d2_v9/logs/{netbody,network,swcdp}_{1,2}.log` — 판정 줄의 수):
+        `body-r5-sw-update` `--network-body` 15·12, `--network` 17·10(8 차 표의 폭 안 — 위 표를 폭으로 고쳤다), `body-r5-sw-two-tabs` B `--network-body` 0·24,
+        `--network` 0·0, `swcdp-body-scopes` 102·90(검증 v20o 단독 92·94보다 위 — 64–102 로), `v20n-r1` 173, `v20o-woff` A 8(끄기 앞 대조 8/8 — 그 뒤는
+        어둠, 설계)·B 56, `v20o-r12rec` B 20/20. 나머지 판정 사례는 8 차와 같은 판정(PASS)이다. 9 차의 고침은 잃음을 늘리지 않는다 — D-v20o-1 은 되돌린
+        짝(이미 잃는 쪽)의 다른 탭 사본만, LOW-A·B 는 잃던 것을 되찾는 쪽이다.
+      - **판정·시험(재검증 9 차 최종 빌드)**: 순수 `zig build test-web-sidecar` **331/331**(원장 331 — net_gate 23·net_body_table 219·net_body_sw 19;
+        8 차 319 + 검증자 탐침을 들인 것 R2-a·R2-b·R9-a·P11-s·P19-s·P14-r + 9 차 새 시험 6 — 7 차 겹침 꼴의 다른 탭 사본·이은 사본은 그대로·되돌리는 창
+        여유·파서 `Range`·머리 표 상한·되돌리기 값; 퍼즈는 같은 시험에 세계 하나를 더했다), `web_osr` 의 새 시험(릴리스 판 sidecar 환경)은
+        `test-macos-app-host-abi` 바이너리에서 통과, CLI `test-cli-failure-contract` 832 통과·1 skip(8 차와 같다), 퍼즈 30 000 판 여덟 세계 WRONG 0(위).
+        실제 CEF(최종 빌드, 1 분 부하 2–5): 고친 갈래 2 판씩 — `--review-body-swcdp` **39/39 · 39/39**(`v20n-r1h` 「sw-lose 10 · 막은 까닭 10」 둘 다,
+        `v20o-woff`·`v20m-navn` 포함), `--review-body-v20m` **10/10 · 10/10**(`v20o-r12rec` 포함), `--review-body-v20l` **15/15 · 15/15**(전체 차례 —
+        `r14-many`·`r14-stall` 이 처음으로 전체 차례에서 선다), `--network-body` 92/92 · 92/92, `--network` 173/173 · 173/173; 회귀 1 판씩 —
+        `--review-body-v20a` 35/35, `-v20b` 42/42, `-v20fb` 336/336(`V20F_HOSTLOG`), `-v20fa`(단독) 66/66.
+        변이(이 작업 트리, ReleaseSafe·퍼즈 3 000 판, 판정은 실패 수로만, 변이마다 원본으로 되돌려 `cmp` 확인 — 모두 같았다): 순수 26 —
+        D-v20o-1 열넷(8 차 꼴로 되돌림 V1 은 R2-a·R2-b·7 차 꼴 시험이 잡는다; 첫 판은 V2–V6·V8–V10·V14 가 살아 — 두 겹이 서로를 덮어 한쪽만 되돌려도
+        P 는 잇지 않았다 — 「되돌린 때 W 가 나쁘다·사본이 그때 끝났다·이은 사본은 그대로」 를 단언하고 이은 사본 시험을 더해 잡았다), LOW-A 아홉(9/9),
+        LOW-B 셋(첫 판 B2 「닫힌 눈먼 때도 닫는다」 가 살아 닫힌 눈먼 때를 단언), 최종 **24/26** — 살아남은 둘 V12·V13(되돌린 번호 표를 비우지 않는다)은
+        그 번호의 사본이 이미 끝나 같은 번호가 다시 오지 않으면 같은 일을 한다(동등에 가깝다 — 표가 자랄 뿐). 릴리스 판 환경 셋(`test-macos-app-host-abi`):
+        두 접두 각각을 남기는 변이 2/2 잡힘, `start` 의 `if (hardened)` 를 끄는 변이는 산다(`start` 를 부르는 시험이 없다 — 서명한 hardened 앱 스모크의 몫).
+        판정자(CEF) 1/1: host 가 `MARU_WEB_TEST_SW_LOSE` 를 읽지 않게 한 빌드에서 `v20n-r1h` FAIL(「sw-lose 0」 — 8 차 판정은 이 빌드에서도 PASS 였다).
+        게이트 12(`fmt-check`·`check-task-split`·`check-doc-links`·`check-doc-line-refs`·`check-config-docs`·`check-mobile-contract`·`check-macos-app-host`·
+        `macos-app-host-swift-check`·`check-boundaries`·`check-targets`·`check-wasm-sync`·`web-sidecar`) 모두 통과.
+      - **남는 틈**: 8 차의 ①–④ 그대로, 더해 ⑤ 7 차 겹침 규칙이 끝내는 짝 없는 기록의 다른 탭 사본(그 탭이 제 판정으로 맺은 짝 — 위 「훑은 자리」 ③), ⑥ 릴리스 판
+        sidecar 환경 거르기를 실제 hardened 앱으로 본 판정은 없다(순수 시험은 거르는 함수만 — 변이 E3), ⑦ D-v20o-1 을 실제 CEF 로 낸 판정은 없다(늦은
+        붙은 알림 · 제 기록 없는 보이는 W · 둘째 탭의 같은 응답 — 순수·퍼즈로만).
+      - **9 차가 바꾼 형(리베이스)**: `Candidate.pair_w`, `Table.rendererGone` 이 시각을 받는다, `sw_mod.Link.sigs` 의 값은 `SigSlot`(+ `sig_order`·
+        `forgetSig`), `Table.retractPair`·`retractCopies`·`Scratch.retracted`, `web_osr.hostEnv`·`devOnlyHostEnv`, 판정자 `Begin.slot`·`Body.begun`·
+        `logLines`·v20l `hang_seen`·`hang_release`.

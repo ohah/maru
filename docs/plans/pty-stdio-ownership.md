@@ -22,3 +22,15 @@ LSP·formatter의 grouped spawn을 그대로 쓰는 이관은 제어 터미널 �
 공개 API 근거: Apple [dup2(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/dup2.2.html)의 FD 대체와 복제 규칙,
 [fcntl(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html)의 FD_CLOEXEC 규칙을 따른다.
 `F_DUPFD_CLOEXEC` 상수와 호출 표면은 현재 macOS SDK의 `sys/fcntl.h`로 확인했다.
+
+
+머지 검토에서 수동 ReleaseFast의 기존 EOF fixture 경쟁을 확인했다. 완성 응답 수신 뒤에는
+peer가 아직 열려 있을 수 있으므로, peer close 완료를 기다린 뒤 EOF를 단언한다.
+추가 held-peer 대조군은 열린 동안 null·연결 유지, 닫힘 완료 뒤 terminal/source-zero를
+legacy·generation 양쪽에서 검사한다. 기존 C3 cadence 12개(30개 실제 소켓 조건)를 두 모드에서 실행한다.
+peer close를 보류한 채 원래 EOF 기대를 적용하면 두 모드에서 CI와 같은 실패가 재현됐다.
+제품의 비차단 읽기 계약은 유지한다.
+
+수동 editor ReleaseFast의 콜드 실행도 1502/2019까지 진행하다 잡 예산 35분으로 중단돼
+전체 잡 예산을 50분으로 보완했다. 개별 테스트 시한과 단언은 유지한다.
+사용자 기본 셸 시작 시한 건은 수정 전 backend에서도 재현한 별도 opt-in 환경 조건이다.

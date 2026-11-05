@@ -155,3 +155,7 @@ GPU presentedTime을 혼동하지 않는다. 세대나 시각이 없는 자료�
 
 추가 `--display-stages`는 같은 구문 프레임의 tick·Swift draw·renderer·commit 직전·실제 표시를
 연결한다. [설치 이후 단계 결과](display-stage-results.md)에서 별도 모집단과 손상 대조를 확인한다.
+
+추가 `--frame-wake-control`의 동일 앱 예약 대조는 `frame_wake_study.py`로 수집하고
+`frame_wake_report.py`로 독립 재계산한다. [프레임 요청 대조 결과](frame-wake-results.md)는
+입력/유휴 CPU·tick/draw·표시 지연과 제품 반영 보류 이유를 함께 기록한다.

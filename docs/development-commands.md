@@ -10,6 +10,10 @@
 `display_stage_review.py`의 실제 프레임 손상 대조는
 [설치 이후 표시 계약](../tools/editor-input-stream/display-stage-results.md)을 따른다.
 
+`--frame-wake-control` 진단 앱의 예약 대조·입력/유휴 CPU·tick/draw와 손상 검증은
+[실행과 결과](../tools/editor-input-stream/frame-wake-results.md)를 따른다.
+`frame_wake_study.py`·`frame_wake_report.py`·`frame_wake_review.py`가 각각 수집·재계산·독립 손상을 맡는다.
+
 색 표시의 단계 분해와 timer 30/60/120Hz 대조는
 [실행·판정 계약](../tools/editor-input-latency/stage-results.md)을 따른다.
 `stages.py`는 기존 원시 시각을 다시 검증하고, `cadence.py`는 격리 설정으로 실제 입력을 비교한다.

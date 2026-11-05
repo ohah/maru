@@ -2432,3 +2432,17 @@ CI의 `macOS-only gates`는 세 worker의 manifest와 실행 receipt를 검증�
 21조건 × 4방식 × C O0/O2의 관측 원문을 새 외부 디렉터리에 보관한다.
 [도구 설명](../tools/pty-spawn-poc/README.md)과 [결과 해석](plans/pty-native-spawn-poc.md)을 따른다.
 제품 테스트와 기본 CI gate를 대체하지 않는다.
+
+## PTY helper 실제 셸 수명 PoC
+
+`python3 tools/pty-spawn-poc/lifecycle.py --output /tmp/maru-pty-lifecycle-new`와
+`python3 tools/pty-spawn-poc/lifecycle_controls.py --output /tmp/maru-pty-lifecycle-controls-new`는
+[20개 독립 계약·환경 제외·설계 검토안](plans/pty-helper-lifecycle.md)을 따른다.
+기본 bash만 실행하며 zsh는 clean host에서 명시 opt-in이다. 제품 E2E로 세지 않는다.
+
+## PTY resize 재기록 인과 대조
+
+`python3 tools/pty-spawn-poc/resize_study.py --output /tmp/maru-resize-new --mode fork`와
+`--mode spawn-helper`는 소유한 actor 사본에서 세 syscall 순서를 비교한다.
+`resize_review.py --study <결과>/study.json --output <새 파일>`은 실측 손상을 거부한다.
+[설치 셸 보존·진단 범위와 해석](plans/pty-resize-overwrite.md)을 따른다.

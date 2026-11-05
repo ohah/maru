@@ -61,3 +61,6 @@ host upgrade/reattach와 사용자 셸 설정을 검증한다. 이번 PoC는 이
 설치 macOS SDK `sys/spawn.h`의 `POSIX_SPAWN_SETSID`·`POSIX_SPAWN_CLOEXEC_DEFAULT`,
 `spawn.h`의 addopen/adddup2/addchdir다. SDK 상수를 직접 포함하며 숫자 사본을 만들지 않는다.
 다른 터미널 구현 소스를 열람·복사하지 않았다.
+
+후속 [helper 적용 조건과 실제 셸 수명 PoC](pty-helper-lifecycle.md)는 bash job control과 resize,
+환경 간섭으로 제외한 zsh 자료, 번들·실패 전달의 검토안을 구분한다.

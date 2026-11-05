@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -66,33 +67,11 @@ static int probe(int argc, char **argv) {
     }
     return getenv("PTY_POC_EXIT") ? atoi(getenv("PTY_POC_EXIT")) : 0;
 }
-int main(int argc, char **argv) {
-    if (argc > 1 && !strcmp(argv[1], "--probe")) return probe(argc, argv);
-    if (argc > 1 && !strcmp(argv[1], "--helper")) {
-        // Fresh exec image does the operations unavailable as spawn file actions.
-        // No threads or allocator state are inherited across this exec boundary.
-        if (ioctl(0, TIOCSCTTY, 0)) return 126;
-        child_cwd(argv[2]); execve(argv[3], argv + 3, environ); return 127;
-    }
-    if (argc < 5) return 125;
-    must(atexit(cleanup)==0);
-    const char *mode = argv[1], *cwd = argv[2];
-    int closed = atoi(getenv("PTY_POC_CLOSED") ?: "0");
-    int cloexec = atoi(getenv("PTY_POC_CLOEXEC") ?: "0");
-    int saved_out = fcntl(1, F_DUPFD_CLOEXEC, 90); must(saved_out >= 0);
-    int nullfd = open("/dev/null", O_RDONLY); must(nullfd >= 0);
-    must(dup2(nullfd, 83) == 83); close(nullfd); // intentional ambient FD control
-    for (int fd = 0; fd < 3; ++fd) {
-        if (closed & (1 << fd)) close(fd);
-        else if (cloexec & (1 << fd)) must(fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
-    }
-    int master, slave; char name[128]; struct winsize ws = {.ws_row=27,.ws_col=91};
-    must(openpty(&master, &slave, name, NULL, &ws) == 0);
-    master = promote(master); slave = promote(slave);
-    must(fcntl(master, F_SETFD, FD_CLOEXEC) == 0);
-    must(fcntl(slave, F_SETFD, FD_CLOEXEC) == 0);
-    must(fcntl(master, F_SETFL, O_NONBLOCK) == 0);
-    signal(SIGALRM, deadline); alarm(8);
+// Shared by the original capture experiment and the live-shell bridge.
+// Keeping one launcher prevents the two experiments from drifting.
+static int spawn_target(int argc, char **argv, int master, int slave,
+                        const char *name, pid_t *out_pid) {
+    const char *mode=argv[1], *cwd=argv[2];
     pid_t pid = -1; int spawn_error = 0;
     if (!strcmp(mode, "fork")) {
         pid = fork(); must(pid >= 0);
@@ -129,6 +108,81 @@ int main(int argc, char **argv) {
         spawn_error = posix_spawn(&pid,exe,&actions,&attr,child_argv,environ);
         free(helper); posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attr);
     }
+    *out_pid=pid; return spawn_error;
+}
+static void winch(int sig) {
+    (void)sig; (void)write(1,"\n__JOB_WINCH__\n",15);
+}
+// Controlled foreground/background workload: signal dispositions are explicit so
+// stopped jobs and terminal-generated signals can be observed independently.
+static int job(const char *kind) {
+    const int signals[]={SIGINT,SIGQUIT,SIGTSTP,SIGTTIN,SIGTTOU,SIGWINCH};
+    for (unsigned i=0;i<sizeof(signals)/sizeof(signals[0]);++i) signal(signals[i],SIG_DFL);
+    sigset_t empty; sigemptyset(&empty); sigprocmask(SIG_SETMASK,&empty,NULL);
+    struct termios original, raw;
+    int raw_mode=!strcmp(kind,"raw");
+    if (raw_mode) { must(tcgetattr(0,&original)==0); raw=original; cfmakeraw(&raw); must(tcsetattr(0,TCSANOW,&raw)==0); }
+    if (!strcmp(kind,"resize")) signal(SIGWINCH,winch);
+    printf("\n__JOB__%d:%d\n",getpid(),getpgrp()); fflush(NULL);
+    if (!strcmp(kind,"fast42")) return 42;
+    if (!strcmp(kind,"read") || raw_mode || !strcmp(kind,"exit42")) {
+        char line[80]; ssize_t n;
+        do { n=read(0,line,sizeof(line)); } while (n<0 && errno==EINTR);
+        if (raw_mode) { must(tcsetattr(0,TCSANOW,&original)==0); printf("\n__BYTE__%d\n", n>0 ? (unsigned char)line[0] : -1); }
+        else printf("\n__READ__%d\n", n>0);
+        return !strcmp(kind,"exit42") ? 42 : 0;
+    }
+    for (;;) pause();
+}
+static int bridge(int argc, char **argv) {
+    if (argc<7) return 125;
+    int master=atoi(argv[4]), slave=atoi(argv[5]);
+    if (strcmp(argv[2],"fork") && strcmp(argv[2],"spawn-helper")) return 125;
+    struct rlimit no_core={0,0}; must(setrlimit(RLIMIT_CORE,&no_core)==0);
+    must(atexit(cleanup)==0); signal(SIGALRM,deadline); alarm(12);
+    char **target=calloc((size_t)argc,sizeof(char *)); must(target!=NULL);
+    target[0]=argv[0]; target[1]=argv[2]; target[2]=argv[3];
+    for(int i=6;i<argc;++i) target[i-3]=argv[i];
+    pid_t pid=-1; int rc=spawn_target(argc-3,target,master,slave,"",&pid);
+    free(target); close(master); close(slave);
+    if(rc) { printf("ERROR=%d\n",rc); return 0; }
+    owned_child=pid; printf("ROOT=%d\n",pid); fflush(NULL);
+    int status; pid_t got; do { got=waitpid(pid,&status,0); } while(got<0 && errno==EINTR);
+    must(got==pid); owned_child=0; alarm(0);
+    errno=0; must(waitpid(pid,NULL,WNOHANG)==-1 && errno==ECHILD);
+    printf("EXIT=%d SIGNAL=%d REAPED=1\n",WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0);
+    return 0;
+}
+int main(int argc, char **argv) {
+    if (argc>2 && !strcmp(argv[1],"--job")) return job(argv[2]);
+    if (argc>1 && !strcmp(argv[1],"--bridge")) return bridge(argc,argv);
+    if (argc > 1 && !strcmp(argv[1], "--probe")) return probe(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "--helper")) {
+        // Fresh exec image does the operations unavailable as spawn file actions.
+        // No threads or allocator state are inherited across this exec boundary.
+        if (ioctl(0, TIOCSCTTY, 0)) return 126;
+        child_cwd(argv[2]); execve(argv[3], argv + 3, environ); return 127;
+    }
+    if (argc < 5) return 125;
+    must(atexit(cleanup)==0);
+    int closed = atoi(getenv("PTY_POC_CLOSED") ?: "0");
+    int cloexec = atoi(getenv("PTY_POC_CLOEXEC") ?: "0");
+    int saved_out = fcntl(1, F_DUPFD_CLOEXEC, 90); must(saved_out >= 0);
+    int nullfd = open("/dev/null", O_RDONLY); must(nullfd >= 0);
+    must(dup2(nullfd, 83) == 83); close(nullfd); // intentional ambient FD control
+    for (int fd = 0; fd < 3; ++fd) {
+        if (closed & (1 << fd)) close(fd);
+        else if (cloexec & (1 << fd)) must(fcntl(fd, F_SETFD, FD_CLOEXEC) == 0);
+    }
+    int master, slave; char name[128]; struct winsize ws = {.ws_row=27,.ws_col=91};
+    must(openpty(&master, &slave, name, NULL, &ws) == 0);
+    master = promote(master); slave = promote(slave);
+    must(fcntl(master, F_SETFD, FD_CLOEXEC) == 0);
+    must(fcntl(slave, F_SETFD, FD_CLOEXEC) == 0);
+    must(fcntl(master, F_SETFL, O_NONBLOCK) == 0);
+    signal(SIGALRM, deadline); alarm(8);
+    pid_t pid=-1;
+    int spawn_error=spawn_target(argc,argv,master,slave,name,&pid);
     if (spawn_error) {
         dprintf(saved_out,"spawn_error=%d\n",spawn_error);
         close(slave); close(master); close(83); close(saved_out); return 0;

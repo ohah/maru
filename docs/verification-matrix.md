@@ -5577,3 +5577,9 @@ stdio·크기·argv/env/cwd, 종료/reap·FD 회수와 실제 fork 직전 CLOEXE
 이는 실제 PTY 프로세스 증거이며 GUI/HID 검증은 아니다. 기존 15개 통합 검사는 명시적
 `MARU_INTERACTIVE_SHELL=/bin/sh` 대조군과 기본 사용자 셸 실행을 구별한다.
 최종 결과와 제한은 [계획](plans/pty-stdio-ownership.md) 및 해당 Draft PR을 따른다.
+
+
+PTY 머지 검토의 EOF 회귀는 `test-session-host-2c3e-c3`의 12개를 두 모드에서 검사한다.
+legacy/generation의 열린 peer·닫힌 peer·부분 프레임·응답 전후 이벤트를 30개 소켓 조건으로 대조한다.
+응답 수신과 peer close 완료를 구분하며, 열린 peer의 null을 EOF로 오인하는 기대는 gated 대조군에서 실패한다.
+수동 editor ReleaseFast의 35분 중단과 테스트 실패를 구별해 기록한다.

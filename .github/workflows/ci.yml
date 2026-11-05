@@ -957,9 +957,9 @@ jobs:
     # 찬 캐시 재빌드를 치른다(PR 은 캐시를 읽기만 하고 저장하지 않는다).
     if: ${{ github.event_name != 'pull_request' && github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
-    # 실측(로컬 M-series, 웜 캐시): Debug 87s · ReleaseFast 97s. 콜드 러너는 그보다 훨씬 크므로
-    # 이웃 macOS 잡들과 같은 여유를 둔다.
-    timeout-minutes: 35
+    # PR #4696 콜드 실행은 단언 실패 없이 2019개 중 1502개까지 진행하다 35분에서 중단됐다.
+    # 컴파일과 전체 실행을 수용하는 잡 예산이다. 개별 테스트의 시한과 단언은 유지한다.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

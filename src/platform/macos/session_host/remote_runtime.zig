@@ -16996,12 +16996,12 @@ fn runC3ResponseFollower(
     }
 }
 
-fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complete, header, payload }) !void {
+fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complete, complete_held, header, payload }) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fds: [2]c.fd_t = undefined;
     try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
     const Peer = struct {
-        fn run(fd: c.fd_t, selected: @TypeOf(cut), closed: *std.atomic.Value(u8)) void {
+        fn run(fd: c.fd_t, selected: @TypeOf(cut), closed: *std.atomic.Value(u8), allow_close: *std.atomic.Value(u8)) void {
             defer {
                 _ = c.close(fd);
                 closed.store(1, .release);
@@ -17017,15 +17017,17 @@ fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complet
             defer std.heap.page_allocator.free(response);
             const len = switch (selected) {
                 .immediate => unreachable,
-                .complete => response.len,
+                .complete, .complete_held => response.len,
                 .header => protocol.header_size - 1,
                 .payload => protocol.header_size + 3,
             };
             socket_server.writeAll(fd, response[0..len]) catch return;
+            if (selected == .complete_held) waitRemoteTestFlag(allow_close) catch return;
         }
     };
+    var allow_close = std.atomic.Value(u8).init(0);
     var peer_closed = std.atomic.Value(u8).init(0);
-    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], cut, &peer_closed });
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], cut, &peer_closed, &allow_close });
     var client: client_mod.Client = .{
         .allocator = testing.allocator,
         .fd = fds[0],
@@ -17059,6 +17061,7 @@ fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complet
     runtime.blocking_flush_active = false;
     runtime.currentGeneration().event_generation_tracking = .tracked;
     defer {
+        allow_close.store(1, .release); // Unwind must release the peer even if an assertion fails.
         peer.join();
         runtime.currentGeneration().observation.deinit(testing.allocator);
         runtime.direct_input.deinit(testing.allocator);
@@ -17071,9 +17074,17 @@ fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complet
         try waitRemoteTestFlag(&peer_closed);
         try testing.expectError(error.ConnectionClosed, runtime.refreshObservation());
         try testing.expectEqual(@as(u64, 0), runtime.currentGeneration().observation.revision);
-    } else if (cut == .complete) {
+    } else if (cut == .complete or cut == .complete_held) {
         try runtime.refreshObservation();
         try testing.expectEqual(@as(u64, 4), runtime.currentGeneration().observation.revision);
+        if (cut == .complete_held) {
+            // Keep the peer open until a nonblocking empty turn is observed.
+            try testing.expect((try runtime.testingClient().readStreamBatch(7)) == null);
+            try testing.expect(!runtime.testingClient().unusable);
+            allow_close.store(1, .release);
+        }
+        // Receiving a complete response does not prove the peer has closed yet.
+        try waitRemoteTestFlag(&peer_closed);
         try testing.expectError(error.ConnectionClosed, runtime.testingClient().readStreamBatch(7));
     } else {
         try testing.expectError(error.ProtocolError, runtime.refreshObservation());
@@ -17241,6 +17252,7 @@ test "2c3e C3 socket cadence는 immediate EOF를 선처리하고 완성 response
     inline for (.{ C3CadenceAttachmentMode.legacy, .generation }) |mode| {
         try runC3EofCadence(mode, .immediate);
         try runC3EofCadence(mode, .complete);
+        try runC3EofCadence(mode, .complete_held);
     }
 }
 

@@ -34,3 +34,6 @@ peer close를 보류한 채 원래 EOF 기대를 적용하면 두 모드에서 C
 수동 editor ReleaseFast의 콜드 실행도 1502/2019까지 진행하다 잡 예산 35분으로 중단돼
 전체 잡 예산을 50분으로 보완했다. 개별 테스트 시한과 단언은 유지한다.
 사용자 기본 셸 시작 시한 건은 수정 전 backend에서도 재현한 별도 opt-in 환경 조건이다.
+
+후속 [native spawn 비교 PoC](pty-native-spawn-poc.md)는 제어 터미널·cwd 폴백의 실제 OS 차이를 기록한다.
+제품 backend 이관과 비교 모형의 결과를 구분한다.

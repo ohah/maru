@@ -5583,3 +5583,10 @@ PTY 머지 검토의 EOF 회귀는 `test-session-host-2c3e-c3`의 12개를 두 �
 legacy/generation의 열린 peer·닫힌 peer·부분 프레임·응답 전후 이벤트를 30개 소켓 조건으로 대조한다.
 응답 수신과 peer close 완료를 구분하며, 열린 peer의 null을 EOF로 오인하는 기대는 gated 대조군에서 실패한다.
 수동 editor ReleaseFast의 35분 중단과 테스트 실패를 구별해 기록한다.
+
+## PTY native spawn 비교 모형 (2026-11-05)
+
+독립 C syscall 모형은 21조건을 fork·spawn-dup·spawn-open·spawn-helper와 O0/O2로 비교한다.
+제어 터미널·foreground·실제 Ctrl+C, stdio 8배치·CLOEXEC 3배치, 입력·크기·cwd 폴백·argv/env·exit·login을 확인한다.
+직접 native의 예상 부적합을 성공 관측으로 기록하므로 168개 관측을 제품 통과로 세지 않는다.
+[판단과 미검증 범위](plans/pty-native-spawn-poc.md), [명령](../tools/pty-spawn-poc/README.md)을 따른다.

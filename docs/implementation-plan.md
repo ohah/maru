@@ -1810,3 +1810,4 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [macOS CI 게이트 분할·신뢰된 캐시 보충](plans/ci-macos-gates-shards.md): 기존 검사 범위와 필수 체크를 유지하며 세 worker로 분배한다.
 
 - [PTY stdio 소유권](plans/pty-stdio-ownership.md) — 닫힌 표준 FD 충돌과 slave CLOEXEC, 실제 터미널 회귀.
+- [PTY native spawn 비교 PoC](plans/pty-native-spawn-poc.md) — syscall 모형 비교와 제품 이관 판단.

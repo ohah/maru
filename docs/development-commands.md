@@ -2421,3 +2421,10 @@ CI의 `macOS-only gates`는 세 worker의 manifest와 실행 receipt를 검증�
 `MARU_INTERACTIVE_SHELL=/bin/sh mise exec -- zig build test-pty -j2` 및 `-Doptimize=ReleaseFast`는
 사용자 dotfile에 의존하지 않는 통합 대조군이다. 기본 opt-in 실행은 SHELL/MARU_INTERACTIVE_SHELL을
 따라 사용자의 대화형 셸을 실행하므로 그 결과는 이 대조군과 구별한다.
+
+## PTY native spawn 비교 PoC
+
+`python3 tools/pty-spawn-poc/run.py --output /tmp/maru-pty-poc-new`는 macOS에서
+21조건 × 4방식 × C O0/O2의 관측 원문을 새 외부 디렉터리에 보관한다.
+[도구 설명](../tools/pty-spawn-poc/README.md)과 [결과 해석](plans/pty-native-spawn-poc.md)을 따른다.
+제품 테스트와 기본 CI gate를 대체하지 않는다.

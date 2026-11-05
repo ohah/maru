@@ -183,6 +183,16 @@ pub const max_wdefer: usize = 1024;
 pub const blind_pad_us: i64 = 1_000_000;
 /// 탭마다 기억하는 눈먼 때 수(넘치면 가장 오래된 것을 「모른다」 로 접는다 — `wspan_floor`).
 pub const max_blinds: usize = 64;
+/// 재검증 11 차(D-v20q-2): 시작 사건 ts → 그 기록 IO 의 지연 위 끝. 7 차 E2 는 한 사례(`v20m-rstc` 무더기)에서 「중앙 2.7 ms·최대 10.7 ms」 를 쟀지만,
+/// 10 차 최종 빌드·검증 v20q 의 CEF host 로그(`--review-body-swcdp` 5 판·`-v20l` 4 판·`-v20m` 2 판)에서 판정이 맺은 짝 17 790 쌍의 그 지연은 중앙 0.33 ms·
+/// p90 2.5 ms·p99 35.8 ms·**최대 42.5 ms**(10.7 ms 를 넘은 쌍 1 037 — 모두 같은 초에 수십 개가 몰린 무더기; 음수 0) — 무더기에서 망 서비스가 IO 를 늦게
+/// 시작한다(계획 「재검증 11 차」, `scratchpad/w9d2_v11/logs/lagdist_*.txt`). 위 끝은 그보다 넉넉한 50 ms(`lost_start_pad_us` — 겹침으로 끝낸 기록의 눈먼
+/// 때 셈이 이미 쓰는 폭)로 둔다. 눈먼 때 끝(enable 답) 바로 앞에 시작한 보이지 않는 W 의 기록 IO 는 그 끝 뒤 이만큼까지 온다 — 판정·잇기는 눈먼 때의
+/// 뒤 끝을 기록 IO 와 견줄 때 이만큼 넓혀 본다 — 그 IO 가 짝 W 의 시작 앞일 때만(`blindIoHit`·`pairStale` ② — 보이는 W 의 제 기록 IO 는 제 시작 뒤라
+/// 잃지 않는다; 그 IO 가 시작 뒤인 같은 틈은 남는 틈 ⑩). 시작을 잃은 W 의 기록 IO 는 그 `requestTime` 앞(실측
+/// +44…+1302 µs 뒤에 찍힌다 — 퍼즈의 옛 꼴은 시작 ts 그대로라 IO 가 그 지연만큼 뒤)이라 그 W 의 자리를 `requestTime` + 이만큼까지만 본다(`pairStale` ①
+/// — LOW-E″). 지연에 굳은 위 끝은 없다(줄 서기) — 이 값보다 늦은 무더기의 눈먼 때 끝 W 는 남는 틈이다.
+pub const ts_io_lag_us: i64 = lost_start_pad_us;
 /// 재검증 6 차 D4: 빼는 꼴 W 의 기억(`Tab.wexcl` — 응답 사건은 메서드를 모른다) 상한 — 넘으면 비운다(잊은 W 는 남는 W 의 판정이 막는다).
 pub const max_wexcl: usize = 4096;
 /// 탭마다 잇기를 기다리는 P 수 — 넘치면 가장 오래된 것을 잇지 않고 놓는다.
@@ -1276,7 +1286,10 @@ const OpenSet = struct {
     keys: [max_open_tracked]sw_mod.WKey = undefined,
 };
 /// 재검증 7 차: 워커 세션 하나의 눈먼 때 — [`lo`, `hi`] 에 시작한 W 는 시작 사건을 잃어 응답 때에야 보인다(`hi` 최대 = 아직 켜지지 않았다).
-const Blind = struct { wtarget: u64, lo: i64, hi: i64 };
+/// 재검증 11 차(D-v20q-1): `again` — 그 탭이 그 워커를 처음 붙인 때가 아니다(다시 뜸 `workerReloaded`·이미 눈먼 때를 둔 타깃에 다시 붙음) — 그
+/// 워커의 세대가 바뀌었다(다른 탭이 판정 앞에 그 워커를 켜 두었어도 그 탭도 이때 눈멀었다 — `pairStale` 이 `sawWorker` 로 넘기지 않는다).
+/// `off` — 그 세션이 떨어진 때(떨어짐·렌더러 죽음 — 그 뒤 그 탭은 그 워커의 W 를 보지 못한다; 최대 = 아직 붙어 있다).
+const Blind = struct { wtarget: u64, lo: i64, hi: i64, again: bool = false, off: i64 = std.math.maxInt(i64) };
 
 /// 재검증 3 차 LB-1: 문서 loader 하나와 그 loader 로 보낸 가장 늦은 요청의 기준 시각(`Tab.loaders`).
 const LoaderSeen = struct { loader: u64 = 0, last_ts: i64 = 0 };
@@ -1515,6 +1528,8 @@ pub const Table = struct {
         retracted: std.AutoHashMapUnmanaged(u64, void) = .empty,
         /// 재검증 10 차(LOW-P3 — 진단·시험): `retractCopies` 가 사본을 찾으러 훑은 탭 수(누적).
         copy_scans: usize = 0,
+        /// 재검증 11 차(LOW-P4 — 진단·시험): `pairStale` 을 부른 수(누적 — 잇는 P 마다 한 번).
+        stale_checks: usize = 0,
 
         fn deinit(self: *Scratch, gpa: std.mem.Allocator) void {
             self.all_reqs.deinit(gpa);
@@ -1679,9 +1694,11 @@ pub const Table = struct {
         const t = self.tabOf(browser) orelse return;
         try self.finishAll(gpa, t, .detached);
         try self.emit(gpa, .{ .detach_workers = .{ .browser = browser, .why = .renderer_gone } });
-        for (t.blinds.items) |*b| if (b.hi == std.math.maxInt(i64)) {
-            b.hi = @max(now_us, b.lo);
-        };
+        for (t.blinds.items) |*b| {
+            if (b.hi == std.math.maxInt(i64)) b.hi = @max(now_us, b.lo);
+            // 재검증 11 차(D-v20q-1): 세션이 모두 떨어졌다(`sawWorker` 가 이 뒤로 이 탭이 그 워커를 보았다고 치지 않는다).
+            if (b.off == std.math.maxInt(i64)) b.off = now_us;
+        }
     }
 
     /// 브라우저가 닫힌다(DevTools 가 떨어졌을 때도) — `detached` 로 끝내고 자리를 비운다. 재검증 6 차 F16: 끔(`stop`)과 같이 그 탭의 VS(C3a)
@@ -1774,7 +1791,8 @@ pub const Table = struct {
 
     /// 재검증 10 차(LOW-P3): 탭 `t` 가 기록 `request` 의 사본을 받았다(`sw_copies`).
     fn noteCopy(self: *Table, gpa: std.mem.Allocator, t: *const Tab, request: u64) std.mem.Allocator.Error!void {
-        if (self.sw_copies.count() >= @max(2 * self.sw_copies_base, max_candidates)) self.rebuildCopies(gpa);
+        // 다시 짓다 할당에 실패하면 앞 색인을 그대로 둔다(넉넉한 쪽 — 더 훑을 뿐).
+        if (self.sw_copies.count() >= @max(2 * self.sw_copies_base, max_candidates)) self.rebuildCopies(gpa) catch {};
         const g = try self.sw_copies.getOrPut(gpa, request);
         if (!g.found_existing) g.value_ptr.* = 0;
         g.value_ptr.* |= tabBit(self, t);
@@ -1785,10 +1803,16 @@ pub const Table = struct {
         return @as(CopyMask, 1) << @intCast(i);
     }
 
-    /// 지금 탭들의 서비스 워커 갈래 후보로 `sw_copies` 를 다시 짓는다(자리를 이미 쥐고 있다 — 칸 수는 줄기만 한다; 넣다 할당에 실패하면 모두 훑는
-    /// 쪽으로 — `copies_all`).
-    fn rebuildCopies(self: *Table, gpa: std.mem.Allocator) void {
-        _ = gpa;
+    /// 지금 탭들의 서비스 워커 갈래 후보로 `sw_copies` 를 다시 짓는다. 재검증 11 차(LOW-C1): 넣을 후보 수만큼의 자리를 **비우기 전에** 잡는다 — 부른
+    /// 쪽(`cefBegin` → `noteCopy`)은 지금 후보를 이미 `t.cands` 에 넣었고 색인에는 아직 없어, 표가 꼭 찬 때(`available` 0) 그 하나가 자리를 넘었다(Debug
+    /// `integer overflow` panic, ReleaseFast 는 `available` 이 감겨 표가 다시 자라지 않는다 — 검증 v20q-B Q14-b). 잡지 못하면(할당 실패) 앞 색인을
+    /// 그대로 두고 오류를 돌려준다(앞 색인은 지금 후보의 비트를 모두 품는 넉넉한 쪽이다 — 지금 후보는 부른 쪽이 넣는다).
+    fn rebuildCopies(self: *Table, gpa: std.mem.Allocator) std.mem.Allocator.Error!void {
+        var n: usize = 0;
+        for (&self.tabs) |*o| if (o.browser != 0) for (o.cands.items) |c| {
+            if (c.key.sw) n += 1;
+        };
+        try self.sw_copies.ensureTotalCapacity(gpa, @intCast(n));
         self.sw_copies.clearRetainingCapacity();
         for (&self.tabs) |*o| {
             if (o.browser == 0) continue;
@@ -2430,8 +2454,14 @@ pub const Table = struct {
             };
         }
         var kb: usize = 0;
-        for (t.blinds.items) |b| {
-            if (b.hi != std.math.maxInt(i64) and b.hi < keep_from) continue;
+        for (t.blinds.items, 0..) |b, k| {
+            // 재검증 11 차(D-v20q-1): 그 워커의 마지막 눈먼 때는 둔다 — 이 탭이 그 워커를 언제부터 보고 있었는지(`sawWorker`)·다시 붙음(`again`)을
+            // 시한 뒤에도 안다(지우면 다른 탭이 기록을 늦게 켤 때마다 그 앞 1 초의 짝을 모두 물렀다). 판정 창·잇기의 IO 는 시한 앞에 닿지 않는다.
+            const last = for (t.blinds.items[k + 1 ..]) |x| {
+                if (x.wtarget == b.wtarget) break false;
+            } else true;
+            // 뒤 끝은 ts → IO 지연만큼 넓게 본다(`ts_io_lag_us` — 그만큼 뒤의 IO 까지 그 눈먼 때가 닿는다).
+            if (!last and b.hi != std.math.maxInt(i64) and b.hi +| ts_io_lag_us < keep_from) continue;
             t.blinds.items[kb] = b;
             kb += 1;
         }
@@ -2456,45 +2486,68 @@ pub const Table = struct {
         return false;
     }
 
+    /// 재검증 11 차(D-v20q-2): 기록 IO `io` 가 어느 워커 세션의 눈먼 때 [앞 끝, 뒤 끝 + ts → IO 지연] 안인가(그 기록은 아직 보이지 않은 W 의 것일 수
+    /// 있다).
+    fn blindIoHit(t: *const Tab, io: i64) bool {
+        for (t.blinds.items) |b| if (b.lo <= io and b.hi +| ts_io_lag_us >= io) return true;
+        return false;
+    }
+
     /// 재검증 7 차: 그 탭에 워커 세션이 붙었다(`net_body.onTarget` — 남겨 둔 세션) — 눈먼 때를 연다(enable 답이 올 때까지).
     pub fn workerAttached(self: *Table, gpa: std.mem.Allocator, browser: BrowserId, wtarget: u64, now_us: i64) std.mem.Allocator.Error!void {
-        return self.openBlind(gpa, browser, wtarget, now_us - blind_pad_us, std.math.maxInt(i64), now_us, true);
+        return self.openBlind(gpa, browser, wtarget, now_us - blind_pad_us, std.math.maxInt(i64), now_us, true, false);
     }
 
     /// 재검증 8 차: 남의 출처 세션이 붙었다 — 눈먼 때는 열되(7 차 그대로) 앞 판정의 짝은 되돌리지 않는다: 그 워커의 W 의 기록은 문이 이 탭에
     /// 붙이지 않았다(그 출처를 맨 위에 둔 탭에만 — 문과 표의 맨 위 출처는 같은 `mainFrameAddress` 에서 바뀐다). 되돌리면 다른 출처 iframe 의
     /// 워커가 붙을 때마다 그 앞 1 초의 본문을 잃었다(판정 `v20l-pre` 의 한 판 대조 8 → 0 — 실측).
     pub fn workerAttachedForeign(self: *Table, gpa: std.mem.Allocator, browser: BrowserId, wtarget: u64, now_us: i64) std.mem.Allocator.Error!void {
-        return self.openBlind(gpa, browser, wtarget, now_us - blind_pad_us, std.math.maxInt(i64), now_us, false);
+        return self.openBlind(gpa, browser, wtarget, now_us - blind_pad_us, std.math.maxInt(i64), now_us, false, false);
     }
 
     /// 재검증 7 차: 그 세션의 `Network.enable` 답이 왔다(성공·실패)·세션이 떨어졌다 — 눈먼 때를 닫는다(그 뒤에 시작한 W 는 시작 사건이 보이거나
     /// 아예 보이지 않는다 — 보이지 않는 W 의 기록은 설명되지 않아 C3b′ 가 막는다).
     pub fn workerEnabled(self: *Table, browser: BrowserId, wtarget: u64, now_us: i64) void {
         const t = self.tabOf(browser) orelse return;
-        // 끝은 답이 닿은 때 그대로 — 그 앞에 시작한 W 의 기록 IO 는 이때보다 앞이고, 보이는 W 의 판정 창 앞 여유(`window_before_us`)가 이미 그만큼을
-        // 덮는다(여기에 더하면 enable 바로 뒤에 시작한 보이는 fetch 를 두 번 깎았다 — 실측 r13-flood 대조 20 중 6).
+        // 끝은 답이 닿은 때 그대로 — 보이는 W 의 판정 창 앞 여유(`window_before_us`)가 그 앞을 덮는다(여기에 더하면 enable 바로 뒤에 시작한 보이는
+        // fetch 를 두 번 깎았다 — 실측 r13-flood 대조 20 중 6). 재검증 11 차(D-v20q-2): 그 앞에 시작한 W 의 기록 IO 는 이때보다 뒤일 수 있다(ts → IO
+        // 지연 — `ts_io_lag_us`) — 끝은 그대로 두고 기록 IO 와 견줄 때만 넓힌다(`blindIoHit`·`pairStale`).
         for (t.blinds.items) |*b| if (b.wtarget == wtarget and b.hi == std.math.maxInt(i64)) {
             b.hi = now_us;
+        };
+    }
+
+    /// 재검증 11 차(D-v20q-1): 그 탭의 워커 세션이 떨어졌다(`Target.detachedFromTarget`) — 열린 눈먼 때를 닫고(`workerEnabled` 와 같다) 그 워커의
+    /// 눈먼 때에 떨어진 때를 적는다. 그 뒤 그 탭은 그 워커의 W 를 보지 못한다 — 다른 탭의 눈먼 때를 「그 탭은 그 워커를 보고 있었다」 로 넘기지
+    /// 않는다(`sawWorker`).
+    pub fn workerDetached(self: *Table, browser: BrowserId, wtarget: u64, now_us: i64) void {
+        const t = self.tabOf(browser) orelse return;
+        for (t.blinds.items) |*b| if (b.wtarget == wtarget) {
+            if (b.hi == std.math.maxInt(i64)) b.hi = now_us;
+            if (b.off == std.math.maxInt(i64)) b.off = now_us;
         };
     }
 
     /// 재검증 7 차: 워커 타깃이 다시 떴다(`Inspector.targetReloadedAfterCrash` — 새 epoch) — 그 앞뒤를 눈먼 때로(다시 켜진 도메인이 언제 사건을
     /// 내는지 모른다).
     pub fn workerReloaded(self: *Table, gpa: std.mem.Allocator, browser: BrowserId, wtarget: u64, now_us: i64) std.mem.Allocator.Error!void {
-        return self.openBlind(gpa, browser, wtarget, now_us - blind_pad_us, now_us + blind_pad_us, now_us, true);
+        return self.openBlind(gpa, browser, wtarget, now_us - blind_pad_us, now_us + blind_pad_us, now_us, true, true);
     }
 
-    fn openBlind(self: *Table, gpa: std.mem.Allocator, browser: BrowserId, wtarget: u64, lo: i64, hi: i64, now_us: i64, revoke: bool) std.mem.Allocator.Error!void {
+    fn openBlind(self: *Table, gpa: std.mem.Allocator, browser: BrowserId, wtarget: u64, lo: i64, hi: i64, now_us: i64, revoke: bool, reload: bool) std.mem.Allocator.Error!void {
         const t = self.tabOf(browser) orelse return;
         if (!t.recording() or !self.sw_twin_worker) return;
+        // 재검증 11 차(D-v20q-1): 다시 뜸이거나 이 탭이 이미 그 워커의 눈먼 때를 두었다(떨어졌다 다시 붙음) — 그 워커의 세대가 바뀌었다.
+        const again = reload or for (t.blinds.items) |b| {
+            if (b.wtarget == wtarget) break true;
+        } else false;
         if (t.blinds.items.len >= max_blinds) {
             // 가장 오래된 것을 잊는다 — 그 끝까지를 「모른다」 로(열린 것이면 지금까지).
             const old = t.blinds.orderedRemove(0);
             t.wspan_floor = @max(t.wspan_floor, if (old.hi == std.math.maxInt(i64)) now_us else old.hi);
             t.span_epoch +%= 1; // 재검증 8 차(19 회차): 바닥이 올랐다
         }
-        try t.blinds.append(gpa, .{ .wtarget = wtarget, .lo = lo, .hi = hi });
+        try t.blinds.append(gpa, .{ .wtarget = wtarget, .lo = lo, .hi = hi, .again = again });
         // 재검증 8 차(퍼즈 30 000 판 — 늦게 안 눈먼 때): 눈먼 때는 붙은 알림이 닿은 때에야 연다 — 그 앞 시각까지 넓히지만(`blind_pad_us`), 알림
         // 앞에 이미 끝난 판정은 그 때를 보지 못했다(그 사이 시작한 W 는 아직 보이지 않았다 — 시작을 잃었고 응답도 잃으면 끝내 보이지 않는다). 그
         // 판정이 맺은 짝 가운데 아직 P 를 잇지 않은 기록이 이 때에 IO 를 찍었으면 본문 없이 끝낸다(그 기록의 주인이 보이지 않은 W 일 수 있다 —
@@ -3360,6 +3413,14 @@ pub const Table = struct {
             // 수 있다(재검증 5 차 K1·K2·K3 — 짝이 하나로 보여도 틀렸다, 실제 CEF 40/40·40/40). 그래서 늘 맞추기를 의심하는 쪽으로: 이 요청과 짝일 수
             // 있는 같은 열쇠의 기록을 모두 `ambiguous` 로 끝내고 주인일 수 있는 요청을 모두 뺀다. 전에 쓰던 `swUnique`(재검증 4 차 뒤 R6)는 걷었다 —
             // 그 셋째 조건이 판정마다 기록 × 요청을 훑었다(K4). 워커 CDP 로 잇는 길은 계획 v2 의 S1–S3b.
+            // 재검증 11 차(D-v20q-2): 겹침 규칙 ③ 은 눈먼 때(시작의 구간)를 판정 창과 견준다 — 눈먼 때 끝 바로 앞에 시작한(보이지 않는) W 의 기록 IO 는
+            // 그 끝 뒤 ts → IO 지연(`ts_io_lag_us`)만큼 늦을 수 있어, 판정 창이 눈먼 때에 닿지 않는 W(눈먼 때 끝 + 5 ms 뒤에 시작)가 그 기록을 가져갔다
+            // (검증 v20q 6 회차 퍼즈 씨앗 213235·258375 — 제 기록 없는 보이는 W). 짝으로 고른 기록의 IO 가 **이 W 의 시작 앞**이고(보이는 W 의 IO 는 제
+            // 시작 뒤 — J1, 그 앞 IO 의 기록은 이 W 의 것이 아니다) 어느 눈먼 때 [앞 끝, 뒤 끝 + 지연] 안이면 그 창을 맺지 않는다(검증자의 좁은 꼴 —
+            // 제 기록은 잃지 않는다). 그 IO 가 이 W 의 시작 뒤인 같은 틈(이 W 가 눈먼 때 끝 + 지연 안에 시작했다)은 막지 않는다 — 막으면 enable 답 뒤
+            // 지연 안의 제 기록을 모두 잃는다(10.7 ms 로도 실제 CEF `v20l-vsleak` 15/20·`v20l-ctrl` 13/20 — 판정 하한 18 아래, 사례마다 첫 본문 하나씩;
+            // 남는 틈 ⑩ — 설계 결정, 계획 「재검증 11 차」).
+            if (r.worker and t.cands.items[ci].t_io_us < r.anchor() and blindIoHit(t, t.cands.items[ci].t_io_us)) return self.endWorkerWindow(gpa, t, i, 0, .w_blind, now_us);
             const sw_unsure = !self.sw_twin_worker and r.sw and r.responded;
             // 재검증 5 차 S3(C5 — 공격 3 H1·공격 2 A2): 다른 SW 타깃의 같은 열쇠 워커 요청이 이 기록과 짝일 수 있으면 의심한다 — 관(타깃)이 다르면
             // CDP 시작 차례와 CEF IO 차례가 뒤집힌다(실측 706/26 541 — 관 하나 안은 0/14 221).
@@ -3499,7 +3560,8 @@ pub const Table = struct {
             if (!(c.t_io_us >= z.lo and c.t_io_us <= z.hi) and !compatible(&r, &c)) continue;
             if (c.claimed and c.link_until == 0) continue; // 받으러 갔다 — 이미 이었다
             try sc.extra.append(gpa, c.request);
-            // 눈먼 때에 시작한 W 의 기록은 그 W 의 시작 뒤 무더기 지연만큼 늦게 IO 를 찍을 수 있다(실측 최대 10.7 ms — `lost_start_pad_us` 로 넉넉히).
+            // 눈먼 때에 시작한 W 의 기록은 그 W 의 시작 뒤 무더기 지연만큼 늦게 IO 를 찍을 수 있다(실측 최대 42.5 ms — `lost_start_pad_us` 로 넉넉히 —
+            // 재검증 11 차 `ts_io_lag_us`).
             if (blindHit(t, c.t_io_us - lost_start_pad_us, c.t_io_us)) in_blind += 1;
         }
         const explain = sc.extra.items.len -| in_blind <= n_over + 1;
@@ -3791,13 +3853,13 @@ pub const Table = struct {
         }
         if (r.state == .failed) {
             swExplain(t, cand.request);
-            try self.link.notePairAt(gpa, r.wkey, cand.request, t.browser, now_us);
+            try self.link.notePairFrom(gpa, r.wkey, cand.request, t.browser, now_us, r.anchor());
             self.link.noteBad(r.wkey);
             try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = .request_failed, .flags = .{ .credentialed = cand.cef_credentialed } } });
             _ = t.cands.orderedRemove(ci);
             return;
         }
-        try self.link.notePairAt(gpa, r.wkey, cand.request, t.browser, now_us);
+        try self.link.notePairFrom(gpa, r.wkey, cand.request, t.browser, now_us, r.anchor());
         swExplain(t, cand.request);
         try self.emit(gpa, .{ .sw_paired = .{ .browser = t.browser, .request = cand.request, .wrid = r.rid } });
         if (!self.sw_link_body) {
@@ -4146,47 +4208,61 @@ pub const Table = struct {
     ///   ① 기록하는 어느 탭이든 같은 주소·메서드의 다른 W 자리가 그 기록의 IO 를 품고, 그 W 가 짝을 맺은 판정(`W.paired_at`) 때 이미 시작했다
     ///      (시작을 잃은 W 는 늘 — 그 시작을 모른다). 판정 뒤에 시작한 보이는 W 의 IO 는 그 시작 뒤라(J1) 판정 앞에 온 이 기록의 주인일 수 없다 —
     ///      같은 주소를 잇달아 받는 fetch 를 막지 않게.
-    ///   ② 그 기록의 사본을 가진(또는 짝을 맺은) 기록 탭의 눈먼 때가 그 IO 를 덮는다([앞 끝 − `lost_start_pad_us`, 뒤 끝] — `openBlind` 의 되돌리기와
-    ///      같은 폭). 그 탭의 워커 세션이 그때 보지 못한 W 가 있었을 수 있다 — 짝을 맺은 탭이 그 알림을 아직 받지 못했거나(차례는 세션마다) 기록을
-    ///      껐어도 다른 탭이 같은 늦은 붙음을 알면 막는다. 다만 다른 탭의 눈먼 때는, 짝을 맺은 탭이 아직 기록하고 그 판정 때 이미 그 워커의 눈먼
-    ///      때를 닫았으면(`sawWorker` — 그 세션의 enable 답을 판정 앞에 받았다) 치지 않는다 — 그 판정은 그 워커에 대해 제 눈먼 때를 다 알고 섰다(겹침
-    ///      규칙이 본 그대로다). 다른 탭이 기록을 늦게 켤 때 여는 눈먼 때가 앞 탭의 짝을 모두 무르지 않게(이 단서가 없으면 퍼즈 둘째 탭 세계의 이은
-    ///      수 −9 % — 계획 「재검증 10 차」).
-    ///   ③ 그 탭이 그 IO 까지의 자리를 잊었다(`wspan_floor`).
+    ///   ② 기록하는 어느 탭이든 그 눈먼 때가 그 IO 를 덮는다([앞 끝 − `lost_start_pad_us`, 뒤 끝 + `ts_io_lag_us`] — 앞은 `openBlind` 의 되돌리기와 같은
+    ///      폭, 뒤는 ts → IO 지연 — 재검증 11 차 D-v20q-2). 그 탭의 워커 세션이 그때 보지 못한 W 가 있었을 수 있다 — 짝을 맺은 탭이 그 알림을 아직
+    ///      받지 못했거나(차례는 세션마다) 기록을 껐어도 다른 탭이 같은 늦은 붙음을 알면 막는다. 다만 다른 탭의 눈먼 때는, 그것이 그 탭의 그 워커
+    ///      처음 붙음이고 짝을 맺은 탭이 아직 기록하며 그 IO 때 그 워커를 보고 있었고 판정 앞에 그 세션의 눈먼 때를 닫았으면(`sawWorker`) 치지
+    ///      않는다 — 그 판정은 그 워커에 대해 제 눈먼 때를 다 알고 섰다(겹침 규칙이 본 그대로다). 다른 탭이 기록을 늦게 켤 때 여는 눈먼 때가 앞
+    ///      탭의 짝을 모두 무르지 않게(이 단서가 없으면 퍼즈 둘째 탭 세계의 이은 수 −9 % — 계획 「재검증 10 차」). 재검증 11 차(D-v20q-1): 10 차는
+    ///      사본이 없는 탭(그 IO 뒤에 켰다)의 눈먼 때를 늘 건너뛰었고(짝 탭이 그 워커를 모르면 그 앎은 그 탭에만 있다 — 검증 v20q R1-a) 다시 뜸·다시
+    ///      붙음의 눈먼 때도 짝 탭의 옛 세대 앎으로 넘겼다(R1-b·R1-c — 짝 탭도 그때 눈멀었고 알림이 아직일 뿐) — 이제 둘 다 친다(`Blind.again`).
+    ///   ③ 그 기록의 사본을 가진(또는 짝을 맺은 — `W.pair_tab`) 탭이 그 IO 까지의 자리를 잊었다(`wspan_floor`).
     /// 판정 때 그 판정 탭이 이미 알던 것은 판정의 겹침 규칙이 막았으니 여기서 새로 막는 것은 판정 뒤에 안 것(또는 다른 탭만 아는 것)이다 — 잃는
     /// 쪽으로만 바뀐다. 9 차의 되돌리기(`openBlind`·`endWorkerWindow`·`retractCopies`)는 겹친 방어로 남는다(앎이 온 때 곧 끝낸다). 잇기 뒤에 온 앎은
     /// 되돌릴 수 없다(남는 틈 ② 그대로).
     fn pairStale(self: *const Table, c: Candidate, wk: sw_mod.WKey) ?sw_mod.Reason {
         const w = self.link.ws.get(wk) orelse return .w_stale;
         const io = c.t_io_us;
+        const pt: ?*const Tab = if (self.tabOfConst(w.pair_tab)) |x| (if (x.recording()) x else null) else null;
         for (&self.tabs) |*o| {
             if (o.browser == 0 or !o.recording()) continue;
             for (o.wspans.items) |s| {
                 if (s.url != c.key.url or s.method != c.key.method) continue;
                 if (s.key.target == wk.target and s.key.rid == wk.rid) continue;
-                if (io < s.lo or io > s.hi) continue;
+                // 재검증 11 차(LOW-E″): 시작을 잃은 W 의 기록 IO 는 그 `requestTime` 앞이다(실측 +44…+1302 µs 뒤에 찍힌다 — 7 차 「왜 안전한가」) —
+                // 그 자리는 응답 때까지가 아니라 `requestTime` + ts → IO 지연까지만 본다. 응답까지 보면 시작을 잃고 1 초 넘게 늦게 응답한 W 가 그
+                // 사이 같은 주소의 옳은 짝을 모두 물렀다(`v20m-nav` 제 본문 9 차 7 → 10 차 0 — 검증 v20q 9 회차).
+                const hi = if (s.lost) @min(s.hi, s.start +| ts_io_lag_us) else s.hi;
+                if (io < s.lo or io > hi) continue;
                 if (!s.lost and s.start > w.paired_at) continue;
                 return .w_stale;
             }
             const holds = o.browser == w.pair_tab or for (o.cands.items) |x| {
                 if (x.request == c.request) break true;
             } else false;
-            if (!holds) continue;
-            if (io <= o.wspan_floor) return .w_stale;
+            if (holds and io <= o.wspan_floor) return .w_stale;
             for (o.blinds.items) |bl| {
-                if (!(bl.lo <= io + lost_start_pad_us and bl.hi >= io)) continue;
-                if (o.browser != w.pair_tab) if (self.tabOfConst(w.pair_tab)) |pt| if (pt.recording() and sawWorker(pt, bl.wtarget, w.paired_at)) continue;
+                // 재검증 11 차(D-v20q-2): 뒤 끝은 ts → IO 지연만큼 넓게 — 눈먼 때 끝 바로 앞에 시작한 W 의 기록 IO 는 그 끝 뒤에 온다. 그 여유는 그 IO 가 짝
+                // W 의 시작 앞일 때만(판정의 `blindIoHit` 과 같은 좁은 꼴 — 제 기록은 잃지 않는다; 시작을 모르면 늘).
+                const lag_ok = w.pair_start == 0 or io < w.pair_start;
+                if (!(bl.lo <= io + lost_start_pad_us and (bl.hi >= io or (lag_ok and bl.hi +| ts_io_lag_us >= io)))) continue;
+                // 재검증 11 차(D-v20q-1): 다른 탭의 눈먼 때는 기록의 사본이 없는 탭(뒤에 켰다)의 것도 친다 — 그 눈먼 때가 짝 탭이 그때 보고 있던 워커
+                // 의 처음 붙음이면(그 탭이 늦게 켰을 뿐이다) 넘기고(`sawWorker`), 다시 뜸·다시 붙음(`again` — 그 워커의 세대가 바뀌었다, 짝 탭도
+                // 그때 눈멀었다 — 그 알림이 아직일 뿐)이면 넘기지 않는다.
+                if (o.browser != w.pair_tab and !bl.again) if (pt) |x| if (sawWorker(x, bl.wtarget, w.paired_at, io)) continue;
                 return .w_stale;
             }
         }
         return null;
     }
 
-    /// 재검증 10 차: 탭 `t` 의 워커 `wtarget` 세션의 눈먼 때가 시각 `at`(짝을 맺은 판정) 앞에 닫혔다 — 그 판정은 그 워커에 대한 제 눈먼 때를 다
-    /// 알고 섰다(겹침 규칙). 그 뒤 그 탭에 그 워커의 눈먼 때가 새로 열려(늦은 알림·다시 뜸) 그 IO 를 덮으면 그 탭 자신의 칸이 막는다(`pairStale` —
-    /// 짝을 맺은 탭은 늘 본다). 그 탭의 눈먼 때를 잊었으면(시한 — `pruneSpans`) 모르는 것으로(닫힌 쪽).
-    fn sawWorker(t: *const Tab, wtarget: u64, at: i64) bool {
-        for (t.blinds.items) |b| if (b.wtarget == wtarget and b.hi != std.math.maxInt(i64) and b.hi <= at) return true;
+    /// 재검증 10 차: 탭 `t` 가 기록 IO `io` 때 워커 `wtarget` 을 보고 있었고 그 판정(시각 `at`) 앞에 그 세션의 눈먼 때를 닫았다 — 그 판정은 그
+    /// 워커에 대한 제 눈먼 때를 다 알고 섰다(겹침 규칙). 그 뒤 그 탭에 그 워커의 눈먼 때가 새로 열려(늦은 알림·다시 뜸) 그 IO 를 덮으면 그 탭 자신의
+    /// 칸이 막는다(`pairStale` — 짝을 맺은 탭은 늘 본다). 재검증 11 차(D-v20q-1): 그 눈먼 때가 그 IO 앞에 시작했고(`lo` — 그 탭이 그 워커를 IO 뒤에야
+    /// 붙였으면 그때 그 워커를 보지 못했다) 그 세션이 IO 앞에 떨어지지 않았어야 한다(`off`). 그 워커의 마지막 눈먼 때는 시한 뒤에도 둔다
+    /// (`pruneSpans`); 잊었으면(상한) 모르는 것으로(닫힌 쪽).
+    fn sawWorker(t: *const Tab, wtarget: u64, at: i64, io: i64) bool {
+        for (t.blinds.items) |b| if (b.wtarget == wtarget and b.hi != std.math.maxInt(i64) and b.hi <= at and b.lo <= io and b.off >= io) return true;
         return false;
     }
 
@@ -4248,14 +4324,6 @@ pub const Table = struct {
                 };
                 const c = t.cands.items[ci];
                 if (c.claimed and c.link_until == 0) return true; // C7′ — 이미 이었다(같은 바이트)
-                // 재검증 10 차(구조 규칙 — 잇는 때 다시 본다): 짝을 맺은 판정 뒤에 안 것이 그 짝을 무르면 잇지 않는다(`pairStale`). 그 W 는 나쁜 것으로
-                // (다른 탭의 P 도 잇지 않는다).
-                if (self.pairStale(c, x.w)) |why| {
-                    self.link.noteBad(x.w);
-                    try self.swNote(gpa, t, &p, x.q, why);
-                    try self.swPointedAmbiguous(gpa, t, x.q);
-                    return true;
-                }
                 // 재검증 8 차(R-1): 기록 쪽 상태도(CEF 응답 — 알면) 같아야 한다.
                 if (x.status != p.status or (c.cef_status != 0 and c.cef_status != p.status)) {
                     try self.swNote(gpa, t, &p, x.q, .status);
@@ -4270,6 +4338,17 @@ pub const Table = struct {
                 }
                 if (c.cef_failed or c.lost) {
                     try self.swNote(gpa, t, &p, x.q, .record_failed);
+                    try self.swPointedAmbiguous(gpa, t, x.q);
+                    return true;
+                }
+                // 재검증 10 차(구조 규칙 — 잇는 때 다시 본다): 짝을 맺은 판정 뒤에 안 것이 그 짝을 무르면 잇지 않는다(`pairStale`). 그 W 는 나쁜 것으로
+                // (다른 탭의 P 도 잇지 않는다). 재검증 11 차(LOW-P4): 기다림 갈래(기록의 CEF 끝)를 모두 지난 뒤 — 정말 잇는 때 한 번만 본다(전에는 기록 끝을
+                // 기다리는 P 마다 바퀴마다 모든 기록 탭의 자리·후보를 훑었다 — 32 탭 가득 한 부름 0.4 ms(ReleaseFast)·3 ms(Debug), 검증 v20q-B Q19-g).
+                // 가장 늦게 보니 그 사이에 온 앎도 모두 본다.
+                self.scratch.stale_checks += 1;
+                if (self.pairStale(c, x.w)) |why| {
+                    self.link.noteBad(x.w);
+                    try self.swNote(gpa, t, &p, x.q, why);
                     try self.swPointedAmbiguous(gpa, t, x.q);
                     return true;
                 }
@@ -4309,6 +4388,8 @@ const H = struct {
     /// CDP 사건마다 그때까지의 CEF 기록이 모두 왔다고 친다(IO 상자가 빈 때 — 시험이 후보를 사건 차례대로 곧 넘긴다). 제 기록이 CDP 끝보다
     /// 늦게 오는 꼴(W9d② 적대 리뷰 3 회차 P1)을 보는 시험은 끄고 물 높이를 손으로 올린다(`flushed`·`tick`).
     sync: bool = true,
+    /// 재검증 11 차(시험): 까닭마다 받은 `sw_note` 수(어느 겹이 막았는지 — 판정의 `w_blind` · 잇는 때의 `w_stale`).
+    notes: std.EnumArray(sw_mod.Reason, usize) = .initFill(0),
 
     fn deinit(self: *H) void {
         self.table.deinit(gpa_t);
@@ -4344,7 +4425,10 @@ const H = struct {
             .pause => self.paused += 1,
             .detach_workers => {},
             .sw_paired => |x| if (std.c.getenv("SW_TEST_LOG") != null) std.debug.print("    sw-pair req {d} w {s}\n", .{ x.request, x.wrid.slice() }),
-            .sw_note => |x| if (std.c.getenv("SW_TEST_LOG") != null) std.debug.print("    sw-note req {d} p {s} {s}\n", .{ x.request, x.prid.slice(), @tagName(x.reason) }),
+            .sw_note => |x| {
+                self.notes.getPtr(x.reason).* += 1;
+                if (std.c.getenv("SW_TEST_LOG") != null) std.debug.print("    sw-note req {d} p {s} {s}\n", .{ x.request, x.prid.slice(), @tagName(x.reason) });
+            },
         };
     }
 
@@ -11129,7 +11213,7 @@ test "W9d② 재검증 5 차 S3b: 떼기·다시 켬 — 다시 켜면 설명되
 const SwWorld = struct {
     /// 재검증 8 차(LOW-3): `head`·`range`·`status` — 그 fetch 의 머리(HEAD·`Range` — τ 를 나눈 HEAD·206 은 다른 바이트), `s_delay` — 시작 사건이
     /// 늦게 닿는 폭(다른 타깃 — 4 회차 R4-b 의 차례).
-    const Fetch = struct { q: u64, url: u64, target: u64, start: i64, io: i64, resp: i64, tau: i64, body: u64, disk: bool, excl: bool, ended: bool, w_sent: bool, w_resp: bool, w_delay: i64, rid: [16]u8, rid_len: u8, omit: bool = false, head: bool = false, range: u64 = 0, status: u16 = 200, s_delay: i64 = 0, w_sent6: bool = false };
+    const Fetch = struct { q: u64, url: u64, target: u64, start: i64, io: i64, resp: i64, tau: i64, body: u64, disk: bool, excl: bool, ended: bool, w_sent: bool, w_resp: bool, w_delay: i64, rid: [16]u8, rid_len: u8, omit: bool = false, head: bool = false, range: u64 = 0, status: u16 = 200, s_delay: i64 = 0, w_sent6: bool = false, epoch: u32 = 0, s_delay6: i64 = 0, w_delay6: i64 = 0 };
 };
 
 test "W9d② 재검증 5 차 S3b 퍼즈: 맞물린 표 — 이은 본문은 늘 그 기록 제 fetch 의 본문이다, 끝은 기록마다 하나(재검증 7 차 E6: 실측의 꼴을 넣은 세계 여섯)" {
@@ -11162,8 +11246,25 @@ test "W9d② 재검증 5 차 S3b 퍼즈: 맞물린 표 — 이은 본문은 늘 
     // 재검증 10 차(LOW-T): 둘째 탭 세계에 검증 v20p 가 찾은 차례 둘 — 둘째 탭의 새 워커 붙은 알림이 먼저 닿는 판(R2-c)과 첫 탭이 판 가운데 기록을
     // 끄거나 닫히는 판(R2-d). 9 차 코드는 이 세계에서 틀린 본문을 낸다(계획 「재검증 10 차」).
     const two_x = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .omit_n = 6, .ts_lag_max = 10_700, .urls = 12, .tab2 = true, .fifo = true, .att6_early = true, .stop5 = true, .name = "two-tabs+early+stop" });
-    // 모든 세계를 돈 뒤에 단언한다(앞 세계가 실패해도 뒤 세계의 수를 남긴다 — 130 000 판, 계획 「재검증 10 차」).
+    // 재검증 11 차(LOW-T·D-v20q-2): 검증 v20q 가 짚은 빈 차례 — 눈먼 때 끝 바로 앞의 보이지 않는 W 와 그 끝 + 5–10 ms 의 제 기록 없는 보이는 W(`edge`),
+    // 워커 다시 뜸·세션 다시 붙음(`reload`·`reattach`)·타깃 1 의 늦은 시작(`delay1`), 둘째 탭 세션의 따로 늦음(`lag6`). 10 차 코드는 `edge` 에서(D-v20q-2),
+    // 둘째 탭 churn 에서(D-v20q-1) 틀린 본문을 낸다(계획 「재검증 11 차」). `edge` 의 앞 W 와 그 세계의 fetch 는 무더기 지연 45 ms 까지(실측 최대 42.5 ms),
+    // churn 둘은 10.7 ms 까지이고 W 응답을 다시 뜸으로만 잃는다 — 눈먼 때 끝 뒤 지연 안에 시작한 제 기록 없는 보이는 W 가 응답을 잃은 보이지 않는 W 의
+    // 늦은 IO 앞에 시작하는 꼴(남는 틈 ⑩ — 막지 않는다, 설계 결정)은 이 세계에서 단언하지 않는다. 그 틈의 크기는 측정 손잡이로 잰다: `SW_FUZZ_CHURN_LOSE=1`
+    // (churn 둘이 W 응답을 1/20 잃는다)·`SW_FUZZ_LAG45=1`(churn 둘도 45 ms)·`SW_FUZZ_EDGE_AFTER=1`(`edge` 의 뒤 W 가 그 IO 앞에도) — 계획 「재검증 11 차」.
+    const edge = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .omit = true, .ts_lag_max = 45_000, .urls = 12, .fifo = true, .edge = true, .edge_after = std.c.getenv("SW_FUZZ_EDGE_AFTER") != null, .name = "gentle+blind+edge" });
+    const lag45 = std.c.getenv("SW_FUZZ_LAG45") != null;
+    const churn_lose = std.c.getenv("SW_FUZZ_CHURN_LOSE") != null;
+    const churn = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .share = true, .lose = if (churn_lose) 20 else 0, .omit = true, .ts_lag_max = if (lag45) 45_000 else 10_700, .urls = 12, .fifo = true, .reload = true, .reattach = true, .delay1 = true, .edge = true, .name = "gentle+blind+share+churn" });
+    const two_c = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .share = true, .lose = if (churn_lose) 20 else 0, .omit = true, .omit_n = 6, .ts_lag_max = if (lag45) 45_000 else 10_700, .urls = 12, .tab2 = true, .fifo = true, .att6_early = true, .stop5 = true, .reload = true, .reattach = true, .lag6 = true, .delay1 = true, .edge = true, .name = "two-tabs+churn" });
+    // 모든 세계를 돈 뒤에 단언한다(앞 세계가 실패해도 뒤 세계의 수를 남긴다 — 330 000 판, 계획 「재검증 11 차」).
+    // 측정 손잡이(`SW_FUZZ_LAG45`·`SW_FUZZ_EDGE_AFTER`)를 켜면 남는 틈 ⑩ 의 수를 적기만 한다(그 세계는 단언하지 않는다).
+    const measure = lag45 or churn_lose or std.c.getenv("SW_FUZZ_EDGE_AFTER") != null;
     for ([_]@TypeOf(gap){ rough, rough_clock, gap, skew, real, real_gap, share, two, two_x }) |r| try testing.expectEqual(@as(usize, 0), r.wrong);
+    if (!measure) for ([_]@TypeOf(gap){ edge, churn, two_c }) |r| try testing.expectEqual(@as(usize, 0), r.wrong);
+    try testing.expect(edge.links >= seeds);
+    try testing.expect(churn.links * 10 >= seeds);
+    try testing.expect(two_c.links * 10 >= seeds and two_c.links6 * 20 >= seeds);
     try testing.expect(rough.links * 6 >= seeds);
     // 어둠이 적은 세계는 잇기가 살아 있어야 틀린 짝을 찾는 힘이 있다(판당 한 번은 잇는다). τ 나누기 세계는 W 응답을 잃어 어둠이 많다(판 열에 하나).
     for ([_]@TypeOf(gap){ gap, skew, real, real_gap }) |r| try testing.expect(r.links >= seeds);
@@ -12310,7 +12411,8 @@ test "재검증 7 차 기준 · v20m R7-a: F16b — W_a 의 응답 뒤 다른 �
 
 /// 재검증 7 차(E6): 맞물린 표의 세계 모의기(본디 「S3b 퍼즈」 의 몸 — 재검증 6 차 검증의 사본 `v20mFuzz` 가 바꾼 가정을 손잡이로 품었다). 손잡이:
 ///   - `skew_max` — 시작을 잃은 W 의 `requestTime` = IO 뒤 +44…`skew_max` µs(실측 +44…+1302, 무더기에서 더 늦다; 0 이면 옛 가정 — 시작 그대로).
-///   - `ts_lag_max` — 보이는 W 의 시작 ts → IO 지연(0 이면 옛 가정 — 타깃 1 은 0.2–0.5 ms, 타깃 2 는 0.2–3.2 ms; 실측 무더기 중앙 2.7·최대 10.7 ms).
+///   - `ts_lag_max` — 보이는 W 의 시작 ts → IO 지연(0 이면 옛 가정 — 타깃 1 은 0.2–0.5 ms, 타깃 2 는 0.2–3.2 ms; 7 차 실측 무더기 중앙 2.7·최대 10.7 ms —
+///     재검증 11 차의 더 넓은 실측은 최대 42.5 ms라 11 차의 새 세계는 45 ms).
 ///   - `gap` — 기록을 켠 뒤 이만큼의 IO 는 기록이 표에 들지 않는다(6 차의 `any_recording` 틈 — 제품은 7 차에서 닫았다; 표가 제 기록 없는 보이는 W 에
 ///     견디는지 본다).
 ///   - `omit` — 판의 fetch 1/12 은 기록이 표지 없이 없다(알지 못하는 다른 길의 「제 기록 없는 W」).
@@ -12334,7 +12436,18 @@ test "재검증 7 차 기준 · v20m R7-a: F16b — W_a 의 응답 뒤 다른 �
 ///   - `att6_early` — 재검증 10 차(LOW-T): 둘째 탭의 새 워커 붙은 알림이 첫 탭의 것보다 먼저(3 ms 까지) 닿는 판(판의 절반 — 세션마다 따로 닿는다,
 ///     검증 v20p R2-c 의 차례).
 ///   - `stop5` — 재검증 10 차(LOW-T): 판의 1/6 에서 첫 탭이 판 가운데 기록을 끄거나 닫힌다(검증 v20p R2-d — 짝을 맺은 탭이 사라진다).
-const SwFuzzCfg = struct { seeds: usize, skew_max: i64 = 0, gap: i64 = 0, gentle: bool = false, ts_lag_max: i64 = 0, omit: bool = false, blind: bool = false, seed_from: usize = 0, name: []const u8 = "", urls: usize = 6, share: bool = false, lose: u8 = 0, tab2: bool = false, omit_n: u8 = 12, fifo: bool = false, att6_early: bool = false, stop5: bool = false };
+///   - `reload` — 재검증 11 차(LOW-T): 판의 1/3 에서 한 타깃이 다시 뜬다(`Inspector.targetReloadedAfterCrash` — 새 epoch): 그때 날던 W 는 응답을
+///     잃고(기록은 남는다), 다시 뜬 뒤 도메인이 사건을 내기 전(0.5–8.5 ms)에 시작한 W 는 두 탭에서 시작을 잃는다. 다시 뜸 알림은 탭마다 따로 — 절반은
+///     2 ms 안, 절반은 300 ms 까지 늦다(그 세션의 새 epoch 사건은 그 알림 뒤 — FIFO; 검증 v20q R1-b·R1-c 의 차례).
+///   - `reattach` — 재검증 11 차(LOW-T): 판의 1/3 에서 한 탭의 한 타깃 세션이 떨어졌다가(`workerDetached`) 다시 붙는다(새 눈먼 때) — 떨어진 동안
+///     그 탭에 닿을 사건은 잃고, 다시 켜지기 전에 시작한 W 는 그 탭에서 시작을 잃는다.
+///   - `lag6` — 재검증 11 차(LOW-T): 둘째 탭 세션의 W 사건이 따로 늦는다(시작 1/4 · 응답 1/6 이 300 ms 까지 — 그 세션 FIFO 로 뒤 사건도).
+///   - `delay1` — 재검증 11 차(LOW-T): 타깃 1 의 시작 사건도 1/6 늦춘다(전에는 타깃 2 만 — `share`).
+///   - `edge_after` — 재검증 11 차(측정): `edge` 의 뒤 W 가 앞 W 의 기록 IO 앞에도 시작한다(남는 틈 ⑩ — 막지 않는 꼴; 기본 세계는 그 IO 뒤에만).
+///   - `edge` — 재검증 11 차(D-v20q-2): 판의 1/3 에서 타깃 1 의 눈먼 때 끝 바로 앞(3 ms 안)에 시작한 W(시작·응답을 잃는다 — 기록 IO 는 6–45 ms 뒤,
+///     실측 무더기 최대 42.5 ms)와 그 끝 + 5.2–45.2 ms 에 시작한 같은 주소의 보이는 W(제 기록 없음)·그 W 의 P 를 둔다(IO 가 뒤 W 의 시작 앞인 꼴과 뒤인
+///     꼴 모두).
+const SwFuzzCfg = struct { seeds: usize, skew_max: i64 = 0, gap: i64 = 0, gentle: bool = false, ts_lag_max: i64 = 0, omit: bool = false, blind: bool = false, seed_from: usize = 0, name: []const u8 = "", urls: usize = 6, share: bool = false, lose: u8 = 0, tab2: bool = false, omit_n: u8 = 12, fifo: bool = false, att6_early: bool = false, stop5: bool = false, reload: bool = false, reattach: bool = false, lag6: bool = false, delay1: bool = false, edge: bool = false, edge_after: bool = false };
 
 fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dark6: usize, links6: usize, stops: usize } {
     const seeds: usize = cfg.seeds;
@@ -12397,7 +12510,32 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
             en6[1] = att6[1] + 500 + @as(i64, rnd.uintLessThan(u32, 8_000));
             en6[2] = att6[2] + 500 + @as(i64, rnd.uintLessThan(u32, 8_000));
         }
+        // 재검증 11 차(LOW-T): 다시 뜸·다시 붙음·눈먼 때 끝의 판(손잡이가 꺼진 세계의 난수 차례는 그대로).
+        var rl_tg: u64 = 0;
+        var rl_at: i64 = 0;
+        var rl_vis: i64 = 0;
+        var rl_note = [_]i64{ 0, 0 }; // 탭 5·6 의 다시 뜸 알림
+        if (cfg.reload and rnd.uintLessThan(u8, 3) == 0) {
+            rl_tg = 1 + rnd.uintLessThan(u64, 2);
+            rl_at = rec_start + 8_000 + @as(i64, rnd.uintLessThan(u32, 40_000));
+            rl_vis = rl_at + 500 + @as(i64, rnd.uintLessThan(u32, 8_000));
+            for (&rl_note) |*x| x.* = rl_at + 50 + @as(i64, if (rnd.boolean()) rnd.uintLessThan(u32, 2_000) else rnd.uintLessThan(u32, 300_000));
+        }
+        var ra_tab: BrowserId = 0;
+        var ra_tg: u64 = 0;
+        var ra_off: i64 = 0;
+        var ra_att: i64 = 0;
+        var ra_en: i64 = 0;
+        if (cfg.reattach and rnd.uintLessThan(u8, 3) == 0) {
+            ra_tab = if (cfg.tab2 and rnd.boolean()) 6 else 5;
+            ra_tg = 1 + rnd.uintLessThan(u64, 2);
+            ra_off = rec_start + 8_000 + @as(i64, rnd.uintLessThan(u32, 40_000));
+            ra_att = ra_off + 500 + @as(i64, rnd.uintLessThan(u32, 30_000));
+            ra_en = ra_att + 500 + @as(i64, rnd.uintLessThan(u32, 8_000));
+        }
+        const edge_round = cfg.edge and cfg.blind and rnd.uintLessThan(u8, 3) == 0;
         for (0..n_f) |k| {
+            const last_io_before = last_io; // 재검증 11 차(`edge` — 바꾼 fetch 는 그 앞 IO 차례로 다시 잰다)
             t += @as(i64, rnd.uintLessThan(u32, 4_000));
             const target: u64 = if (rnd.uintLessThan(u8, 4) == 0) 2 else 1;
             const ui = rnd.uintLessThan(usize, urls.len);
@@ -12450,13 +12588,77 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
                 f.resp = rec_start + 1_000 + @as(i64, rnd.uintLessThan(u32, 20_000));
                 f.tau = f.resp + sw_wall_off;
             }
+            // 재검증 11 차(LOW-T): 타깃 1 의 늦은 시작 사건.
+            if (cfg.delay1 and f.target == 1 and rnd.uintLessThan(u8, 6) == 0) f.s_delay = @as(i64, rnd.uintLessThan(u32, 1_800_000));
+            // 재검증 11 차(D-v20q-2): 눈먼 때 끝의 판 — 앞 둘을 바꾼다.
+            if (edge_round and k < 2) {
+                f.target = 1;
+                f.url = hashUrl8(urls[0]);
+                f.excl = false;
+                f.disk = false;
+                f.head = false;
+                f.range = 0;
+                f.status = 200;
+                f.s_delay = 0;
+                f.w_delay = 0;
+                if (k == 0) {
+                    f.start = @max(en[1] - 1 - @as(i64, rnd.uintLessThan(u32, 3_000)), rec_start + 1);
+                    f.io = f.start + 6_000 + @as(i64, rnd.uintLessThan(u32, 39_000)); // 무더기의 ts → IO 지연(실측 최대 42.5 ms)
+                    f.w_sent = false;
+                    f.w_resp = false;
+                    f.omit = false;
+                } else {
+                    // 재검증 11 차: 뒤 W 는 앞 W 의 기록 IO 뒤에 시작한다(IO 가 뒤 W 의 시작 앞인 꼴 — 막는 꼴). 뒤 W 가 그 IO 앞에 시작하는 꼴(남는 틈 ⑩)은
+                    // `edge_after` 로만(측정).
+                    f.start = en[1] + 5_200 + @as(i64, rnd.uintLessThan(u32, 40_000));
+                    if (!cfg.edge_after) f.start = @max(f.start, last_io_before[1] + 1);
+                    f.io = f.start + 200 + @as(i64, rnd.uintLessThan(u32, 10_000));
+                    f.w_sent = true;
+                    f.w_resp = true;
+                    f.omit = true;
+                }
+                last_io = last_io_before;
+                f.io = @max(f.io, last_io[1] + 1);
+                last_io[1] = f.io;
+                f.resp = f.io + 1_000 + @as(i64, rnd.uintLessThan(u32, 20_000));
+                f.tau = f.resp + sw_wall_off;
+                t = @max(t, f.start);
+            }
             // 둘째 탭의 세션이 그 W 의 시작을 보는가(그 탭의 눈먼 때 뒤에 시작했다).
-            if (cfg.tab2) f.w_sent6 = if (cfg.blind) f.start >= en6[target] and f.start >= rec_start else f.w_sent;
+            if (cfg.tab2) f.w_sent6 = if (cfg.blind) f.start >= en6[f.target] and f.start >= rec_start else f.w_sent;
+            // 재검증 11 차(LOW-T): 다시 뜸 — 날던 W 는 응답을 잃고, 새 epoch 의 처음 W 는 시작을 잃는다.
+            if (rl_tg != 0 and f.target == rl_tg) {
+                if (f.start >= rl_at) {
+                    f.epoch = 1;
+                    if (f.start < rl_vis) {
+                        f.w_sent = false;
+                        f.w_sent6 = false;
+                    }
+                } else if (f.resp + 50 + f.w_delay > rl_at) f.w_resp = false;
+            }
+            if (cfg.lag6) {
+                if (rnd.uintLessThan(u8, 4) == 0) f.s_delay6 = @as(i64, rnd.uintLessThan(u32, 300_000));
+                if (rnd.uintLessThan(u8, 6) == 0) f.w_delay6 = @as(i64, rnd.uintLessThan(u32, 300_000));
+            }
             next_body += 1;
             const rs = try std.fmt.bufPrint(&f.rid, "{s}{d}", .{ if (f.excl) "preload-" else "w.", k });
             f.rid_len = @intCast(rs.len);
             try fs.append(gpa_t, f);
             if (!f.excl) try bodies.put(gpa_t, f.q, f.body);
+        }
+        // 재검증 11 차(새 세계): 서로 다른 주소의 두 fetch 가 µs 까지 같은 τ 를 갖지 않게 — 서로 다른 두 네트워크 응답의 µs 충돌은 실측에 없었다(옛 꼴 —
+        // `SW_FUZZ_LEGACY`; 7 차가 남는 틈으로 적었다). 응답을 늘 잃는 `edge` 의 앞 W 와 다시 뜸·다시 붙음이 응답을 잃게 하는 세계에서는 그 충돌이
+        // 330 000 판에 몇씩 틀린 본문을 냈다(모형의 티 — 같은 주소의 τ 나누기(`share`)는 그대로). 옛 세계는 그대로 둔다(10 차와 견줄 수 있게).
+        if (cfg.edge or cfg.reload or cfg.reattach) {
+            var again = true;
+            while (again) {
+                again = false;
+                for (fs.items, 0..) |g, gi| for (fs.items[gi + 1 ..]) |*f2| if (f2.tau == g.tau and f2.url != g.url) {
+                    f2.resp += 1;
+                    f2.tau += 1;
+                    again = true;
+                };
+            }
         }
         // 사건을 시각 차례로: CEF 시작(기록 — preload 는 없다)·W 시작·W 응답·CEF 끝.
         const Ev = struct { at: i64, kind: u8, i: usize };
@@ -12477,8 +12679,10 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
             if (f.w_resp) try evs.append(gpa_t, .{ .at = f.resp + 50 + f.w_delay, .kind = 2, .i = i });
             if (f.ended and !f.excl) try evs.append(gpa_t, .{ .at = f.resp + 3_000, .kind = 3, .i = i });
             // 재검증 9 차(LOW-T1): 둘째 탭의 세션 사본(조금 늦게 닿는다 — 세션마다 따로 온다).
-            if (cfg.tab2 and f.w_sent6) try evs.append(gpa_t, .{ .at = if (cfg.fifo) f.start + 57 + f.s_delay else @min(f.start + 57 + f.s_delay, f.resp + 48 + f.w_delay), .kind = 7, .i = i });
-            if (cfg.tab2 and f.w_resp) try evs.append(gpa_t, .{ .at = f.resp + 59 + f.w_delay, .kind = 8, .i = i });
+            // 재검증 11 차(LOW-T): `lag6` 이면 둘째 탭 세션의 늦음은 따로(첫 탭의 `s_delay` 를 따르지 않는다).
+            const sd6 = if (cfg.lag6) f.s_delay6 else f.s_delay;
+            if (cfg.tab2 and f.w_sent6) try evs.append(gpa_t, .{ .at = if (cfg.fifo) f.start + 57 + sd6 else @min(f.start + 57 + sd6, f.resp + 48 + f.w_delay), .kind = 7, .i = i });
+            if (cfg.tab2 and f.w_resp) try evs.append(gpa_t, .{ .at = f.resp + 59 + f.w_delay + f.w_delay6, .kind = 8, .i = i });
         }
         // 페이지 P: 받은 응답을 아무 P 에(복제·메모 — 같은 것을 여러 번도), 기록 전 메모·만든 응답·Cache Storage.
         const n_p = 4 + rnd.uintLessThan(usize, 12);
@@ -12503,6 +12707,16 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
             const rs = try std.fmt.bufPrint(&pg.rid, "p.{d}", .{k});
             pg.rid_len = @intCast(rs.len);
             pg.start = @min(pg.start, pg.resp - 1);
+            try ps.append(gpa_t, pg);
+            try pbody.put(gpa_t, try gpa_t.dupe(u8, rs), pg.body);
+            try evs.append(gpa_t, .{ .at = pg.resp, .kind = 4, .i = ps.items.len - 1 });
+        }
+        // 재검증 11 차(D-v20q-2): 눈먼 때 끝의 판 — 뒤 W(제 기록 없음)의 P.
+        if (edge_round and fs.items.len >= 2) {
+            const f = fs.items[1];
+            var pg: Pg = .{ .rid = undefined, .rid_len = 0, .start = f.start - 100, .resp = f.resp + 10 + @as(i64, rnd.uintLessThan(u32, 600_000)), .tau = f.tau, .src = "network", .body = f.body };
+            const rs = try std.fmt.bufPrint(&pg.rid, "p.edge", .{});
+            pg.rid_len = @intCast(rs.len);
             try ps.append(gpa_t, pg);
             try pbody.put(gpa_t, try gpa_t.dupe(u8, rs), pg.body);
             try evs.append(gpa_t, .{ .at = pg.resp, .kind = 4, .i = ps.items.len - 1 });
@@ -12551,6 +12765,31 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
                 }
             };
         }
+        // 재검증 11 차(LOW-T): 다시 뜸 알림(15·16) — 그 세션의 옛 epoch 사건 뒤, 새 epoch 사건은 그 알림 뒤(FIFO).
+        if (rl_tg != 0) for ([_]BrowserId{ 5, 6 }, 0..) |tb, x| {
+            if (tb == 6 and !cfg.tab2) continue;
+            const ks: [2]u8 = if (tb == 5) .{ 1, 2 } else .{ 7, 8 };
+            var note = rl_note[x];
+            for (evs.items) |e| if ((e.kind == ks[0] or e.kind == ks[1]) and fs.items[e.i].target == rl_tg and fs.items[e.i].epoch == 0) {
+                note = @max(note, e.at + 1);
+            };
+            for (evs.items) |*e| if ((e.kind == ks[0] or e.kind == ks[1]) and fs.items[e.i].target == rl_tg and fs.items[e.i].epoch == 1) {
+                e.at = @max(e.at, note + 1);
+            };
+            try evs.append(gpa_t, .{ .at = note, .kind = if (tb == 5) 15 else 16, .i = rl_tg });
+        };
+        // 재검증 11 차(LOW-T): 다시 붙음 — 떨어진 동안 그 탭에 닿을 그 타깃의 사건을 잃고, 다시 켜지기 전에 시작한 W 는 그 탭에서 시작을 잃는다.
+        if (ra_tab != 0 and (ra_tab == 5 or cfg.tab2)) {
+            const ks: [2]u8 = if (ra_tab == 5) .{ 1, 2 } else .{ 7, 8 };
+            for (evs.items) |*e| if ((e.kind == ks[0] or e.kind == ks[1]) and fs.items[e.i].target == ra_tg) {
+                const f = fs.items[e.i];
+                if (e.kind == ks[0] and f.start >= ra_off and f.start < ra_en) e.kind = 99;
+                if (e.kind == ks[1] and e.at >= ra_off and e.at < ra_att) e.kind = 99;
+            };
+            try evs.append(gpa_t, .{ .at = ra_off, .kind = if (ra_tab == 5) 17 else 20, .i = ra_tg });
+            try evs.append(gpa_t, .{ .at = ra_att, .kind = if (ra_tab == 5) 18 else 21, .i = ra_tg });
+            try evs.append(gpa_t, .{ .at = ra_en, .kind = if (ra_tab == 5) 19 else 22, .i = ra_tg });
+        }
         // 재검증 10 차(LOW-T): 첫 탭이 판 가운데 기록을 끄거나(13) 닫힌다(14).
         if (cfg.stop5 and cfg.tab2 and rnd.uintLessThan(u8, 6) == 0) {
             try evs.append(gpa_t, .{ .at = rec_start + 5_000 + @as(i64, rnd.uintLessThan(u32, @intCast(@max(n_f * 4_000, 1)))), .kind = if (rnd.boolean()) 13 else 14, .i = 0 });
@@ -12564,8 +12803,8 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
         var now: i64 = 0;
         var seen_fetch: usize = 0;
         if (dump_seed != null and dump_seed.? == seed) {
-            std.debug.print("\n[fuzz dump {s} seed {d}] rec_start {d} rec6 +{d} late_worker {} att {d},{d} en {d},{d} att6 {d},{d} en6 {d},{d}\n", .{ cfg.name, seed, rec_start, rec6 - rec_start, late_worker, att[1] - rec_start, att[2] - rec_start, en[1] - rec_start, en[2] - rec_start, att6[1] - rec_start, att6[2] - rec_start, en6[1] - rec_start, en6[2] - rec_start });
-            for (fs.items) |f| std.debug.print("  F q{d} {s} url{x} tgt{d} start+{d} io+{d} resp+{d} body{d} disk{} excl{} omit{} head{} range{x} st{d} sent{} sent6{} wresp{} wdelay{d} sdelay{d} ended{}\n", .{ f.q, f.rid[0..f.rid_len], f.url % 0x1000, f.target, f.start - rec_start, f.io - rec_start, f.resp - rec_start, f.body, f.disk, f.excl, f.omit, f.head, f.range, f.status, f.w_sent, f.w_sent6, f.w_resp, f.w_delay, f.s_delay, f.ended });
+            std.debug.print("\n[fuzz dump {s} seed {d}] rec_start {d} rec6 +{d} late_worker {} att {d},{d} en {d},{d} att6 {d},{d} en6 {d},{d} reload tgt {d} at +{d} vis +{d} notes +{d},+{d} · reattach tab {d} tgt {d} off +{d} att +{d} en +{d} · edge {}\n", .{ cfg.name, seed, rec_start, rec6 - rec_start, late_worker, att[1] - rec_start, att[2] - rec_start, en[1] - rec_start, en[2] - rec_start, att6[1] - rec_start, att6[2] - rec_start, en6[1] - rec_start, en6[2] - rec_start, rl_tg, rl_at - rec_start, rl_vis - rec_start, rl_note[0] - rec_start, rl_note[1] - rec_start, ra_tab, ra_tg, ra_off - rec_start, ra_att - rec_start, ra_en - rec_start, edge_round });
+            for (fs.items) |f| std.debug.print("  F q{d} {s} url{x} tgt{d} start+{d} io+{d} resp+{d} body{d} disk{} excl{} omit{} head{} range{x} st{d} sent{} sent6{} wresp{} wdelay{d} sdelay{d} ended{} epoch{d} sdelay6 {d} wdelay6 {d}\n", .{ f.q, f.rid[0..f.rid_len], f.url % 0x1000, f.target, f.start - rec_start, f.io - rec_start, f.resp - rec_start, f.body, f.disk, f.excl, f.omit, f.head, f.range, f.status, f.w_sent, f.w_sent6, f.w_resp, f.w_delay, f.s_delay, f.ended, f.epoch, f.s_delay6, f.w_delay6 });
             for (ps.items) |p| std.debug.print("  P {s} start+{d} resp+{d} tau{d} src {s} body{d}\n", .{ p.rid[0..p.rid_len], p.start - rec_start, p.resp - rec_start, p.tau - sw_wall_off - rec_start, p.src, p.body });
             for (evs.items) |e| std.debug.print("  @+{d} kind {d} i {d}\n", .{ e.at - rec_start, e.kind, e.i });
         }
@@ -12604,23 +12843,23 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
                 },
                 7 => {
                     const f = fs.items[e.i];
-                    try h.table.workerEvent(gpa_t, 6, f.target, .{ .sent = .{ .rid = f.rid[0..f.rid_len], .url_hash = f.url, .method_hash = hashMethod(if (f.head) "HEAD" else "GET"), .ts_us = f.start, .excluded = f.excl, .range_hash = f.range } }, now);
+                    try h.table.workerEvent(gpa_t, 6, sw_mod.targetKey(f.target, f.epoch), .{ .sent = .{ .rid = f.rid[0..f.rid_len], .url_hash = f.url, .method_hash = hashMethod(if (f.head) "HEAD" else "GET"), .ts_us = f.start, .excluded = f.excl, .range_hash = f.range } }, now);
                 },
                 8 => {
                     const f = fs.items[e.i];
                     const rt: i64 = if (!f.w_sent6 and cfg.skew_max > 0) f.io + 44 + @as(i64, @intCast(f.q % @as(u64, @intCast(cfg.skew_max - 43)))) else f.start;
-                    try h.table.workerEvent(gpa_t, 6, f.target, .{ .response = .{ .rid = f.rid[0..f.rid_len], .ts_us = f.resp, .tau = f.tau, .disk = f.disk, .status = f.status, .excluded = f.excl, .start_us = rt, .url_hash = f.url } }, now);
+                    try h.table.workerEvent(gpa_t, 6, sw_mod.targetKey(f.target, f.epoch), .{ .response = .{ .rid = f.rid[0..f.rid_len], .ts_us = f.resp, .tau = f.tau, .disk = f.disk, .status = f.status, .excluded = f.excl, .start_us = rt, .url_hash = f.url } }, now);
                 },
                 10 => try h.table.workerAttached(gpa_t, 6, e.i, now),
                 11 => h.table.workerEnabled(6, e.i, now),
                 1 => {
                     const f = fs.items[e.i];
-                    try h.table.workerEvent(gpa_t, 5, f.target, .{ .sent = .{ .rid = f.rid[0..f.rid_len], .url_hash = f.url, .method_hash = hashMethod(if (f.head) "HEAD" else "GET"), .ts_us = f.start, .excluded = f.excl, .range_hash = f.range } }, now);
+                    try h.table.workerEvent(gpa_t, 5, sw_mod.targetKey(f.target, f.epoch), .{ .sent = .{ .rid = f.rid[0..f.rid_len], .url_hash = f.url, .method_hash = hashMethod(if (f.head) "HEAD" else "GET"), .ts_us = f.start, .excluded = f.excl, .range_hash = f.range } }, now);
                 },
                 2 => {
                     const f = fs.items[e.i];
                     const rt: i64 = if (!f.w_sent and cfg.skew_max > 0) f.io + 44 + @as(i64, @intCast(f.q % @as(u64, @intCast(cfg.skew_max - 43)))) else f.start;
-                    try h.table.workerEvent(gpa_t, 5, f.target, .{ .response = .{ .rid = f.rid[0..f.rid_len], .ts_us = f.resp, .tau = f.tau, .disk = f.disk, .status = f.status, .excluded = f.excl, .start_us = rt, .url_hash = f.url } }, now);
+                    try h.table.workerEvent(gpa_t, 5, sw_mod.targetKey(f.target, f.epoch), .{ .response = .{ .rid = f.rid[0..f.rid_len], .ts_us = f.resp, .tau = f.tau, .disk = f.disk, .status = f.status, .excluded = f.excl, .start_us = rt, .url_hash = f.url } }, now);
                 },
                 3 => {
                     h.table.cefStatus(5, fs.items[e.i].q, fs.items[e.i].status); // 재검증 8 차: CEF 응답의 상태(끝 앞에 온다)
@@ -12632,6 +12871,14 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
                 },
                 5 => try h.table.workerAttached(gpa_t, 5, e.i, now),
                 6 => h.table.workerEnabled(5, e.i, now),
+                15 => try h.table.workerReloaded(gpa_t, 5, e.i, now),
+                16 => try h.table.workerReloaded(gpa_t, 6, e.i, now),
+                17 => h.table.workerDetached(5, e.i, now),
+                18 => try h.table.workerAttached(gpa_t, 5, e.i, now),
+                19 => h.table.workerEnabled(5, e.i, now),
+                20 => h.table.workerDetached(6, e.i, now),
+                21 => try h.table.workerAttached(gpa_t, 6, e.i, now),
+                22 => h.table.workerEnabled(6, e.i, now),
                 13 => try h.table.stop(gpa_t, 5),
                 14 => try h.table.closed(gpa_t, 5),
                 4, 12 => {
@@ -12675,7 +12922,7 @@ fn swFuzz(cfg: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dar
             }
         };
     }
-    std.debug.print("\n[sw fuzz {s} skew_max={d} ts_lag={d} gap={d} omit={} blind={} gentle={} tab2={} fifo={} att6_early={} stop5={}] seeds {d}+{d} · pages {d} · linked {d} (second tab {d}) · WRONG {d} · rounds gone dark {d} (second tab {d}) · first tab stopped {d}\n", .{ cfg.name, cfg.skew_max, cfg.ts_lag_max, cfg.gap, cfg.omit, cfg.blind, cfg.gentle, cfg.tab2, cfg.fifo, cfg.att6_early, cfg.stop5, seed_from, seeds, p_total, links, links6, wrong, dark_rounds, dark6_rounds, stops });
+    std.debug.print("\n[sw fuzz {s} skew_max={d} ts_lag={d} gap={d} omit={} blind={} gentle={} tab2={} fifo={} att6_early={} stop5={} reload={} reattach={} lag6={} delay1={} edge={}] seeds {d}+{d} · pages {d} · linked {d} (second tab {d}) · WRONG {d} · rounds gone dark {d} (second tab {d}) · first tab stopped {d}\n", .{ cfg.name, cfg.skew_max, cfg.ts_lag_max, cfg.gap, cfg.omit, cfg.blind, cfg.gentle, cfg.tab2, cfg.fifo, cfg.att6_early, cfg.stop5, cfg.reload, cfg.reattach, cfg.lag6, cfg.delay1, cfg.edge, seed_from, seeds, p_total, links, links6, wrong, dark_rounds, dark6_rounds, stops });
     return .{ .wrong = wrong, .links = links, .dark = dark_rounds, .dark6 = dark6_rounds, .links6 = links6, .stops = stops };
 }
 
@@ -13121,6 +13368,8 @@ test "재검증 8 차 19 회차: 같은 주소의 열린 W 자리가 표의 칸(
 test "재검증 9 차 기준 · v20o R2-a(D-v20o-1): 늦게 안 눈먼 때 — 짝을 맺은 탭 5 가 되돌리면 그 W 는 나쁜 것이라 같은 출처를 기록하는 탭 6 의 같은 번호 사본(그 W 를 맞추지 않았다)에 그 W 의 응답 사본을 받은 P 가 잇지 않는다" {
     var h: H = .{};
     defer h.deinit();
+    // 재검증 11 차(LOW-T): 중간 상태는 적어 두고 본문 단언을 먼저 — 변이가 한 겹을 끄면 본문이 틀리는지(어느 겹이 막는지) 잰다.
+    var mid_ok = true;
     try swSetup(&h, 5, true);
     try swSetup(&h, 6, true);
     const u = sw_origin ++ "/lateblind2";
@@ -13139,8 +13388,8 @@ test "재검증 9 차 기준 · v20o R2-a(D-v20o-1): 늦게 안 눈먼 때 — �
     try h.table.workerAttached(gpa_t, 5, 2, b + 42_200);
     // 탭 5 가 되돌리면 W_a 는 나쁜 것이고 탭 6 의 사본도 그때 끝난다(그 탭의 붙은 알림·P 를 기다리지 않는다).
     try h.drain();
-    try testing.expect(h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("a.1") }).?.bad);
-    try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7401));
+    mid_ok = mid_ok and (if (h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("a.1") })) |w| w.bad else false);
+    mid_ok = mid_ok and (h.end_counts.get(7401) orelse 0) == 2;
     try h.table.workerAttached(gpa_t, 6, 2, b + 42_300);
     try h.drain();
     h.table.workerEnabled(5, 2, b + 47_800);
@@ -13154,6 +13403,7 @@ test "재검증 9 차 기준 · v20o R2-a(D-v20o-1): 늦게 안 눈먼 때 — �
     // 끝은 사본마다 하나(두 탭 모두 본문 없이).
     try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7401));
     try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(7401));
+    try testing.expect(mid_ok);
 }
 
 test "재검증 9 차 기준 · v20o R2-b(D-v20o-1): R2-a 를 실제 차례로 — 두 탭 모두 W_a 를 보되 탭 6 은 W_a 의 시작 뒤·7401 의 IO 앞에 기록을 켰다(W_a 는 탭 6 의 맞추기 밖). 탭 6 의 P(W_a 응답 사본)는 탭 5 의 되돌린 짝으로 잇지 않는다" {
@@ -13189,6 +13439,8 @@ test "재검증 9 차 기준 · v20o R2-b(D-v20o-1): R2-a 를 실제 차례로 �
 test "재검증 9 차(D-v20o-1): 되돌린 기록의 다른 탭 사본 — 그 탭이 다른 W 와 짝을 맺어 이미 이었으면 그대로 두고(끝은 하나), 그 W 도 나쁜 것으로 둔다(그 W 의 응답을 받은 다른 P 가 잇지 않게)" {
     var h: H = .{};
     defer h.deinit();
+    // 재검증 11 차(LOW-T): 중간 상태는 적어 두고 본문 단언을 먼저 — 변이가 한 겹을 끄면 본문이 틀리는지(어느 겹이 막는지) 잰다.
+    var mid_ok = true;
     try swSetup(&h, 5, true);
     try swSetup(&h, 6, true);
     const u = sw_origin ++ "/lateblind4";
@@ -13209,20 +13461,23 @@ test "재검증 9 차(D-v20o-1): 되돌린 기록의 다른 탭 사본 — 그 �
     try wev(&h, 5, 1, .{ .sent = .{ .rid = "a.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } }, b + 42_350);
     try wev(&h, 5, 1, .{ .response = .{ .rid = "a.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 42_400);
     try h.drain();
-    try testing.expect(h.table.tabOf(5).?.cands.items.len == 1 and h.table.tabOf(5).?.cands.items[0].link_until != 0);
+    mid_ok = mid_ok and (h.table.tabOf(5).?.cands.items.len == 1 and h.table.tabOf(5).?.cands.items[0].link_until != 0);
     // 탭 5 에 새로 뜬 워커의 붙은 알림이 늦게 — 탭 5 의 짝을 되돌린다. 탭 6 의 사본은 이미 이었으니 그대로, W_c 는 나쁜 것.
     try h.table.workerAttached(gpa_t, 5, 2, b + 42_500);
     try h.drain();
-    try testing.expect(h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("a.1") }).?.bad);
-    try testing.expect(h.table.link.ws.get(.{ .target = 3, .rid = sw_mod.hashId("c.1") }).?.bad);
+    mid_ok = mid_ok and (if (h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("a.1") })) |w| w.bad else false);
+    mid_ok = mid_ok and (if (h.table.link.ws.get(.{ .target = 3, .rid = sw_mod.hashId("c.1") })) |w| w.bad else false);
     h.table.workerEnabled(5, 2, b + 47_800);
     try swRun(&h, b + 48_000, b + 3_000_000);
     try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7411)); // 사본마다 하나(이은 사본은 그 본문의 끝)
+    try testing.expect(mid_ok);
 }
 
 test "재검증 9 차(D-v20o-1 — 7 차 겹침 규칙의 같은 꼴): 앞 판정이 짝을 맺어 P 를 기다리던 기록을 시작을 잃은 같은 주소 W 가 끝내면, 그 짝의 W 는 나쁜 것이라 그 W 를 맞추지 않은 다른 탭의 사본에도 잇지 않는다" {
     var h: H = .{};
     defer h.deinit();
+    // 재검증 11 차(LOW-T): 중간 상태는 적어 두고 본문 단언을 먼저 — 변이가 한 겹을 끄면 본문이 틀리는지(어느 겹이 막는지) 잰다.
+    var mid_ok = true;
     try swSetup(&h, 5, true);
     try swSetup(&h, 6, true);
     const u = sw_origin ++ "/lostpair";
@@ -13239,18 +13494,19 @@ test "재검증 9 차(D-v20o-1 — 7 차 겹침 규칙의 같은 꼴): 앞 판�
     try wev(&h, 5, 1, .{ .response = .{ .rid = "w.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 40_750);
     try wev(&h, 6, 1, .{ .response = .{ .rid = "w.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 40_760);
     try swRun(&h, b + 41_000, b + 41_100);
-    try testing.expect(h.table.tabOf(5).?.cands.items.len == 1 and h.table.tabOf(5).?.cands.items[0].link_until != 0); // 짝을 맺고 P 를 기다린다
+    mid_ok = mid_ok and (h.table.tabOf(5).?.cands.items.len == 1 and h.table.tabOf(5).?.cands.items[0].link_until != 0); // 짝을 맺고 P 를 기다린다
     // W2 의 응답 — 시작을 잃었다. 탭 5 는 겹침 규칙으로 7501 을 끝낸다.
     try wev(&h, 5, 1, .{ .response = .{ .rid = "w.2", .ts_us = b + 45_000, .tau = b + 45_000 + sw_wall_off, .status = 200, .start_us = b + 27_500, .url_hash = hashUrl8(u) } }, b + 45_050);
     // 그 짝의 W1 은 나쁜 것이고 탭 6 의 사본도 함께 끝났다.
-    try testing.expect(h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("w.1") }).?.bad);
-    try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7501));
+    mid_ok = mid_ok and (if (h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("w.1") })) |w| w.bad else false);
+    mid_ok = mid_ok and (h.end_counts.get(7501) orelse 0) == 2;
     try wev(&h, 6, 1, .{ .response = .{ .rid = "w.2", .ts_us = b + 45_000, .tau = b + 45_000 + sw_wall_off, .status = 200, .start_us = b + 27_500, .url_hash = hashUrl8(u) } }, b + 45_060);
     // 탭 6 의 페이지가 W1 의 응답 사본을 받았다(본문은 W1 의 것 — 7501 의 본문은 W2 의 것).
     try pFetch(&h, 6, "p.6", u, b + 30_000, b + 450_000, b + 40_700 + sw_wall_off, .{});
     try swRun(&h, b + 452_000, b + 3_000_000);
     try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.6"));
     try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7501));
+    try testing.expect(mid_ok);
 }
 
 test "재검증 9 차 기준 · v20o R9-a(LOW-T2 — 변이 M10): 늦게 안 눈먼 때를 열 때 이미 이어 본문을 받으러 간 기록(claimed·link_until 0)은 그대로다 — 끝은 하나(되돌리면 둘째 끝)" {
@@ -13592,39 +13848,106 @@ test "재검증 10 차(구조 규칙 — 잃음을 넓히지 않는 쪽): 짝을
     }
 }
 
-test "재검증 10 차(구조 규칙 — 눈먼 때는 그 기록을 가진 탭만): 기록의 사본이 없는 탭(뒤에 켰다)의 눈먼 때는 그 짝을 무르지 않는다 — 사본을 가진 탭의 눈먼 때는 무른다(짝을 맺은 탭이 그 워커의 눈먼 때를 판정 앞에 닫았으면 무르지 않는다); 사본을 가진 탭이 그 IO 까지의 자리를 잊었으면(바닥) 무른다" {
-    inline for (.{ 0, 1, 2, 3 }) |mode| {
+test "재검증 10 차(구조 규칙 — 눈먼 때는 그 기록을 가진 탭만 → 11 차: 짝 탭이 그 워커를 보고 있었을 때만 넘긴다): 기록의 사본이 없는 탭(뒤에 켰다)의 눈먼 때도 짝 탭이 그 워커를 몰랐으면 무른다(D-v20q-1 R1-a) — 짝 탭이 그 워커의 눈먼 때를 판정 앞에 닫았으면 처음 붙음은 무르지 않고, 다시 뜸·다시 붙음·짝 탭이 그 IO 앞에 뗀(렌더러 죽음 포함) 워커·그 IO 뒤에야 붙인 워커·다른 워커만 아는 짝 탭이면 무른다; 사본을 가진 탭이 그 IO 까지의 자리를 잊었으면(바닥) 무른다" {
+    // 모드: 0 사본 없는 탭 6 이 짝 탭이 모르는 워커 2 를 붙임(11 차 — 10 차는 이었다) · 1 사본을 가진 탭 6 이 그렇게 · 2 바닥 · 3 사본을 가진 탭 6,
+    // 짝 탭은 워커 2 를 판정 앞에 켰다 · 4 사본 없는 탭 6, 짝 탭은 워커 2 를 켰다 · 5 사본 없는 탭 6, 짝 탭은 워커 1 만 켰다(변이 Q4b — 타깃을 가린다) ·
+    // 6 짝 탭은 워커 2 를 켰지만 탭 6 의 눈먼 때는 다시 뜸(세대가 바뀌었다) · 7 짝 탭은 워커 2 를 켰다가 그 IO 앞에 뗐다 · 8 짝 탭은 워커 2 를 그 IO 뒤에야
+    // 붙였다(판정 앞에 닫힘 — 그 IO 때는 보지 못했다) · 9 짝 탭의 렌더러가 그 IO 앞에 죽었다(세션이 모두 떨어졌다) · 10 모드 4 를 12 초 기록한 뒤(짝 탭의
+    // 그 워커 눈먼 때는 시한을 넘겼지만 그 워커의 마지막 것이라 둔다) · 11 짝 탭은 워커 2 를 켰고, 사본을 가진 탭 6 은 워커 2 를 켰다 뗀 뒤 다시 붙였다.
+    inline for (.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }) |mode| {
         var h: H = .{};
         defer h.deinit();
         try swSetup(&h, 5, true);
         try swSetup(&h, 6, true);
         const u = sw_origin ++ "/r10-holds";
         const b: i64 = 10_000_000;
+        const o: i64 = if (mode == 10) 12_000_000 else 0; // 모드 10 은 그 뒤 시각
+        const copy6 = mode == 1 or mode == 3 or mode == 6 or mode == 11;
         h.table.markStarted(5, b);
-        h.table.markStarted(6, if (mode == 1 or mode == 3) b else b + 30_000); // 모드 1·3 은 탭 6 이 사본을 받는다
-        if (mode == 3) {
+        h.table.markStarted(6, if (copy6) b else b + o + 30_000);
+        if (mode == 3 or mode == 4 or mode == 6 or mode == 7 or mode == 9 or mode == 10 or mode == 11) {
             // 짝을 맺을 탭 5 는 워커 2 를 일찍 붙여 켰다(눈먼 때 [b + 2 ms − 1 s, b + 3 ms] — 판정 앞에 닫혔다).
             try h.table.workerAttached(gpa_t, 5, 2, b + 2_000);
             try h.drain();
             h.table.workerEnabled(5, 2, b + 3_000);
+            if (mode == 7) h.table.workerDetached(5, 2, b + 20_000);
+            if (mode == 9) try h.table.rendererGone(gpa_t, 5, b + 10_000);
         }
-        _ = try h.cand(5, 7601, u, b + 24_300, .{ .sw = true });
-        _ = try h.cand(6, 7601, u, b + 24_300, .{ .sw = true });
-        try testing.expectEqual(mode == 1 or mode == 3, h.table.tabOf(6).?.cands.items.len == 1);
-        try wFetch(&h, 5, 1, "w.1", u, b + 24_000, b + 40_700, .{});
-        h.table.cefEndReceived(5, 7601, b + 41_000, true, 9);
-        if (mode == 1 or mode == 3) h.table.cefEndReceived(6, 7601, b + 41_000, true, 9);
+        if (mode == 11) {
+            try h.table.workerAttached(gpa_t, 6, 2, b + 2_500);
+            try h.drain();
+            h.table.workerEnabled(6, 2, b + 3_500);
+            h.table.workerDetached(6, 2, b + 5_000);
+        }
+        if (mode == 5) {
+            try h.table.workerAttached(gpa_t, 5, 1, b + 2_000);
+            try h.drain();
+            h.table.workerEnabled(5, 1, b + 3_000);
+        }
+        if (mode == 10) try swRun(&h, b + 4_000, b + o); // 시한을 넘긴다(`pruneSpans`)
+        _ = try h.cand(5, 7601, u, b + o + 24_300, .{ .sw = true });
+        _ = try h.cand(6, 7601, u, b + o + 24_300, .{ .sw = true });
+        try testing.expectEqual(copy6, h.table.tabOf(6).?.cands.items.len == 1);
+        if (mode == 8) {
+            // 눈먼 때 앞 끝 b + 80 ms — 그 IO(b + 24.3 ms) + 50 ms 뒤(그 탭 자신의 눈먼 때로는 덮지 않는다)이고 W1 의 판정 창에도 닿지 않는다. 사본 없는
+            // 탭 6 은 그보다 먼저(앞 끝 b + 70 ms — 그 IO + 50 ms 안) 처음 붙였다.
+            try h.table.workerAttached(gpa_t, 6, 2, b + 70_000 + blind_pad_us);
+            try h.drain();
+            h.table.workerEnabled(6, 2, b + 70_500 + blind_pad_us);
+            try h.table.workerAttached(gpa_t, 5, 2, b + 80_000 + blind_pad_us);
+            try h.drain();
+            h.table.workerEnabled(5, 2, b + 81_000 + blind_pad_us);
+        }
+        const w_at: i64 = if (mode == 8) b + 85_000 + blind_pad_us else b + o + 24_000;
+        if (mode == 8) {
+            // 판정이 탭 5 의 그 눈먼 때 뒤에 서게 — W1 의 시작·응답은 늦게 닿는다(시각은 그대로).
+            try wev(&h, 5, 1, .{ .sent = .{ .rid = "w.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } }, w_at);
+            try wev(&h, 5, 1, .{ .response = .{ .rid = "w.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, w_at + 50);
+        } else try wFetch(&h, 5, 1, "w.1", u, b + o + 24_000, b + o + 40_700, .{});
+        h.table.cefEndReceived(5, 7601, w_at + 17_000, true, 9);
+        if (copy6) h.table.cefEndReceived(6, 7601, w_at + 17_000, true, 9);
         if (mode == 2) {
             // 사본을 가진 탭 5 가 그 IO 까지의 자리를 잊었다(상한 — 화이트박스).
             h.table.tabOf(5).?.wspan_floor = b + 24_300;
-        } else {
-            try h.table.workerAttached(gpa_t, 6, 2, b + 41_100); // 탭 6 의 눈먼 때 [b + 41.1 ms − 1 s, …)
+        } else if (mode == 6) {
+            try h.table.workerReloaded(gpa_t, 6, 2, w_at + 17_100); // 탭 6 의 다시 뜸 눈먼 때 [− 1 s, + 1 s]
             try h.drain();
-            h.table.workerEnabled(6, 2, b + 41_500);
+        } else if (mode != 8) {
+            try h.table.workerAttached(gpa_t, 6, 2, w_at + 17_100); // 탭 6 의 눈먼 때 [알림 − 1 s, …)
+            try h.drain();
+            h.table.workerEnabled(6, 2, w_at + 17_500);
         }
+        const tau: i64 = (if (mode == 8) b else b + o) + 40_700 + sw_wall_off;
+        try pFetch(&h, 5, "p.1", u, b + o + 23_900, w_at + 17_800, tau, .{});
+        try swRun(&h, w_at + 18_000, w_at + 3_000_000);
+        std.debug.print("\n[r10-holds mode {d}] p.1 -> {?d}\n", .{ mode, fetchedFor(&h, "p.1") });
+        try testing.expectEqual(@as(?u64, if (mode == 3 or mode == 4 or mode == 10) 7601 else null), fetchedFor(&h, "p.1"));
+    }
+}
+
+test "재검증 11 차(D-v20q-2 — 잇는 때의 뒤 여유): 사본을 가진 다른 탭이 판정 앞에 새 워커를 붙여 켰고(짝 탭은 그 알림이 아직) 그 눈먼 때 끝이 기록 IO 앞 ts → IO 지연(50 ms) 안이면 무른다 — 그 끝 바로 앞에 시작한 W 의 기록 IO 는 그만큼 늦다; 그보다 앞이면 잇는다" {
+    inline for (.{ 14_300, 44_300, 64_300 }) |gap| {
+        var h: H = .{};
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        try swSetup(&h, 6, true);
+        const u = sw_origin ++ "/r11-lag2";
+        const b: i64 = 10_000_000;
+        h.table.markStarted(5, b);
+        h.table.markStarted(6, b);
+        const io: i64 = b + 24_300;
+        try h.table.workerAttached(gpa_t, 6, 2, io - gap - 5_000); // 기록을 켠 앞이어도 그 탭은 기록 중이다(시작은 swSetup)
+        try h.drain();
+        h.table.workerEnabled(6, 2, io - gap); // 탭 6 의 눈먼 때 끝 = IO − gap
+        _ = try h.cand(5, 7951, u, io, .{ .sw = true });
+        _ = try h.cand(6, 7951, u, io, .{ .sw = true });
+        try wFetch(&h, 5, 1, "w.1", u, b + 24_500, b + 40_700, .{}); // 그 IO(b + 24.3 ms)는 W1 의 시작 앞(창의 앞 여유 안)
+        h.table.cefEndReceived(5, 7951, b + 41_000, true, 9);
+        h.table.cefEndReceived(6, 7951, b + 41_000, true, 9);
         try pFetch(&h, 5, "p.1", u, b + 23_900, b + 41_800, b + 40_700 + sw_wall_off, .{});
         try swRun(&h, b + 42_000, b + 3_000_000);
-        try testing.expectEqual(@as(?u64, if (mode == 0 or mode == 3) 7601 else null), fetchedFor(&h, "p.1"));
+        std.debug.print("\n[r11 lag2 gap {d}] p.1 -> {?d}\n", .{ gap, fetchedFor(&h, "p.1") });
+        try testing.expectEqual(@as(?u64, if (gap < ts_io_lag_us) null else 7951), fetchedFor(&h, "p.1"));
     }
 }
 
@@ -14021,4 +14344,652 @@ test "재검증 10 차(MED-P2 의 같은 꼴 — 탭의 빼는 꼴 W 표): 빼�
     };
     try testing.expectEqual(@as(u32, 3), t.wexcl.count());
     try testing.expect(tomb * 4 <= t.wexcl.capacity());
+}
+
+// ── 검증 v20q(10 차 dd92920f9 반례 찾기 1–10 회차) 탐침 ──────────────────────────────────────────────────────────
+
+/// v20q R1: 탭 5 가 W_a(타깃 1, 제 기록 없음) ↔ 7401(주인은 사건이 오지 않은 타깃 2 의 W_b)을 짝짓고 P 를 기다린다.
+/// `t6_from` — 탭 6 이 기록을 켠 때(7401 의 IO b + 27.8 ms 뒤면 사본이 없다). `early2` — 탭 5·6 이 워커 2 를 판정 앞에 붙여 켰다.
+fn v20qBase(h: *H, u: []const u8, b: i64, t6_from: i64, early2: bool) !void {
+    try swSetup(h, 5, true);
+    try swSetup(h, 6, true);
+    h.table.markStarted(5, b);
+    h.table.markStarted(6, t6_from);
+    if (early2) {
+        try h.table.workerAttached(gpa_t, 5, 2, b + 2_000);
+        try h.drain();
+        h.table.workerEnabled(5, 2, b + 3_000);
+        try h.table.workerAttached(gpa_t, 6, 2, t6_from + 100);
+        try h.drain();
+        h.table.workerEnabled(6, 2, t6_from + 500);
+    }
+    _ = try h.cand(5, 7401, u, b + 27_800, .{ .sw = true });
+    _ = try h.cand(6, 7401, u, b + 27_800, .{ .sw = true });
+    h.table.cefEndReceived(5, 7401, b + 34_000, true, 9);
+    if (h.table.tabOf(6).?.cands.items.len > 0) h.table.cefEndReceived(6, 7401, b + 34_000, true, 9);
+    try wev(h, 5, 1, .{ .sent = .{ .rid = "a.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } }, b + 24_050);
+    try wev(h, 5, 1, .{ .response = .{ .rid = "a.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 40_750);
+    try swRun(h, b + 41_000, b + 41_100);
+    const t5 = h.table.tabOf(5).?;
+    try testing.expect(t5.cands.items.len == 1 and t5.cands.items[0].claimed and t5.cands.items[0].link_until != 0);
+}
+
+test "v20q R1-a(사본 없는 탭의 눈먼 때): 탭 6 은 7401 뒤에 켜 사본이 없고, 탭 5 가 한 번도 붙이지 않은 새 워커 2 를 탭 6 이 먼저 붙였다 — 그 눈먼 때가 IO 를 덮는데 탭 5 의 P 가 잇는가" {
+    var h: H = .{};
+    defer h.deinit();
+    const u = sw_origin ++ "/v20q-r1a";
+    const b: i64 = 10_000_000;
+    try v20qBase(&h, u, b, b + 30_000, false);
+    try testing.expectEqual(@as(usize, 0), h.table.tabOf(6).?.cands.items.len);
+    try h.table.workerAttached(gpa_t, 6, 2, b + 42_200); // 탭 6 의 눈먼 때 [b + 42.2 ms − 1 s, …) — 7401 의 IO 를 덮는다
+    try h.drain();
+    h.table.workerEnabled(6, 2, b + 43_000);
+    try pFetch(&h, 5, "p.a5", u, b + 23_900, b + 43_500, b + 40_700 + sw_wall_off, .{});
+    try swRun(&h, b + 44_000, b + 300_000);
+    const got = fetchedFor(&h, "p.a5");
+    // 탭 5 의 붙은 알림은 잇기 뒤(세션마다 따로 닿는다).
+    try h.table.workerAttached(gpa_t, 5, 2, b + 300_100);
+    try h.drain();
+    std.debug.print("\n[v20q R1-a] p.a5 -> {?d} (7401 = wrong body if W_a had no own record)\n", .{got});
+    try testing.expectEqual(@as(?u64, null), got);
+}
+
+test "v20q R1-b(sawWorker 단서와 다시 뜸): 탭 5·6 이 워커 2 를 판정 앞에 붙여 켰고, 워커 2 가 다시 떠(targetReloadedAfterCrash) 탭 6 에 먼저 알린다 — 그 눈먼 때가 IO 를 덮는데 탭 5 의 옛 epoch 눈먼 때(닫힘)로 넘겨 P 가 잇는가" {
+    var h: H = .{};
+    defer h.deinit();
+    const u = sw_origin ++ "/v20q-r1b";
+    const b: i64 = 10_000_000;
+    try v20qBase(&h, u, b, b + 26_000, true);
+    try testing.expectEqual(@as(usize, 1), h.table.tabOf(6).?.cands.items.len);
+    try h.table.workerReloaded(gpa_t, 6, 2, b + 42_200); // 탭 6 의 다시 뜸 눈먼 때 [b + 42.2 ms − 1 s, b + 42.2 ms + 1 s]
+    try h.drain();
+    try pFetch(&h, 5, "p.a5", u, b + 23_900, b + 43_500, b + 40_700 + sw_wall_off, .{});
+    try swRun(&h, b + 44_000, b + 300_000);
+    const got = fetchedFor(&h, "p.a5");
+    try h.table.workerReloaded(gpa_t, 5, 2, b + 300_100);
+    try h.drain();
+    std.debug.print("\n[v20q R1-b] p.a5 -> {?d} (7401 = wrong body if W_a had no own record)\n", .{got});
+    try testing.expectEqual(@as(?u64, null), got);
+}
+
+test "v20q R1-b′(대조): R1-b 에서 탭 5 가 워커 2 를 판정 앞에 켜지 않았으면(sawWorker 거짓) 탭 6 의 다시 뜸 눈먼 때가 막는다" {
+    var h: H = .{};
+    defer h.deinit();
+    const u = sw_origin ++ "/v20q-r1bc";
+    const b: i64 = 10_000_000;
+    try v20qBase(&h, u, b, b + 26_000, false);
+    try h.table.workerReloaded(gpa_t, 6, 2, b + 42_200);
+    try h.drain();
+    try pFetch(&h, 5, "p.a5", u, b + 23_900, b + 43_500, b + 40_700 + sw_wall_off, .{});
+    try swRun(&h, b + 44_000, b + 300_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.a5"));
+}
+
+test "v20q R1-c(sawWorker 단서 — 잇는 탭 자신의 눈먼 때): R1-b 꼴에서 P 가 탭 6(다시 뜸 눈먼 때가 7401 의 IO 를 덮는 바로 그 탭)에서 끝나도 잇는가" {
+    var h: H = .{};
+    defer h.deinit();
+    const u = sw_origin ++ "/v20q-r1c";
+    const b: i64 = 10_000_000;
+    try v20qBase(&h, u, b, b + 26_000, true);
+    // 탭 6 도 W_a 의 응답 사본을 받는다(맞추기에는 들지 않는다 — 경계 뒤 5 ms 앞에 시작).
+    try wev(&h, 6, 1, .{ .sent = .{ .rid = "a.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } }, b + 26_100);
+    try wev(&h, 6, 1, .{ .response = .{ .rid = "a.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 40_760);
+    try h.table.workerReloaded(gpa_t, 6, 2, b + 42_200);
+    try h.drain();
+    try pFetch(&h, 6, "p.b6", u, b + 30_000, b + 43_500, b + 40_700 + sw_wall_off, .{});
+    try swRun(&h, b + 44_000, b + 300_000);
+    const got = fetchedFor(&h, "p.b6");
+    std.debug.print("\n[v20q R1-c] p.b6 -> {?d}\n", .{got});
+    try testing.expectEqual(@as(?u64, null), got);
+}
+
+test "v20q R5-a(사본 색인 성질): 무작위 차례(넣기·다시 시작·되돌리기·닫힘·끔·렌더러 죽음·다시 켬·다시 짓기)에서 늘 「서비스 워커 갈래 후보를 쥔 탭의 비트는 색인에 있다」" {
+    var rng = std.Random.DefaultPrng.init(0x7a20_0001);
+    const r = rng.random();
+    const rounds: usize = if (std.c.getenv("V20Q_R5_ROUNDS")) |s| std.fmt.parseInt(usize, std.mem.span(s), 10) catch 60 else 60;
+    var rebuilds: usize = 0;
+    var retracts: usize = 0;
+    var checks: usize = 0;
+    for (0..rounds) |round| {
+        var h: H = .{};
+        defer h.deinit();
+        const tabs = [_]BrowserId{ 5, 6, 7 };
+        var sess: u32 = 1;
+        for (tabs) |b| {
+            try swSetup(&h, b, true);
+            h.table.markStarted(b, 1);
+        }
+        var now: i64 = 10_000_000;
+        const pool: u64 = if (round % 2 == 0) 300 else 20_000;
+        var last_base: usize = 0;
+        const steps: usize = if (pool > 1_000) 14_000 else 3_000;
+        for (0..steps) |_| {
+            now += 200 + @as(i64, r.uintLessThan(u16, 400));
+            const b = tabs[r.uintLessThan(usize, 3)];
+            const op = r.uintLessThan(u8, 100);
+            if (op < 70) {
+                var ub: [48]u8 = undefined;
+                const uz = std.fmt.bufPrint(&ub, sw_origin ++ "/x{d}", .{r.uintLessThan(u8, 3)}) catch unreachable;
+                _ = try h.cand(b, 1_000 + r.uintLessThan(u64, pool), uz, now, .{ .sw = r.uintLessThan(u8, 10) != 0 });
+            } else if (op < 82) {
+                if (h.table.tabOf(b)) |t| {
+                    for (t.cands.items) |*c| if (c.key.sw and r.boolean()) {
+                        c.claimed = true;
+                        c.link_until = now + 10_000_000;
+                    };
+                    try h.table.workerAttached(gpa_t, b, 40 + r.uintLessThan(u64, 3), now);
+                    try h.drain();
+                    retracts += 1;
+                }
+            } else if (op < 86) {
+                if (h.table.tabOf(b) != null) {
+                    try h.table.closed(gpa_t, b);
+                    try h.drain();
+                    sess += 1;
+                    _ = try h.table.start(gpa_t, b, sess);
+                    h.table.markStarted(b, now);
+                    h.table.topOrigin(b, originHash(sw_origin), now);
+                }
+            } else if (op < 90) {
+                if (h.table.tabOf(b) != null) {
+                    try h.table.stop(gpa_t, b);
+                    try h.drain();
+                    sess += 1;
+                    _ = try h.table.start(gpa_t, b, sess);
+                    h.table.markStarted(b, now);
+                    h.table.topOrigin(b, originHash(sw_origin), now);
+                }
+            } else if (op < 93) {
+                try h.table.rendererGone(gpa_t, b, now);
+                try h.drain();
+            } else {
+                // 같은 탭 다시 켬(이미 켜져 있으면 앞 세션 끝 — start 의 앞 갈래)
+                sess += 1;
+                _ = try h.table.start(gpa_t, b, sess);
+                try h.drain();
+                h.table.markStarted(b, now);
+            }
+            if (h.table.sw_copies_base != last_base) {
+                rebuilds += 1;
+                last_base = h.table.sw_copies_base;
+            }
+            for (&h.table.tabs) |*o| {
+                if (o.browser == 0) continue;
+                for (o.cands.items) |c| if (c.key.sw) {
+                    checks += 1;
+                    const m = h.table.sw_copies.get(c.request) orelse 0;
+                    if (m & Table.tabBit(&h.table, o) == 0) {
+                        std.debug.print("\n[v20q R5-a] MISSING bit round {d} tab {d} req {d}\n", .{ round, o.browser, c.request });
+                        return error.TestUnexpectedResult;
+                    }
+                };
+            }
+        }
+    }
+    std.debug.print("\n[v20q R5-a] rounds {d} · checks {d} · rebuilds {d} · retract calls {d}\n", .{ rounds, checks, rebuilds, retracts });
+    try testing.expect(rebuilds > 0);
+}
+
+test "v20q R8-a(변이 S4 의 동등 주장): 맞추기 밖(세션 경계 뒤 5 ms 안)인 시작을 잃은 W_b 의 `requestTime` 이 짝 판정 뒤(IO 뒤 1 ms 안 — 실측 1.3 ms 안)여도 그 자리가 기록 IO 를 품으면 잇지 않는다" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/v20q-r8a";
+    const b: i64 = 10_000_000;
+    h.table.markStarted(5, b);
+    _ = try h.cand(5, 7701, u, b + 10_000, .{ .sw = true });
+    h.table.cefStatus(5, 7701, 200);
+    h.table.cefEndReceived(5, 7701, b + 10_800, true, 9);
+    // W_a(타깃 1 — 보이는 시작, 제 기록 없음): 응답 b + 10.9 ms → 판정이 W_a ↔ 7701.
+    try wFetch(&h, 5, 1, "a.1", u, b + 9_800, b + 10_900, .{});
+    try testing.expect(h.table.tabOf(5).?.cands.items.len == 1 and h.table.tabOf(5).?.cands.items[0].link_until != 0);
+    // W_b(타깃 2 — 그 세션은 b + 8 ms 에 맨 위 출처의 것이 되었다: 경계 b + 8 ms + 5 ms 앞 시작이라 맞추기 밖), 시작을 잃고 응답만(requestTime b + 11 ms).
+    h.table.cef_seen_us = @max(h.table.cef_seen_us, b + 20_050);
+    try h.table.workerEventFrom(gpa_t, 5, 2, .{ .response = .{ .rid = "b.1", .ts_us = b + 20_000, .tau = b + 20_000 + sw_wall_off, .status = 200, .start_us = b + 11_000, .url_hash = hashUrl8(u) } }, b + 20_050, b + 8_000);
+    try h.drain();
+    try pFetch(&h, 5, "p.a", u, b + 9_700, b + 21_000, b + 10_900 + sw_wall_off, .{});
+    try swRun(&h, b + 22_000, b + 3_000_000);
+    const got = fetchedFor(&h, "p.a");
+    std.debug.print("\n[v20q R8-a] p.a -> {?d}\n", .{got});
+    try testing.expectEqual(@as(?u64, null), got);
+}
+
+// ── 검증 v20q 2 회차: 9 차 시험의 본문 단언만 남긴 사본(겹친 방어 평가 — 중간 상태 단언 없이) ──
+test "v20q R2-copy0" {
+    // 원본: 재검증 9 차 기준 · v20o R2-a(D-v20o-1)
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    try swSetup(&h, 6, true);
+    const u = sw_origin ++ "/lateblind2";
+    const b: i64 = 10_000_000;
+    h.table.markStarted(5, b);
+    h.table.markStarted(6, b);
+    // 타깃 2(새로 뜬 워커)의 W_b — 사건이 하나도 오지 않는다. 그 기록 7401 은 두 탭에 붙는다(문은 그 출처의 지켜보는 탭 모두에).
+    _ = try h.cand(5, 7401, u, b + 27_800, .{ .sw = true });
+    _ = try h.cand(6, 7401, u, b + 27_800, .{ .sw = true });
+    h.table.cefEndReceived(5, 7401, b + 34_000, true, 9);
+    h.table.cefEndReceived(6, 7401, b + 34_000, true, 9);
+    // 타깃 1 의 W_a — 탭 5 의 세션만 본다, 제 기록은 표에 없다(알지 못하는 길 — 퍼즈 씨앗 10293 의 꼴). 탭 5 에서 7401 과 짝.
+    try wFetch(&h, 5, 1, "a.1", u, b + 24_000, b + 40_700, .{});
+    try swRun(&h, b + 41_000, b + 41_100);
+    // 두 탭 모두에 타깃 2 의 붙은 알림이 늦게 닿는다.
+    try h.table.workerAttached(gpa_t, 5, 2, b + 42_200);
+    // 탭 5 가 되돌리면 W_a 는 나쁜 것이고 탭 6 의 사본도 그때 끝난다(그 탭의 붙은 알림·P 를 기다리지 않는다).
+    try h.drain();
+    // (removed) try testing.expect(h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("a.1") }).?.bad);
+    // (removed) try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7401));
+    try h.table.workerAttached(gpa_t, 6, 2, b + 42_300);
+    try h.drain();
+    h.table.workerEnabled(5, 2, b + 47_800);
+    h.table.workerEnabled(6, 2, b + 47_900);
+    // 탭 6 의 페이지 fetch — 워커가 W_a 의 응답을 같이 썼다(같은 τ). 그 본문은 W_a 의 것, 7401 의 본문은 W_b 의 것.
+    try pFetch(&h, 6, "p.b6", u, b + 30_000, b + 450_000, b + 40_700 + sw_wall_off, .{});
+    try pFetch(&h, 5, "p.a", u, b + 23_900, b + 451_000, b + 40_700 + sw_wall_off, .{});
+    try swRun(&h, b + 452_000, b + 3_000_000);
+    std.debug.print("\n[v20q R2-copy0] p.a -> {?d}\n", .{fetchedFor(&h, "p.a")});
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.a"));
+    std.debug.print("\n[v20q R2-copy0] p.b6 -> {?d}\n", .{fetchedFor(&h, "p.b6")});
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.b6"));
+    // 끝은 사본마다 하나(두 탭 모두 본문 없이).
+    // (removed) try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7401));
+    // (removed) try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(7401));
+}
+test "v20q R2-copy1" {
+    // 원본: 재검증 9 차 기준 · v20o R2-b(D-v20o-1)
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    try swSetup(&h, 6, true);
+    const u = sw_origin ++ "/lateblind3";
+    const b: i64 = 10_000_000;
+    h.table.markStarted(5, b);
+    h.table.markStarted(6, b + 26_000);
+    _ = try h.cand(5, 7401, u, b + 27_800, .{ .sw = true });
+    _ = try h.cand(6, 7401, u, b + 27_800, .{ .sw = true });
+    h.table.cefEndReceived(5, 7401, b + 34_000, true, 9);
+    h.table.cefEndReceived(6, 7401, b + 34_000, true, 9);
+    // W_a 는 두 탭의 세션이 모두 본다(같은 워커 타깃 1).
+    try wev(&h, 5, 1, .{ .sent = .{ .rid = "a.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } }, b + 24_050);
+    try wev(&h, 6, 1, .{ .sent = .{ .rid = "a.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } }, b + 26_100);
+    try wev(&h, 5, 1, .{ .response = .{ .rid = "a.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 40_750);
+    try wev(&h, 6, 1, .{ .response = .{ .rid = "a.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 40_760);
+    try swRun(&h, b + 41_000, b + 41_100);
+    try h.table.workerAttached(gpa_t, 5, 2, b + 42_200);
+    try h.table.workerAttached(gpa_t, 6, 2, b + 42_300);
+    try h.drain();
+    h.table.workerEnabled(5, 2, b + 47_800);
+    h.table.workerEnabled(6, 2, b + 47_900);
+    try pFetch(&h, 6, "p.b6", u, b + 30_000, b + 450_000, b + 40_700 + sw_wall_off, .{});
+    try swRun(&h, b + 452_000, b + 3_000_000);
+    std.debug.print("\n[v20q R2-copy1] p.b6 -> {?d}\n", .{fetchedFor(&h, "p.b6")});
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.b6"));
+    // (removed) try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7401));
+}
+test "v20q R2-copy2" {
+    // 원본: 재검증 9 차(D-v20o-1): 되돌린 기록의 다른 탭 사본
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    try swSetup(&h, 6, true);
+    const u = sw_origin ++ "/lateblind4";
+    const b: i64 = 10_000_000;
+    h.table.markStarted(5, b);
+    h.table.markStarted(6, b);
+    _ = try h.cand(5, 7411, u, b + 27_800, .{ .sw = true });
+    _ = try h.cand(6, 7411, u, b + 27_800, .{ .sw = true });
+    h.table.cefEndReceived(5, 7411, b + 34_000, true, 9);
+    h.table.cefEndReceived(6, 7411, b + 34_000, true, 9);
+    // 탭 6 은 W_c(타깃 3 — 탭 6 의 세션만 본다)와 7411 의 짝을 맺고(제 기록이 없다), 탭 6 의 P 가 W_c 의 응답으로 그 사본을 이었다(받으러 갔다).
+    try wFetch(&h, 6, 3, "c.1", u, b + 25_000, b + 41_700, .{});
+    try swRun(&h, b + 42_000, b + 42_100);
+    try pFetch(&h, 6, "p.c6", u, b + 24_900, b + 42_300, b + 41_700 + sw_wall_off, .{});
+    std.debug.print("\n[v20q R2-copy2] p.c6 -> {?d}\n", .{fetchedFor(&h, "p.c6")});
+    try testing.expectEqual(@as(?u64, 7411), fetchedFor(&h, "p.c6"));
+    // 그 뒤에야 탭 5 가 W_a(타깃 1 — 시작·응답 사건이 늦게 닿았다)와 7411 의 짝을 맺는다(제 기록이 없다). 재검증 10 차: 이 차례를 거꾸로 하면(탭 5 가
+    // 먼저 W_a 를 본다) 탭 6 의 P 는 잇는 때 W_a 의 자리를 보고 잇지 않는다(`pairStale` — 아래 「재검증 10 차」 시험).
+    try wev(&h, 5, 1, .{ .sent = .{ .rid = "a.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } }, b + 42_350);
+    try wev(&h, 5, 1, .{ .response = .{ .rid = "a.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 42_400);
+    try h.drain();
+    // (removed) try testing.expect(h.table.tabOf(5).?.cands.items.len == 1 and h.table.tabOf(5).?.cands.items[0].link_until != 0);
+    // 탭 5 에 새로 뜬 워커의 붙은 알림이 늦게 — 탭 5 의 짝을 되돌린다. 탭 6 의 사본은 이미 이었으니 그대로, W_c 는 나쁜 것.
+    try h.table.workerAttached(gpa_t, 5, 2, b + 42_500);
+    try h.drain();
+    // (removed) try testing.expect(h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("a.1") }).?.bad);
+    // (removed) try testing.expect(h.table.link.ws.get(.{ .target = 3, .rid = sw_mod.hashId("c.1") }).?.bad);
+    h.table.workerEnabled(5, 2, b + 47_800);
+    try swRun(&h, b + 48_000, b + 3_000_000);
+    // (removed) try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7411)); // 사본마다 하나(이은 사본은 그 본문의 끝)
+}
+test "v20q R2-copy3" {
+    // 원본: 재검증 9 차(D-v20o-1 — 7 차 겹침 규칙의 같은 꼴)
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    try swSetup(&h, 6, true);
+    const u = sw_origin ++ "/lostpair";
+    const b: i64 = 10_000_000;
+    h.table.markStarted(5, b);
+    h.table.markStarted(6, b + 26_000);
+    // 기록 7501 의 주인은 시작을 잃은 W2(requestTime b + 27.5 ms — 탭 6 의 맞추기 경계 + 5 ms 앞이라 탭 6 은 W2 를 맞추지 않는다).
+    _ = try h.cand(5, 7501, u, b + 27_800, .{ .sw = true });
+    _ = try h.cand(6, 7501, u, b + 27_800, .{ .sw = true });
+    h.table.cefEndReceived(5, 7501, b + 34_000, true, 9);
+    h.table.cefEndReceived(6, 7501, b + 34_000, true, 9);
+    // W1 — 제 기록이 없다(알지 못하는 길). 탭 5 가 7501 과 짝을 맺는다(그때 W2 는 보이지 않았다). 탭 6 은 W1 을 맞추지 않는다(경계 앞 시작).
+    try wev(&h, 5, 1, .{ .sent = .{ .rid = "w.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } }, b + 24_050);
+    try wev(&h, 5, 1, .{ .response = .{ .rid = "w.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 40_750);
+    try wev(&h, 6, 1, .{ .response = .{ .rid = "w.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } }, b + 40_760);
+    try swRun(&h, b + 41_000, b + 41_100);
+    // (removed) try testing.expect(h.table.tabOf(5).?.cands.items.len == 1 and h.table.tabOf(5).?.cands.items[0].link_until != 0); // 짝을 맺고 P 를 기다린다
+    // W2 의 응답 — 시작을 잃었다. 탭 5 는 겹침 규칙으로 7501 을 끝낸다.
+    try wev(&h, 5, 1, .{ .response = .{ .rid = "w.2", .ts_us = b + 45_000, .tau = b + 45_000 + sw_wall_off, .status = 200, .start_us = b + 27_500, .url_hash = hashUrl8(u) } }, b + 45_050);
+    // 그 짝의 W1 은 나쁜 것이고 탭 6 의 사본도 함께 끝났다.
+    // (removed) try testing.expect(h.table.link.ws.get(.{ .target = 1, .rid = sw_mod.hashId("w.1") }).?.bad);
+    // (removed) try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7501));
+    try wev(&h, 6, 1, .{ .response = .{ .rid = "w.2", .ts_us = b + 45_000, .tau = b + 45_000 + sw_wall_off, .status = 200, .start_us = b + 27_500, .url_hash = hashUrl8(u) } }, b + 45_060);
+    // 탭 6 의 페이지가 W1 의 응답 사본을 받았다(본문은 W1 의 것 — 7501 의 본문은 W2 의 것).
+    try pFetch(&h, 6, "p.6", u, b + 30_000, b + 450_000, b + 40_700 + sw_wall_off, .{});
+    try swRun(&h, b + 452_000, b + 3_000_000);
+    std.debug.print("\n[v20q R2-copy3] p.6 -> {?d}\n", .{fetchedFor(&h, "p.6")});
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.6"));
+    // (removed) try testing.expectEqual(@as(?u32, 2), h.end_counts.get(7501));
+}
+
+// ── 검증 v20q-B 탐침(기록용 — 고침 아님) ─────────────────────────────────────────────────────────────────────────
+
+test "재검증 11 차(LOW-K′) · v20q-B Q11-b: 같은 워커의 W 사본이 남의 출처 세션(탭 5)으로 먼저 닿아도 맨 위 출처 탭 6 의 사본이 오면 맨 위 출처 W 다 — 남의 W 4 096 을 쏟은 뒤에도 그 P 는 잇는다(10 차는 남의 W 로 셈해 놓았다 — null)" {
+    // variant 0: 탭 6 사본 먼저(대조), 1: 탭 5(남의) 먼저·쏟음 없음, 2: 탭 5 먼저 + 남의 W 4 096 쏟음.
+    inline for (.{ 0, 1, 2 }) |variant| {
+        var h: H = .{};
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        try swSetup(&h, 6, true);
+        h.table.topOrigin(5, originHash("https://top5.test"), 1);
+        const u = sw_origin ++ "/v20q-q11b";
+        const b: i64 = 10_000_000;
+        h.table.markStarted(5, b);
+        h.table.markStarted(6, b);
+        _ = try h.cand(6, 7701, u, b + 24_300, .{ .sw = true });
+        const sent: WorkerEvent = .{ .sent = .{ .rid = "o.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = b + 24_000 } };
+        const resp: WorkerEvent = .{ .response = .{ .rid = "o.1", .ts_us = b + 40_700, .tau = b + 40_700 + sw_wall_off, .status = 200, .start_us = b + 24_000, .url_hash = hashUrl8(u) } };
+        try h.table.workerEventFrom(gpa_t, 5, 1, sent, b + 24_040, std.math.maxInt(i64));
+        try wev(&h, 6, 1, sent, b + 24_050);
+        if (variant == 0) {
+            try wev(&h, 6, 1, resp, b + 40_750);
+            try h.table.workerEventFrom(gpa_t, 5, 1, resp, b + 40_760, std.math.maxInt(i64));
+        } else {
+            try h.table.workerEventFrom(gpa_t, 5, 1, resp, b + 40_740, std.math.maxInt(i64));
+            try wev(&h, 6, 1, resp, b + 40_750);
+        }
+        try h.drain();
+        h.table.cefEndReceived(6, 7701, b + 41_000, true, 9);
+        try swRun(&h, b + 41_010, b + 41_020);
+        const key: sw_mod.WKey = .{ .target = 1, .rid = sw_mod.hashId("o.1") };
+        var in_foreign = false;
+        for (h.table.link.foreign_order.items) |k| if (k.target == key.target and k.rid == key.rid) {
+            in_foreign = true;
+        };
+        const paired = if (h.table.link.ws.get(key)) |w| w.pair else 0;
+        try testing.expect(!h.table.link.ws.get(key).?.foreign);
+        if (variant == 2) {
+            var k: usize = 0;
+            while (k < sw_mod.max_foreign_ws) : (k += 1) {
+                var rb: [24]u8 = undefined;
+                const rid = std.fmt.bufPrint(&rb, "f{d}", .{k}) catch unreachable;
+                try h.table.workerEventFrom(gpa_t, 5, 99, .{ .response = .{ .rid = rid, .ts_us = b + 41_030, .tau = b + 50_000 + @as(i64, @intCast(k)) + sw_wall_off, .status = 200, .start_us = b + 41_000, .url_hash = hashUrl8("https://other.test/x") } }, b + 41_040, std.math.maxInt(i64));
+            }
+            try h.drain();
+        }
+        const still = h.table.link.ws.contains(key);
+        try pFetch(&h, 6, "p.1", u, b + 23_900, b + 41_200, b + 40_700 + sw_wall_off, .{});
+        try swRun(&h, b + 42_000, b + 3_000_000);
+        const got = fetchedFor(&h, "p.1");
+        std.debug.print("\n[v20q Q11-b v{d}] W in foreign_order={} paired={d} still_in_ws={} order={d} foreign={d} horizon_raised={} -> P linked {?d}\n", .{ variant, in_foreign, paired, still, h.table.link.order.items.len, h.table.link.foreign_order.items.len, h.table.link.horizon != 0, got });
+        try testing.expect(still);
+        try testing.expectEqual(@as(?u64, 7701), got);
+    }
+}
+
+test "재검증 11 차(LOW-C1) · v20q-B Q14-b: sw_copies 다시 짓기(rebuildCopies)는 지금 넣는 후보까지 넣을 자리를 먼저 잡는다 — 표가 꼭 찬(available 0) 때 다시 지어도 자리를 넘지 않는다(10 차는 Debug panic·ReleaseFast available 감김)" {
+    var h: H = .{};
+    defer h.deinit();
+    const ntabs = 7;
+    for (0..ntabs) |i| try swSetup(&h, @intCast(5 + i), true);
+    var req: u64 = 1_000_000;
+    // 1) 16 389 개를 넣는다(다시 짓기 4 096·8 194 를 지난다).
+    var placed: usize = 0;
+    const per = 4000;
+    while (placed < 16_390) : (placed += 1) {
+        const ti = placed / per;
+        const t = h.table.tabOf(@intCast(5 + ti)).?;
+        req += 1;
+        try t.cands.append(gpa_t, .{ .request = req, .key = .{ .url = 7, .method = 1, .sw = true }, .t_io_us = 1, .attr = 1 });
+        try h.table.noteCopy(gpa_t, t, req);
+    }
+    std.debug.print("\n[v20q Q14-b] after 16390: count {d} base {d} cap {d} avail {d}\n", .{ h.table.sw_copies.count(), h.table.sw_copies_base, h.table.sw_copies.capacity(), h.table.sw_copies.available });
+    // 2) 3 283 개의 후보가 끝난다(표에는 남는다 — 넉넉한 쪽) → 다음 넣기(16 390 번째)가 다시 짓는다: 산 것 13 107(새 것 포함).
+    {
+        var removed: usize = 0;
+        var ti: usize = 0;
+        while (removed < 3_284) : (ti += 1) {
+            const t = h.table.tabOf(@intCast(5 + ti)).?;
+            const n = @min(t.cands.items.len, 3_284 - removed);
+            t.cands.replaceRangeAssumeCapacity(0, n, &.{});
+            removed += n;
+        }
+    }
+    var tix: usize = 0;
+    const addOne = struct {
+        fn f(hh: *H, tix_: *usize, req_: *u64) !void {
+            while (hh.table.tabOf(@intCast(5 + tix_.*)).?.cands.items.len >= per) tix_.* += 1;
+            const t = hh.table.tabOf(@intCast(5 + tix_.*)).?;
+            req_.* += 1;
+            try t.cands.append(gpa_t, .{ .request = req_.*, .key = .{ .url = 7, .method = 1, .sw = true }, .t_io_us = 1, .attr = 1 });
+            try hh.table.noteCopy(gpa_t, t, req_.*);
+        }
+    }.f;
+    try addOne(&h, &tix, &req);
+    std.debug.print("[v20q Q14-b] rebuild at 16390: count {d} base {d} cap {d} avail {d}\n", .{ h.table.sw_copies.count(), h.table.sw_copies_base, h.table.sw_copies.capacity(), h.table.sw_copies.available });
+    // 3) 끝나지 않는 후보를 더 넣어 표를 꼭 채운다(count == 2 × base == 32 768 의 max_load 26 214).
+    while (h.table.sw_copies.count() < 2 * h.table.sw_copies_base) try addOne(&h, &tix, &req);
+    var live: usize = 0;
+    for (0..ntabs) |i| live += h.table.tabOf(@intCast(5 + i)).?.cands.items.len;
+    std.debug.print("[v20q Q14-b] full: count {d} base {d} cap {d} avail {d} live cands {d}\n", .{ h.table.sw_copies.count(), h.table.sw_copies_base, h.table.sw_copies.capacity(), h.table.sw_copies.available, live });
+    try testing.expectEqual(@as(u32, 0), h.table.sw_copies.available);
+    try testing.expectEqual(@as(usize, h.table.sw_copies.count()), live);
+    // 4) 다음 넣기: count ≥ 2 × base → 다시 짓기 — 산 후보는 count + 1(지금 넣은 것) — 자리를 넘는다(Debug·ReleaseSafe 는 `available -= 1` 넘침).
+    try addOne(&h, &tix, &req);
+    std.debug.print("[v20q Q14-b] after fire: count {d} cap {d} avail {d} (wrapped if huge)\n", .{ h.table.sw_copies.count(), h.table.sw_copies.capacity(), h.table.sw_copies.available });
+    live += 1;
+    try testing.expectEqual(@as(usize, h.table.sw_copies.count()), live);
+    try testing.expect(h.table.sw_copies.available < h.table.sw_copies.capacity());
+    try testing.expect(h.table.sw_copies.count() + h.table.sw_copies.available <= h.table.sw_copies.capacity());
+    // 다시 지은 뒤에도 쥔 후보의 비트가 모두 있다.
+    for (0..ntabs) |i| {
+        const t = h.table.tabOf(@intCast(5 + i)).?;
+        for (t.cands.items) |c| try testing.expect(h.table.sw_copies.get(c.request).? & Table.tabBit(&h.table, t) != 0);
+    }
+}
+
+test "재검증 11 차(LOW-P4) · v20q-B Q19-g: pairStale 한 번의 값 — 32 탭이 모두 기록하고 탭마다 같은 주소의 자리 8 191·후보 4 095(모두 그 기록의 사본)·눈먼 때 64(덮지만 sawWorker 로 넘김) — 한 부름의 위 끝(잇는 P 마다 한 번)" {
+    var h: H = .{};
+    defer h.deinit();
+    const ntabs = max_tabs;
+    for (0..ntabs) |i| try swSetup(&h, @intCast(5 + i), true);
+    const url: u64 = hashUrl8(sw_origin ++ "/q19g");
+    const meth = hashMethod("GET");
+    const io: i64 = 50_000_000;
+    const wk: sw_mod.WKey = .{ .target = 1, .rid = sw_mod.hashId("w.1") };
+    try h.table.link.noteResponse(gpa_t, wk, io + 1_000 + sw_wall_off, false, false, 200);
+    try h.table.link.notePairAt(gpa_t, wk, 4242, 5, io + 2_000);
+    for (0..ntabs) |i| {
+        const t = h.table.tabOf(@intCast(5 + i)).?;
+        var rb: [24]u8 = undefined;
+        for (0..max_wspans - 1) |s| {
+            const rid = std.fmt.bufPrint(&rb, "s{d}.{d}", .{ i, s }) catch unreachable;
+            const key: sw_mod.WKey = .{ .target = 2, .rid = sw_mod.hashId(rid) };
+            try t.wspans.append(gpa_t, .{ .key = key, .url = url, .method = meth, .lo = io + 10_000, .hi = io + 20_000, .start = io + 10_000 });
+        }
+        for (0..max_candidates - 1) |c| try t.cands.append(gpa_t, .{ .request = 10_000 + c, .key = .{ .url = url, .method = meth, .sw = true }, .t_io_us = io - 100, .attr = 1 });
+        try t.cands.append(gpa_t, .{ .request = 4242, .key = .{ .url = url, .method = meth, .sw = true }, .t_io_us = io, .attr = 1 });
+        for (0..max_blinds) |x| try t.blinds.append(gpa_t, .{ .wtarget = 3, .lo = if (i == 0 and x == 0) 0 else io - 10, .hi = if (i == 0) io + 1 else io + 10 });
+    }
+    // 짝 탭(5)은 워커 3 의 눈먼 때를 판정 앞에 닫았다 — 그러나 짝 탭 자신의 눈먼 때는 IO 를 덮지 않게(hi = io+1 이면 덮는다 — 아래에서 lo 를 옮긴다).
+    {
+        const t5 = h.table.tabOf(5).?;
+        for (t5.blinds.items) |*bl| {
+            bl.lo = 0;
+            bl.hi = io - lost_start_pad_us * 4; // 덮지 않고 판정 앞에 닫혔다
+        }
+    }
+    const t5 = h.table.tabOf(5).?;
+    const c = t5.cands.items[t5.cands.items.len - 1];
+    var worst: u64 = 0;
+    var total: u64 = 0;
+    const reps = 20;
+    var why: ?sw_mod.Reason = null;
+    for (0..reps) |_| {
+        const a = clock_gettime_nsec_np(16);
+        why = h.table.pairStale(c, wk);
+        const d = clock_gettime_nsec_np(16) - a;
+        worst = @max(worst, d);
+        total += d;
+    }
+    std.debug.print("\n[v20q Q19-g] pairStale tabs {d} spans/tab {d} cands/tab {d} blinds/tab {d}: mean {d} µs worst {d} µs -> {?}\n", .{ ntabs, max_wspans - 1, max_candidates, max_blinds, total / reps / 1000, worst / 1000, why });
+    // 넘겼다(자리는 IO 밖·눈먼 때는 sawWorker) — 끝까지 훑은 값이다. 실측 Debug 3 ms·ReleaseFast 0.4 ms(스레드 CPU 시간) — 위 끝 50 ms.
+    try testing.expectEqual(@as(?sw_mod.Reason, null), why);
+    try testing.expect(worst < 50 * std.time.ns_per_ms);
+}
+
+test "재검증 11 차(LOW-P4): 기록의 CEF 끝을 기다리는 P 는 바퀴마다 pairStale 을 부르지 않는다 — 끝이 온 뒤 잇는 때 한 번(10 차는 기다리는 바퀴마다 모든 기록 탭을 훑었다)" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/r11-p4";
+    const b: i64 = 10_000_000;
+    h.table.markStarted(5, b);
+    _ = try h.cand(5, 7801, u, b + 10_300, .{ .sw = true });
+    try wFetch(&h, 5, 1, "w.1", u, b + 10_000, b + 12_000, .{});
+    try pFetch(&h, 5, "p.1", u, b + 9_900, b + 12_250, b + 12_000 + sw_wall_off, .{});
+    const c0 = h.table.scratch.stale_checks;
+    // CEF 끝이 아직 — 1.5 초 동안 바퀴 150 번.
+    var now: i64 = b + 12_400;
+    while (now < b + 1_512_400) : (now += 10_000) try swRun(&h, now, now + 1);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+    try testing.expectEqual(c0, h.table.scratch.stale_checks);
+    h.table.cefEndReceived(5, 7801, now, true, 9);
+    try swRun(&h, now + 1_000, now + 2_000);
+    try testing.expectEqual(@as(?u64, 7801), fetchedFor(&h, "p.1"));
+    try testing.expectEqual(c0 + 1, h.table.scratch.stale_checks);
+}
+
+test "재검증 11 차 · v20q-B Q19-h(값): 다시 짓기의 한 번 값 — sw_copies(32 탭 × 4 096 사본 후보) rebuildCopies, Link.ws 가 꽉 찬(맨 위 16 384 + 남의 4 096) 때 Tombs 의 rehash 한 번" {
+    var h: H = .{};
+    defer h.deinit();
+    for (0..max_tabs) |i| try swSetup(&h, @intCast(5 + i), true);
+    for (0..max_tabs) |i| {
+        const t = h.table.tabOf(@intCast(5 + i)).?;
+        for (0..max_candidates) |c| try t.cands.append(gpa_t, .{ .request = 1_000_000 + i * max_candidates + c, .key = .{ .url = 7, .method = 1, .sw = true }, .t_io_us = 1, .attr = 1 });
+    }
+    try h.table.sw_copies.ensureTotalCapacity(gpa_t, @intCast(max_tabs * max_candidates));
+    var a = clock_gettime_nsec_np(16);
+    try h.table.rebuildCopies(gpa_t);
+    const rb = clock_gettime_nsec_np(16) - a;
+    const l = &h.table.link;
+    var buf: [24]u8 = undefined;
+    for (0..sw_mod.max_ws) |i| try l.noteResponse(gpa_t, sw_mod.WKey.of(1, 0, try std.fmt.bufPrint(&buf, "o{d}", .{i})), 1_700_000_000_000_000 + @as(i64, @intCast(i)) * 7, false, false, 200);
+    for (0..sw_mod.max_foreign_ws) |i| try l.noteResponseFrom(gpa_t, sw_mod.WKey.of(2, 0, try std.fmt.bufPrint(&buf, "f{d}", .{i})), 1_800_000_000_000_000 + @as(i64, @intCast(i)) * 7, false, false, 200, true);
+    a = clock_gettime_nsec_np(16);
+    l.ws.rehash(std.hash_map.AutoContext(sw_mod.WKey){});
+    const rh = clock_gettime_nsec_np(16) - a;
+    a = clock_gettime_nsec_np(16);
+    l.taus.rehash(std.hash_map.AutoContext(i64){});
+    const rt = clock_gettime_nsec_np(16) - a;
+    std.debug.print("\n[v20q Q19-h] rebuildCopies {d} entries: {d} µs · ws rehash (count {d} cap {d}): {d} µs · taus rehash (count {d} cap {d}): {d} µs · sw_copies bytes ~{d} KiB\n", .{ h.table.sw_copies.count(), rb / 1000, l.ws.count(), l.ws.capacity(), rh / 1000, l.taus.count(), l.taus.capacity(), rt / 1000, h.table.sw_copies.capacity() * (8 + @sizeOf(CopyMask) + 1) / 1024 });
+}
+
+// ── 재검증 11 차 ───────────────────────────────────────────────────────────────────────────────────────────
+
+test "재검증 11 차(D-v20q-2): 눈먼 때 끝 바로 앞에 시작한 보이지 않는 W 의 기록 IO 는 그 끝 뒤 ts → IO 지연만큼 늦다 — 그 IO 가 제 기록 없는 보이는 W(판정 창은 눈먼 때에 닿지 않는다)의 시작 앞이면 짝을 맺지 않는다; 지연 밖 IO·enable 답 바로 뒤에 시작한 W 의 제 기록은 잇는다" {
+    // 모드 0: IO 가 W4 의 시작 앞(검증 v20q E-b 의 꼴 — 씨앗 213235, 막는다) · 1: IO 가 W4 의 시작 뒤(같은 틈 — W4 가 눈먼 때 끝 + 지연 안에 시작; 남는 틈 ⑩ —
+    // 막으면 모드 3 의 제 기록을 잃는다, 측정만) · 2: 대조 — IO 가 눈먼 때 끝 + 지연(`ts_io_lag_us` 50 ms) 밖(잇는다) · 3: enable 답 6 ms 뒤에 시작한 W4 의
+    // 제 기록(IO 그 0.3 ms 뒤 — 잇는다; 넓은 꼴은 이것을 잃었다).
+    inline for (.{ 0, 1, 2, 3 }) |mode| {
+        var h: H = .{};
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        const u = sw_origin ++ "/r11-lag";
+        const b: i64 = 10_000_000;
+        h.table.markStarted(5, b);
+        try h.table.workerAttached(gpa_t, 5, 1, b + 2_000);
+        try h.drain();
+        h.table.workerEnabled(5, 1, b + 6_000); // 눈먼 때 [b + 2 ms − 1 s, b + 6 ms]
+        // W0(타깃 1) — 눈먼 때 끝 앞 b + 5.5 ms 에 시작해 시작을 잃었고 응답도 잃었다(사건이 하나도 오지 않는다). 그 기록 7901 의 IO 는 지연 뒤.
+        const io: i64 = switch (mode) {
+            0 => b + 10_500,
+            1 => b + 14_000,
+            2 => b + 70_000,
+            else => b + 12_300,
+        };
+        const s4: i64 = switch (mode) {
+            0 => b + 11_500, // 판정 창 앞 끝 b + 6.5 ms — 눈먼 때 끝 뒤(7 차 ③ 은 닿지 않는다)
+            1 => b + 12_000,
+            2 => b + 69_800,
+            else => b + 12_000,
+        };
+        _ = try h.cand(5, 7901, u, io, .{ .sw = true });
+        h.table.cefStatus(5, 7901, 200);
+        h.table.cefEndReceived(5, 7901, b + 75_000, true, 9);
+        // W4(같은 주소, 보이는 시작) — 제 기록은 없다(모드 2 는 7901 이 그 기록일 수 있다).
+        try wFetch(&h, 5, 1, "w.4", u, s4, b + 80_000, .{});
+        try pFetch(&h, 5, "p.4", u, s4 - 100, b + 81_000, b + 80_000 + sw_wall_off, .{});
+        try swRun(&h, b + 82_000, b + 3_000_000);
+        std.debug.print("\n[r11 D-v20q-2 mode {d}] p.4 -> {?d} · w_blind {d} · w_stale {d}\n", .{ mode, fetchedFor(&h, "p.4"), h.notes.get(.w_blind), h.notes.get(.w_stale) });
+        if (mode == 1) continue; // 남는 틈 ⑩(측정만 — 7901 을 잇는다)
+        try testing.expectEqual(@as(?u64, if (mode == 0) null else 7901), fetchedFor(&h, "p.4"));
+        // 모드 0 은 판정이 막는다(그 창의 기록을 끝내고 설명한다 — 잇는 때의 `pairStale` 은 겹친 방어).
+        if (mode == 0) try testing.expect(h.notes.get(.w_blind) >= 1 and h.notes.get(.w_stale) == 0);
+    }
+}
+
+test "재검증 11 차(D-v20q-2) · 검증 v20q 6 회차 퍼즈 씨앗: 213235(τ 나누기 한 탭 세계)·258375(둘째 탭 세계 둘) — 이은 본문은 늘 그 기록 제 fetch 의 본문(10 차는 셋 모두 WRONG 1)" {
+    const share = try swFuzz(.{ .seeds = 1, .seed_from = 213235, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .ts_lag_max = 10_700, .urls = 12, .fifo = true, .name = "gentle+blind+share+lose" });
+    const two = try swFuzz(.{ .seeds = 1, .seed_from = 258375, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .omit_n = 6, .ts_lag_max = 10_700, .urls = 12, .tab2 = true, .fifo = true, .name = "two-tabs+blind+share+lose" });
+    const two_x = try swFuzz(.{ .seeds = 1, .seed_from = 258375, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .omit_n = 6, .ts_lag_max = 10_700, .urls = 12, .tab2 = true, .fifo = true, .att6_early = true, .stop5 = true, .name = "two-tabs+early+stop" });
+    try testing.expectEqual(@as(usize, 0), share.wrong + two.wrong + two_x.wrong);
+}
+
+test "재검증 11 차(LOW-E″ — v20m-nav 의 꼴): 시작을 잃고 1 초 넘게 늦게 응답한 W 의 자리는 그 requestTime + 지연까지만 본다 — 그 사이 같은 주소의 보이는 W 가 제 기록과 맺은 짝을 잇는 때 무르지 않는다(10 차는 응답까지 보아 w_stale); 그 자리가 기록 IO 를 품으면(requestTime 앞) 무른다" {
+    // 모드 0: 기록 IO 가 그 W 의 requestTime 뒤 260 ms(잇는다) · 1: 기록 IO 가 그 requestTime 앞 1 ms(무른다 — 그 W 의 기록일 수 있다) · 2: 기록 IO 가 그
+    // requestTime 뒤 5 ms(무른다 — requestTime 이 시작 ts 그대로인 시계에서는 IO 가 그만큼 뒤일 수 있다, `ts_io_lag_us`).
+    inline for (.{ 0, 1, 2 }) |mode| {
+        var h: H = .{};
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        const u = sw_origin ++ "/r11-nav";
+        const b: i64 = 10_000_000;
+        h.table.markStarted(5, b);
+        // 보이는 W23(타깃 1) ↔ 제 기록 7203.
+        const s23: i64 = b + 250_000;
+        const io: i64 = if (mode == 0) s23 + 600 else b + 249_000;
+        _ = try h.cand(5, 7203, u, io, .{ .sw = true });
+        h.table.cefStatus(5, 7203, 200);
+        try wFetch(&h, 5, 1, "w.23", u, s23, b + 260_000, .{});
+        // 시작을 잃은 W20(타깃 2 — 그 세션은 requestTime 뒤에 맨 위 출처의 것이 되어 맞추기 밖): requestTime(모드 0 은 b − 10 ms, 모드 1 은 IO + 1 ms),
+        // 응답은 1.2 초 뒤.
+        const rt: i64 = switch (mode) {
+            0 => b - 10_000,
+            1 => io + 1_000,
+            else => io - 5_000,
+        };
+        h.table.cef_seen_us = @max(h.table.cef_seen_us, b + 1_200_050);
+        try h.table.workerEventFrom(gpa_t, 5, 2, .{ .response = .{ .rid = "w.20", .ts_us = b + 1_200_000, .tau = b + 1_200_000 + sw_wall_off, .status = 200, .start_us = rt, .url_hash = hashUrl8(u) } }, b + 1_200_050, rt + 1_000);
+        try h.drain();
+        h.table.cefEndReceived(5, 7203, b + 1_200_100, true, 9);
+        try pFetch(&h, 5, "p.23", u, s23 - 100, b + 1_250_000, b + 260_000 + sw_wall_off, .{});
+        try swRun(&h, b + 1_251_000, b + 4_000_000);
+        std.debug.print("\n[r11 LOW-E'' mode {d}] p.23 -> {?d}\n", .{ mode, fetchedFor(&h, "p.23") });
+        try testing.expectEqual(@as(?u64, if (mode == 0) 7203 else null), fetchedFor(&h, "p.23"));
+    }
 }

@@ -1148,7 +1148,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const res = reversal(&r, gpa, log, at);
         // 재검증 10 차(LOW-J): 7 차 겹침 규칙 뒤로 같은 주소 W 둘(두 타깃)은 짝을 맺지 않아 sw-pair 줄이 판마다 0 이었다(짝의 옳음을 보는 힘이 없다 —
         // 검증 v20p 7 회차). 판마다 한 타깃만 받는 다른 주소(`k=solo`)를 더해 짝이 서고, 그 짝이 옳은지(X-Served)와 짝 수의 아래 끝을 함께 본다.
-        report(on and done and res.wrong_pairs == 0 and res.correct_pairs >= 100, "v20l-r20-xtarget", std.fmt.bufPrint(&detail, "rounds with both records and both W {d} · CEF order != CDP order (reversed) {d} · CDP start gap < 1 ms {d} (reversed among them {d}) · sw-pair lines {d} (correct {d} · WRONG {d}) · w_cross_target notes {d}", .{ res.both, res.reversed, res.close, res.close_rev, res.pairs, res.correct_pairs, res.wrong_pairs, countLines(log, "reason=w_cross_target") }) catch "");
+        report(on and done and res.wrong_pairs == 0 and res.correct_pairs >= 100, "v20l-r20-xtarget", std.fmt.bufPrint(&detail, "rounds with both records and both W {d} · CEF order != CDP order (reversed) {d} · CDP start gap < 1 ms {d} (reversed among them {d}) · sw-pair lines {d} (two-target k=same {d} · one-target k=solo {d} · correct {d} · WRONG {d}) · w_cross_target notes {d}", .{ res.both, res.reversed, res.close, res.close_rev, res.pairs, res.pairs_same, res.pairs_solo, res.correct_pairs, res.wrong_pairs, countLines(log, "reason=w_cross_target") }) catch "");
         recordOff(&r, tab_a);
         r.pump(500);
         try r.goO(tab_a, 0, "/blank");
@@ -1206,7 +1206,8 @@ extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
 extern "c" fn pclose(f: *anyopaque) c_int;
 extern "c" fn fread(ptr: [*]u8, size: usize, n: usize, f: *anyopaque) usize;
 
-const Rev = struct { both: usize = 0, reversed: usize = 0, close: usize = 0, close_rev: usize = 0, pairs: usize = 0, correct_pairs: usize = 0, wrong_pairs: usize = 0 };
+/// 재검증 11 차(LOW-J′): `pairs_same`·`pairs_solo` — sw-pair 줄을 그 기록 주소(`k=same` 두 타깃·`k=solo` 한 타깃)로 가른 수.
+const Rev = struct { both: usize = 0, reversed: usize = 0, close: usize = 0, close_rev: usize = 0, pairs: usize = 0, correct_pairs: usize = 0, wrong_pairs: usize = 0, pairs_same: usize = 0, pairs_solo: usize = 0 };
 
 /// 판 r 마다: 같은 주소의 기록 둘(CEF IO 시각 `cef-begin t=`)과 W 둘(CDP 시작 `sw-wsent ts=`)을 서버 셈(X-Served ↔ W 의 xs)으로 이어,
 /// 두 차례가 다른 판을 센다. `sw-pair` 줄은 기록의 X-Served 와 W 의 xs 로 맞는지 본다.
@@ -1272,12 +1273,22 @@ fn reversal(r: *Run, gpa: std.mem.Allocator, log: []const u8, at: usize) Rev {
             if (rev) res.close_rev += 1;
         }
     }
+    var kind_of: std.AutoHashMapUnmanaged(u64, u8) = .empty; // 기록 번호 → 1 same · 2 solo
+    for (r.begins.items[at..]) |b| if (b.browser == tab_a and b.sw) {
+        const k: u8 = if (std.mem.indexOf(u8, b.url, "k=same") != null) 1 else if (std.mem.indexOf(u8, b.url, "k=solo") != null) 2 else 0;
+        if (k != 0) kind_of.put(gpa, b.request, k) catch {};
+    };
     var it2 = std.mem.splitScalar(u8, log, '\n');
     while (it2.next()) |line| {
         if (std.mem.indexOf(u8, line, "sw-pair ") == null) continue;
         const req = std.fmt.parseInt(u64, field(line, " req=") orelse continue, 10) catch continue;
         const wrid = field(line, " wrid=") orelse continue;
         res.pairs += 1;
+        switch (kind_of.get(req) orelse 0) {
+            1 => res.pairs_same += 1,
+            2 => res.pairs_solo += 1,
+            else => {},
+        }
         const xs = w_xs.get(wrid) orelse continue;
         const rec = r.body(tab_a, req).xserved;
         if (rec == 0) continue;

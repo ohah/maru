@@ -76,7 +76,8 @@ pub const DropMark = struct { browser: BrowserId, url_hash: u64, t_us: i64, sw_c
 /// W9d② 적대 리뷰 5 회차 C1: 넘김 상자가 넘쳐 버린 시작 아닌 기록(리다이렉트·응답·끝)의 표지 자리 — 넘치면 그 탭은 넘침으로(그 탭의 짝 없는
 /// 후보 모두 — `net_body_table.cefLostAll`).
 pub const max_lost_marks: usize = 256;
-pub const LostMark = struct { browser: BrowserId, request: u64 };
+/// 재검증 11 차(LOW-J′ — 진단): `evicted` — 서비스 워커 갈래 자리를 비워 잃은 기록(`evictOrphan`), 아니면 넘김 상자가 넘쳐 잃은 기록.
+pub const LostMark = struct { browser: BrowserId, request: u64, evicted: bool = false };
 
 const Bucket = struct {
     tokens: f64,
@@ -357,7 +358,7 @@ pub const State = struct {
             if (oldest == null or t.sw_seq < oldest.?.sw_seq) oldest = t;
         };
         const t = oldest orelse return false;
-        if (t.begun) self.markLost(t.targetSlice(), t.request);
+        if (t.begun) self.markLostWhy(t.targetSlice(), t.request, true);
         t.* = .{};
         self.sw_orphans -|= 1;
         self.sw_evicted +|= 1;
@@ -623,9 +624,13 @@ pub const State = struct {
 
     /// 5 회차 C1: 버린 시작 아닌 기록의 표지를 붙일 탭마다(자리가 없으면 그 탭은 넘침으로).
     pub fn markLost(self: *State, targets: []const BrowserId, request: u64) void {
+        self.markLostWhy(targets, request, false);
+    }
+
+    fn markLostWhy(self: *State, targets: []const BrowserId, request: u64, evicted: bool) void {
         for (targets) |b| {
             if (self.lost_mark_len < max_lost_marks) {
-                self.lost_marks[self.lost_mark_len] = .{ .browser = b, .request = request };
+                self.lost_marks[self.lost_mark_len] = .{ .browser = b, .request = request, .evicted = evicted };
                 self.lost_mark_len += 1;
             } else for (&self.lost_marks_overflowed) |*o| if (o.* == 0 or o.* == b) {
                 o.* = b;
@@ -1409,7 +1414,7 @@ test "재검증 8 차(D-v20n-1): 놓은 요청이 서비스 워커 갈래의 자
     var lm: [max_lost_marks]LostMark = undefined;
     var over: [max_targets]BrowserId = undefined;
     try testing.expectEqual(@as(usize, 1), s.takeLostMarks(&lm, &over));
-    try testing.expectEqual(LostMark{ .browser = 1, .request = 1 }, lm[0]);
+    try testing.expectEqual(LostMark{ .browser = 1, .request = 1, .evicted = true }, lm[0]); // 재검증 11 차: 비움의 잃음은 표시한다(판정 v20o-r12rec)
     // 시작을 보내지 않은 놓은 요청을 비우면 표지가 없다.
     try testing.expect(s.startServiceWorker("https://victim.test", r + 1, now + 40_000, &out).track != null);
     try testing.expectEqual(@as(usize, 0), s.takeLostMarks(&lm, &over));

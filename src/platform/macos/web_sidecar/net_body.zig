@@ -284,7 +284,12 @@ pub fn noteDropOverflow(browser: BrowserId, t_us: i64) void {
 /// W9d② 적대 리뷰 5 회차 C1: 넘김 상자가 넘쳐 이 요청의 리다이렉트·응답·끝이 버려졌다 — 짝 없는 후보는 끝난 것·결과를 모르는 것으로(시한 뒤 `unmatched`,
 /// 짝이 되면 `ambiguous`).
 pub fn cefLost(browser: BrowserId, request: u64) void {
-    dbg("cef-lost b={d} req={d}", .{ browser, request });
+    cefLostWhy(browser, request, false);
+}
+
+/// 재검증 11 차(LOW-J′ — 진단): `evicted` 면 서비스 워커 갈래 자리를 비워 잃었다(`net_gate.evictOrphan` — 판정 `v20o-r12rec` 가 넘김 상자 넘침과 가른다).
+pub fn cefLostWhy(browser: BrowserId, request: u64, evicted: bool) void {
+    dbg("cef-lost b={d} req={d}{s}", .{ browser, request, if (evicted) " orphan-evicted" else "" });
     table.cefLost(browser, request, machUs());
     ensureTick();
 }
@@ -650,8 +655,9 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
     const sid = sid_v.string;
     if (!attached) {
         dbg("sw-detached b={d} sid={s}", .{ browser, sid });
-        // 재검증 7 차: 떨어진 세션의 눈먼 때를 닫는다(그 뒤의 W 는 아예 보이지 않는다 — 그 기록은 설명되지 않아 C3b′ 가 막는다).
-        if (sw.find(sid)) |x| table.workerEnabled(x.browser, blindKey(x.target), machUs());
+        // 재검증 7 차: 떨어진 세션의 눈먼 때를 닫는다(그 뒤의 W 는 아예 보이지 않는다 — 그 기록은 설명되지 않아 C3b′ 가 막는다). 재검증 11 차:
+        // 떨어진 때도 적는다(`Table.workerDetached` — 그 뒤 이 탭이 그 워커를 보았다고 치지 않는다).
+        if (sw.find(sid)) |x| table.workerDetached(x.browser, blindKey(x.target), machUs());
         sw.detached(sid);
         return;
     }
@@ -831,7 +837,7 @@ fn foreignCheck(_: [*c]c.cef_task_t) callconv(.c) void {
     const now = machUs();
     while (sw.takeForeign(now)) |x| {
         dbg("sw-foreign-detach b={d} sid={s} origin={x}", .{ x.browser, x.sidSlice(), x.origin });
-        if (x.target != 0) table.workerEnabled(x.browser, blindKey(x.target), now); // 재검증 7 차: 그 세션의 눈먼 때를 닫는다
+        if (x.target != 0) table.workerDetached(x.browser, blindKey(x.target), now); // 재검증 7 차: 그 세션의 눈먼 때를 닫는다(11 차: 떨어진 때도)
         detachSession(x.browser, x.sidSlice());
     }
     ensureForeignCheck();

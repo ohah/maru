@@ -3,11 +3,14 @@ import argparse
 import json
 from pathlib import Path
 import verify
+import display_stages
 
 
 def analyze(app, producer, meta):
     require = verify.require
     require(meta.get('diagnostic') is True, 'stage diagnostics required')
+    display = meta.get('display_stages',False)
+    require(type(display) is bool and display == any(name in app for name in ('display_stage_header','display_frames','display_draws')), 'display diagnostic label')
     verify.classify(app, producer, meta)
     rows = app.get('parse_stages')
     header = app.get('parse_stage_header')
@@ -46,7 +49,10 @@ def analyze(app, producer, meta):
     elapsed['view_native_copy'] = sum(stages[7][i][1] - stages[6][i][1] for i in range(count)) / 1e6
     elapsed['last_post_to_syntax'] = (shown - post) / 1e6
     require(abs(sum(elapsed[n] for n in names) - elapsed['last_post_to_syntax']) < 1e-6, 'stage sum')
-    return dict(revision=revision, serial=tag[-1], views=count, elapsed_ms=elapsed)
+    result = dict(revision=revision, serial=tag[-1], views=count, elapsed_ms=elapsed)
+    if display:
+        result['display'] = display_stages.analyze(app,meta,views[-1][1],main,require)
+    return result
 
 
 def read(root):
@@ -71,6 +77,7 @@ def read(root):
         folder = root/run['path']
         require(verify.sha(folder/'record.json') == run['record_sha256'], 'record drift')
         meta = json.loads((folder/'record.json').read_text())
+        require(type(meta.get('display_stages',False)) is bool and meta.get('display_stages',False) is source.get('display_stages',False), 'display diagnostic source agreement')
         require(meta['error'] is None and meta['count'] == 30 and meta['size'] == 50000 and meta['period_ns'] == 50000000 and meta['mode'] == 'async' and meta['fixture_kind'] == 'multiline' and meta['fold_reuse_control'] == 'prepared', 'diagnostic condition')
         require(run['path'] == f"{meta['flow']}-{meta['repeat']}" and meta['shared'] == (meta['flow'] == 'shared'), 'diagnostic row label')
         require(all(verify.sha(folder/name) == meta[name+'_sha256'] for name in ('app.json', 'posts.json', 'app.log', 'producer.log', 'config', 'ready.json', 'source-record.json', 'source-recovery.json')), 'raw artifact drift')

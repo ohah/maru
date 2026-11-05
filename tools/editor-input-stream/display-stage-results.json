@@ -1,0 +1,201 @@
+{
+  "kind": "parse-stage-diagnostic",
+  "head": "500af08bb82bf0cdc06311980baee048bbe79663",
+  "app_sha256": "e68dace66cd4eda5ddfa6d0d28b1010872a8b2bea64ac5d4c2f404a2d3a4b436",
+  "processes": 6,
+  "inputs": 180,
+  "runs": [
+    {
+      "path": "typing-0",
+      "revision": 30,
+      "serial": 30,
+      "views": 1,
+      "elapsed_ms": {
+        "post_to_submit": 7.492166,
+        "queue": 0.002334,
+        "worker": 34.331958,
+        "publication": 0.000417,
+        "delivery": 0.017,
+        "views": 0.066375,
+        "display": 25.380958,
+        "view_native_copy": 0.002958,
+        "last_post_to_syntax": 67.291208
+      },
+      "display": {
+        "generation": 49,
+        "tick_in_progress_at_install": false,
+        "elapsed_ms": {
+          "wait_for_tick": 6.494625,
+          "frame_prepare": 3.424708,
+          "tick_finalize": 0.014333,
+          "wait_for_swift": 0.0025,
+          "swift_prepare": 0.021209,
+          "renderer_prepare": 0.283625,
+          "arm_to_commit": 0.007542,
+          "commit_to_present": 15.132416,
+          "installed_to_present": 25.380958
+        }
+      }
+    },
+    {
+      "path": "shared-0",
+      "revision": 30,
+      "serial": 30,
+      "views": 2,
+      "elapsed_ms": {
+        "post_to_submit": 4.320375,
+        "queue": 3.931792,
+        "worker": 46.487041,
+        "publication": 0.000292,
+        "delivery": 0.021167,
+        "views": 0.136958,
+        "display": 27.722458,
+        "view_native_copy": 0.00425,
+        "last_post_to_syntax": 82.620083
+      },
+      "display": {
+        "generation": 52,
+        "tick_in_progress_at_install": false,
+        "elapsed_ms": {
+          "wait_for_tick": 5.856958,
+          "frame_prepare": 5.622334,
+          "tick_finalize": 0.019041,
+          "wait_for_swift": 0.002875,
+          "swift_prepare": 0.020959,
+          "renderer_prepare": 0.2425,
+          "arm_to_commit": 0.006666,
+          "commit_to_present": 15.951125,
+          "installed_to_present": 27.722458
+        }
+      }
+    },
+    {
+      "path": "typing-1",
+      "revision": 30,
+      "serial": 30,
+      "views": 1,
+      "elapsed_ms": {
+        "post_to_submit": 19.237292,
+        "queue": 0.003,
+        "worker": 25.641459,
+        "publication": 0.000291,
+        "delivery": 0.0175,
+        "views": 0.056375,
+        "display": 34.754792,
+        "view_native_copy": 0.004208,
+        "last_post_to_syntax": 79.710709
+      },
+      "display": {
+        "generation": 52,
+        "tick_in_progress_at_install": false,
+        "elapsed_ms": {
+          "wait_for_tick": 14.528125,
+          "frame_prepare": 3.404083,
+          "tick_finalize": 0.013251,
+          "wait_for_swift": 0.001749,
+          "swift_prepare": 0.016084,
+          "renderer_prepare": 0.245875,
+          "arm_to_commit": 0.004833,
+          "commit_to_present": 16.540792,
+          "installed_to_present": 34.754792
+        }
+      }
+    },
+    {
+      "path": "shared-1",
+      "revision": 30,
+      "serial": 30,
+      "views": 2,
+      "elapsed_ms": {
+        "post_to_submit": 4.079083,
+        "queue": 0.001584,
+        "worker": 33.760333,
+        "publication": 0.000125,
+        "delivery": 0.011833,
+        "views": 0.122,
+        "display": 38.632292,
+        "view_native_copy": 0.003292,
+        "last_post_to_syntax": 76.60725
+      },
+      "display": {
+        "generation": 50,
+        "tick_in_progress_at_install": false,
+        "elapsed_ms": {
+          "wait_for_tick": 12.0115,
+          "frame_prepare": 5.653875,
+          "tick_finalize": 0.017292,
+          "wait_for_swift": 0.002708,
+          "swift_prepare": 0.020042,
+          "renderer_prepare": 0.244291,
+          "arm_to_commit": 0.007167,
+          "commit_to_present": 20.675417,
+          "installed_to_present": 38.632292
+        }
+      }
+    },
+    {
+      "path": "typing-2",
+      "revision": 30,
+      "serial": 30,
+      "views": 1,
+      "elapsed_ms": {
+        "post_to_submit": 3.947209,
+        "queue": 0.002166,
+        "worker": 44.179875,
+        "publication": 0.000167,
+        "delivery": 0.014292,
+        "views": 0.069416,
+        "display": 36.663958,
+        "view_native_copy": 0.003417,
+        "last_post_to_syntax": 84.877083
+      },
+      "display": {
+        "generation": 55,
+        "tick_in_progress_at_install": false,
+        "elapsed_ms": {
+          "wait_for_tick": 11.887083,
+          "frame_prepare": 3.416167,
+          "tick_finalize": 0.016125,
+          "wait_for_swift": 0.002625,
+          "swift_prepare": 0.020584,
+          "renderer_prepare": 0.299458,
+          "arm_to_commit": 0.006875,
+          "commit_to_present": 21.015041,
+          "installed_to_present": 36.663958
+        }
+      }
+    },
+    {
+      "path": "shared-2",
+      "revision": 30,
+      "serial": 30,
+      "views": 2,
+      "elapsed_ms": {
+        "post_to_submit": 5.552375,
+        "queue": 0.002541,
+        "worker": 32.86125,
+        "publication": 0.000334,
+        "delivery": 0.013083,
+        "views": 0.122583,
+        "display": 42.628709,
+        "view_native_copy": 0.003166,
+        "last_post_to_syntax": 81.180875
+      },
+      "display": {
+        "generation": 44,
+        "tick_in_progress_at_install": false,
+        "elapsed_ms": {
+          "wait_for_tick": 9.33925,
+          "frame_prepare": 5.768959,
+          "tick_finalize": 0.021583,
+          "wait_for_swift": 0.003083,
+          "swift_prepare": 0.020709,
+          "renderer_prepare": 0.257916,
+          "arm_to_commit": 0.005917,
+          "commit_to_present": 27.211292,
+          "installed_to_present": 42.628709
+        }
+      }
+    }
+  ]
+}

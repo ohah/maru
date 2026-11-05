@@ -6,6 +6,10 @@
 `parse_stage_report.py`는 보관 앱·소스·도구·원시 기록을 대조해 다시 계산한다.
 `parse_stage_review.py`는 실제 자료의 독립 손상 거절과 원본 보존을 검사한다.
 
+추가 `prepare.py --display-stages`의 프레임·제출·표시 진단과
+`display_stage_review.py`의 실제 프레임 손상 대조는
+[설치 이후 표시 계약](../tools/editor-input-stream/display-stage-results.md)을 따른다.
+
 색 표시의 단계 분해와 timer 30/60/120Hz 대조는
 [실행·판정 계약](../tools/editor-input-latency/stage-results.md)을 따른다.
 `stages.py`는 기존 원시 시각을 다시 검증하고, `cadence.py`는 격리 설정으로 실제 입력을 비교한다.

@@ -1,0 +1,139 @@
+{
+  "rejected": [
+    {
+      "name": "hidden-diagnostic-label",
+      "reason": "display diagnostic label"
+    },
+    {
+      "name": "bad-header",
+      "reason": "display header shape"
+    },
+    {
+      "name": "counter-boolean",
+      "reason": "display header shape"
+    },
+    {
+      "name": "overflow",
+      "reason": "display population/overflow/pending"
+    },
+    {
+      "name": "pending-callback",
+      "reason": "display population/overflow/pending"
+    },
+    {
+      "name": "frame-missing",
+      "reason": "display population/overflow/pending"
+    },
+    {
+      "name": "draw-missing",
+      "reason": "display population/overflow/pending"
+    },
+    {
+      "name": "frame-width",
+      "reason": "display row shape"
+    },
+    {
+      "name": "draw-width",
+      "reason": "display row shape"
+    },
+    {
+      "name": "frame-generation",
+      "reason": "unique producing frame"
+    },
+    {
+      "name": "draw-generation",
+      "reason": "unique presented drawable"
+    },
+    {
+      "name": "revision",
+      "reason": "display revision/prefix"
+    },
+    {
+      "name": "frame-prefix",
+      "reason": "display revision/prefix"
+    },
+    {
+      "name": "draw-prefix",
+      "reason": "display readiness"
+    },
+    {
+      "name": "frame-not-ready",
+      "reason": "display readiness"
+    },
+    {
+      "name": "draw-not-ready",
+      "reason": "display readiness"
+    },
+    {
+      "name": "color-not-ready",
+      "reason": "display readiness"
+    },
+    {
+      "name": "frame-wrong-thread",
+      "reason": "display main thread"
+    },
+    {
+      "name": "draw-wrong-thread",
+      "reason": "display main thread"
+    },
+    {
+      "name": "tick-clock-missing",
+      "reason": "display missing time"
+    },
+    {
+      "name": "prepare-clock-missing",
+      "reason": "display missing time"
+    },
+    {
+      "name": "tick-end-missing",
+      "reason": "display missing time"
+    },
+    {
+      "name": "swift-clock-missing",
+      "reason": "display missing time"
+    },
+    {
+      "name": "renderer-clock-missing",
+      "reason": "display missing time"
+    },
+    {
+      "name": "arm-clock-missing",
+      "reason": "display missing time"
+    },
+    {
+      "name": "commit-clock-missing",
+      "reason": "display missing time"
+    },
+    {
+      "name": "wrong-presented-drawable",
+      "reason": "unique presented drawable"
+    },
+    {
+      "name": "commit-after-present",
+      "reason": "display time order"
+    },
+    {
+      "name": "negative-value",
+      "reason": "display row shape"
+    },
+    {
+      "name": "overflow-value",
+      "reason": "display row shape"
+    },
+    {
+      "name": "boolean-value",
+      "reason": "display row shape"
+    },
+    {
+      "name": "float-value",
+      "reason": "display row shape"
+    }
+  ],
+  "normal_controls": 33,
+  "processes": 6,
+  "source_hashes": {
+    "app.json": "0bb80e417242b013d80f6eaa2556c6c33a1e1b4740e8a97d54015ba49583667c",
+    "posts.json": "9d0c4d9da6ff28165aacb7a57d875d9ba10c09a0c43a18f3a0ca38ee39b76805",
+    "record.json": "bda754844477787488ebcc244a11b21e346a90eb5e556139e03cf12dcf8e179d"
+  }
+}

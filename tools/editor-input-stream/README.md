@@ -152,3 +152,6 @@ GPU presentedTime을 혼동하지 않는다. 세대나 시각이 없는 자료�
 `prepare.py --stream --fold-reuse-control --parse-stages`와 `parse_stage_study.py`는
 같은 마지막 요청의 워커·runtime 수락·각 뷰 설치·Metal 표시를 연결한다.
 계측 빌드는 일반 성능 집계에서 거절한다. [실행 명령·결과·한계](parse-stage-results.md)를 따른다.
+
+추가 `--display-stages`는 같은 구문 프레임의 tick·Swift draw·renderer·commit 직전·실제 표시를
+연결한다. [설치 이후 단계 결과](display-stage-results.md)에서 별도 모집단과 손상 대조를 확인한다.

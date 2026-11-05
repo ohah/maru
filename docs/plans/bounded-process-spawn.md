@@ -13,3 +13,5 @@ PoC 비교와 추가 적대 검증은 [Draft #4671](https://github.com/ohah/maru
 - 별도 후속: [LSP·formatter 이관](editor-grouped-spawn.md). PTY fork 호출 이관은 미착수다. 이 계획의 범위는 bounded-process 소비자다.
 
 PoC의 CI 통과를 제품 변경의 CI 통과로 대신하지 않는다. 제품 변경은 PR #4677에서 별도로 검증했고 사용자 승인 뒤 필수 CI를 확인하여 머지했다.
+
+PTY native 이관에 앞서 [stdio 소유권](pty-stdio-ownership.md)의 낮은 FD 충돌과 CLOEXEC를 보강한다.

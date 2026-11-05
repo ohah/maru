@@ -34,6 +34,18 @@ openpty
 
 현재 `PtySession` 최소 구현은 테스트가 통제할 수 있도록 blocking pull API인 `readEvent`를 먼저 제공한다. 앱 runtime 단계에서는 `PtyReader`가 이 `readEvent` 루프를 별도 reader thread에서 실행하고, `PtyEventQueue` bounded queue를 통해 `RuntimeEventPump`로 넘긴다. 즉 `PtySession` backend는 여전히 thread를 직접 소유하지 않고, app layer가 reader lifecycle과 queue drain을 조립한다.
 
+## 닫힌 표준 FD에서의 소유권
+
+앱이나 세션 호스트가 stdin/stdout/stderr 일부를 닫은 상태에서도 PTY를 만들 수 있다.
+`openpty`가 0~2번에 준 master/slave는 부모에서 `F_DUPFD_CLOEXEC`로 3번 이상으로 옮긴다.
+원본을 닫은 직후 소유 FD 번호를 갱신하므로, 두 번째 이동이나 후속 준비가 실패해도 현재 소유한 끝점을 회수한다.
+두 끝점과 wake pipe는 fork 직전에 CLOEXEC다. 자식의 `dup2(slave, 0/1/2)`와 master close가
+서로 충돌하지 않고, stdio의 CLOEXEC는 서로 다른 FD로부터의 dup2로 해제된다.
+
+기존 `openpty → fork → setsid → TIOCSCTTY → exec`와 login wrapper, cwd의 HOME/상속 폴백은 유지한다.
+전체 주변 FD allowlist와 openpty 생성 시점의 원자적 상속 차단은 후속 native 이관에서 검토한다.
+[검증 계획](plans/pty-stdio-ownership.md)은 실제 터미널 probe와 셸/reader 통합 검사를 구분한다.
+
 ## 기본 흐름
 
 ```text

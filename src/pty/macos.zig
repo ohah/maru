@@ -682,7 +682,13 @@ pub const PtySession = struct {
             closeFd(slave_fd);
         }
 
+        // A daemon may start with 0..2 closed. Keep both endpoints outside stdio:
+        // childExec maps the slave into 0..2 before closing its master, and must
+        // neither overwrite its source nor close a freshly mapped descriptor.
+        try moveAboveStdio(&master_fd);
+        try moveAboveStdio(&slave_fd);
         try setCloseOnExec(master_fd);
+        try setCloseOnExec(slave_fd); // A sibling exec must not retain our slave.
         // master fd를 non-blocking으로 둔다. write는 버퍼에 들어가는 만큼만 쓰고 EAGAIN이면
         // 0을 돌려줘(아래 writeFd) 큰 붙여넣기가 UI tick을 동결시키지 않는다 — poll만으로는
         // 512B 여유를 보장 못 해 blocking fd에선 write가 막힐 수 있었다(#5). reader는 poll-
@@ -1949,6 +1955,16 @@ fn setNonBlocking(fd: std.posix.fd_t) !void {
     const flags = std.c.fcntl(fd, std.c.F.GETFL, @as(c_int, 0));
     if (flags < 0) return error.FcntlFailed;
     if (std.c.fcntl(fd, std.c.F.SETFL, flags | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true }))) < 0) return error.FcntlFailed;
+}
+
+// Move only low descriptors; normal PTYs keep their existing fd numbers. Update
+// the caller after duplication so its error cleanup always owns the current fd.
+fn moveAboveStdio(fd: *std.c.fd_t) !void {
+    if (fd.* > 2) return;
+    const moved = std.c.fcntl(fd.*, std.c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+    if (moved < 0) return error.FcntlFailed;
+    closeFd(fd.*);
+    fd.* = moved;
 }
 
 fn setCloseOnExec(fd: std.posix.fd_t) !void {

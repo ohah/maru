@@ -2410,3 +2410,10 @@ CI의 `macOS-only gates`는 세 worker의 manifest와 실행 receipt를 검증�
 `mise exec -- python3 -m unittest discover -s tools/ci -p test_macos_shards.py`는
 신뢰 조건·누락/중복·실패/취소·부분 재실행·캐시 writer 조건을 검사한다.
 [설계와 검증 범위](plans/ci-macos-gates-shards.md)를 따른다.
+
+
+`mise exec -- zig build test-pty-stdio -j2`는 macOS 실제 PTY를 Debug·ReleaseFast 각각
+20개로 검사한다. 닫힌 stdio, CLOEXEC, 제어 터미널/foreground, 입력·크기·cwd·환경과 부분 실패 회수다.
+`MARU_INTERACTIVE_SHELL=/bin/sh mise exec -- zig build test-pty -j2` 및 `-Doptimize=ReleaseFast`는
+사용자 dotfile에 의존하지 않는 통합 대조군이다. 기본 opt-in 실행은 SHELL/MARU_INTERACTIVE_SHELL을
+따라 사용자의 대화형 셸을 실행하므로 그 결과는 이 대조군과 구별한다.

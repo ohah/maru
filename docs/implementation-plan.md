@@ -1808,3 +1808,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [LSP·formatter 그룹 생성 경쟁 제거](plans/editor-grouped-spawn.md) — native 생성·실패 구분·FD/OOM·단일 시한.
 
 - [macOS CI 게이트 분할·신뢰된 캐시 보충](plans/ci-macos-gates-shards.md): 기존 검사 범위와 필수 체크를 유지하며 세 worker로 분배한다.
+
+- [PTY stdio 소유권](plans/pty-stdio-ownership.md) — 닫힌 표준 FD 충돌과 slave CLOEXEC, 실제 터미널 회귀.

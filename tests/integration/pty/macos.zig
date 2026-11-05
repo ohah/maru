@@ -78,8 +78,8 @@ test "macOS openpty controlled command reaches SurfaceRuntime snapshot" {
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     try reader.start();
-    defer reader.join();
     defer queue.close();
 
     const raw = try drainRuntimeQueueUntilExit(allocator, &queue, &runtime);
@@ -152,8 +152,8 @@ test "macOS PTY reader and pump preserve large stdout through a bounded queue" {
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     try reader.start();
-    defer reader.join();
     defer queue.close();
 
     const raw = try drainRuntimeQueueUntilExit(allocator, &queue, &runtime);
@@ -259,10 +259,10 @@ test "macOS interactive shell accepts scripted input through a real PTY" {
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 8);
     defer queue.deinit();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     try reader.start();
     // interactive shell은 사용자의 dotfile 영향을 받을 수 있다. 실패 경로에서도
     // reader를 깨우고 child를 reap해야 opt-in smoke가 개발 세션을 멈추지 않는다.
-    defer reader.stopAndJoin();
 
     const command = try std.fmt.allocPrint(allocator, "printf '{s}\\n'; exit\n", .{marker});
     defer allocator.free(command);
@@ -355,6 +355,7 @@ test "macOS PTY reader stopAndJoin closes a blocking child without leaking a zom
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     try reader.start();
 
     // 이 짧은 대기는 shell loop가 시작되고 reader가 PTY read에 들어갈 시간을 준다.
@@ -404,6 +405,7 @@ test "macOS PTY reader stopAndJoin reaps a child that closed its stdio but keeps
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1);
     defer queue.deinit();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     try reader.start();
 
     // child가 stdio를 닫고 reader가 EOF -> reap 경로(kqueue 대기)에 들어갈 시간을 준다.
@@ -724,6 +726,7 @@ test "macOS reader-processing delivers OSC 11 reply without any render tick (PR3
     defer queue.deinit();
     defer queue.close();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
     try reader.start();
     // drainAvailable/renderTick 호출 없음. child가 끝나면(응답 받아 마커 찍고 exit) 리더도 EOF로 끝난다.
@@ -779,6 +782,7 @@ test "macOS reader-processing answers OSC 11 within a bound under output flood (
     defer queue.deinit();
     defer queue.close();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
     try reader.start();
     reader.join(); // child가 응답을 (상한 안에) 받아 마커 찍고 exit → reader도 EOF로 끝남
@@ -820,6 +824,7 @@ test "macOS reader write and render snapshot hammer concurrently without corrupt
     defer queue.deinit();
     defer queue.close();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
     try reader.start();
 
@@ -870,6 +875,7 @@ test "macOS close during flood reaps reader-processing child without UAF or zomb
     // 끝내는지가 핵심). 그 뒤 close.
     try sleepMillis(20);
     reader.stopAndJoin(); // reader가 멈춘다(코어 접근 종료) + child reap
+    reader.deinit(); // Final reader allocations must be freed before core/queue destruction.
     surface.deinit(); // reader join 후 core.deinit — UAF 없음
     session.deinit();
     queue.deinit();
@@ -914,6 +920,7 @@ test "macOS reader-processing writes main input via write_queue as the sole writ
     var write_queue = try maru.app.PtyWriteQueue.init(std.testing.io, allocator, 4096);
     defer write_queue.deinit();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     reader.setWriteQueue(&write_queue); // 단일 writer 경로 주입(setProcessing/start 전)
     reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
     try reader.start();
@@ -985,6 +992,7 @@ test "macOS close with pending main-input write unblocks producer and reaps with
     write_queue.close();
     reader.stopAndJoin(); // queue.close → session.close[SIGKILL] → join
     producer.join(); // QueueClosed로 끝났어야 한다(무한 대기면 여기서 hang)
+    reader.deinit(); // Final reader allocations must be freed before core/queue destruction.
     surface.deinit(); // reader join 후 core.deinit — UAF 없음
     session.deinit();
     queue.deinit();
@@ -1030,6 +1038,7 @@ test "macOS reader drains main input even when the output event queue is full �
     var write_queue = try maru.app.PtyWriteQueue.init(std.testing.io, allocator, 4096);
     defer write_queue.deinit();
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
+    defer disposeReader(&reader);
     reader.setWriteQueue(&write_queue);
     reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
     try reader.start();
@@ -1053,4 +1062,11 @@ test "macOS reader drains main input even when the output event queue is full �
     reader.stopAndJoin(); // 정리(데드락이어도 queue.close가 막힌 push를 깨워 종료 — 무한 hang 없음)
 
     try std.testing.expect(drained); // false면 교차-큐 데드락 회귀(reader가 출력 큐 push에 막혀 입력 미-drain)
+}
+
+// Joined readers retain transfer buffers for pause/resume. These fixtures own a
+// final reader lifetime, so they must close/join and release those allocations.
+fn disposeReader(reader: *maru.app.PtyReader) void {
+    reader.stopAndJoin();
+    reader.deinit();
 }

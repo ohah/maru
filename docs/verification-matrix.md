@@ -5567,3 +5567,13 @@ byte 후보와 현재 줄 투영, 원본 불변과 연속 기준 퇴역을 대�
 해시와 묶인다. 실패/취소/누락은 실패이며 명시적 비 runtime 분류만 worker 생략을 허용한다.
 검증된 같은 tree의 main compile-only는 테스트 통과 증거가 아니라 캐시 보충 증거다.
 [계획](plans/ci-macos-gates-shards.md)과 `tools/ci/test_macos_shards.py`를 따른다.
+
+
+## PTY stdio 소유권 (2026-11-05)
+
+`test-pty-stdio`는 Debug·ReleaseFast에서 각각 20 compiled/20 passed를 요구한다.
+기존 코드의 두 모드 14개 실패와 수정본을 대조하며, 실제 C probe의 tty/foreground/session/group,
+stdio·크기·argv/env/cwd, 종료/reap·FD 회수와 실제 fork 직전 CLOEXEC를 관측한다.
+이는 실제 PTY 프로세스 증거이며 GUI/HID 검증은 아니다. 기존 15개 통합 검사는 명시적
+`MARU_INTERACTIVE_SHELL=/bin/sh` 대조군과 기본 사용자 셸 실행을 구별한다.
+최종 결과와 제한은 [계획](plans/pty-stdio-ownership.md) 및 해당 Draft PR을 따른다.

@@ -7877,7 +7877,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_pty_tests = b.addRunArtifact(pty_tests);
     run_pty_tests.setCwd(b.path("."));
+    run_pty_tests.addArg("--maru-expect-tests=15");
+    if (macos_host_tests) run_pty_tests.addArg("--maru-expect-passed=15");
 
+    const pty_stdio_step = b.step("test-pty-stdio", "Verify real PTY ownership when parent stdio is closed");
+    if (macos_host_tests) for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |pty_optimize| {
+        const probe = b.addExecutable(.{ .name = b.fmt("pty-stdio-probe-{s}", .{@tagName(pty_optimize)}), .root_module = b.createModule(.{ .target = target, .optimize = pty_optimize, .link_libc = true }) });
+        probe.root_module.addCSourceFile(.{ .file = b.path("tests/fixtures/pty_stdio_probe.c"), .flags = &.{} });
+        const options = b.addOptions();
+        options.addOptionPath("path", probe.getEmittedBin());
+        const judges = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/pty_stdio.zig"), .target = target, .optimize = pty_optimize, .link_libc = true, .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "pty_stdio_probe", .module = options.createModule() } } }) });
+        const run_judges = b.addRunArtifact(judges);
+        run_judges.setCwd(b.path("."));
+        run_judges.addArg("--maru-expect-tests=20");
+        run_judges.addArg("--maru-expect-passed=20");
+        pty_stdio_step.dependOn(&run_judges.step);
+        if (pty_optimize == optimize) macos_only_test_step.dependOn(&run_judges.step);
+    };
     const pty_step = b.step("test-pty", "Run opt-in macOS PTY integration tests, including interactive shell smoke");
     pty_step.dependOn(&run_pty_tests.step);
 

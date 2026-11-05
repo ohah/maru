@@ -1,0 +1,126 @@
+{
+  "rejected": [
+    {
+      "name": "label-hidden",
+      "reason": "frame wake diagnostic label"
+    },
+    {
+      "name": "label-wrong",
+      "reason": "frame wake mode"
+    },
+    {
+      "name": "actual-mode-wrong",
+      "reason": "frame wake mode"
+    },
+    {
+      "name": "missing-start",
+      "reason": "frame wake snapshots"
+    },
+    {
+      "name": "short-snapshot",
+      "reason": "frame wake snapshots"
+    },
+    {
+      "name": "boolean-time",
+      "reason": "frame wake snapshots"
+    },
+    {
+      "name": "zero-time",
+      "reason": "frame wake cpu/queued status"
+    },
+    {
+      "name": "cpu-failure",
+      "reason": "frame wake cpu/queued status"
+    },
+    {
+      "name": "queued-request",
+      "reason": "frame wake cpu/queued status"
+    },
+    {
+      "name": "idle-cpu-failure",
+      "reason": "frame wake cpu/queued status"
+    },
+    {
+      "name": "idle-pending-request",
+      "reason": "frame wake cpu/queued status"
+    },
+    {
+      "name": "time-backwards",
+      "reason": "frame wake counters backwards"
+    },
+    {
+      "name": "cpu-user-backwards",
+      "reason": "frame wake counters backwards"
+    },
+    {
+      "name": "cpu-system-backwards",
+      "reason": "frame wake counters backwards"
+    },
+    {
+      "name": "no-install-notice",
+      "reason": "frame wake input activity absent"
+    },
+    {
+      "name": "no-active-ticks",
+      "reason": "frame wake input activity absent"
+    },
+    {
+      "name": "no-active-draws",
+      "reason": "frame wake input activity absent"
+    },
+    {
+      "name": "queue-not-balanced",
+      "reason": "frame wake counters backwards"
+    },
+    {
+      "name": "wake-not-executed",
+      "reason": "frame wake queue accounting"
+    },
+    {
+      "name": "short-idle",
+      "reason": "frame wake idle window"
+    },
+    {
+      "name": "long-idle",
+      "reason": "frame wake idle window"
+    },
+    {
+      "name": "idle-new-notice",
+      "reason": "frame wake continues in idle"
+    },
+    {
+      "name": "idle-new-request",
+      "reason": "frame wake continues in idle"
+    },
+    {
+      "name": "idle-fired-request",
+      "reason": "frame wake continues in idle"
+    },
+    {
+      "name": "idle-coalesced-request",
+      "reason": "frame wake continues in idle"
+    },
+    {
+      "name": "negative-cpu",
+      "reason": "frame wake snapshots"
+    },
+    {
+      "name": "overflow-cpu",
+      "reason": "frame wake snapshots"
+    },
+    {
+      "name": "float-cpu",
+      "reason": "frame wake snapshots"
+    },
+    {
+      "name": "boolean-cpu",
+      "reason": "frame wake snapshots"
+    }
+  ],
+  "normal_controls": 30,
+  "source_hashes": {
+    "app.json": "d2bd3684422641148496ba285b99adf3907a14bbd4c4d02b85511bd6ca247cbc",
+    "posts.json": "0141dbd72c4b9d84102f251a08d00a36aa6a8b93479589c38727c935b58f9a4a",
+    "record.json": "027ba0269ed83e73bf4f9bdeedc110cd02cabd9ca60a9588ae950fe1c55edf32"
+  }
+}

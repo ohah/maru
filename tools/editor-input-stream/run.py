@@ -24,14 +24,18 @@ def provider_fingerprints():
     return {str(p):verify.sha(p) if p.is_file() else None for p in paths}
 
 
-def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None, fixture_kind="flat", bracket_control=None, fold_reuse_control=None):
+def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None, fixture_kind="flat", bracket_control=None, fold_reuse_control=None, frame_wake_control=None):
     target.mkdir(mode=0o700)
     (target/'profile').mkdir();(target/'host').mkdir(mode=0o700)
     data = protocol.fixture(size,fixture_kind)
     (target/'document.zig').write_bytes(data)
     (target/'config').write_text('session.keep-alive-after-quit = false\nlsp.enabled = false\neditor.wrap = false\n')
     state = json.loads((build/'source.json').read_text())
+    if state.get('frame_wake_control'):
+        if frame_wake_control not in ('scheduled','immediate'):raise ValueError('frame wake label required')
+    elif frame_wake_control is not None:raise ValueError('frame wake build required')
     if state.get('parse_stages') and observer is None:
+
         raise ValueError('parse stage build requires diagnostic observer')
     if summary_control is not None and (state.get('summary_control') is not True or summary_control not in ('disabled','prepared')):
         raise ValueError('verified summary control build/mode required')
@@ -56,6 +60,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
         MARU_MACOS_APP_SMOKE_MS='180000',MARU_EDITOR_IME_SMOKE='1',MARU_LATENCY_MODE=mode,MARU_LATENCY_FLOW=flow,
         MARU_LATENCY_OUTPUT=str(target/'app.json'),MARU_STREAM_READY=str(target/'ready.json'),MARU_STREAM_POSTS=str(target/'posts.json'),
         MARU_STREAM_SOURCE_RECORD=str(target/'source-record.json'),MARU_STREAM_COUNT=str(count),MARU_STREAM_WAIT_MS='30000')
+    if frame_wake_control == 'immediate':env['MARU_STREAM_IMMEDIATE_PARSE_FRAME']='1'
     if kind == 'main-pause': env['MARU_STREAM_MAIN_PAUSE_MS']='500'
     if kind == 'drop-present': env.update(MARU_STREAM_DROP_PRESENT='1',MARU_STREAM_WAIT_MS='7000')
     if summary_control=='disabled':env['MARU_STREAM_SKIP_SUMMARY_PREPARATION']='1'
@@ -65,7 +70,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     meta = {'count':count,'mode':mode,'flow':flow,'size':size,'repeat':rep,'shared':flow=='shared','period_ns':period*1_000_000,'lateness_ns':20_000_000,
             'kind':kind,'fixture_bytes':len(data),'fixture_sha256':hashlib.sha256(data).hexdigest(),
             'fixture_tail_sha256':hashlib.sha256(data[3:]).hexdigest(),'load_before':os.getloadavg(),
-            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'display_stages':state.get('display_stages',False),'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind,'bracket_control':bracket_control,'fold_reuse_control':fold_reuse_control}
+            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'frame_wake_control':frame_wake_control,'display_stages':state.get('display_stages',False),'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind,'bracket_control':bracket_control,'fold_reuse_control':fold_reuse_control}
     child = sender = None
     failure = None
     with (target/'app.log').open('w') as log, (target/'producer.log').open('w') as sender_log:

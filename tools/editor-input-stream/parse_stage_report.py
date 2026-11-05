@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import verify
 import display_stages
+import frame_wake_control
 
 
 def analyze(app, producer, meta):
@@ -52,6 +53,10 @@ def analyze(app, producer, meta):
     result = dict(revision=revision, serial=tag[-1], views=count, elapsed_ms=elapsed)
     if display:
         result['display'] = display_stages.analyze(app,meta,views[-1][1],main,require)
+    wake = meta.get('frame_wake_control')
+    has_wake = any(name in app for name in ('frame_wake_mode','wake_input_start','wake_idle_start','wake_idle_end'))
+    require((wake is not None) == has_wake, 'frame wake diagnostic label')
+    if wake is not None:result['frame_wake'] = frame_wake_control.analyze(app,meta,require)
     return result
 
 
@@ -61,6 +66,7 @@ def read(root):
     manifest = json.loads((root/'study.json').read_text())
     require(manifest['kind'] == 'parse-stage-diagnostic' and manifest['complete'] is True, 'incomplete diagnostics')
     source = manifest['source']
+    require(type(source.get('frame_wake_control',False)) is bool, 'frame wake source flag')
     require(source.get('parse_stages') is True and source.get('fold_reuse_control') is True, 'instrumented build required')
     build = Path(manifest['build'])
     require(json.loads((build/'source.json').read_text()) == source, 'build receipt drift')
@@ -77,6 +83,7 @@ def read(root):
         folder = root/run['path']
         require(verify.sha(folder/'record.json') == run['record_sha256'], 'record drift')
         meta = json.loads((folder/'record.json').read_text())
+        require((meta.get('frame_wake_control') is not None) == source.get('frame_wake_control',False), 'frame wake source agreement')
         require(type(meta.get('display_stages',False)) is bool and meta.get('display_stages',False) is source.get('display_stages',False), 'display diagnostic source agreement')
         require(meta['error'] is None and meta['count'] == 30 and meta['size'] == 50000 and meta['period_ns'] == 50000000 and meta['mode'] == 'async' and meta['fixture_kind'] == 'multiline' and meta['fold_reuse_control'] == 'prepared', 'diagnostic condition')
         require(run['path'] == f"{meta['flow']}-{meta['repeat']}" and meta['shared'] == (meta['flow'] == 'shared'), 'diagnostic row label')

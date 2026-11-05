@@ -40,6 +40,7 @@ def main():
         parser.error('new external output and 1..3 repetitions required')
     source = json.loads((build/'source.json').read_text())
     verify.require(source.get('parse_stages') is True and source.get('fold_reuse_control') is True, 'stage build required')
+    verify.require(source.get('frame_wake_control',False) is False, 'use frame wake study for controlled builds')
     output.mkdir(mode=0o700)
     tools = list(HERE.glob('*.py')) + [HERE.parent/'editor-input-attribution/observer.py']
     hashes = {str(p.relative_to(ROOT)): verify.sha(p) for p in tools}

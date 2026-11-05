@@ -522,6 +522,12 @@ pub const W = struct {
     /// 보이는 W 의 IO 는 시작 사건 뒤다 — J1).
     paired_at: i64 = 0,
     pair_tab: BrowserId = 0,
+    /// 재검증 11 차(D-v20q-2): 짝을 처음 맺은 판정의 그 W 의 기준 시각(시작 사건 ts — 0 = 모른다). 보이는 W 의 기록 IO 는 제 시작 뒤라 그 앞 IO 의
+    /// 기록은 그 W 의 것이 아니다 — 잇는 때 눈먼 때 뒤 끝의 ts → IO 지연 여유는 그 IO 가 이 시각 앞일 때만 쓴다(`Table.pairStale`).
+    pair_start: i64 = 0,
+    /// 재검증 11 차(LOW-K′): 남의 출처 세션의 사본으로만 보았다(`Link.foreign_order` 에 든다). 맨 위 출처 세션의 사본이 오면 거짓으로 바꾸고
+    /// `order` 로 옮긴다 — 어느 탭이든 맨 위 출처로 보는 W 는 남의 W 가 아니다.
+    foreign: bool = false,
 };
 
 pub const TauEntry = struct {
@@ -537,6 +543,9 @@ pub const TauEntry = struct {
     sig: Sig = .{},
     status: u16 = 0,
     mixed: bool = false,
+    /// 재검증 11 차(LOW-R1): 이 τ 를 쓴 W 가운데 아직 `ws` 에 있는 수(남의 W 를 놓을 때 줄인다 — 0 이면 칸을 지운다). `nondisk`·`disk` 는 줄이지 않는다
+    /// (독 τ 는 독으로 남는다).
+    live: u16 = 0,
 };
 
 /// 재검증 10 차(MED-P1·P2): Zig 의 열린 주소 해시 표(`HashMapUnmanaged`)는 지운 칸에 묘비를 남기고 표가 자랄 때에만 치운다(지울 때 `available` 을
@@ -546,15 +555,20 @@ pub const TauEntry = struct {
 /// 지운 수 이하다 — 다시 지은 뒤 묘비는 늘 자리의 1/4 아래다. 다시 짓는 동안 그 표의 칸 포인터는 무효다 — 부른 쪽은 쥐지 않는다.
 pub const Tombs = struct {
     n: u32 = 0,
+    /// 재검증 11 차(LOW-T — 시험): 지운 수의 누적과 다시 지은 수(지울 때마다 다시 짓는 퇴행을 셈으로 본다 — 검증 v20q 변이 Q11).
+    total: u64 = 0,
+    rebuilds: u32 = 0,
 
     pub fn removed(self: *Tombs, map: anytype, k: u32) void {
         if (k == 0) return;
         self.n +|= k;
+        self.total +|= k;
         const cap = map.capacity();
         if (cap == 0 or @as(u64, self.n) * 4 < cap) return;
         const M = @TypeOf(map.*);
         map.rehash(std.hash_map.AutoContext(@FieldType(M.KV, "key")){});
         self.n = 0;
+        self.rebuilds +|= 1;
     }
 };
 
@@ -791,18 +805,25 @@ pub const Link = struct {
     /// 워커는 이 문서를 다스리지 않는다)라 그 τ 의 P 가 다른 W 로 이어지는 일은 없다; 남은 칸이 지운 W 를 가리키면 `horizon` 까닭으로 잇지 않는다.
     fn evictForeign(self: *Link) void {
         const n = @min(foreign_evict_batch, self.foreign_order.items.len);
-        var gone: [2]u32 = .{ 0, 0 };
+        var gone: [3]u32 = .{ 0, 0, 0 };
         for (self.foreign_order.items[0..n]) |k| {
             const w = self.ws.get(k) orelse continue;
-            if (w.tau != 0) if (self.taus.get(w.tau)) |e| {
-                const only = e.first.target == k.target and e.first.rid == k.rid and @as(u32, e.nondisk) + e.disk <= 1 and !e.hop;
-                if (only and self.taus.remove(w.tau)) gone[1] += 1;
+            // 재검증 11 차(LOW-K′): 맨 위 출처 세션의 사본이 와 `order` 로 옮긴 W — 여기서는 차례 칸만 버린다.
+            if (!w.foreign) continue;
+            // 재검증 11 차(LOW-R1): τ 칸은 그 τ 를 쓴 W 가 `ws` 에 하나도 남지 않으면 지운다(전에는 「그 W 하나뿐」 일 때만 — 디스크 적중과 τ 를 나눈 남의
+            // 응답의 칸이 지평 없이 영영 남았다, 검증 v20q-B Q11-c). 남은 W 가 있으면 칸(독·셈)은 그대로다 — 칸의 W 가 지운 W 면 `horizon` 까닭으로
+            // 잇지 않는다. 짝을 맺은 남의 W 의 `explained` 도 지운다(`evict` 와 같다).
+            if (w.tau != 0) if (self.taus.getPtr(w.tau)) |e| {
+                e.live -|= 1;
+                if (e.live == 0 and !e.hop and self.taus.remove(w.tau)) gone[1] += 1;
             };
+            if (w.pair != 0 and self.explained.remove(w.pair)) gone[2] += 1;
             if (self.ws.remove(k)) gone[0] += 1;
         }
         self.foreign_order.replaceRangeAssumeCapacity(0, n, &.{});
         self.ws_tombs.removed(&self.ws, gone[0]);
         self.taus_tombs.removed(&self.taus, gone[1]);
+        self.explained_tombs.removed(&self.explained, gone[2]);
     }
 
     /// 재검증 8 차(R-1): 워커 요청의 시작 사건(리다이렉트 홉이 아닌 것) — 그 머리를 응답 때까지 둔다. 탭 사이 사본이 다른 머리로 오면 모르는 것으로.
@@ -865,7 +886,17 @@ pub const Link = struct {
     pub fn noteResponseFrom(self: *Link, gpa: std.mem.Allocator, key: WKey, tau: i64, disk: bool, excl: bool, status: u16, foreign: bool) std.mem.Allocator.Error!void {
         if (self.ws.getPtr(key)) |w| {
             if (w.tau != tau or w.disk != disk) w.bad = true;
+            // 재검증 11 차(LOW-K′): 남의 출처 세션의 사본이 먼저 닿은 W 에 맨 위 출처 세션의 사본이 왔다 — 맨 위 출처 W 로 옮긴다(남의 쏟음에 지평
+            // 없이 놓이지 않게; 남의 차례 칸은 `evictForeign` 이 건너뛴다). 사본의 차례는 경쟁이라 「처음 닿은 사본」 으로 가르면 다른 탭이 그 출처를
+            // iframe 으로 품을 때 맨 위 출처 W 의 절반 남짓이 남의 W 로 셈해졌다(검증 v20q-B Q11-b).
+            const promote = !foreign and w.foreign;
+            if (promote) w.foreign = false;
             if (self.sigs.remove(key)) self.sigs_tombs.removed(&self.sigs, 1);
+            if (promote) {
+                // `evict` 는 `order` 앞의 W 만 지운다 — 이 W(아직 `order` 에 없다)는 남는다.
+                if (self.order.items.len >= max_ws) self.evict();
+                try self.order.append(gpa, key);
+            }
             return;
         }
         if (foreign) {
@@ -875,7 +906,7 @@ pub const Link = struct {
             self.sigs_tombs.removed(&self.sigs, 1);
             break :blk kv.value.sig;
         } else .{};
-        try self.ws.put(gpa, key, .{ .tau = tau, .disk = disk, .excluded = excl, .status = status, .sig = sig });
+        try self.ws.put(gpa, key, .{ .tau = tau, .disk = disk, .excluded = excl, .status = status, .sig = sig, .foreign = foreign });
         try (if (foreign) &self.foreign_order else &self.order).append(gpa, key);
         if (tau == 0 or tau <= self.horizon) return; // τ 없음(data:·blob:) — C2 / 지평 이하는 넣지 않는다(그 τ 의 P 는 지평으로 막힌다)
         const g = try self.taus.getOrPut(gpa, tau);
@@ -885,6 +916,7 @@ pub const Link = struct {
             // 재검증 8 차(R-1): 같은 τ 를 머리·상태가 다른 W 가 함께 썼다(GET 200 · HEAD · 206 — 바이트가 다르다) — 독 τ(영영).
             g.value_ptr.mixed = true;
         }
+        g.value_ptr.live +|= 1;
         if (disk) g.value_ptr.disk +|= 1 else {
             g.value_ptr.nondisk +|= 1;
             if (g.value_ptr.nd_key == null) g.value_ptr.nd_key = key;
@@ -909,6 +941,11 @@ pub const Link = struct {
     /// 재검증 10 차: 짝을 맺은 판정의 탭·단조 시각과 함께(`W.paired_at`·`pair_tab` — 처음 맺은 것만; 같은 짝을 뒤 탭이 다시 맺어도 앞 판정의
     /// 시각이 기준이다 — 그 시각 뒤에 시작한 W 는 그 기록의 주인일 수 없다).
     pub fn notePairAt(self: *Link, gpa: std.mem.Allocator, key: WKey, q: u64, browser: BrowserId, now_us: i64) std.mem.Allocator.Error!void {
+        return self.notePairFrom(gpa, key, q, browser, now_us, 0);
+    }
+
+    /// 재검증 11 차(D-v20q-2): `w_start` — 그 W 의 기준 시각(`W.pair_start` — 처음 맺은 것만).
+    pub fn notePairFrom(self: *Link, gpa: std.mem.Allocator, key: WKey, q: u64, browser: BrowserId, now_us: i64, w_start: i64) std.mem.Allocator.Error!void {
         const w = self.ws.getPtr(key) orelse {
             // 응답 전에 짝이 정해지지 않는다(짝은 응답 때) — 응답이 버려졌으면(지평) 짝만 적는다.
             try self.explained.put(gpa, q, {});
@@ -919,6 +956,7 @@ pub const Link = struct {
             w.pair = q;
             w.paired_at = now_us;
             w.pair_tab = browser;
+            w.pair_start = w_start;
         }
         try self.explained.put(gpa, q, {});
     }
@@ -1765,7 +1803,11 @@ test "재검증 10 차(MED-P2) · v20p-B Q19-e: 응답한 W 의 표(ws·taus·ex
         try testing.expect(tombsOf(&l.taus) * 4 <= l.taus.capacity());
         try testing.expect(tombsOf(&l.explained) * 4 <= l.explained.capacity());
     }
-    std.debug.print("\n[10 차 Q19-e] ws {d} cap {d} · worst round mean {d} ns\n", .{ l.ws.count(), l.ws.capacity(), worst_mean });
+    std.debug.print("\n[10 차 Q19-e] ws {d} cap {d} · worst round mean {d} ns · ws removed {d} rebuilds {d}\n", .{ l.ws.count(), l.ws.capacity(), worst_mean, l.ws_tombs.total, l.ws_tombs.rebuilds });
+    // 재검증 11 차(LOW-T — 검증 v20q 변이 Q11): 다시 짓기는 지운 수가 자리의 1/4 에 닿을 때마다 한 번 — 다시 지은 뒤 셈을 0 으로 두지 않으면(지울
+    // 때마다 다시 짓는 퇴행) 시간 위 끝은 못 보지만 이 셈이 본다.
+    try testing.expect(l.ws_tombs.rebuilds > 0);
+    try testing.expect(@as(u64, l.ws_tombs.rebuilds) * (l.ws.capacity() / 4) <= l.ws_tombs.total);
     // 전에는 판 11–13 에서 응답 하나 222 µs(ReleaseFast — 표 전체 훑기)였다.
     try testing.expect(worst_mean < 50_000);
 }
@@ -1811,4 +1853,113 @@ test "재검증 10 차(MED-P1 — 실패로 지우기): 머리의 표는 보냄�
     }
     try testing.expectEqual(@as(u32, 3), l.sigs.count());
     try testing.expect(tombsOf(&l.sigs) * 4 <= l.sigs.capacity());
+}
+
+// ── 검증 v20q 4 회차 탐침(묘비 — 높은 적재) ─────────────────────────────────────────────────────────────
+
+fn v20qFreeOf(m: anytype) usize {
+    var n: usize = 0;
+    const md = m.metadata orelse return 0;
+    for (0..m.capacity()) |x| {
+        if (md[x].isFree()) n += 1;
+    }
+    return n;
+}
+
+test "v20q R4-a(묘비 — 적재 0.78 근처): 응답이 끝내 오지 않은 W 의 머리 13 000 이 남은 표에서 보냄·응답을 오래 되풀이하면 빈 칸·한 부름 최악·줄이기 값은" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    const get: Sig = .{ .method = 0x6e7 };
+    var buf: [24]u8 = undefined;
+    const stale: usize = if (std.c.getenv("V20Q_STALE")) |s| std.fmt.parseInt(usize, std.mem.span(s), 10) catch 13_000 else 13_000;
+    for (0..stale) |i| try l.noteSent(gpa_t, WKey.of(7, 0, try std.fmt.bufPrint(&buf, "d{d}", .{i})), get);
+    const cap0 = l.sigs.capacity();
+    var worst: u64 = 0;
+    var worst_at: usize = 0;
+    var min_free: usize = std.math.maxInt(usize);
+    var max_tomb: usize = 0;
+    var rehashes: usize = 0;
+    var last_n: u32 = 0;
+    const iters: usize = 120_000;
+    for (0..iters) |i| {
+        const k = WKey.of(8, 0, try std.fmt.bufPrint(&buf, "c{d}", .{i}));
+        const a = clock_gettime_nsec_np(16);
+        try l.noteSent(gpa_t, k, get);
+        try l.noteResponse(gpa_t, k, 0, false, false, 200);
+        const d = clock_gettime_nsec_np(16) - a;
+        if (d > worst) {
+            worst = d;
+            worst_at = i;
+        }
+        if (l.sigs_tombs.n < last_n) rehashes += 1;
+        last_n = l.sigs_tombs.n;
+        if (i % 97 == 0) {
+            min_free = @min(min_free, v20qFreeOf(&l.sigs));
+            max_tomb = @max(max_tomb, tombsOf(&l.sigs));
+        }
+    }
+    std.debug.print("\n[v20q R4-a] stale {d} cap {d}->{d} count {d} · min free {d} · max tombs {d} · rehash {d} · worst call {d} µs at {d} · sig_order {d}\n", .{ stale, cap0, l.sigs.capacity(), l.sigs.count(), min_free, max_tomb, rehashes, worst / 1000, worst_at, l.sig_order.items.len });
+    try testing.expect(min_free > 0);
+}
+
+test "재검증 11 차(LOW-K′) · v20q R3-a: 같은 W 를 남의 출처로 보는 탭이 먼저 응답을 넣어도 맨 위 출처로 보는 탭의 사본이 오면 맨 위 출처 W 다 — 남의 W 4 096 뒤에도 남는다(10 차는 놓았다); 남의 사본으로만 본 W 는 상한에서 놓이고(지평 없이) 그 τ 칸이 지워진다" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    l.raiseVisible(5, 1);
+    const get: Sig = .{ .method = 0x6e7 };
+    const w1 = WKey.of(1, 0, "w1");
+    try l.noteSent(gpa_t, w1, get); // 탭 5(맨 위 출처 세션)의 시작 사건
+    try l.noteResponseFrom(gpa_t, w1, 5_000, false, false, 200, true); // 탭 6(남의 출처 세션)이 먼저 응답을 넣었다
+    try testing.expect(l.ws.get(w1).?.foreign);
+    try l.noteResponse(gpa_t, w1, 5_000, false, false, 200); // 탭 5 의 사본 — 맨 위 출처 W 로 옮긴다
+    try testing.expect(!l.ws.get(w1).?.foreign);
+    // 맨 위 출처 차례에 든다(상한에서 맨 위 출처 W 로 쫓긴다 — 영영 남지 않는다).
+    try testing.expect(for (l.order.items) |k| {
+        if (k.target == w1.target and k.rid == w1.rid) break true;
+    } else false);
+    try l.notePairAt(gpa_t, w1, 31, 5, 100);
+    const v0 = l.decide(5, 5_000, .network, get);
+    // 남의 사본으로만 본 W3(τ 6 000) — 상한(`>=`)에서 놓인다.
+    const w3 = WKey.of(3, 0, "w3");
+    try l.noteResponseFrom(gpa_t, w3, 6_000, false, false, 200, true);
+    var buf: [24]u8 = undefined;
+    for (0..max_foreign_ws - 1) |i| try l.noteResponseFrom(gpa_t, WKey.of(9, 0, try std.fmt.bufPrint(&buf, "f{d}", .{i})), 10_000 + @as(i64, @intCast(i)), false, false, 200, true);
+    const kept = l.ws.contains(w1);
+    const gone3 = !l.ws.contains(w3);
+    // 같은 τ 의 다른 맨 위 출처 W(µs 까지 같은 τ — 실제로는 드물다) — W1 이 남아 독 τ(`many`).
+    const w2 = WKey.of(2, 0, "w2");
+    try l.noteSent(gpa_t, w2, get);
+    try l.noteResponse(gpa_t, w2, 5_000, false, false, 200);
+    try l.notePairAt(gpa_t, w2, 77, 5, 200);
+    const v1 = l.decide(5, 5_000, .network, get);
+    std.debug.print("\n[v20q R3-a] before {s} · w1 kept {} · w3 evicted {} (τ 칸 {}) · horizon {d} · after {s}\n", .{ @tagName(v0), kept, gone3, l.taus.contains(6_000), l.horizon, @tagName(v1) });
+    try testing.expect(v0 == .link and kept and gone3 and !l.taus.contains(6_000) and l.horizon == 0);
+    try testing.expect(v1 == .ambiguous and v1.ambiguous.reason == .many);
+}
+
+test "재검증 11 차(LOW-R1) · v20q-B Q11-c: 남의 W 놓기(evictForeign)는 디스크 적중과 τ 를 나눈 남의 W 의 τ 칸·짝을 맺은 남의 W 의 explained 칸도 지운다 — 표가 남의 W 상한 안에 묶이고 지평은 그대로(10 차는 40 960 판 뒤 taus 41 415·explained 10 240)" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    var buf: [32]u8 = undefined;
+    const rounds = 10 * max_foreign_ws;
+    for (0..rounds) |i| {
+        const tau: i64 = 1_700_000_000_000_000 + @as(i64, @intCast(i)) * 10;
+        // 같은 남의 워커가 네트워크로 받은 응답과, 그 뒤 HTTP 캐시(디스크)에서 같은 τ 로 다시 받은 응답.
+        try l.noteResponseFrom(gpa_t, WKey.of(9, 0, try std.fmt.bufPrint(&buf, "n{d}", .{i})), tau, false, false, 200, true);
+        try l.noteResponseFrom(gpa_t, WKey.of(9, 0, try std.fmt.bufPrint(&buf, "d{d}", .{i})), tau, true, false, 200, true);
+        // 다른 탭의 맨 위 출처 세션이 짝을 맺는 W(첫 사본이 남의 세션으로 닿았다 — 남의 W 로 셈해졌다).
+        if (i % 4 == 0) {
+            const k = WKey.of(10, 0, try std.fmt.bufPrint(&buf, "p{d}", .{i}));
+            try l.noteResponseFrom(gpa_t, k, tau + 3, false, false, 200, true);
+            try l.notePairAt(gpa_t, k, 5_000_000 + i, 6, 1);
+        }
+    }
+    std.debug.print("\n[v20q Q11-c] after {d} rounds: ws {d} foreign_order {d} taus {d} explained {d} horizon {d}\n", .{ rounds, l.ws.count(), l.foreign_order.items.len, l.taus.count(), l.explained.count(), l.horizon });
+    try testing.expect(l.ws.count() <= max_foreign_ws);
+    try testing.expect(l.taus.count() <= l.ws.count());
+    try testing.expect(l.explained.count() <= l.ws.count());
+    try testing.expectEqual(@as(i64, 0), l.horizon);
+    // 남은 칸은 산 W 를 가리킨다(쫓긴 W 의 칸이 남지 않는다).
+    var it = l.taus.valueIterator();
+    while (it.next()) |e| try testing.expect(e.live > 0);
 }

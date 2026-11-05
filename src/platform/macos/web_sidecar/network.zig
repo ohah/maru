@@ -749,7 +749,7 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
         freeEvent(e);
     }
     // W9d② 적대 리뷰 5 회차 C1: 버린 리다이렉트·응답·끝 — 그 요청의 시작(후보)은 위에서 넘겼다(상자의 차례). 후보는 끝을 영영 기다리지 않는다.
-    for (lost[0..lost_len]) |m| net_body.cefLost(m.browser, m.request);
+    for (lost[0..lost_len]) |m| net_body.cefLostWhy(m.browser, m.request, m.evicted);
     for (lost_overflowed) |b| if (b != 0) net_body.cefLostAll(b);
     // W9d② 적대 리뷰 3 회차 P1: 꺼낸 때까지의 CEF 기록이 모두 표에 닿았다 — 제 기록을 기다리던 CDP 끝을 곧 정한다.
     net_body.cefFlushed(swapped_us - 1);

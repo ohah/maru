@@ -693,6 +693,11 @@ const PairResult = struct { log_ok: bool = false, pairs: usize = 0, correct: usi
 
 /// 재검증 9 차(LOW-H): host 로그의 `from` 뒤에서 `needles` 가운데 하나가 든 줄 수(로그가 없으면 0 — 판정이 서지 않는다).
 fn logLines(path: ?[:0]const u8, from: usize, needles: []const []const u8) usize {
+    return logLinesRange(path, from, std.math.maxInt(usize), needles);
+}
+
+/// 재검증 11 차(LOW-J3): [`from`, `to`) 바이트 안의 줄만(판마다 따로 센다).
+fn logLinesRange(path: ?[:0]const u8, from: usize, to: usize, needles: []const []const u8) usize {
     const gpa = std.heap.c_allocator;
     const p = path orelse return 0;
     const fd = std.c.open(p, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
@@ -702,11 +707,12 @@ fn logLines(path: ?[:0]const u8, from: usize, needles: []const []const u8) usize
     defer all.deinit(gpa);
     var buf: [65536]u8 = undefined;
     _ = std.c.lseek(fd, @intCast(from), std.c.SEEK.SET);
-    while (true) {
+    while (all.items.len < to -| from) {
         const got = std.c.read(fd, &buf, buf.len);
         if (got <= 0) break;
         all.appendSlice(gpa, buf[0..@intCast(got)]) catch break;
     }
+    if (all.items.len > to -| from) all.shrinkRetainingCapacity(to - from);
     var n: usize = 0;
     var it = std.mem.splitScalar(u8, all.items, '\n');
     while (it.next()) |line| for (needles) |nd| if (std.mem.indexOf(u8, line, nd) != null) {
@@ -1696,7 +1702,7 @@ fn v20nCase(r: *Run, report: Report, session: *u32, comptime name: []const u8, c
 
 fn v20nRun(r: *Run, report: Report, session: *u32, log_path: ?[:0]const u8) !void {
     var detail: [6000]u8 = undefined;
-    var lb_r1h: [200]u8 = undefined;
+    var lb_r1h: [320]u8 = undefined;
     var pb: [256]u8 = undefined;
     if (v20nPicked("v20n-r1")) try v20nCase(r, report, session, "v20n-r1", "r1", "", 120_000, 150, 12);
     // 재검증 8 차(R-1): `v20n-r1h` 는 기준 판정이다(고르지 않아도 돈다).
@@ -1715,7 +1721,11 @@ fn v20nRun(r: *Run, report: Report, session: *u32, log_path: ?[:0]const u8) !voi
         var ok: usize = 0;
         const at_all = r.begins.items.len;
         const log0 = logSize(log_path);
+        // 재검증 11 차(LOW-J3): 판마다 로그 자리를 끊어 판의 막은 까닭을 따로 센다(합이 아니라 — 한 판에 몰려도 서던 것을 조였다).
+        var run_from: [11]usize = undefined;
+        var run_ok: [11]bool = @splat(false);
         for (1..11) |j| {
+            run_from[j - 1] = logSize(log_path);
             var tb: [8]u8 = undefined;
             if (!r.pumpTitle(tab_a, std.fmt.bufPrint(&tb, "a{d}", .{j}) catch "", 15_000)) break;
             r.pump(100);
@@ -1724,7 +1734,10 @@ fn v20nRun(r: *Run, report: Report, session: *u32, log_path: ?[:0]const u8) !voi
             const at = r.begins.items.len;
             r.pump(400);
             sig.store(n0 + 2 * j - 1, .monotonic);
-            if (r.pumpTitle(tab_a, std.fmt.bufPrint(&tb, "b{d}", .{j}) catch "", 15_000)) ok += 1;
+            if (r.pumpTitle(tab_a, std.fmt.bufPrint(&tb, "b{d}", .{j}) catch "", 15_000)) {
+                ok += 1;
+                run_ok[j - 1] = true;
+            }
             r.pump(3000);
             const t = tally(r, tab_a, at);
             tot.total += t.total;
@@ -1755,7 +1768,17 @@ fn v20nRun(r: *Run, report: Report, session: *u32, log_path: ?[:0]const u8) !voi
         const is_r1h = comptime std.mem.eql(u8, nm, "v20n-r1h");
         const lost = if (is_r1h) logLines(log_path, log0, &.{"body: sw-lose "}) else 0;
         const shared = if (is_r1h) logLines(log_path, log0, &.{ "reason=sig", "reason=partial", "reason=mixed" }) else 0;
-        report(p0 and ok == 10 and tot.wrong == 0 and tot.multi_end == 0 and (!is_r1h or (tot.sw >= 8 and lost >= ok and shared >= ok)), nm, std.fmt.bufPrint(&detail, "trials {d}/10: {s}{s}", .{ ok, bodyLine(&tot, ok == 10, &lb2), if (is_r1h) (std.fmt.bufPrint(&lb_r1h, " · host dropped W1 responses {d} (sw-lose) · page GETs held off by a shared-τ HEAD/Range W {d} (sig/partial/mixed)", .{ lost, shared }) catch "") else "" }) catch "");
+        // 재검증 11 차(LOW-J3): 판마다 하한 — 성공한 판마다 sw-lose ≥ 1 · 막은 까닭 ≥ 1(가장 적은 판을 detail 에).
+        run_from[10] = logSize(log_path);
+        var min_lost: usize = std.math.maxInt(usize);
+        var min_shared: usize = std.math.maxInt(usize);
+        if (is_r1h) for (0..10) |x| if (run_ok[x]) {
+            min_lost = @min(min_lost, logLinesRange(log_path, run_from[x], run_from[x + 1], &.{"body: sw-lose "}));
+            min_shared = @min(min_shared, logLinesRange(log_path, run_from[x], run_from[x + 1], &.{ "reason=sig", "reason=partial", "reason=mixed" }));
+        };
+        if (min_lost == std.math.maxInt(usize)) min_lost = 0;
+        if (min_shared == std.math.maxInt(usize)) min_shared = 0;
+        report(p0 and ok == 10 and tot.wrong == 0 and tot.multi_end == 0 and (!is_r1h or (tot.sw >= 8 and min_lost >= 1 and min_shared >= 1)), nm, std.fmt.bufPrint(&detail, "trials {d}/10: {s}{s}", .{ ok, bodyLine(&tot, ok == 10, &lb2), if (is_r1h) (std.fmt.bufPrint(&lb_r1h, " · host dropped W1 responses {d} (sw-lose — fewest in one trial {d}) · page GETs held off by a shared-τ HEAD/Range W {d} (sig/partial/mixed — fewest in one trial {d})", .{ lost, min_lost, shared, min_shared }) catch "") else "" }) catch "");
         try r.navigate(tab_a, "/blank");
         r.pump(500);
     };

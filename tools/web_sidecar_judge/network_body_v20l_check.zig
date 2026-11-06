@@ -143,7 +143,8 @@ const page_js = "var P=new URLSearchParams(location.search);" ++
     "if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}" ++
     "if(P.get('wk')){try{new SharedWorker('/g/wk.js?s=1')}catch(e){};try{window.__w=new Worker('/g/wk.js?d=1')}catch(e){}}" ++
     "var fs=(P.get('if')||'').split(',').filter(function(x){return x});for(var q=0;q<fs.length;q++){var f=document.createElement('iframe');f.src=decodeURIComponent(fs[q]);document.body.appendChild(f);await new Promise(function(r){f.onload=r;setTimeout(r,6000)})}" ++
-    "var n=+(P.get('n')||0);var K=P.get('k')||'k';var ms=+(P.get('ms')||0);" ++
+    // 재검증 12 차: `pw` — 첫 fetch 앞에 기다린다(ms). 떠 있던 SW 에 붙는 눈먼 때 + 지연(50 ms)의 본문은 어둠이라(넓은 꼴) 본문을 세는 꼴은 그 뒤에 받는다.
+    "var n=+(P.get('n')||0);var K=P.get('k')||'k';var ms=+(P.get('ms')||0);var pw=+(P.get('pw')||0);if(pw)await new Promise(function(r){setTimeout(r,pw)});" ++
     "for(var i=0;i<n;i++){await fetch('/g/x?k='+K+i,{cache:'no-store'}).then(function(r){return r.text()}).catch(function(){});if(ms)await new Promise(function(r){setTimeout(r,ms)})}" ++
     "document.title='ready'})";
 
@@ -546,6 +547,14 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     env_n += 1;
     env_buf[env_n] = "MARU_WEB_TEST_BODY_LOG=1";
     env_n += 1;
+    // 재검증 12 차: 대조 손잡이(`MARU_WEB_SW_WAIT=0`·`MARU_WEB_SW_KEEP=0`)를 host 에 그대로 넘긴다.
+    var pt_bufs: [2][64:0]u8 = undefined;
+    for ([_][:0]const u8{ "MARU_WEB_SW_WAIT", "MARU_WEB_SW_KEEP" }, 0..) |name, k| {
+        const v = std.c.getenv(name) orelse continue;
+        const e = std.fmt.bufPrintSentinel(&pt_bufs[k], "{s}={s}", .{ name, std.mem.span(v) }, 0) catch continue;
+        env_buf[env_n] = e.ptr;
+        env_n += 1;
+    }
     var sp_buf: [1100]u8 = undefined;
     const stderr_path: ?[:0]const u8 = blk: {
         const eq = std.mem.indexOfScalar(u8, profile_arg, '=') orelse break :blk null;
@@ -656,7 +665,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             if (std.mem.indexOf(u8, line, " b=151 ") == null) continue;
             const kind = field(line, " type=") orelse "";
             const keep = field(line, " keep=") orelse "";
-            if (!std.mem.eql(u8, kind, "service_worker")) att_other_type = true;
+            // 재검증 12 차: 전용 워커(`worker`)는 붙는다 — 멈춰 붙은 것을 놓고 곧 뗀다(keep=false; 렌더러가 filter 를 모른 채 멈춘다). 그 밖의 꼴·남긴 전용 워커는 틀림.
+            if (!std.mem.eql(u8, kind, "service_worker") and !(std.mem.eql(u8, kind, "worker") and std.mem.eql(u8, keep, "false"))) att_other_type = true;
             const url = attUrl(line, targets.items);
             if (std.mem.indexOf(u8, url, "b=2") != null) att_o2 = true;
             if (std.mem.indexOf(u8, url, "b=3") != null) att_x2 = true;
@@ -777,7 +787,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         // ② A 가 기록한다.
         const on = recordOn(&r, tab_a);
         const at = r.begins.items.len;
-        try r.goO(tab_a, 0, "/g/p?b=1&n=30&k=capR");
+        try r.goO(tab_a, 0, "/g/p?b=1&n=30&k=capR&pw=150");
         const ready = r.pumpTitle(tab_a, "ready", 25_000);
         r.pump(3000);
         const t = tally(&r, tab_a, at, "/g/x?k=capR");
@@ -833,7 +843,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const log_at3 = logSize(stderr_path);
         const on_b = recordOn(&r, tab_b);
         const at = r.begins.items.len;
-        try r.goO(tab_b, 1, "/g/p?b=2&n=20&k=manyB");
+        try r.goO(tab_b, 1, "/g/p?b=2&n=20&k=manyB&pw=150");
         const ready_b = r.pumpTitle(tab_b, "ready", 20_000);
         r.pump(4000);
         const log3 = readLog(gpa, stderr_path, log_at3);
@@ -1015,7 +1025,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             _ = recordOn(&r, meas);
             const at = r.begins.items.len;
             var pb: [96]u8 = undefined;
-            try r.goO(meas, 0, try std.fmt.bufPrint(&pb, "/g/p?b=1&n=20&k=lk{d}", .{phase}));
+            try r.goO(meas, 0, try std.fmt.bufPrint(&pb, "/g/p?b=1&n=20&k=lk{d}&pw=150", .{phase}));
             const done = r.pumpTitle(meas, "ready", 30_000);
             r.pump(4000);
             var nb: [64]u8 = undefined;

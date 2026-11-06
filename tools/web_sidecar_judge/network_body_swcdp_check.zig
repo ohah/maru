@@ -457,7 +457,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     try startServer();
     var detail: [2000]u8 = undefined;
     var lb: [400]u8 = undefined;
-    var env_buf: [4][*:0]const u8 = undefined;
+    var env_buf: [6][*:0]const u8 = undefined;
     var env_n: usize = 0;
     // 워커 세션을 붙이는 판정이다 — 플래그를 늘 준다(`SWCDP_FLAG=0` 이면 끈 대조).
     const flag_off = if (std.c.getenv("SWCDP_FLAG")) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
@@ -468,6 +468,14 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     // 재검증 8 차(R-1): `v20n-r1h` 의 주소(`lose1`)에 든 워커 GET 응답을 host 가 버린다(판정자 전용 진단 — 다른 판의 주소에는 없다).
     env_buf[env_n] = "MARU_WEB_TEST_SW_LOSE=lose1";
     env_n += 1;
+    // 재검증 12 차: 대조 손잡이(`MARU_WEB_SW_WAIT=0` — 멈춰 붙이기 끔·`MARU_WEB_SW_KEEP=0` — 붙여 두기 끔)를 host 에 그대로 넘긴다.
+    var pt_bufs: [2][64:0]u8 = undefined;
+    for ([_][:0]const u8{ "MARU_WEB_SW_WAIT", "MARU_WEB_SW_KEEP" }, 0..) |name, k| {
+        const v = std.c.getenv(name) orelse continue;
+        const e = std.fmt.bufPrintSentinel(&pt_bufs[k], "{s}={s}", .{ name, std.mem.span(v) }, 0) catch continue;
+        env_buf[env_n] = e.ptr;
+        env_n += 1;
+    }
     var sp_buf: [1100]u8 = undefined;
     const stderr_path: ?[:0]const u8 = if (std.c.getenv("SWCDP_HOST_STDERR")) |p| std.mem.span(p) else blk: {
         const eq = std.mem.indexOfScalar(u8, profile_arg, '=') orelse break :blk null;
@@ -886,6 +894,10 @@ fn bodyLine(t: *const Tally, done: bool, buf: []u8) []const u8 {
 //   v20l-vsleak (7 회차) 기록하던 탭 33 개를 끄지 않고 닫은 뒤(앱의 `destroy` 꼴) 새 탭의 그대로 넘김 — `v20l-ctrl` 은 닫기 없는 대조.
 // 재검증 6 차부터 고친 뒤의 기준이다: 모두 틀린 본문 0(`v20l-pre`·`-tog` 는 D1 — 전에는 WRONG 5+2), `v20l-cap` 은 몫이 풀린 뒤 같은 주소 둘씩의
 // 본문(D3 — 전에는 탭이 어둠이라 0), `v20l-vsleak`·`-ctrl` 은 새 탭의 본문(D2·F16, C3a 의 흐름 고침 — 오래 돈 sidecar 에서도).
+// 재검증 12 차: 떠 있던 SW 에 붙는 눈먼 때 + 지연(50 ms)의 서비스 워커 갈래 본문은 어둠이다(넓은 꼴 — 남는 틈 ⑩ 을 닫는다; 사용자 결정 2026-11-05).
+// 눈먼 때는 그 탭과 떠 있는 워커가 처음 만날 때만 선다 — `v20l-recstart`(그 잃음을 잰다)·`v20l-reentry`(다녀간 출처로 돌아옴 — 잃지 않는다)·
+// `v20l-keepaway`(떠나 있는 동안 붙여 둔 세션에 닿은 다른 탭의 W 가 돌아온 뒤의 P 와 잇지 않는다). `v20l-vsleak`·`-ctrl` 은 SW 가 다스린 뒤 150 ms
+// 기다려 받는다(`pw` — 빈 문서에서 켠 뒤 범위로 들어가자마자의 20 개는 처음 만남이라 0/20).
 
 const swv_js = "self.addEventListener('install',function(){self.skipWaiting()});" ++
     "self.addEventListener('activate',function(e){e.waitUntil(clients.claim().then(function(){if(self.registration.navigationPreload)return self.registration.navigationPreload.enable()}))});" ++
@@ -929,7 +941,8 @@ const swv_page_body = "reg('/swv/sw.js','/swv/').then(async function(){if(!navig
     // 3 회차: 기록 전 W1(묶기) → 신호 → W2(0–20 ms 뒤, 서버 1.6 s) → 250 ms 뒤 기록 뒤의 페이지 요청이 W1 을 같이 쓴다.
     "if(C=='pre'||C=='tog'){var D=[0,1,2,3,5,8,12,20];var A=[];for(var i=0;i<8;i++)A.push(F('/swv/x?k='+K+'q'+i,{'x-who':'co','x-d':'900'}));document.title='p0';await SIG(N);var B=[];" ++
     "D.forEach(function(d,i){B.push(S(d).then(function(){return F('/swv/x?k='+K+'q'+i,{'x-who':'pt','x-d':'1600'})}))});await S(250);for(var i=0;i<8;i++)B.push(F('/swv/x?k='+K+'q'+i,{'x-who':'co'}));await Promise.all(A.concat(B));await S(1500);await CTL()}" ++
-    "if(C=='pt'){var B=[];for(var i=0;i<20;i++)B.push(W('/swv/x?k='+K+'b'+i,'pt'));await Promise.all(B)}" ++
+    // 재검증 12 차: `pw` — 첫 fetch 앞에 기다린다(ms). 떠 있던 SW 에 붙는 눈먼 때 + 지연(50 ms)의 본문은 어둠이다(넓은 꼴 — `v20l-recstart` 가 잰다).
+    "if(C=='pt'){var PW=+(new URLSearchParams(location.search).get('pw')||0);if(PW)await S(PW);var B=[];for(var i=0;i<20;i++)B.push(W('/swv/x?k='+K+'b'+i,'pt'));await Promise.all(B)}" ++
     "if(C=='rng'){for(var j=0;j<10;j++){var cu='/swv/c?k='+K+'g'+j;await W(cu,'warm');await W(cu,'rng');await W(cu,'hit');await W(cu,'rv');await S(50)}}" ++
     "if(C=='redir'){for(var j=0;j<15;j++){await Promise.all([W('/swv/r?k='+K+'r'+j,'pt'),W('/swv/x?k='+K+'r'+j+'&rd=1','pt')]);await S(30)}}" ++
     "if(C=='xo'){var f=document.createElement('iframe');var fd=new Promise(function(res){addEventListener('message',function(m){if(m.data=='ifdone')res()})});f.src=LH+'/swv/if?k='+K;document.body.appendChild(f);" ++
@@ -1289,7 +1302,7 @@ fn v20lRun(r: *Run, report: Report, session: *u32) !void {
         const at = r.begins.items.len;
         _ = r.titles.remove(id_new);
         var u: [256]u8 = undefined;
-        try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=pt&k=vl{d}", .{ port, session.* }) } });
+        try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=pt&pw=150&k=vl{d}", .{ port, session.* }) } });
         const done = r.pumpTitle(id_new, "bdone", 60_000);
         r.pump(4000);
         const t = tally(r, id_new, at);
@@ -1310,7 +1323,7 @@ fn v20lRun(r: *Run, report: Report, session: *u32) !void {
         const at = r.begins.items.len;
         _ = r.titles.remove(id_new);
         var u: [256]u8 = undefined;
-        try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=pt&k=vc{d}", .{ port, session.* }) } });
+        try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=pt&pw=150&k=vc{d}", .{ port, session.* }) } });
         const done = r.pumpTitle(id_new, "bdone", 60_000);
         r.pump(4000);
         const t = tally(r, id_new, at);
@@ -1321,6 +1334,54 @@ fn v20lRun(r: *Run, report: Report, session: *u32) !void {
         try r.host.send(.{ .destroy_browser = id_new });
         r.pump(500);
     }
+    // 재검증 12 차: 떠 있던 SW 에 붙자마자 20 개. `v20l-recstart` 는 SW 가 다스리는 문서에서 기록을 켠 뒤 곧 같은 범위로 옮겨 받는다(그 탭과 그 워커가
+    // 처음 만나는 눈먼 때 — 넓은 꼴: 눈먼 때 + 지연 안의 본문은 어둠, 기록을 켤 때 한 번). 틀린 본문 0 만 단언하고 제 본문 수를 적는다.
+    // `v20l-reentry`(⑩′ — 사용자 결정 2026-11-06): 같은 문서에서 켠 뒤 다른 출처(localhost)로 떠나 4 초(남의 출처 시한 3 초 넘게) 머물다 돌아와 곧
+    // 받는다 — 다녀간 출처의 세션을 붙여 두므로 돌아와도 눈먼 때가 없다(`>= 18`). `v20l-keepaway` 는 떠나 있는 동안 기록하지 않는 탭 B 가 같은 SW 로
+    // 같은 주소 20 개를 받는다(붙여 둔 세션에 그 W 가 닿는다 — 밸브에 세지 않고 맞추기에 넣지 않는다) — 돌아온 A 의 같은 주소 20 개는 제 본문만
+    // (틀린 본문 0)·기록은 켜진 채(`on`).
+    inline for (.{ .{ "v20l-recstart", 0, 701 }, .{ "v20l-reentry", 1, 702 }, .{ "v20l-keepaway", 2, 703 } }) |c| if (enabled(c[0])) {
+        const id_new: u64 = c[2];
+        try openTab(r, id_new);
+        var u: [256]u8 = undefined;
+        // SW 가 다스리는 문서(받지 않는 꼴)에 먼저 둔다.
+        _ = r.titles.remove(id_new);
+        try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=none&k=vs{d}", .{ port, session.* }) } });
+        _ = r.pumpTitle(id_new, "bdone", 30_000);
+        session.* += 1;
+        const on = recordOn(r, id_new, session.*);
+        if (c[1] >= 1) {
+            r.pump(500);
+            _ = r.titles.remove(id_new);
+            try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://localhost:{d}/blank", .{port}) } });
+            _ = r.pumpTitle(id_new, "blank", 15_000);
+            if (c[1] == 2) {
+                _ = r.titles.remove(tab_b);
+                try r.host.send(.{ .navigate = .{ .browser = tab_b, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=pt&k=vk{d}", .{ port, session.* }) } });
+                _ = r.pumpTitle(tab_b, "bdone", 60_000);
+                try r.navigate(tab_b, "/blank");
+            }
+            r.pump(4000);
+        }
+        const at = r.begins.items.len;
+        _ = r.titles.remove(id_new);
+        const key: []const u8 = switch (c[1]) {
+            0 => "vr",
+            1 => "ve",
+            else => "vk",
+        };
+        try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=pt&k={s}{d}", .{ port, key, session.* }) } });
+        const done = r.pumpTitle(id_new, "bdone", 60_000);
+        r.pump(4000);
+        const t = tally(r, id_new, at);
+        const still_on = if (r.states.get(id_new)) |st| st == .on else false;
+        var lb2: [2000]u8 = undefined;
+        report(on and done and still_on and t.wrong == 0 and t.no_end == 0 and t.multi_end == 0 and (c[1] == 0 or t.sw_own >= 18), c[0], std.fmt.bufPrint(&detail, "{s} · recording still on {}", .{ bodyLine(&t, done, &lb2), still_on }) catch "");
+        try r.host.send(.{ .net_record = .{ .browser = id_new, .on = false, .session = 0 } });
+        r.pump(300);
+        try r.host.send(.{ .destroy_browser = id_new });
+        r.pump(500);
+    };
     if (enabled("v20l-detach")) {
         // 켬·끔 열 번(답을 기다리지 않는다) → 끔, 켬 직후 끔 — 그 뒤 놀리면 멈춰야 한다.
         session.* += 1;

@@ -3547,3 +3547,103 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         `net_body.cefLostWhy`(진단 줄 ` orphan-evicted`), 퍼즈 `SwFuzzCfg.reload`·`reattach`·`lag6`·`delay1`·`edge`·`edge_after`·`SwWorld.Fetch.epoch`·`s_delay6`·
         `w_delay6`, 시험 `H.notes`. 이번에 고친 파일: `net_body.zig`·`net_body_sw.zig`·`net_body_table.zig`·`net_gate.zig`·`network.zig`·`build/web_sidecar.zig`
         (시험 수)·`src/cli/mcp.zig`·`docs/control-plane-browser.md`(LOW-D″)·판정자 `network_body_{swcdp,v20l,v20m}_check.zig`·이 계획.
+    - **재검증 12 차(11 차의 남는 틈 ⑩ 과 ⑩′ 를 뿌리에서 — 사용자 결정 2026-11-05·06)**: 11 차는 ⑩(워커 세션이 붙은 뒤 `Network.enable` 답까지의 눈먼 때와
+      그 끝 + 시작 → IO 지연 50 ms 사이에 제 기록 없는 보이는 W 와 응답을 잃은 보이지 않는 W 가 겹치면 틀린 본문)을 막으면 다시 뜰 때마다 첫 본문을 잃는다고
+      남겼다. 사용자 결정: ① 새로 뜨는 워커는 멈춰 붙인다(Playwright·Puppeteer 의 차례), ② 기록을 켤 때 이미 떠 있던 워커의 붙는 순간 눈먼 때(+ 지연)의
+      서비스 워커 갈래 본문은 버린다(어둠 — 넓은 꼴), ③ 사용자에게 보이는 변화는 「기록 중 새로 뜨는 서비스 워커의 시작이 조금 늦어짐」 뿐(걸리거나 중앙
+      + 20 ms·p99 + 100 ms 를 넘으면 넣지 않는다), ④(11-06) 다시 들어옴·다시 붙음의 눈먼 때(⑩′)는 다녀간 사이트의 세션을 기록이 끝날 때까지 붙여 두어 닫고,
+      눈먼 때가 다시 생기는 다른 길은 모두 어둠으로 — 받아들인 동작 바뀜: 기록 중 다녀간 사이트의 워커가 놀아도 멈추지 않는다(기록을 끄면 뗀다), 범위가
+      「그 탭이 보이는 출처」 에서 「기록 중 그 탭이 보였던 출처」 로. 실측·실행 기록 `scratchpad/w9d2_v12/`(`PHASE0.md` 1–7 절).
+      - **옛 PHASE0 b(재검증 5 차)가 걸린 까닭**: ⓐ 붙은 채 멈춘 SW 의 다시 뜸(`Inspector.targetReloadedAfterCrash`)에 놓지 않았다(w1–w3 — 다시 뜬 SW 가 멈춰
+        페이지 fetch 0/15; 놓자 18/18), ⓑ filter 로 뺀 전용 워커도 멈춘다 — 렌더러는 filter 를 모른 채 자식 전용 워커마다 멈춤을 건다(Chromium
+        `RendererAutoAttacherBase` 는 `wait_for_debugger` 만 넘긴다) — 붙지 않아 놓을 길이 없었다(f1·f5; 이번 `filter=sw` 도 `swwait-dw-rec` 5/5 걸림), ⓒ
+        filter 없는 판(f2)은 붙은 iframe 세션의 자식을 다루지 않았다. maru 는 브라우저 세션이 없어(페이지마다 하나인 DevTools) 페이지 세션에서 붙인다.
+      - **차례 — 「enable 답 뒤」 가 아니라 「같은 세션에 enable 뒤 차례로」 놓는다(Playwright·Puppeteer 와 같은 쪽 — 사용자 결정 11-06)**: 멈춘 새 SW 는 놓기
+        전에 enable 에 답하지 않는다 — 답을 기다려 놓으면 시한(500 ms)까지 멈췄다(`first-rec` 중앙 511 ms). Playwright `crServiceWorker`·Puppeteer
+        `TargetManager` 처럼 enable → `runIfWaitingForDebugger` 를 같은 세션에 차례로 보낸다(한 세션의 메시지는 차례대로 풀리고 워커는 놓일 때까지 스크립트를
+        돌리지 않는다 — enable 을 보낸 멈춘 세션 214 개 모두 enable 답이 놓기 답 앞에 왔다). 한 워커에 탭마다 세션이 붙어도 Chromium 은 멈춰 붙은 세션이
+        모두 놓아야 뛴다(`V8DebuggerBarrier`). filter 에 전용 워커(`worker`)를 넣어 붙이고 곧 놓은 뒤 뗀다(iframe 은 넣지 않는다 — 넣으면 다른 출처 iframe
+        의 이동도 놓을 때까지 늦다). **기록 앞에 깐 SW 의 다시 뜸은 멈추지 않는다**(Chromium: `IsAttached() && should_pause_on_start()` — 그 깃발은 멈춰 붙은
+        채 깔린 버전에만; 실측 `restart-pre` 시작 사건 20/40 잃음) — 그래서 멈춤(`Inspector.targetCrashed`)에 그 세션을 뗀다: 다음 시작은 새로 멈춰 붙는다
+        (0/40 — 늘 새 `targetId`; 같은 `targetId` 면 그 타깃의 다음 epoch — `Sw.stopped`).
+      - **멈춘 워커가 영영 멈추는 길(실측 — 고친 뒤 0)**: 놓기 답 앞에 세션이 사라지면 그 워커는 스크립트를 받은 뒤 아무도 놓지 않는 채 멈춘다 — 기록 끔 뒤
+        관찰자를 놓아 붙음을 받지 못함(`swwait-offrace` 1/3), Chromium 이 다른 출처로 옮긴 페이지의 SW 세션을 스스로 뗌(`navrace` 4/5), 기록하는 탭 닫힘
+        (`closerace` 4/5). 고침: 관찰자는 탭이 닫힐 때까지, 뗄 세션은 놓기 답 뒤에(`net_body_sw.Pend` — Playwright `CRSession.detach`·Puppeteer `silentDetach`),
+        답 앞에 사라진 세션의 워커는 살아 있는 탭에서 `Target.attachToTarget` 으로 다시 붙어 놓는다(건지기 — `Rescue`: 곧 해 보고 300 ms 마다 60 번, 한
+        타깃 3 번까지). 놓기 답 시한 30 초. 놓기 답을 버린 판(`MARU_WEB_TEST_SW_NOREPLY`)도 걸림 0.
+      - **붙여 두기(⑩′ — 11-06)**: 다녀간 출처(기록 중 그 탭의 맨 위 출처였던 곳)의 세션(`Session.visited`)은 남의 출처 시한 떼기를 하지 않는다 — 떠나 있음은
+        `foreign_since` 그대로(사건은 밸브에 세지 않는다 — N11, W 는 맞추기 밖). Chromium 페이지 auto-attach 는 이동 뒤 프레임과 맞지 않는 SW 의 auto 세션만
+        뗀다(`TargetHandler::AutoDetach`) — 그 떨어짐은 그 탭에서 `Target.attachToTarget` 으로 다시 붙인다(손 세션 — `setAutoAttach{false}` 가 떼지 않아 기록
+        끝의 모든 정리 길이 따로 뗀다). 돌아오면 이미 켜진 세션이라 눈먼 때가 없고, Chromium 이 다시 붙인 auto 세션은 그림자로 쥔다(켜지 않는다 — 사건이
+        두 번 오지 않게). 떠나 있는 동안의 다시 붙음 눈먼 때는 이 탭의 기록을 가리지 못한다(`Blind.away` — 그 출처의 서비스 워커 갈래 기록은 그 출처를 맨
+        위에 둔 탭에만 붙는다 — `net_gate.serviceWorkerTargets`; 돌아올 때 아직 열렸거나 끝 + 지연 안이면 보통 눈먼 때 — `workerReturned`). 떠나 있는 동안의
+        W 는 자리(`WSpan`)만 적는다(`away_from` — 떠나 있는 동안 시작해 돌아온 뒤 IO 를 찍은 W 의 기록은 이 탭에 붙으니; 퍼즈 `away` 가 처음 330 000 판에서
+        틀린 본문 11 을 냈다 — 남의 출처 W 처럼 자리를 적지 않아 돌아온 뒤 같은 주소의 제 기록 없는 보이는 W 가 가져갔다). 탭 몫 16 은 맨 위 + 떠나 있는
+        세션을 함께 세고, 넘으면 가장 오래 떠나 있던 것부터 뗀다(그 출처로 돌아오면 처음 만남 — 어둠).
+      - **끈 뒤에도 남은 세션(최종 회귀에서 찾아 고침)**: 첫 최종 회귀에서 `v20l-r15-race`·`r16-toggle` 이 「끈 뒤 SW 가 멈추지 않음」 으로 떨어졌다(
+        11 차·12 차 중간 빌드는 통과). 기록하는 탭이 닫힐 때 Chromium 이 뗀 세션을 붙여 두기로 받아(닫힘 알림보다 떨어짐이 먼저 온다) 다른 탭에서
+        건졌고(붙여 놓고 떼기), 그 탭이 같은 워커에 auto 세션을 쥔 때 손 세션을 떼자 Chromium 이 그 워커의 auto 목록 자리를 지웠다 — 남은 auto 세션은
+        목록 밖이라 `setAutoAttach{autoAttach:false}` 가 떼지 않았고 다음 이동에 Chromium 이 같은 워커에 auto 세션을 또 붙였다(그림자). 고침: 붙여 두기만인
+        건지기는 그 탭에서만(그 탭이 닫히면 버린다 — `Rescue.release`), 기록이 멈추는 모든 길(끔·밸브·렌더러 죽음·다시 켬)에서 쥔 세션을 auto 든 손이든
+        하나하나 뗀 뒤 `autoAttach:false`(놓기 답을 기다리면 그 뒤에). CEF 변이(`--review-body-v20l` 전체): 둘 다 되돌리면 r15·r16 이
+        다시 떨어지고(13/15), 어느 하나만 두어도 15/15(겹친 방어). 고친 뒤 최종 회귀 두 판 15/15·15/15.
+      - **눈먼 때의 모형(단순해진 것)**: 눈먼 때는 이제 기록 중 그 탭과 떠 있는 워커가 처음 만날 때만 선다 — 모두 넓은 꼴(판정은 고른 기록의 IO 가 [앞 끝,
+        뒤 끝 + 50 ms] 안이면 W 의 시작 앞이든 뒤든 맺지 않고, 잇는 때 `pairStale` ② 도 늘 뒤 끝 + 50 ms; 11 차의 좁은 꼴과 `W.pair_start` 는 걷었다).
+        멈춰 붙은 세션은 앎만(`Blind.none` — `sawWorker`·`again` 은 그대로 쓰는 겹친 방어).
+      - **제 본문 11 차 대비 — 처음 만남의 창(사용자 결정 ②)이 사례의 잃음이다(다시 들어옴이 아니다)**: 붙여 두기 없이 모두 넓게 둔 중간 빌드
+        (`logs/reg_broad/`)에서 `v20m-r11-nav` 26 → 0, `v20m-r12-move` 60 → 0, `v20m-r11-retarget` 131 → 16, `v20n-r12-hop` 20 → 0, `v20o-r12rec` 19 → 0 을
+        다시 들어옴 탓으로 읽었으나, 붙여 두기를 넣은 최종 빌드도 26 → 15·15, 60 → 0·0, 131·132 → 0·0, 20 → 0·0, 19 → 0·0(두 판)이었다. 눈먼 때를 찍어 보니(진단 빌드 — 잃은 기록마다 그 탭의 눈먼 때) 모두
+        **처음 만남**의 눈먼 때 뒤 끝 + 50 ms 안이었다: 이 사례들은 기록을 켠 직후(`r12-move`·`r12-hop`·`r12rec` 의 탭 B — 그 SW 는 앞 사례부터 떠 있다)나
+        처음 다녀가는 출처에서(`r11-retarget` — 옮긴 출처 O2 의 떠 있던 다른 SW b=2 가 옮김 2 ms 앞에 붙는다; `r11-nav` 의 첫 O1·O2·X2) 문서가 서자마자
+        3–45 ms 안에 fetch 를 다 낸다(로컬 서버). 11 차의 좁은 꼴은 그 IO 가 W 의 시작 뒤이면 막지 않았다(남는 틈 ⑩ — 퍼즈 `edge_after` WRONG 19 095 의
+        그 꼴). 같은 사례를 첫 fetch 앞 150 ms 기다림(`V20M_PW=150` — 판정자 진단 손잡이, 기본 0)으로 재면 `r11-retarget` 160(11 차 131)·`r12-move` 60
+        (60)·`r12-hop` 20(20)·`r12rec` 20(19) — 그 창 밖의 본문은 하나도 잃지 않는다(`logs/diag/pw150.log`). `r11-nav` 는 쪽마다 약 55 ms 라 기다리면
+        fetch 가 줄어 견줄 수 없다 — 붙음 수가 다시 들어옴이 눈먼 때를 다시 세우지 않음을 보인다(11 차 쪽마다 다시 붙음 9 → 12 차 처음 만남 3·떠날 때
+        손으로 다시 붙임 3, 남은 본문은 다시 들어온 쪽의 것). 다시 들어옴 그 자체를 재는 `v20l-reentry` 는 20/20(붙여 두기를 끈 대조 0/20), `v20l-keepaway` 20/20(대조 0/20).
+      - **눈먼 때가 다시 생기는 길(모두 어둠)**: 기록을 켤 때 이미 떠 있던 워커·처음 다녀가는 사이트에 떠 있던 워커(처음 만남), 몫(탭 16·전체 64)으로 뗀
+        출처로 돌아옴, 몫 밖이라 세워 둔 세션(켜지 않는다 — 그 W 의 기록은 설명되지 않아 C3b′), 렌더러 죽음 뒤 다시 걸기, 다시 켬, 뗌 앞의 다시 뜸
+        (`targetReloadedAfterCrash` — 넓은 꼴 다시 뜸 눈먼 때), 건진 워커(눈먼 때로 둔다). 닫히지 않는 길: 위 「남는 틈」.
+      - **PHASE0 수치**(CEF 154.0.23, 꼴마다 20 판, 1 분 부하 1.7–7.0): 걸림 0 — 새 SW·기록 앞/중에 깐 SW 의 다시 뜸·업데이트·기록하는 두 탭·다른 출처
+        iframe 의 SW 와 그 전용 워커·전용 워커 둘 겹·공유 워커·에이전트 DevTools 겹침·깔자마자 끔/옮김/닫힘, 기록하지 않는 탭·끈 뒤. 시작 지연(멈춤 켬 −
+        끔): Δ중앙 −1.4…+1.3 ms, Δp99 ≤ +22.9 ms; 놓이기까지 중앙 1.5–2.7 ms. 다시 뜬 워커·업데이트·두 탭의 W 시작 사건 0/40·0/40·0/60·0/220(끔 20·20·20·40
+        잃음). 붙여 두기: 떠나 40 초 뒤에도 SW 가 산다(끔은 멈췄다 다시 뜸), 돌아와 곧 20 개 제 본문 20/20(끔 0/20), 떠나 있는 동안 다른 탭이 같은 SW 로 같은
+        주소 20 개를 받아도 돌아온 뒤 20/20·틀린 본문 0·기록 켜진 채, 출처 스물을 다녀가면 helper RSS 출처마다 약 3.7 MiB(같은 사이트).
+      - **판정·시험(12 차 최종 빌드)**: 순수 `zig build test-web-sidecar` **387/387**(원장 387 — net_body_table 260·net_body_sw 34; 11 차 377 +
+        12 차 새 시험 10). 퍼즈 330 000 판(ReleaseSafe) 열네 세계 **WRONG 0** — 새 사실(멈춰 붙음·`edge_after_half`·`away`) 판은 이은 수의 힘 단언까지 통과
+        (`logs/fuzz330k_final2.log`); 옛 사실(`SW_FUZZ_OLDFACTS=1`·`SW_FUZZ_EDGE_AFTER=1` — 11 차 측정 꼴) 판도 열네 세계 WRONG 0(11 차 `edge_after` 19 095)이고
+        힘 단언은 떨어진다(옛 사실에 넓은 꼴이면 판 대부분이 어둠 — 예: `gentle+blind+clock+omit` 이은 수 3 422, 새 사실 363 534; 잼 꼴이라 합격 조건이
+        아니다). 실제 CEF(최종 빌드, `logs/` — 1 분 부하 1.6–11; `-v20l` 둘째 판 끝에 다른 일로 53 까지 올라 그 판과 뒤
+        `--network-body` 둘째 판은 낮은 부하에서 다시 — 부하 2.9–4.7 에서 15/15·92/92): `--review-body-swwait` 19/19·19/19, `-swcdp` 42/42·42/42, `-v20m` 10/10·10/10, `-v20l`
+        15/15·15/15, `--network-body` 92/92·92/92, `--network` 173/173·173/173, `-v20a` 35/35, `-v20b` 42/42, `-v20fb`(낮은 부하) 336/336, `-v20fa`(단독)
+        66/66, `v20m-navn` 따로 셋(멈춤 끈 대조 하나) 2/2·2/2·2/2 — 판정 줄 1 187(다시 돌린 둘 107 은 따로) 모두 통과. 중간 빌드 한 판의 `v20m-navn` 39/40 은 문(`net_gate`)의 맨 위
+        출처 바뀜과 IO 의 경주(새 문서 시작 1.9 ms 뒤의 그대로 넘김 fetch 의 기록이 그 탭에 붙지 않았다 — 본문과 무관, `PHASE0.md` 8 절), 12 차의 열한
+        판 가운데 하나. 제 본문 11 차 대비(두 판): `v20l-reentry` 20·`v20l-keepaway` 20(새 사례), `r13-flood` 48 → 60·`r14-many` 17 → 20(둘 다 이번에 첫 fetch 앞 150 ms 를 둔 사례 — 판정자가 바뀌었다), 나머지는 같거나
+        처음 만남의 창에서 줄었다 — 위 「제 본문 11 차 대비」 의 다섯과 `v20m-nav` 7 → 0(같은 주소 둘을 곧 내는 쪽마다 — 11 차는 다시 붙는 눈먼 때가 그
+        하나를 가려 짝이 하나뿐이었고, 붙여 두면 둘 다 보여 겹침 규칙으로 어둠: `w_overlap` 10 → 17), `r16-toggle` 491·485 → 422·366(끔·켬마다 처음 만남),
+        swcdp 본문 꼴 −1…−2·`r12-scope`·`r19-bigc` 2 → 0(기록 시작의 첫 본문). 변이(이 작업 트리, ReleaseSafe·퍼즈 3 000 판, 판정은 실패 수로만, 변이마다
+        `cmp` 복원 확인 — 모두 같았다): 66 개 가운데 **60 잡힘**(컴파일이 깨진 아홉은 고쳐 다시 — 모두 잡힘; 넷은 시험의 panic 으로 잡힘; 처음 살아남은
+        `K1`·`O4`·`R8`·`P4` 는 시험을 보태 잡힘). 살아남은 여섯과 까닭: `N8`(앎만 둔 눈먼 때의 `again` — 판정·잇기가 그 눈먼 때를 보지 않아 같은 꼴),
+        `K9`(그림자의 시한 — 그림자는 세운 때를 먼 뒤로 두어 겹친 방어), `N6`(접힘이 앎만 둔 눈먼 때로도 바닥을 올림 — 어둠 쪽), `B7`(눈먼 때 지우기의
+        지연 여유 — 지우는 선은 10 초 앞·아직 정하지 않은 기록의 앞 끝이라 50 ms 가 닿지 않는다), `A4`(떠나 있는 W 의 시작 때 자리 — 응답 때 다시
+        적어 330 000 판에서도 WRONG 0; 판정이 그 W 의 응답 앞에 설 때만의 겹친 방어), `R4x`(11 차에서도 살아남은 hop 표 — 그대로). 살아남은 넷(`B7`·`A4`·
+        `N6`·`R4x`)은 퍼즈 330 000 판으로도 WRONG 0. CEF 변이: 끈 뒤 남은 세션의 고침 둘(위)을 함께 되돌리면 `-v20l` 13/15(r15·r16 다시 떨어짐), 하나씩
+        되돌리면 15/15·15/15. 게이트 12(`fmt-check`·`check-task-split`·`check-doc-links`·`check-doc-line-refs`·`check-config-docs`·`check-mobile-contract`·
+        `check-macos-app-host`·`macos-app-host-swift-check`·`check-boundaries`·`check-targets`·`check-wasm-sync`·`web-sidecar`) 통과. CLI
+        `test-cli-failure-contract` 832 통과·1 skip(11 차와 같다); `test-cli-relay` 는 「expected 33, compiled 35」(maru 모듈의 이름 없는 test 블록 수)로 떨어진다 — 이 고침은
+        maru 모듈에 test 블록을 더하지 않았다(`src/cli/mcp.zig` 글 한 줄; 기준 커밋에서 따로 재지는 않았다).
+      - **남는 틈**: 8 차의 ①–④·9 차의 ⑤–⑦·10 차의 ⑧–⑨·11 차의 ⑪–⑬ 그대로. ⑩·⑩′ 는 닫았다(11 차 측정 꼴 `edge_after` 330 000 판 WRONG 19 095 → 0, 씨앗
+        120104 → 0, 붙여 두기·떠나 있음 퍼즈 330 000 판 0). 더해 ⑭ 처음 만남(기록을 켤 때 이미 떠 있던 워커·처음 다녀가는 사이트에 떠 있던 워커·몫으로 뗀
+        출처로 돌아옴)의 눈먼 때 + 50 ms 의 서비스 워커 갈래 본문은 잃는다(사용자 결정 ② — `v20l-recstart`), ⑮ 건질 탭이 하나도 없을 때 놓기 답 앞에
+        사라진 세션의 워커는 다음 탭이 생길 때까지 멈춰 있다, ⑯ 놓기 답이 30 초 넘게 오지 않는 뗄 세션은 떼고 건진다 — 건지기 셋째까지도 스크립트를 받지
+        못하면 그 워커는 멈춘 채다, ⑰ 놓기 답 기다리기 자리(256)가 차면 그 세션은 곧 뗀다(건지지 않는다 — 실측에서 닿지 않았다), ⑱ 떠나 있는 사이트의
+        워커가 매우 바쁘면 그 W 의 자리가 이 탭 자리 상한(8 192)을 채워 앞 절반을 잊는다(「모른다」 — 어둠).
+      - **12 차가 바꾼 형(리베이스)**: `Blind.none`·`away`, `Table.workerAttachedPaused`·`workerReturned`·`away_from`, `workerAttachedForeign(…, away)`,
+        `sw_mod.Session.visited`·`manual`·`detaching`·`returned`·`target_id`, `Attach.shadow`, `Parked.shadow`·`manual`, `Sw.pend`·`rescue`·`rescued`·`epochs`·
+        `evicted`·`keep_visited`, `Pend`·`Rescue`(+`keep`·`release`)·`pendAdd/Done/Gone/Expired/OfBrowser/MarkDetach/Count`·`nextPend`·`rescueAdd/AddAs/Take/Failed/Due/
+        Count`·`nextRescue`·`stopped`·`epochOf`·`keepAfterDetach`·`takeReturned`·`takeEvicted`·`awayCount`·`markManual/Visited/Detaching`, `W.pair_start`·
+        `Link.notePairFrom` 을 걷음, `net_body` 의 `release`·`pendFinished`·`rescueTick`·`autoAttach`, 퍼즈 `SwFuzzCfg.paused`·`edge_after_half`·`away`·
+        `SW_FUZZ_OLDFACTS`, 판정자 `network_body_swwait_check.zig`(`--review-body-swwait`)·swcdp 의 `v20l-recstart`·`v20l-reentry`·`v20l-keepaway`·`pw`(첫
+        fetch 앞 기다림 — `v20l`·`v20m` 의 `/g/p` 도)·v20m 의 진단 손잡이 `V20M_PW`·judge `host.zig` 의 env 자리 12, `net_body.detachWorkers` 는 쥔 세션을
+        모두 하나하나 뗀다. 고친 파일: `net_body.zig`·`net_body_sw.zig`·`net_body_table.zig`·
+        `devtools_table.zig`(글)·`build/web_sidecar.zig`(시험 수)·`src/cli/mcp.zig`·`docs/control-plane-browser.md`·판정자 `main.zig`·`host.zig`·
+        `network_body_{swwait,swcdp,v20l,v20m}_check.zig`·이 계획.

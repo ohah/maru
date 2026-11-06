@@ -59,8 +59,9 @@ pub const BeginError = error{ Busy, Duplicate, Forbidden };
 /// 묻는 W9d③·④ 의 몫이다). 세션이 하나라 이 호출과 sidecar 의 기록이 같은 Network 도메인을 쓴다.
 ///
 /// 재검증 5 차 S1(서비스 워커 갈래 새 설계 — 공격 2 A7·A16): `Target.*` 도 막는다 — 같은 세션에 sidecar 가 서비스 워커 auto-attach 를 건다.
-/// 떼면(`setAutoAttach`·`detachFromTarget`) 워커 사건이 말없이 끊기고, `waitForDebuggerOnStart` 를 켜면 전용 워커·재시작한 서비스 워커가
-/// 멈춘다(실측 PHASE0 b), 다른 탭·브라우저 전체를 본다(`setDiscoverTargets`). maru 가 쓰는 꼴 하나 — 인자 없는 `getTargetInfo`(그 탭 자신의
+/// 떼면(`setAutoAttach`·`detachFromTarget`) 워커 사건이 말없이 끊기고 멈춰 붙은 워커가 놓이기 앞에 떼어 영영 멈출 수 있으며(재검증 12 차 —
+/// sidecar 는 새로 뜨는 워커를 멈춰 붙여 enable 뒤에 놓는다; 그 차례를 바꾸면 눈먼 때가 다시 생긴다), 다른 탭·브라우저 전체를 본다
+/// (`setDiscoverTargets`). `Runtime.runIfWaitingForDebugger` 는 페이지 세션의 것이라 워커를 놓지 않는다(해가 없다 — 판정 `swwait-agent`). maru 가 쓰는 꼴 하나 — 인자 없는 `getTargetInfo`(그 탭 자신의
 /// 주소: localStorage 의 출처 확인 — `web_cdp_storage.zig` 가 `{}` 로 보낸다)만 받는다(`targetParamsAllowed`). 재검증 6 차 F11: 전에는
 /// `getTargets`·`activateTarget`·`targetId` 를 준 `getTargetInfo` 도 받아, 이 길을 쓰는 쪽이 다른 탭(사용자 탭 포함)의 주소와 다른 사이트 서비스
 /// 워커의 스크립트 주소를 보고 다른 탭을 앞으로 올릴 수 있었다(v20l r11 실측 — 지금은 에이전트가 메서드를 고를 길이 없어 해가 없었다).

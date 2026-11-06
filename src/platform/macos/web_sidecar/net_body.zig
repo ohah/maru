@@ -13,13 +13,29 @@
 //!   서지 않는다 — J7).
 //! - 시각은 mach_absolute_time 의 µs — Chromium 의 TimeTicks(CDP `timestamp`)와 같은 시계다(J1). `network.zig` 의 IO 스레드도 이것으로 찍는다.
 //! - 재검증 5 차 S1·S3b(서비스 워커 갈래 새 설계 — docs/plans/web-osr-backend.md): 기본으로(`MARU_WEB_SW_CDP=0` 이면 끈다) `Network.enable` 의
-//!   **성공 답 뒤에** 페이지 세션에 `Target.setAutoAttach{autoAttach, flatten, waitForDebuggerOnStart:false, filter:[service_worker]}` 를 걸고
+//!   **성공 답 뒤에** 페이지 세션에 `Target.setAutoAttach{autoAttach, flatten, waitForDebuggerOnStart, filter:[service_worker, worker]}` 를 걸고
 //!   붙는 서비스 워커 세션마다 `Network.enable{0, 0, maxPostDataSize 1}`(본문을 받지 않는다 — 공격 2 A9). 그 세션의 사건은 원시 관찰자
 //!   (`on_dev_tools_message`)로만 온다(실측 p1 — CEF 파서는 sessionId 메시지를 넘기지 않는다) — 끝이 sessionId 인 메시지만 가로채고(표에 있는
 //!   세션이면 1) 나머지는 CEF 에 맡긴다. 워커 사건도 그 탭의 쏟아짐 밸브에 센다. 기록이 멈추는 모든 길(표의 `.detach_workers`)에서
-//!   `setAutoAttach{autoAttach:false}` — 떼지 않으면 그 출처의 서비스 워커가 놀아도 멈추지 않는다(실측 75 초). `waitForDebuggerOnStart` 는 늘
-//!   거짓(참이면 전용 워커·재시작한 서비스 워커가 멈췄다). 워커 W 는 서비스 워커 갈래 기록의 쌍둥이이고(짝은 W 의 응답 때), 서비스 워커가
-//!   답한 페이지 응답 P 의 본문은 τ(`responseTime`)로 W 와 그 기록에 잇는다(`net_body_table.swLinkOne` — C0–C7′).
+//!   `setAutoAttach{autoAttach:false}` — 떼지 않으면 그 출처의 서비스 워커가 놀아도 멈추지 않는다(실측 75 초). 워커 W 는 서비스 워커 갈래 기록의
+//!   쌍둥이이고(짝은 W 의 응답 때), 서비스 워커가 답한 페이지 응답 P 의 본문은 τ(`responseTime`)로 W 와 그 기록에 잇는다(`net_body_table.swLinkOne` — C0–C7′).
+//! - 재검증 12 차(눈먼 때를 뿌리에서 — 계획 「재검증 12 차」): `waitForDebuggerOnStart:true` — 새로 뜨는 워커는 멈춰 붙는다
+//!   (`attachedToTarget.waitingForDebugger`). 그 세션에 `Network.enable` 을 보내고 **그 뒤 차례로** `Runtime.runIfWaitingForDebugger`(Playwright
+//!   `crServiceWorker`·Puppeteer `TargetManager` 의 차례 — 한 세션의 메시지는 차례대로 풀리고 워커는 놓일 때까지 스크립트를 돌리지 않는다; enable 답은
+//!   놓기 뒤에야 온다 — 답을 기다려 놓으면 워커가 그 시한까지 멈췄다, 실측 PHASE0). 그래서 새로 뜬 워커는 눈먼 때가 없다(`Table.workerAttachedPaused`).
+//!   옛 PHASE0 b 가 막혔던 까닭과 막는 길: ① 렌더러는 filter 를 모른 채 자식 전용 워커를 모두 멈춘다 — filter 로 뺀 전용 워커는 붙지 않아 놓을 길이
+//!   없었다(f1·f5) → filter 에 `worker` 를 넣어 붙이고 곧 놓은 뒤 뗀다, ② 붙은 채 멈춘 워커의 다시 뜸(`targetReloadedAfterCrash`)을 놓지 않았다(w1–w3)
+//!   → 다시 뜸마다 놓고, 멈춤(`targetCrashed`)에 세션을 떼 다음 시작이 새로 멈춰 붙게 한다(기록 앞에 깐 버전의 다시 뜸은 멈추지 않아 눈멀었다 —
+//!   `swwait-restart-pre`). ③ 놓기 답 앞에 세션이 사라지면(다른 출처로 옮김에 Chromium 이 스스로 뗌·탭 닫힘·기록 끔의 떼기) 워커가 아무도 놓지 않는
+//!   채 멈춘다(`swwait-navrace`·`closerace` 4/5) → 뗄 세션은 놓기 답 뒤에 떼고(`release`), 관찰자는 탭이 닫힐 때까지 두며(끔 뒤에 온 붙음도 놓는다),
+//!   답 앞에 사라진 세션(Chromium 의 뗌·기록 끔의 `autoAttach:false`·탭 닫힘)의 워커는 살아 있는 탭에서 `Target.attachToTarget` 으로 다시 붙어
+//!   놓는다(건지기 — `rescueTick`). 떠 있던 워커(`waitingForDebugger` 거짓)에 붙는 순간의 눈먼 때만 남는다 — 넓은 꼴(그 뒤 50 ms 의 서비스 워커 갈래
+//!   본문도 어둠 — 남는 틈 ⑩ 을 닫는다).
+//! - 재검증 12 차(⑩′ — 사용자 결정 2026-11-06): 다녀간 출처의 세션(`net_body_sw.Session.visited`)은 기록이 끝날 때까지 붙여 둔다 — 남의 출처 시한 떼기를
+//!   하지 않고, Chromium 이 떠날 때 뗀 세션(auto-attach 는 그 탭 프레임과 맞지 않는 SW 세션을 뗀다; `Target.attachToTarget` 세션은 떼지 않는다)은 손으로
+//!   다시 붙인다. 돌아오면 이미 켜진 세션이라 눈먼 때가 없고, Chromium 이 다시 붙인 세션은 그림자로 쥔다(켜지 않는다). 떠나 있는 동안의 다시 붙음 눈먼
+//!   때는 이 탭의 기록을 가리지 못한다(`Blind.away` — 그 출처의 기록은 그 출처를 맨 위에 둔 탭에만 붙는다). 그래서 눈먼 때는 기록 중 그 탭과 떠 있는
+//!   워커가 처음 만날 때 한 번만 선다(기록을 켤 때 이미 떠 있던 워커 — 사용자 결정 ②; 몫으로 뗀 출처로 돌아옴·렌더러 죽음 뒤 다시 걸기도 그 꼴 — 어둠).
 //! - 재검증 6 차 F13: auto-attach 는 그 탭의 **프레임들의 출처**의 서비스 워커를 붙인다(다른 출처 iframe 의 워커가 기록 중 다시 뜨면 — 다른
 //!   사이트도). 붙인 세션마다 워커 스크립트 주소의 출처를 맨 위 출처와 견주어, 다르면 `net_body_sw.foreign_grace_us` 뒤에 뗀다(`foreignCheck` —
 //!   C0 가 어차피 그 워커의 W 로 본문을 잇지 않으니 잃는 것이 없다; 곧 떼지 않는 까닭은 이동 중 새 출처의 워커가 주소 바뀜보다 먼저 붙을 수
@@ -49,6 +65,18 @@ var sw: sw_mod.Sw = .{};
 var sw_cdp = true;
 /// 재검증 5 차 S3b: 짝이 된 기록에 그 응답을 받은 페이지 P 의 본문을 잇는다(C0–C7′).
 const sw_link = true;
+/// 재검증 12 차: 새로 뜨는 워커를 멈춰 붙인다(`waitForDebuggerOnStart:true`). 기본 켬(`MARU_WEB_SW_WAIT=0` 이면 11 차 길 — 판정자의 대조).
+var sw_wait = true;
+/// 재검증 12 차 PHASE0 탐침 손잡이(판정자 전용): auto-attach filter(`sw` 서비스 워커만 · `swdw` 전용 워커도 · `none` 모두), 놓지 않기.
+var sw_wait_filter: enum { sw, swdw, none } = .swdw;
+var test_norelease = false;
+/// 재검증 12 차: 워커가 멈추면(`Inspector.targetCrashed`) 그 세션을 뗀다 — 다음 시작이 새로 멈춰 붙는다(붙은 채 멈춘 워커의 다시 뜸은 그 버전이
+/// 멈춰 붙어 깔린 것일 때만 멈춘다 — Chromium `should_pause_on_start`; 기록 앞에 깐 워커는 멈추지 않고 떠 눈멀었다, 실측 `swwait-restart-pre`).
+/// PHASE0 대조 `MARU_WEB_SW_WAIT_STOPDETACH=0`.
+var stop_detach = true;
+/// PHASE0 손잡이(판정자 전용): 놓기 답을 버린다(`MARU_WEB_TEST_SW_NOREPLY` — 답이 끊긴 꼴)·놓기 답 시한(ms — `MARU_WEB_TEST_SW_PEND_MS`).
+var test_noreply = false;
+var pend_timeout_us: i64 = sw_mod.pend_timeout_us;
 var registrations: [registry_mod.capacity]?struct { cef_id: c_int, browser: BrowserId, reg: [*c]c.cef_registration_t } = @splat(null);
 var observer: c.cef_dev_tools_message_observer_t = undefined;
 var ready = false;
@@ -104,6 +132,16 @@ fn init() void {
     sw_note_log = std.c.getenv("MARU_WEB_TEST_SW_NOTES") != null;
     if (std.c.getenv("MARU_WEB_TEST_SW_LOSE")) |v| test_lose = std.mem.span(v);
     if (std.c.getenv("MARU_WEB_SW_CDP")) |v| sw_cdp = !std.mem.eql(u8, std.mem.span(v), "0");
+    if (std.c.getenv("MARU_WEB_SW_WAIT")) |v| sw_wait = !std.mem.eql(u8, std.mem.span(v), "0");
+    if (std.c.getenv("MARU_WEB_SW_WAIT_FILTER")) |v| {
+        const f = std.mem.span(v);
+        sw_wait_filter = if (std.mem.eql(u8, f, "none")) .none else if (std.mem.eql(u8, f, "sw")) .sw else .swdw;
+    }
+    test_norelease = std.c.getenv("MARU_WEB_TEST_SW_NORELEASE") != null;
+    if (std.c.getenv("MARU_WEB_SW_WAIT_STOPDETACH")) |v| stop_detach = !std.mem.eql(u8, std.mem.span(v), "0");
+    test_noreply = std.c.getenv("MARU_WEB_TEST_SW_NOREPLY") != null;
+    if (std.c.getenv("MARU_WEB_SW_KEEP")) |v| sw.keep_visited = !std.mem.eql(u8, std.mem.span(v), "0");
+    if (std.c.getenv("MARU_WEB_TEST_SW_PEND_MS")) |v| pend_timeout_us = (std.fmt.parseInt(i64, std.mem.span(v), 10) catch 30_000) * 1000;
     // 재검증 5 차 S3: 워커 세션을 붙이면 서비스 워커 갈래 기록의 쌍둥이는 워커 W 다. 본문을 잇는 것(S3b)은 `sw_link`.
     table.sw_twin_worker = sw_cdp;
     table.sw_link_body = sw_cdp and sw_link;
@@ -122,6 +160,12 @@ fn init() void {
     foreign_task = object.zeroed(c.cef_task_t);
     object.staticRefCounted(&foreign_task.base);
     foreign_task.execute = &foreignCheck;
+    rescue_task = object.zeroed(c.cef_task_t);
+    object.staticRefCounted(&rescue_task.base);
+    rescue_task.execute = &rescueTick;
+    pend_task = object.zeroed(c.cef_task_t);
+    object.staticRefCounted(&pend_task.base);
+    pend_task.execute = &pendCheck;
 }
 
 fn api() *const library.Api {
@@ -155,7 +199,9 @@ pub fn record(v: msg.NetRecord) void {
         table.stop(gpa, v.browser) catch {};
         runActions();
         if (was) sendCdp(entry, "Network.disable", "{}", v.browser, 0, false);
-        unregister(entry.cef_id);
+        // 재검증 12 차: 워커를 멈춰 붙였으면 관찰자를 남긴다 — `setAutoAttach{autoAttach:false}` 가 닿기 전에 멈춰 붙은 워커의 알림을 받아 놓아야
+        // 한다(놓지 않으면 영영 멈춘다 — 실측 `swwait-offrace`). 탭이 닫힐 때 놓는다(`browserClosed`).
+        if (!sw_wait) unregister(entry.cef_id);
         clearControl(v.browser);
         refreshAny();
         writer().send(.{ .net_record_state = .{ .browser = v.browser, .session = 0, .status = .off } }) catch {};
@@ -199,7 +245,8 @@ pub fn browserClosed(cef_id: c_int, browser: BrowserId) void {
     table.closed(gpa, browser) catch {};
     runActions();
     // 재검증 6 차(F16 과 같은 꼴): 기록을 끈 뒤 닫힌 탭은 표에 없어 닫힘의 떼기 일(`.detach_workers` closed)이 오지 않는다 — 서비스 워커 표의
-    // 자리(세대)를 여기서 비운다(남으면 32 번 뒤 새 탭에 붙이기를 걸지 못했다).
+    // 자리(세대)를 여기서 비운다(남으면 32 번 뒤 새 탭에 붙이기를 걸지 못했다). 재검증 12 차: 놓기 답을 기다리던 세션은 건진다.
+    pendClosed(browser);
     sw.forget(browser);
     unregister(cef_id);
     clearControl(browser);
@@ -434,6 +481,8 @@ fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browse
         return;
     };
     dbg("result id={d} ok={} size={d}", .{ id, success, size });
+    // 재검증 12 차: 건지기의 붙이기가 실패했다(그 타깃이 없다 — 이미 끝났다) — 지운다.
+    if (success == 0 and sw.rescueFailed(id)) return;
     const f = table.takeInflight(id) orelse return; // 끄거나 다시 켠 뒤의 늦은 답(세대)
     const bytes: []const u8 = if (result != null) @as([*]const u8, @ptrCast(result.?))[0..size] else "";
     sendBody(f, success != 0, bytes);
@@ -568,23 +617,151 @@ fn wallUs() i64 {
 fn armWorkers(browser: BrowserId) void {
     if (browsers.state.registry.byId(browser) == null) return;
     if (!sw.arm(browser)) return;
-    dbg("sw-arm b={d}", .{browser});
-    _ = swQueue(browser, null, "Target.setAutoAttach", "{\"autoAttach\":true,\"waitForDebuggerOnStart\":false,\"flatten\":true,\"filter\":[{\"type\":\"service_worker\",\"exclude\":false},{\"exclude\":true}]}");
+    dbg("sw-arm b={d} wait={}", .{ browser, sw_wait });
+    _ = autoAttach(browser, sw_wait);
+}
+
+/// `Target.setAutoAttach{autoAttach:true}` — `wait` 면 새로 뜨는 타깃을 멈춰 붙인다. 재검증 12 차: filter 는 서비스 워커와 전용 워커(`worker`) —
+/// 멈춤은 렌더러가 filter 를 모른 채 자식 전용 워커마다 건다(filter 로 뺀 전용 워커도 멈추고 붙지 않아 놓을 길이 없다 — 옛 PHASE0 b f1·f5, Chromium
+/// `RendererAutoAttacherBase` 는 `wait_for_debugger` 만 넘긴다). 그래서 전용 워커도 붙여 곧 놓고 뗀다.
+fn autoAttach(browser: BrowserId, wait: bool) i32 {
+    const filter = switch (sw_wait_filter) {
+        .sw => ",\"filter\":[{\"type\":\"service_worker\",\"exclude\":false},{\"exclude\":true}]",
+        .swdw => ",\"filter\":[{\"type\":\"service_worker\",\"exclude\":false},{\"type\":\"worker\",\"exclude\":false},{\"exclude\":true}]",
+        .none => "",
+    };
+    var pb: [400]u8 = undefined;
+    const params = std.fmt.bufPrint(&pb, "{{\"autoAttach\":true,\"waitForDebuggerOnStart\":{},\"flatten\":true{s}}}", .{ wait, filter }) catch return 0;
+    return swQueue(browser, null, "Target.setAutoAttach", params);
 }
 
 /// 표의 `.detach_workers` — 그 탭의 서비스 워커 세션을 모두 떼고 세대를 올린다. 걸려 있었으면 `setAutoAttach{autoAttach:false}`(실측: 답보다
 /// 먼저 붙은 세션마다 `detachedFromTarget` 이 오고 +28 초에 워커가 멈췄다). 닫힘·DevTools 떨어짐은 보낼 곳이 없다. 렌더러 죽음은 새 문서에서
 /// 다시 건다(`documentStarted`).
 fn detachWorkers(browser: BrowserId, why: table_mod.DetachWhy) void {
+    // 재검증 12 차: 손으로 붙인 세션(다녀간 출처의 붙여 두기·건지기)은 `setAutoAttach{autoAttach:false}` 가 떼지 않는다 — 여기서 뗀다(놓기 답을 기다리면
+    // 그 뒤에). auto 세션도 하나하나 뗀다: Chromium 은 한 세션을 뗄 때 그 워커의 auto 목록 자리를 지워(같은 워커에 손 세션과 auto 세션이 함께 붙었다가
+    // 손 세션을 떼면 auto 세션이 목록 밖에 남는다) `autoAttach:false` 가 그 auto 세션을 떼지 않았다(회귀 `v20l-r15-race`·`r16-toggle` — 끈 뒤 SW 가
+    // 멈추지 않았다). 닫힘은 보낼 곳이 없다.
+    if (why != .closed) {
+        for (sw.sessions) |x| if (x.browser == browser) {
+            if (!sw.pendMarkDetach(x.sidSlice())) detachSession(browser, x.sidSlice());
+        };
+        for (sw.parked) |x| if (x.browser == browser) {
+            const ps = x.sid[0..x.sid_len];
+            if (!sw.pendMarkDetach(ps)) detachSession(browser, ps);
+        };
+    }
     const was = sw.detachAll(browser);
     dbg("sw-detach b={d} why={s} armed={}", .{ browser, @tagName(why), was });
     if (why == .renderer_gone and was) sw.setRearm(browser);
     if (why == .closed) {
+        pendClosed(browser);
         sw.forget(browser);
         return;
     }
     if (!was) return;
+    // 재검증 12 차: 놓기 답을 기다리던 세션도 함께 떨어진다 — 그 떨어짐(`detachedFromTarget` — 관찰자는 남아 있다)에 그 워커를 건진다(`pendFinished`).
+    // 떼기를 미루지 않는다: 미루는 동안 다시 켜면 붙은 채 남은 옛 세대 세션은 다시 알려지지 않아 그 워커가 보이지 않았다.
     _ = swQueue(browser, null, "Target.setAutoAttach", "{\"autoAttach\":false,\"waitForDebuggerOnStart\":false}");
+}
+
+/// 재검증 12 차: 멈춰 붙은 세션을 놓는다(`Runtime.runIfWaitingForDebugger` — 그 세션의 앞 명령(`Network.enable`) 뒤에 차례로 닿는다: 그 세션의 메시지는
+/// 차례대로 풀리고, 워커는 그 세션이 놓을 때까지 스크립트를 돌리지 않는다). `detach` 면 그 답 뒤에 뗀다(답 앞에 떼면 워커의 DevTools 쪽이 아직
+/// 서지 않았을 때 영영 멈출 수 있다 — Playwright `CRSession.detach`·Puppeteer `silentDetach` 의 차례). 답을 기다릴 자리가 없으면 곧 뗀다.
+fn release(browser: BrowserId, sid: []const u8, target_id: []const u8, detach: bool) void {
+    if (test_norelease) {
+        if (detach) detachSession(browser, sid);
+        return;
+    }
+    const id = sendSession(browser, sid, "Runtime.runIfWaitingForDebugger", "{}");
+    dbg("sw-release b={d} sid={s} id={d} detach={}", .{ browser, sid, id, detach });
+    if (!sw.pendAdd(browser, sid, target_id, id, machUs(), detach)) {
+        if (detach) detachSession(browser, sid);
+        return;
+    }
+    ensurePendCheck();
+}
+
+const PendEnd = enum { reply, detached, closed, timeout };
+
+/// 놓기 답이 왔다 — 뗄 세션이면 뗀다. 답 앞에 세션이 사라졌다(떨어짐·탭 닫힘)·시한 — 그 워커를 건진다(다시 붙여 놓는다).
+fn pendFinished(p: sw_mod.Pend, why: PendEnd) void {
+    dbg("sw-release-done b={d} sid={s} why={s} after_us={d} detach={}", .{ p.browser, p.sidSlice(), @tagName(why), machUs() - p.since, p.detach });
+    if (p.detach and (why == .reply or why == .timeout)) detachSession(p.browser, p.sidSlice());
+    // 시한은 세션이 아직 붙어 있다(우리 세션이 그 워커를 쥔다 — 뗄 세션만 떼고 그 워커를 건진다; 남기는 세션은 그대로 둔다).
+    if (why == .detached or why == .closed or (why == .timeout and p.detach)) {
+        if (sw.rescueAdd(p.targetSlice(), if (why == .closed) 0 else p.browser, machUs())) ensureRescue();
+    }
+}
+
+/// 재검증 12 차: 탭이 닫혔다·DevTools 가 떨어졌다 — 놓기 답을 기다리던 세션은 사라졌다(건진다).
+fn pendClosed(browser: BrowserId) void {
+    while (sw.pendOfBrowser(browser)) |p| pendFinished(p, .closed);
+}
+
+/// 재검증 12 차: 건지기 — 살아 있는 탭(먼저 그 탭)의 페이지 세션에서 그 타깃에 붙는다(그 붙음이 `onTarget` 에 오면 놓고 답 뒤에 뗀다). 붙인
+/// 세션이 놓기 앞에 또 사라지면 다시 넣는다(같은 길).
+var rescue_task: c.cef_task_t = undefined;
+var rescue_posted = false;
+/// 걸어 둔 건지기 task 가 돌 때(단조 µs) — 그보다 이른 건지기가 들어오면 하나 더 건다(task 는 되풀이해도 해가 없다).
+var rescue_due_at: i64 = 0;
+
+fn ensureRescue() void {
+    const at = sw.nextRescue() orelse return;
+    if (rescue_posted and at >= rescue_due_at) return;
+    // 처음 해 보기는 곧(워커가 그만큼 멈춰 있다 — 실측 `swwait-offrace` p99 +304 ms 는 첫 해 보기를 사이만큼 미룬 탓이었다), 다시 해 보기는 사이 뒤.
+    const now = machUs();
+    const wait_ms = @divTrunc(@max(at - now, 0), 1000);
+    if ((if (wait_ms == 0) api().post_task(c.TID_UI, &rescue_task) else api().post_delayed_task(c.TID_UI, &rescue_task, wait_ms)) != 0) {
+        rescue_posted = true;
+        rescue_due_at = @max(at, now);
+    }
+}
+
+fn rescueTick(_: [*c]c.cef_task_t) callconv(.c) void {
+    rescue_posted = false;
+    while (sw.rescueDue(machUs())) |x| {
+        const entry = rescuer(x.hint) orelse {
+            x.tries -|= 1; // 탭이 하나도 없다 — 세지 않고 기다린다
+            continue;
+        };
+        // 붙여 두기만(놓을 워커가 아니다)은 그 탭에서만 — 그 탭이 닫혔으면 버린다(다른 탭에 붙였다 떼면 그 탭의 auto 세션이 Chromium 의 auto 목록에서
+        // 빠져 기록을 꺼도 떨어지지 않았다 — 회귀 `v20l-r15-race`).
+        if (!x.release and entry.id != x.hint) {
+            x.* = .{};
+            continue;
+        }
+        if (!register(entry)) continue;
+        var pb: [160]u8 = undefined;
+        const params = std.fmt.bufPrint(&pb, "{{\"targetId\":\"{s}\",\"flatten\":true}}", .{x.targetSlice()}) catch continue;
+        x.cmd_id = swQueue(entry.id, null, "Target.attachToTarget", params);
+        dbg("sw-rescue b={d} target={s} try={d}", .{ entry.id, x.targetSlice(), x.tries });
+    }
+    ensureRescue();
+}
+
+fn rescuer(hint: BrowserId) ?*registry_mod.Entry {
+    if (hint != 0) if (browsers.state.registry.byId(hint)) |e| if (!e.closing) return e;
+    for (&browsers.state.registry.slots) |*slot| if (slot.*) |*e| if (!e.closing) return e;
+    return null;
+}
+
+var pend_task: c.cef_task_t = undefined;
+var pend_posted = false;
+
+fn ensurePendCheck() void {
+    if (pend_posted) return;
+    const at = sw.nextPend() orelse return;
+    const wait_ms = @divTrunc(@max(at + pend_timeout_us - machUs(), 0), 1000) + 1;
+    pend_posted = api().post_delayed_task(c.TID_UI, &pend_task, wait_ms) != 0;
+}
+
+fn pendCheck(_: [*c]c.cef_task_t) callconv(.c) void {
+    pend_posted = false;
+    const now = machUs();
+    while (sw.pendExpired(now, pend_timeout_us)) |p| pendFinished(p, .timeout);
+    ensurePendCheck();
 }
 
 /// 세션 하나에 명령을 보낸다(번호는 본문 호출과 같은 대역 — 답은 원시 관찰자로 온다).
@@ -658,12 +835,23 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
         // 재검증 7 차: 떨어진 세션의 눈먼 때를 닫는다(그 뒤의 W 는 아예 보이지 않는다 — 그 기록은 설명되지 않아 C3b′ 가 막는다). 재검증 11 차:
         // 떨어진 때도 적는다(`Table.workerDetached` — 그 뒤 이 탭이 그 워커를 보았다고 치지 않는다).
         if (sw.find(sid)) |x| table.workerDetached(x.browser, blindKey(x.target), machUs());
+        // 재검증 12 차(⑩′): Chromium 이 뗀 다녀간 출처의 세션(그 탭이 떠났다 — 그 출처의 SW 가 그 탭 프레임과 맞지 않게 되었다)은 손으로 다시 붙여
+        // 기록이 끝날 때까지 둔다(돌아오면 이미 켜진 세션 — 눈먼 때가 없다). 떠나 있는 동안의 다시 붙음 눈먼 때는 이 탭의 기록을 가리지 못한다(`away`).
+        const keep = sw.keepAfterDetach(sid);
         sw.detached(sid);
+        if (keep) |k| {
+            dbg("sw-keep-reattach b={d} sid={s} target={s}", .{ k.browser, sid, k.targetSlice() });
+            if (sw.rescueAddAs(k.targetSlice(), k.browser, machUs(), true)) ensureRescue();
+        }
+        // 재검증 12 차: 떨어진 세션의 놓기 답은 오지 않는다(뗄 것도 없다).
+        if (sw.pendGone(sid)) |gone| pendFinished(gone, .detached);
         return;
     }
     var kind: []const u8 = "";
     var target_id: []const u8 = "";
     var url: []const u8 = "";
+    // 재검증 12 차: 멈춰 붙었는가(`waitForDebuggerOnStart:true` 로 새로 뜬 타깃 — 아직 스크립트를 돌리지 않았다).
+    var waiting = if (v.object.get("waitingForDebugger")) |x| x == .bool and x.bool else false;
     if (v.object.get("targetInfo")) |ti| if (ti == .object) {
         if (ti.object.get("type")) |x| if (x == .string) {
             kind = x.string;
@@ -675,31 +863,69 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
             url = x.string;
         };
     };
+    // 재검증 12 차: 건지던 타깃이 붙었다(건지기의 붙이기든 auto-attach 든) — 놓은 뒤 답을 기다린다(뗄 세션은 그 뒤에 뗀다). 눈먼 때는 멈춰 붙음
+    // (`paused` — Chromium 이 알린 것)으로만 가른다: 건진 워커에 붙은 이 세션의 enable 앞에 다른 세션(건지기)이 그 워커를 놓을 수 있다.
+    const paused = waiting;
+    const rescued = sw.rescueTake(target_id);
+    if (rescued) |x| {
+        dbg("sw-rescued b={d} sid={s} target={s} keep={}", .{ browser, sid, target_id, x.keep });
+        waiting = true;
+    }
     // 기록하는 탭이고 걸어 둔 auto-attach 의 서비스 워커면 둔다 — 아니면(밸브로 멈춤·떼는 중·옛 세대·다른 꼴) 곧 뗀다(공격 2 A1).
     // 재검증 7 차(N13): 몫을 넘으면 세워 둔다(`.park` — enable 하지 않고 시한 뒤 뗀다; 곧 떼면 Chromium 이 같은 워커를 곧 다시 붙였다).
     const now = machUs();
     const a: sw_mod.Attach = if (sw_cdp and table.recording(browser) and std.mem.eql(u8, kind, "service_worker")) sw.attachedAt(browser, sid, target_id, now) else .detach;
     if (a == .detach) {
-        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=false", .{ browser, sid, kind, target_id });
+        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=false waiting={}", .{ browser, sid, kind, target_id, waiting });
+        // 재검증 12 차: 멈춰 붙었으면 놓고 그 답 뒤에 뗀다(뗌만으로는 풀리지 않을 수 있다).
+        if (waiting) return release(browser, sid, target_id, true);
         return detachSession(browser, sid);
     }
+    // 재검증 12 차: 몫으로 뺀 다녀간 출처 세션을 뗀다(그 출처로 돌아오면 처음 만남 — 어둠).
+    while (sw.takeEvicted()) |x| {
+        dbg("sw-evict b={d} sid={s} target={s}", .{ x.browser, x.sidSlice(), x.targetSlice() });
+        table.workerDetached(x.browser, blindKey(x.target), now);
+        if (!sw.pendMarkDetach(x.sidSlice())) detachSession(x.browser, x.sidSlice());
+    }
     if (a == .park) {
-        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=park", .{ browser, sid, kind, target_id });
+        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=park waiting={}", .{ browser, sid, kind, target_id, waiting });
+        if (rescued != null) sw.markManual(sid);
+        if (waiting) release(browser, sid, target_id, false);
         return ensureForeignCheck();
     }
+    if (a == .shadow) {
+        // 재검증 12 차: 이 탭이 그 워커에 켠 세션(다녀간 출처의 붙여 둔 세션)을 이미 쥐었다 — 켜지 않고 쥐어만 둔다(눈먼 때 없음).
+        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=shadow waiting={}", .{ browser, sid, kind, target_id, waiting });
+        if (rescued != null) sw.markManual(sid);
+        if (waiting) release(browser, sid, target_id, false);
+        return;
+    }
+    if (rescued != null) sw.markManual(sid);
+    // 붙여 두기의 다시 붙음은 그 탭에서만 다녀간 출처의 것이다(그 탭이 닫혀 다른 탭이 건졌으면 보통 세션).
+    if (rescued) |x| if (x.keep and x.hint == browser) sw.markVisited(sid);
     // 재검증 6 차 F13: 워커 스크립트 주소의 출처가 맨 위 출처가 아니면(다른 출처 iframe 의 워커·이동 중) 시한 뒤 뗀다(`foreignCheck`).
     // 재검증 7 차(N13): 남의 출처 세션은 탭마다 따로 묶은 몫(`max_foreign_per_tab`)까지만 — 넘으면 세워 둔다.
     const origin = sw.noteOrigin(sid, table_mod.originHash(url), table.topOriginOf(browser), now);
-    dbg("sw-attached b={d} sid={s} type={s} target={s} keep=true own={} url={s}", .{ browser, sid, kind, target_id, origin == .own, url[0..@min(url.len, 160)] });
-    if (origin == .drop) return detachSession(browser, sid);
+    dbg("sw-attached b={d} sid={s} type={s} target={s} keep=true own={} waiting={} url={s}", .{ browser, sid, kind, target_id, origin == .own, waiting, url[0..@min(url.len, 160)] });
+    if (origin == .drop) {
+        if (waiting) return release(browser, sid, target_id, true);
+        return detachSession(browser, sid);
+    }
     if (origin != .own) ensureForeignCheck();
-    if (origin == .park) return;
+    if (origin == .park) {
+        if (waiting) release(browser, sid, target_id, false);
+        return;
+    }
     // 재검증 7 차: enable 답이 올 때까지(그리고 붙기 앞) 시작한 W 는 시작 사건 없이 보인다 — 눈먼 때를 연다.
     // 재검증 8 차: 맨 위 출처의 세션이면 그 눈먼 때 앞에 맺은 짝을 되돌린다(늦게 안 눈먼 때), 남의 출처 세션은 눈먼 때만.
-    if (sw.find(sid)) |x| (if (origin == .own) table.workerAttached(gpa, browser, blindKey(x.target), now) else table.workerAttachedForeign(gpa, browser, blindKey(x.target), now)) catch {};
+    // 재검증 12 차: 멈춰 붙은 워커는 아직 아무것도 하지 않았고 놓기(enable 뒤 차례)까지 하지 않는다 — 눈먼 때가 없다(앎만 — `workerAttachedPaused`).
+    // 떠 있던 워커에 붙었으면 눈먼 때(넓은 꼴 — 그 뒤 50 ms 의 서비스 워커 갈래 본문도 어둠; 기록 중 그 탭과 그 워커가 처음 만날 때 한 번 — 다녀간
+    // 출처는 붙여 두므로 돌아와도 다시 붙지 않는다). 떠나 있는 동안 다시 붙인 다녀간 출처 세션은 `away`(이 탭의 기록을 가리지 못한다).
+    if (sw.find(sid)) |x| (if (paused) table.workerAttachedPaused(gpa, browser, blindKey(x.target), now) else if (origin == .own) table.workerAttached(gpa, browser, blindKey(x.target), now) else table.workerAttachedForeign(gpa, browser, blindKey(x.target), now, x.visited)) catch {};
     const eid = sendSession(browser, sid, "Network.enable", "{\"maxTotalBufferSize\":0,\"maxResourceBufferSize\":0,\"maxPostDataSize\":1}");
     sw.noteEnable(sid, eid);
-    // waitForDebuggerOnStart 는 거짓이라 기다리는 것이 없다 — CEF 가 바뀌어도 멈추지 않게 놓는다(해가 없다).
+    if (waiting) return release(browser, sid, target_id, false);
+    // 멈춰 붙지 않았다(기록을 켤 때 이미 떠 있던 워커 — 눈먼 때) — 놓기는 해가 없다(11 차 그대로).
     _ = sendSession(browser, sid, "Runtime.runIfWaitingForDebugger", "{}");
 }
 
@@ -710,7 +936,15 @@ fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t
     const m = @as([*]const u8, @ptrCast(message.?))[0..size];
     const sid = sw_mod.sessionTail(m) orelse return 0;
     // 모르는·옛 세대의 세션도 삼킨다 — CEF 파서는 어차피 넘기지 않는다(실측 p1 0/285).
-    const s = sw.live(sid) orelse return 1;
+    // 재검증 12 차: 놓기의 답(세션이 표에 있든 없든 — 기록하지 않는 탭·떼는 세션) — 뗄 세션이면 이제 뗀다.
+    if (!test_noreply) if (sw_mod.resultId(m)) |rid| if (sw.pendDone(sid, rid)) |p| pendFinished(p, .reply);
+    const s = sw.live(sid) orelse {
+        // 재검증 12 차: 모르는·옛 세대·세워 둔 세션의 워커도 다시 뜨면 멈춘다(그 세션이 붙어 있는 동안) — 곧 놓는다.
+        if (sw_wait) if (sw_mod.eventMethod(m)) |method| if (std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash")) {
+            if (browserOfCef(browser.*.get_identifier.?(browser))) |bid| release(bid, sid, "", false);
+        };
+        return 1;
+    };
     const id = browserOfCef(browser.*.get_identifier.?(browser)) orelse return 1;
     if (s.browser != id) return 1;
     table.link.clockSample(wallUs(), machUs());
@@ -728,7 +962,15 @@ fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t
     }
     const method = sw_mod.eventMethod(m) orelse return 1;
     if (std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash") or std.mem.eql(u8, method, "Inspector.targetCrashed")) {
+        if (stop_detach and sw_wait and std.mem.eql(u8, method, "Inspector.targetCrashed")) {
+            dbg("sw-stop-detach b={d} sid={s}", .{ id, sid });
+            sw.stopped(sid);
+            sw.markDetaching(sid);
+            detachSession(id, sid);
+        }
         sw.reloaded(sid);
+        // 재검증 12 차: 다시 뜬 워커가 멈춰 있으면(그 세션이 멈춰 붙인 버전 — Chromium `should_pause_on_start`) 곧 놓는다(Playwright `CRServiceWorker`).
+        if (sw_wait and std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash")) release(id, sid, "", false);
         // 재검증 7 차: 새 epoch 의 앞뒤를 눈먼 때로 — 다시 뜬 워커의 첫 요청이 시작 사건 없이 올 수 있다.
         table.workerReloaded(gpa, id, blindKey(s.target), machUs()) catch {};
     }
@@ -774,7 +1016,8 @@ fn workerEvent(id: BrowserId, s: *const sw_mod.Session, method: []const u8, m: [
     };
     // 재검증 6 차 F13·D1: 남의 출처 세션의 W 는 맞추기에 넣지 않는다(문이 그 출처의 기록을 이 탭에 붙이지 않았다 — 제 기록이 없는 W 가 같은 주소의
     // 기록을 가져간다), 맨 위 출처의 것이 된 세션은 그 뒤에 시작한 W 만.
-    const from: i64 = if (s.foreign_since != 0) std.math.maxInt(i64) else s.own_since;
+    // 재검증 12 차(⑩′): 다녀간 출처의 붙여 둔 세션이 떠나 있으면 자리만 적는다(`net_body_table.away_from`).
+    const from: i64 = if (s.foreign_since != 0) (if (s.visited) table_mod.away_from else std.math.maxInt(i64)) else s.own_since;
     table.workerEventFrom(gpa, id, sw_mod.targetKey(s.target, s.epoch), ev, now, from) catch {};
 }
 
@@ -817,6 +1060,8 @@ pub fn topOrigin(browser: BrowserId, origin: []const u8) void {
     if (!ready) return;
     const raise = sw.retarget(browser, h, machUs());
     if (raise != 0 and table.recording(browser)) table.link.raiseVisible(browser, raise);
+    // 재검증 12 차: 돌아온 다녀간 출처 세션 — 떠나 있던 동안 다시 붙인 그 워커의 눈먼 때가 아직 닿으면 보통 눈먼 때로(`Table.workerReturned`).
+    while (sw.takeReturned(browser)) |x| table.workerReturned(browser, blindKey(x.target), machUs());
     dbg("sw-retarget b={d} origin={x} raise={d}", .{ browser, h, raise });
     ensureForeignCheck();
 }
@@ -838,6 +1083,8 @@ fn foreignCheck(_: [*c]c.cef_task_t) callconv(.c) void {
     while (sw.takeForeign(now)) |x| {
         dbg("sw-foreign-detach b={d} sid={s} origin={x}", .{ x.browser, x.sidSlice(), x.origin });
         if (x.target != 0) table.workerDetached(x.browser, blindKey(x.target), now); // 재검증 7 차: 그 세션의 눈먼 때를 닫는다(11 차: 떨어진 때도)
+        // 재검증 12 차: 놓기 답을 아직 기다리면 그 답 뒤에 뗀다.
+        if (sw.pendMarkDetach(x.sidSlice())) continue;
         detachSession(x.browser, x.sidSlice());
     }
     ensureForeignCheck();

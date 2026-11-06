@@ -5,6 +5,9 @@
 //! 고친 결함의 보장 — F13 「그 탭이 보이는 출처의 워커만 산다」, F14a 「다른 출처의 워커가 이 탭의 몫을 막지 않는다」, F14c 「한 탭이 세션 64 를 다
 //! 쥐지 않는다」, F11 「인자 없는 getTargetInfo 만」)이고, 그 밖의 잰 값은 줄에 적는다.
 //!
+//! 재검증 12 차: `V20M_PW=N`(진단) — 페이지(`/g/p`·`/g/s6/p`)가 첫 fetch 앞에 N ms 기다린다(기본 0 — 사례 그대로). 사례들은 기록을 켠 직후·처음
+//! 다녀가는 출처에서 곧 fetch 해, 떠 있던 SW 와 처음 만나는 눈먼 때 + 50 ms(어둠 — 사용자 결정 ②) 안의 제 본문을 잃는다 — 그 창 밖에서 같은 사례를 잰다.
+//!
 //! 출처: O1 = http://127.0.0.1:P1, O2..O6 = http://127.0.0.1:Pn(같은 사이트·다른 출처 — 저장소를 나누지 않는다), X2 = http://localhost:P2.
 //!   r11-nav        기록 중 3 초 안에 맨 위 출처를 여러 번 바꾼다(O1·O2·X2) — 틀린 본문 0, 앞 출처 워커는 결국 멈춘다
 //!   r11-retarget   iframe(O2)이 새 워커를 띄워 남의 것(foreign)으로 붙은 뒤 d ms 에 탭이 그 출처로 옮긴다(d = 3 초 앞뒤) — 틀린 본문 0
@@ -101,6 +104,15 @@ fn reply(conn: c_int, ctype: []const u8, body: []const u8) void {
     replyStatus(conn, "200 OK", ctype, "", body);
 }
 
+/// 재검증 12 차(진단): `V20M_PW=N` 이면 페이지(`/g/p`·`/g/s6/p`)의 첫 fetch 앞 기다림(`pw`)의 기본값을 N ms 로 — 떠 있던 SW 와 처음 만나는 눈먼 때 +
+/// 지연(어둠 — 사용자 결정 ②) 밖에서 같은 사례를 재 본다(기본은 0 — 사례 그대로).
+fn replyPw(conn: c_int, body: []const u8) void {
+    const v = std.c.getenv("V20M_PW") orelse return reply(conn, html, body);
+    var b: [16384]u8 = undefined;
+    const out = std.fmt.bufPrint(&b, "<script>self.PWD={s}</script>{s}", .{ std.mem.span(v), body }) catch return reply(conn, html, body);
+    reply(conn, html, out);
+}
+
 fn headerValue(req: []const u8, name: []const u8) []const u8 {
     var it = std.mem.splitSequence(u8, req, "\r\n");
     _ = it.next();
@@ -138,7 +150,8 @@ const page_js = "var P=new URLSearchParams(location.search);" ++
     "navigator.serviceWorker.register('/g/sw.js?b='+(P.get('b')||'1'),{scope:'/g/'}).then(function(){return navigator.serviceWorker.ready}).then(async function(){" ++
     "if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}" ++
     "var fs=(P.get('if')||'').split(',').filter(function(x){return x});for(var q=0;q<fs.length;q++){var f=document.createElement('iframe');f.src=decodeURIComponent(fs[q]);document.body.appendChild(f);await new Promise(function(r){f.onload=r;setTimeout(r,6000)})}" ++
-    "var n=+(P.get('n')||0);var K=P.get('k')||'k';" ++
+    // 재검증 12 차: `pw` — 첫 fetch 앞에 기다린다(ms — 떠 있던 SW 에 붙는 눈먼 때 + 지연의 본문은 어둠이다).
+    "var n=+(P.get('n')||0);var K=P.get('k')||'k';var pw=+(P.get('pw')||self.PWD||0);if(pw)await new Promise(function(r){setTimeout(r,pw)});" ++
     "for(var i=0;i<n;i++){await fetch('/g/x?k='+K+i,{cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}" ++
     "document.title='ready:'+K})";
 
@@ -166,7 +179,7 @@ fn serveOne(conn: c_int) void {
         _ = boots[@min(b, 15)].fetchAdd(1, .monotonic);
         return reply(conn, "text/plain", "boot");
     }
-    if (std.mem.eql(u8, path, "/g/p")) return reply(conn, html, "<!doctype html><title>p</title><script>" ++ page_js ++ "</script>p");
+    if (std.mem.eql(u8, path, "/g/p")) return replyPw(conn, "<!doctype html><title>p</title><script>" ++ page_js ++ "</script>p");
     if (std.mem.eql(u8, path, "/g/probe")) return reply(conn, html, "<!doctype html><title>probed</title>probe");
     // iframe(O2): 새 워커 하나(범위 `/g/s6/`, 판마다 새 판 `v` — 새 타깃이 뜬다).
     if (std.mem.eql(u8, path, "/g/reg6")) return reply(conn, html, "<!doctype html><title>r6</title><script>" ++
@@ -178,9 +191,9 @@ fn serveOne(conn: c_int) void {
     if (std.mem.eql(u8, path, "/g/s6/stop")) return reply(conn, html, "<!doctype html><title>st</title><script>" ++
         "navigator.serviceWorker.ready.then(function(r){r.active.postMessage({op:'stop'});setTimeout(function(){document.title='stopped'},300)})</script>st");
     // `/g/s6/` 범위 안 페이지 — 다스리는 워커(b=6)를 거쳐 n 번.
-    if (std.mem.eql(u8, path, "/g/s6/p")) return reply(conn, html, "<!doctype html><title>s6</title><script>" ++
+    if (std.mem.eql(u8, path, "/g/s6/p")) return replyPw(conn, "<!doctype html><title>s6</title><script>" ++
         "var P=new URLSearchParams(location.search);(async function(){if(!navigator.serviceWorker.controller){await navigator.serviceWorker.ready;if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}}" ++
-        "var n=+P.get('n'),K=P.get('k');for(var i=0;i<n;i++){await fetch('/g/s6/x?k='+K+i,{cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}document.title='ready:'+K})()</script>s6");
+        "var n=+P.get('n'),K=P.get('k');var pw=+(P.get('pw')||self.PWD||0);if(pw)await new Promise(function(r){setTimeout(r,pw)});for(var i=0;i<n;i++){await fetch('/g/s6/x?k='+K+i,{cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}document.title='ready:'+K})()</script>s6");
     // iframe: 워커를 잇달아 띄운다 — `every` ms 마다 `per` 개(범위마다 새 등록), 3.5 초 뒤 그 등록을 푼다, `dur` ms 동안.
     if (std.mem.eql(u8, path, "/g/regmany")) return reply(conn, html, "<!doctype html><title>rm</title><script>" ++
         "var P=new URLSearchParams(location.search);var per=+P.get('per'),ev=+P.get('every'),dur=+P.get('dur');var t0=Date.now();var c=0;" ++
@@ -593,6 +606,14 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     env_n += 1;
     env_buf[env_n] = "MARU_WEB_TEST_BODY_LOG=1";
     env_n += 1;
+    // 재검증 12 차: 대조 손잡이(`MARU_WEB_SW_WAIT=0`·`MARU_WEB_SW_KEEP=0`)를 host 에 그대로 넘긴다.
+    var pt_bufs: [2][64:0]u8 = undefined;
+    for ([_][:0]const u8{ "MARU_WEB_SW_WAIT", "MARU_WEB_SW_KEEP" }, 0..) |name, k| {
+        const v = std.c.getenv(name) orelse continue;
+        const e = std.fmt.bufPrintSentinel(&pt_bufs[k], "{s}={s}", .{ name, std.mem.span(v) }, 0) catch continue;
+        env_buf[env_n] = e.ptr;
+        env_n += 1;
+    }
     var sp_buf: [1100]u8 = undefined;
     const stderr_path: ?[:0]const u8 = blk: {
         const eq = std.mem.indexOfScalar(u8, profile_arg, '=') orelse break :blk null;
@@ -659,12 +680,15 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const piece = std.fmt.bufPrint(gb[gn..], " {d}", .{g}) catch break;
             gn += piece.len;
         }
-        // 마지막은 O1 — O2(b=2)·X2(b=3) 워커는 3 초 뒤 떼어 놀면 멈춰야 한다(F13).
+        // 마지막은 O1 — O2(b=2)·X2(b=3) 워커는(재검증 12 차: 붙여 두기를 끈 대조에서만) 3 초 뒤 떼어 놀면 멈춰야 한다(F13).
         r.pump(3000);
         const x2 = try idleThenProbe(&r, tab_c, "127.0.0.1", ports[1], 2);
         const x3 = try idleThenProbe(&r, tab_c, "localhost", ports[1], 3);
         const log2 = readLog(gpa, stderr_path, log_at);
-        report(on and ready_n == seq.len and t.wrong == 0 and x2.stopped and x3.stopped, "v20m-r11-nav", std.fmt.bufPrint(&detail, "9 top-origin changes O1→O2→X2→O1→O2→O1→X2→O2→O1 (ms per page:{s}) — ready {d}/9 · {s} || attaches keep=true own=true {d} · own=false {d} · keep=false {d} · retarget lines {d} · foreign-detach {d} (by end of idle {d}) · max live sessions ≈{d} || after: O2 SW {s} (boots {d}→{d}), X2 SW {s} (boots {d}→{d})", .{ gb[0..gn], ready_n, tallyLine(&t, &tb), count3(log, "sw-attached b=151", "keep=true", "own=true"), count3(log, "sw-attached b=151", "keep=true", "own=false"), count2(log, "sw-attached b=151", "keep=false"), countLines(log, "sw-retarget b=151"), countLines(log, "sw-foreign-detach b=151"), countLines(log2, "sw-foreign-detach b=151"), maxLive(log, "b=151 "), if (x2.stopped) "stopped" else "KEPT RUNNING", x2.before, x2.after, if (x3.stopped) "stopped" else "KEPT RUNNING", x3.before, x3.after }) catch "");
+        // 재검증 12 차(⑩′ — 사용자 결정 2026-11-06): 기록하는 동안 다녀간 출처(O2·X2 — 그 탭의 맨 위 출처였다)의 워커는 붙여 두어 놀아도 멈추지 않는다
+        // (끈 대조 `MARU_WEB_SW_KEEP=0` 은 F13 그대로 3 초 뒤 떼어 멈춘다).
+        const keep_on = if (std.c.getenv("MARU_WEB_SW_KEEP")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
+        report(on and ready_n == seq.len and t.wrong == 0 and x2.stopped != keep_on and x3.stopped != keep_on, "v20m-r11-nav", std.fmt.bufPrint(&detail, "9 top-origin changes O1→O2→X2→O1→O2→O1→X2→O2→O1 (ms per page:{s}) — ready {d}/9 · {s} || attaches keep=true own=true {d} · own=false {d} · keep=false {d} · retarget lines {d} · foreign-detach {d} (by end of idle {d}) · max live sessions ≈{d} || after: O2 SW {s} (boots {d}→{d}), X2 SW {s} (boots {d}→{d})", .{ gb[0..gn], ready_n, tallyLine(&t, &tb), count3(log, "sw-attached b=151", "keep=true", "own=true"), count3(log, "sw-attached b=151", "keep=true", "own=false"), count2(log, "sw-attached b=151", "keep=false"), countLines(log, "sw-retarget b=151"), countLines(log, "sw-foreign-detach b=151"), countLines(log2, "sw-foreign-detach b=151"), maxLive(log, "b=151 "), if (x2.stopped) "stopped" else "KEPT RUNNING", x2.before, x2.after, if (x3.stopped) "stopped" else "KEPT RUNNING", x3.before, x3.after }) catch "");
         recordOff(&r, tab_a);
         r.pump(500);
         try r.goO(tab_a, 0, "/blank");
@@ -833,7 +857,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const la0 = logSize(stderr_path);
         _ = recordOn(&r, tab_b);
         var at = r.begins.items.len;
-        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl0_");
+        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl0_&pw=150");
         const ready0 = r.pumpTitle(tab_b, "ready", 20_000);
         r.pump(3000);
         const t0 = tally(&r, tab_b, at, "/g/x?k=fl0_");
@@ -856,7 +880,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const lb = logSize(stderr_path);
         const on_b = recordOn(&r, tab_b);
         at = r.begins.items.len;
-        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl1_");
+        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl1_&pw=150");
         const ready1 = r.pumpTitle(tab_b, "ready", 20_000);
         r.pump(3000);
         const t1 = tally(&r, tab_b, at, "/g/x?k=fl1_");
@@ -872,7 +896,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const lr = logSize(stderr_path);
         _ = recordOn(&r, tab_b);
         at = r.begins.items.len;
-        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl2_");
+        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl2_&pw=150");
         const ready2 = r.pumpTitle(tab_b, "ready", 20_000);
         r.pump(3000);
         const t2 = tally(&r, tab_b, at, "/g/x?k=fl2_");

@@ -5,6 +5,7 @@ from pathlib import Path
 import verify
 import display_stages
 import frame_wake_control
+import target_frame_control
 
 
 def analyze(app, producer, meta):
@@ -57,6 +58,9 @@ def analyze(app, producer, meta):
     has_wake = any(name in app for name in ('frame_wake_mode','wake_input_start','wake_idle_start','wake_idle_end'))
     require((wake is not None) == has_wake, 'frame wake diagnostic label')
     if wake is not None:result['frame_wake'] = frame_wake_control.analyze(app,meta,require)
+    target = meta.get('target_frame_control',False)
+    require(type(target) is bool and target == app.get('target_frame_control',False) and target == any(name in app for name in ('target_input_start','target_idle_start','target_idle_end','target_budget_header','target_budget_rows')), 'target diagnostic label')
+    if target:result['target_frame'] = target_frame_control.analyze(app,meta,result['frame_wake'],require)
     return result
 
 
@@ -83,6 +87,7 @@ def read(root):
         folder = root/run['path']
         require(verify.sha(folder/'record.json') == run['record_sha256'], 'record drift')
         meta = json.loads((folder/'record.json').read_text())
+        require(type(source.get('target_frame_control',False)) is bool and meta.get('target_frame_control',False) is source.get('target_frame_control',False), 'target source agreement')
         require((meta.get('frame_wake_control') is not None) == source.get('frame_wake_control',False), 'frame wake source agreement')
         require(type(meta.get('display_stages',False)) is bool and meta.get('display_stages',False) is source.get('display_stages',False), 'display diagnostic source agreement')
         require(meta['error'] is None and meta['count'] == 30 and meta['size'] == 50000 and meta['period_ns'] == 50000000 and meta['mode'] == 'async' and meta['fixture_kind'] == 'multiline' and meta['fold_reuse_control'] == 'prepared', 'diagnostic condition')

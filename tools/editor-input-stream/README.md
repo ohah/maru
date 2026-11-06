@@ -159,3 +159,7 @@ GPU presentedTime을 혼동하지 않는다. 세대나 시각이 없는 자료�
 추가 `--frame-wake-control`의 동일 앱 예약 대조는 `frame_wake_study.py`로 수집하고
 `frame_wake_report.py`로 독립 재계산한다. [프레임 요청 대조 결과](frame-wake-results.md)는
 입력/유휴 CPU·tick/draw·표시 지연과 제품 반영 보류 이유를 함께 기록한다.
+
+추가 `--target-frame-control`은 같은 수집기에서 대상 창 `renderTick`·기존 예약 소비·투영 예산을
+대조한다. [대상 예약 결과](target-frame-results.md)는 추가 세션 tick을 따로 세며, 이전 전역
+tick 모집단과 구분한다. 실제 자료 손상은 `target_frame_review.py`로 재현한다.

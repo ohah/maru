@@ -70,7 +70,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     meta = {'count':count,'mode':mode,'flow':flow,'size':size,'repeat':rep,'shared':flow=='shared','period_ns':period*1_000_000,'lateness_ns':20_000_000,
             'kind':kind,'fixture_bytes':len(data),'fixture_sha256':hashlib.sha256(data).hexdigest(),
             'fixture_tail_sha256':hashlib.sha256(data[3:]).hexdigest(),'load_before':os.getloadavg(),
-            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'frame_wake_control':frame_wake_control,'display_stages':state.get('display_stages',False),'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind,'bracket_control':bracket_control,'fold_reuse_control':fold_reuse_control}
+            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'frame_wake_control':frame_wake_control,'target_frame_control':state.get('target_frame_control',False),'display_stages':state.get('display_stages',False),'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind,'bracket_control':bracket_control,'fold_reuse_control':fold_reuse_control}
     child = sender = None
     failure = None
     with (target/'app.log').open('w') as log, (target/'producer.log').open('w') as sender_log:

@@ -105,7 +105,7 @@ def analyze(app, meta, require):
     if mode == 'scheduled':
         require(active['requests'] == 0, 'scheduled frame wake unexpectedly requested')
     else:
-        require(active['requests'] > 0 and active['fired'] > 0 and active['requests'] <= active['notices'], 'immediate frame wake not observed')
+        require(active['requests'] > 0 and (meta.get('target_frame_control') is True or active['fired'] > 0) and active['requests'] <= active['notices'], 'immediate frame wake not observed')
     require(2 <= idle['wall_seconds'] <= 5 and idle['ticks'] > 0, 'frame wake idle window')
     require(all(idle[name] == 0 for name in ('notices','requests','fired','coalesced')), 'frame wake continues in idle')
     draws = app['display_draws']

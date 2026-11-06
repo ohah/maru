@@ -42,7 +42,7 @@ pub const Host = struct {
             }
             for ([_]c_int{ to_host[0], to_host[1], from_host[0], from_host[1] }) |fd| _ = std.c.close(fd);
             const argv = [_:null]?[*:0]const u8{ host_path, profile_arg };
-            var envp: [8:null]?[*:0]const u8 = @splat(null);
+            var envp: [12:null]?[*:0]const u8 = @splat(null);
             for (env, 0..) |entry, i| envp[i] = entry;
             _ = std.c.execve(host_path, &argv, &envp);
             std.c._exit(127);

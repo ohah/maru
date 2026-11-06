@@ -17,6 +17,11 @@
 //! 타깃 epoch. 재검증 7 차: 남의 출처 세션의 탭마다 몫(N13)과 넘친 세션을 세워 두기(곧 떼면 되풀이되었다), 벽시계 뒤로 뛰기의 잃음이 그 폭
 //! 동안뿐인 것(N19a)과 한가한 동안의 뛰기(N19b). (S2) C1·C2·C3a·C4·지평·빼는 꼴, 세계 모의기 퍼즈(τ 고리 — 적대 워커의 복제·메모·디스크 적중(같은 τ 다른 본문)·µs 충돌·
 //! 기록 전 메모·만든 응답·Cache Storage: 이은 기록의 본문 == P 가 받은 본문).
+//!
+//! 재검증 12 차(새로 뜨는 워커를 멈춰 붙이기 — `net_body.zig` 머리): 놓기(`Runtime.runIfWaitingForDebugger`) 답을 기다리는 세션(`Pend` — 그 답 뒤에야
+//! 뗀다), 답 앞에 세션이 사라진 워커의 건지기(`Rescue` — 살아 있는 탭에서 `Target.attachToTarget`), 멈춘 타깃에 다시 붙는 세션의 epoch(`stopped`). 시험이
+//! 증명하는 것: 답의 번호·세션이 맞을 때만 빼기·떨어짐·탭 닫힘·시한·뗄 표시, 건지기의 한 타깃 한 자리·곧 해 보기·다시 해 보는 사이·횟수·타깃마다 위 끝·
+//! 실패 답, 두 탭이 같은 다음 epoch 를 쓰기.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -45,6 +50,24 @@ pub const max_foreign_per_tab: usize = 4;
 /// 없으면 곧 뗀다(전의 길). 자리 수: 실측 r13-flood(다른 출처 iframe 이 200 ms 마다 워커 다섯을 띄우고 3.5 초 뒤 푼다 — 동시에 약 90)에서 64 는
 /// 넘쳐 같은 워커를 57 번까지 다시 붙였다 — 넉넉히 256(한 자리 약 80 바이트).
 pub const max_parked: usize = 256;
+/// 재검증 12 차(눈먼 때를 뿌리에서): 멈춰 붙은 세션(`attachedToTarget.waitingForDebugger` — `waitForDebuggerOnStart:true` 로 새로 뜬 워커)의 놓기
+/// (`Runtime.runIfWaitingForDebugger`) 답을 기다리는 자리 수(sidecar 전체 — `Sw.pend`). 그 답 앞에 그 세션을 떼면 워커가 영영 멈출 수 있다(워커의
+/// DevTools 쪽이 아직 서지 않았을 때 — 실측 `swwait-offrace`, Playwright `CRSession.detach` 가 놓기 답을 기다린 뒤 떼는 까닭).
+pub const max_pend: usize = 256;
+/// 놓기 답을 기다리는 위 끝(단조 µs) — 지나면 그 워커를 건지기로 넘긴다(`Rescue`). 답은 워커의 스크립트를 받아 그 스레드가 선 뒤에야 오므로
+/// 느린 망에서 길 수 있다 — 넉넉히.
+pub const pend_timeout_us: i64 = 30_000_000;
+/// 재검증 12 차: 놓기 답 앞에 세션이 사라진(Chromium 이 스스로 뗐다 — 다른 출처로 옮김·탭 닫힘) 멈춘 워커를 다시 붙여 놓는 자리 수(`Sw.rescue`).
+/// 놓기 답 앞에 세션이 사라지면 그 워커는 스레드가 선 뒤 아무도 놓지 않는 채 멈춘다(실측 `swwait-navrace`·`swwait-closerace` 4/5 — 다시 붙은
+/// 세션의 놓기가 풀었다).
+pub const max_rescue: usize = 64;
+/// 건지기를 다시 해 보는 사이와 횟수(타깃이 없으면 붙이기가 실패로 답해 곧 지운다).
+pub const rescue_retry_us: i64 = 300_000;
+pub const rescue_tries: u8 = 60;
+/// 한 타깃을 건지는 횟수의 위 끝(건진 세션도 놓기 답 앞에 또 사라지면 다시 건진다 — 답이 끝내 오지 않는 꼴에서 붙임·건지기가 끝없이 돌지
+/// 않게; PHASE0 `MARU_WEB_TEST_SW_NOREPLY` 에서 1 초 시한으로 5 571 번 돌았다). 기억은 `rescue_memory` 개(가장 오래된 것부터 잊는다).
+pub const rescue_per_target: u8 = 3;
+pub const rescue_memory: usize = 64;
 
 /// 원시 메시지 끝의 `,"sessionId":"…"}` 에서 sessionId(16 진 글자 1..64)를 꺼낸다. 아니면 null — 페이지 세션의 메시지다.
 /// CDP 는 자식 세션의 메시지에 sessionId 를 맨 끝에 붙인다(실측 p1 — 285/285). 끝을 꼭 맞춰야 한다: 페이지의 큰 본문 답이 끝 근처에 비슷한 글을
@@ -119,9 +142,32 @@ pub const Session = struct {
     /// 재검증 6 차 F13·D1: 남의 출처였다가 맨 위 출처의 것이 된 단조 시각(0 = 붙을 때부터 맨 위 출처의 것). 그 앞에 시작한 이 세션의 W 는
     /// 제 기록이 이 탭에 없을 수 있어(문은 그때의 맨 위 출처로 붙일 탭을 골랐다) 맞추기에 넣지 않는다(`Table.workerEventFrom`).
     own_since: i64 = 0,
+    /// 재검증 12 차(⑩′ — 사용자 결정 2026-11-06): 기록 중 이 세션의 워커 출처가 그 탭의 맨 위 출처였다(그 탭이 다녀간 사이트). 그 탭이 떠나도 떼지
+    /// 않는다(`foreign_since` 는 서 — 사건은 밸브에 세지 않고 W 는 맞추기에 넣지 않는다) — 돌아오면 이미 붙어 켜진 세션이라 눈먼 때가 없다. 떼는 것은
+    /// 기록이 끝날 때(모든 정리 길)와 몫을 넘을 때(가장 오래 떠나 있던 것부터 — `takeEvicted`)뿐이다.
+    visited: bool = false,
+    /// `Target.attachToTarget` 으로 붙였다(Chromium 이 떠날 때 뗀 다녀간 출처 세션을 다시 붙인 것 — `setAutoAttach{autoAttach:false}` 가 떼지 않아 정리
+    /// 길이 따로 뗀다).
+    manual: bool = false,
+    /// maru 가 뗐다(뗌 명령을 보냈다 — 그 떨어짐은 다시 붙이지 않는다).
+    detaching: bool = false,
+    /// 재검증 12 차: 그 탭이 그 출처로 돌아왔다(맨 위 출처의 것이 되었다 — `takeReturned` 가 한 번 내준다).
+    returned: bool = false,
+    /// `targetId`(다시 붙일 때).
+    target_id: [max_sid_bytes]u8 = undefined,
+    target_len: u8 = 0,
 
     pub fn sidSlice(self: *const Session) []const u8 {
         return self.sid[0..self.sid_len];
+    }
+
+    pub fn targetSlice(self: *const Session) []const u8 {
+        return self.target_id[0..self.target_len];
+    }
+
+    /// 다녀간 출처의 세션이 그 탭을 떠나 있다(맨 위 출처가 아니다).
+    pub fn away(self: *const Session) bool {
+        return self.visited and self.foreign_since != 0;
     }
 };
 
@@ -135,8 +181,57 @@ pub const TabState = struct {
     rearm_on_doc: bool = false,
 };
 
+/// 재검증 12 차: 놓기 답을 기다리는 멈춰 붙은 세션 하나(`Sw.pend`).
+pub const Pend = struct {
+    browser: BrowserId = 0,
+    sid: [max_sid_bytes]u8 = undefined,
+    sid_len: u8 = 0,
+    /// 놓기 명령의 번호(그 세션의 답으로 온다).
+    id: i64 = 0,
+    /// 놓은 단조 µs(0 = 빈 자리).
+    since: i64 = 0,
+    /// 답 뒤에 뗀다(기록하지 않는 탭·서비스 워커 아닌 타깃·몫 밖 — Puppeteer `silentDetach`).
+    detach: bool = false,
+    /// 그 타깃의 `targetId`(건지기 — 세션이 답 앞에 사라지면 이것으로 다시 붙는다).
+    target: [max_sid_bytes]u8 = undefined,
+    target_len: u8 = 0,
+
+    pub fn sidSlice(self: *const Pend) []const u8 {
+        return self.sid[0..self.sid_len];
+    }
+
+    pub fn targetSlice(self: *const Pend) []const u8 {
+        return self.target[0..self.target_len];
+    }
+};
+
+/// 재검증 12 차: 건질 멈춘 워커 하나 — 살아 있는 탭의 페이지 세션에서 `Target.attachToTarget` 로 붙어(그 붙음이 오면 놓고 답 뒤에 뗀다).
+pub const Rescue = struct {
+    target: [max_sid_bytes]u8 = undefined,
+    target_len: u8 = 0,
+    /// 먼저 해 볼 탭(0 = 아무 탭 — 그 탭이 닫혔다).
+    hint: BrowserId = 0,
+    /// 넣은 단조 µs(0 = 빈 자리)·다음에 해 볼 때·해 본 수·마지막 붙이기 명령의 번호(실패 답이면 지운다).
+    since: i64 = 0,
+    next_try: i64 = 0,
+    tries: u8 = 0,
+    cmd_id: i64 = 0,
+    /// 재검증 12 차: 다녀간 출처의 붙여 두기(Chromium 이 떠날 때 뗀 세션 — 다시 붙인 세션은 다녀간 출처의 것으로·손으로 붙인 것으로 적는다).
+    keep: bool = false,
+    /// 놓아야 할 워커(멈춰 붙은 채 세션이 사라졌다 — `rescueAdd`)도 이 자리에 있나. 붙여 두기만이면(거짓) 그 탭에서만 다시 붙인다 — 그 탭이 닫히면
+    /// 버린다(재검증 12 차 회귀 `v20l-r15-race`: 닫히는 탭의 떨어짐을 붙여 두기로 받아 다른 탭에 붙였다 놓고 떼어, 그 탭의 auto 세션이 Chromium 의
+    /// auto 목록에서 빠졌다 — 기록을 꺼도 떨어지지 않아 SW 가 멈추지 않았다).
+    release: bool = false,
+
+    pub fn targetSlice(self: *const Rescue) []const u8 {
+        return self.target[0..self.target_len];
+    }
+};
+
 /// `park` — 몫을 넘었다(재검증 7 차 N13): 세워 두었다(부른 쪽은 `Network.enable` 을 보내지 않고 시한 뒤 뗀다 — `takeForeign`).
-pub const Attach = enum { keep, park, detach };
+/// 재검증 12 차: `shadow` — 그 탭이 그 워커에 이미 켜진 세션(다녀간 출처의 붙여 둔 세션)을 쥔다 — 이 세션(돌아올 때 Chromium 이 다시 붙인 것)은
+/// 켜지 않고 쥐어만 둔다(사건이 두 번 오지 않게; 떼면 Chromium 이 곧 다시 붙인다). 눈먼 때도 없다.
+pub const Attach = enum { keep, park, detach, shadow };
 
 /// 재검증 7 차: `noteOrigin` 의 답 — 맨 위 출처의 세션·남의 출처 세션(시한 뒤 뗀다)·남의 출처 몫을 넘어 세워 둔 세션(표에서 빠졌다)·세워 둘
 /// 자리도 없어 표에서 뺀 세션(부른 쪽이 곧 뗀다).
@@ -149,12 +244,27 @@ const Parked = struct {
     sid_len: u8 = 0,
     /// 이 시각 + `foreign_grace_us` 에 뗀다.
     since: i64 = 0,
+    /// 재검증 12 차: 그림자(`Attach.shadow` — 시한 없이 기록이 끝날 때까지)·손으로 붙인 세션(정리 길이 따로 뗀다).
+    shadow: bool = false,
+    manual: bool = false,
 };
 
 pub const Sw = struct {
     sessions: [max_sessions]Session = @splat(.{}),
     tabs: [max_tabs]TabState = @splat(.{}),
     parked: [max_parked]Parked = @splat(.{}),
+    pend: [max_pend]Pend = @splat(.{}),
+    rescue: [max_rescue]Rescue = @splat(.{}),
+    /// 건진 타깃(`targetId` 해시)과 그 횟수 — `rescue_per_target` 을 넘으면 더 건지지 않는다.
+    rescued: [rescue_memory]struct { target: u64 = 0, n: u8 = 0 } = @splat(.{}),
+    rescued_next: usize = 0,
+    /// 재검증 12 차: 다녀간 출처의 세션을 붙여 두는가(거짓 = 11 차 길 — 판정자의 대조 `MARU_WEB_SW_KEEP=0`).
+    keep_visited: bool = true,
+    /// 재검증 12 차: 몫으로 뺀 다녀간 출처 세션(부른 쪽이 뗀다 — `takeEvicted`).
+    evicted: [4]Session = @splat(.{}),
+    /// 재검증 12 차: 타깃마다 다음 세션이 쓸 epoch(`stopped`·`reloaded` — 가장 오래된 것부터 잊는다).
+    epochs: [256]struct { target: u64 = 0, epoch: u32 = 0 } = @splat(.{}),
+    epochs_next: usize = 0,
 
     /// 그 탭의 자리(없으면 null). 자리를 잡는 것은 `arm` 하나다 — 재검증 6 차(F16 과 같은 꼴): 전에는 묻기만 하는 길(끔의 `detachAll` 등)도
     /// 자리를 잡아, 기록을 끈 뒤 닫힌 탭(표에 없어 닫힘의 떼기 일이 오지 않는다)의 자리가 남았다 — 32 번이면 새 탭에 붙이기를 걸지 못했다.
@@ -212,18 +322,108 @@ pub const Sw = struct {
             if (s.browser == browser) return .keep;
             return .detach;
         }
-        if (self.parkedIndex(sid)) |k| return if (self.parked[k].browser == browser) .park else .detach;
+        if (self.parkedIndex(sid)) |k| return if (self.parked[k].browser != browser) .detach else if (self.parked[k].shadow) .shadow else .park;
+        const th = hashId(target_id);
+        // 재검증 12 차: 그 탭이 그 워커에 이미 켠 세션을 쥐었다(다녀간 출처의 붙여 둔 세션) — 그림자로 쥔다.
+        for (self.sessions) |o| if (o.browser == browser and o.target == th and o.enable_id != 0 and !o.detaching) {
+            return if (self.parkShadow(browser, sid)) .shadow else .detach;
+        };
         // 탭 몫은 맨 위 출처의 세션만 센다 — 떼기를 기다리는 남의 출처 세션(이동 전 출처의 워커 — `foreign_grace_us`)이 몫을 쥐면 옮겨 간
         // 출처의 워커가 붙지 못했다(v20l r14-many 실측: 워커 70 개 출처에서 옮긴 탭). 남의 출처 세션은 따로 묶는다(`noteOrigin`).
         // 재검증 7 차(N13): 몫을 넘으면 세워 둔다(곧 떼면 되풀이되었다).
+        // 재검증 12 차: 다녀간 출처의 붙여 둔 세션도 몫(탭 16·전체 64)에 센다 — 차면 가장 오래 떠나 있던 것을 뗀다(부른 쪽 — `takeEvicted`; 그 출처로
+        // 돌아오면 처음 만남 — 어둠).
+        if (self.ownCount(browser) + self.awayCount(browser) >= max_sessions_per_tab and self.ownCount(browser) < max_sessions_per_tab) self.evictAway(browser);
         if (self.ownCount(browser) >= max_sessions_per_tab) return if (self.park(browser, sid, now_us)) .park else .detach;
+        const free = for (self.sessions) |o| {
+            if (o.browser == 0) break true;
+        } else false;
+        if (!free) self.evictAway(0);
         for (&self.sessions) |*s| if (s.browser == 0) {
-            s.* = .{ .browser = browser, .target = hashId(target_id), .gen = t.gen };
+            s.* = .{ .browser = browser, .target = th, .gen = t.gen, .epoch = self.epochOf(th) };
             @memcpy(s.sid[0..sid.len], sid);
             s.sid_len = @intCast(sid.len);
+            const tl = @min(target_id.len, max_sid_bytes);
+            @memcpy(s.target_id[0..tl], target_id[0..tl]);
+            s.target_len = @intCast(tl);
             return .keep;
         };
         return if (self.park(browser, sid, now_us)) .park else .detach;
+    }
+
+    /// 재검증 12 차: 그 탭(0 = 모든 탭)의 가장 오래 떠나 있던 다녀간 출처 세션을 표에서 빼 `evicted` 에 둔다(부른 쪽이 뗀다 — `takeEvicted`).
+    fn evictAway(self: *Sw, browser: BrowserId) void {
+        var best: ?usize = null;
+        for (self.sessions, 0..) |o, k| if (o.browser != 0 and (browser == 0 or o.browser == browser) and o.away()) {
+            if (best == null or o.foreign_since < self.sessions[best.?].foreign_since) best = k;
+        };
+        const k = best orelse return;
+        for (&self.evicted) |*e| if (e.browser == 0) {
+            e.* = self.sessions[k];
+            break;
+        };
+        self.sessions[k] = .{};
+    }
+
+    /// 몫으로 뺀(뗄) 세션 하나(null 까지 되풀이 — 부른 쪽이 뗀다).
+    pub fn takeEvicted(self: *Sw) ?Session {
+        for (&self.evicted) |*e| if (e.browser != 0) {
+            const out = e.*;
+            e.* = .{};
+            return out;
+        };
+        return null;
+    }
+
+    /// 그 탭의 다녀간 출처 세션 가운데 떠나 있는 것의 수.
+    pub fn awayCount(self: *const Sw, browser: BrowserId) usize {
+        var n: usize = 0;
+        for (self.sessions) |o| if (o.browser == browser and o.browser != 0 and o.away()) {
+            n += 1;
+        };
+        return n;
+    }
+
+    /// 재검증 12 차: 그림자 세션을 시한 없이 쥔다(자리가 없으면 거짓 — 부른 쪽이 뗀다).
+    fn parkShadow(self: *Sw, browser: BrowserId, sid: []const u8) bool {
+        if (!self.park(browser, sid, std.math.maxInt(i64) / 4)) return false;
+        self.parked[self.parkedIndex(sid).?].shadow = true;
+        return true;
+    }
+
+    /// 그 세션을 손으로 붙였다고 적는다(세션이면 그것, 세워 둔 것이면 그것 — 정리 길이 따로 뗀다).
+    pub fn markManual(self: *Sw, sid: []const u8) void {
+        if (self.find(sid)) |s| s.manual = true;
+        if (self.parkedIndex(sid)) |k| self.parked[k].manual = true;
+    }
+
+    /// 재검증 12 차: 그 세션을 다녀간 출처의 것으로(손으로 다시 붙인 세션 — 떠나 있는 동안 붙었다).
+    pub fn markVisited(self: *Sw, sid: []const u8) void {
+        if (!self.keep_visited) return;
+        if (self.find(sid)) |s| s.visited = true;
+    }
+
+    /// maru 가 그 세션을 뗀다(그 떨어짐은 다시 붙이지 않는다).
+    pub fn markDetaching(self: *Sw, sid: []const u8) void {
+        if (self.find(sid)) |s| s.detaching = true;
+    }
+
+    /// 재검증 12 차: 그 세션이 떨어졌다 — Chromium 이 뗀 다녀간 출처 세션(기록 중·maru 가 떼지 않았다)이면 그 복사를 돌려준다(부른 쪽이 다시 붙인다).
+    pub fn keepAfterDetach(self: *Sw, sid: []const u8) ?Session {
+        const s = self.find(sid) orelse return null;
+        if (!s.visited or s.detaching or s.target_len == 0) return null;
+        const t = self.tab(s.browser) orelse return null;
+        if (!t.armed or s.gen != t.gen) return null;
+        return s.*;
+    }
+
+    /// 그 탭이 돌아온(맨 위 출처의 것이 된) 다녀간 출처 세션 하나(한 번만 — 부른 쪽이 그 워커의 떠나 있던 눈먼 때를 보통으로 바꾼다).
+    pub fn takeReturned(self: *Sw, browser: BrowserId) ?Session {
+        for (&self.sessions) |*s| if (s.browser == browser and s.returned) {
+            s.returned = false;
+            return s.*;
+        };
+        return null;
     }
 
     /// 재검증 7 차(N13): 세션 하나를 세워 둔다(자리가 없으면 거짓 — 부른 쪽이 곧 뗀다).
@@ -259,7 +459,8 @@ pub const Sw = struct {
     /// 남의 출처 세션 수(떼기를 기다린다 — 그 탭의 따로 묶은 몫, 재검증 7 차 N13).
     pub fn foreignCount(self: *const Sw, browser: BrowserId) usize {
         var n: usize = 0;
-        for (self.sessions) |s| if (s.browser == browser and s.browser != 0 and s.foreign_since != 0) {
+        // 재검증 12 차: 다녀간 출처의 붙여 둔 세션은 남의 출처 몫에 세지 않는다(탭 몫에 센다 — `awayCount`).
+        for (self.sessions) |s| if (s.browser == browser and s.browser != 0 and s.foreign_since != 0 and !s.visited) {
             n += 1;
         };
         return n;
@@ -275,6 +476,7 @@ pub const Sw = struct {
         if (own) {
             if (s.foreign_since != 0) s.own_since = @max(now_us, 1);
             s.foreign_since = 0;
+            if (self.keep_visited) s.visited = true;
             return .own;
         }
         if (s.foreign_since == 0 and self.foreignCount(s.browser) >= max_foreign_per_tab) {
@@ -302,6 +504,11 @@ pub const Sw = struct {
                 s.foreign_since = 0;
                 s.own_since = @max(now_us, 1);
                 raise = @max(raise, s.enabled_wall_us);
+                if (s.visited) s.returned = true;
+                if (self.keep_visited) s.visited = true;
+            } else if (!own and s.foreign_since == 0 and s.visited) {
+                // 재검증 12 차: 다녀간 출처의 세션 — 떼지 않고 떠나 있음으로 둔다(사건은 밸브에 세지 않고 W 는 맞추기에 넣지 않는다).
+                s.foreign_since = @max(now_us, 1);
             } else if (!own and s.foreign_since == 0) {
                 // 재검증 7 차(N13): 남의 출처 몫을 넘는 앞 출처 세션은 곧 뗀다(세워 두고 시한을 지난 것으로 — 다음 `takeForeign`). 전에는 출처를
                 // 잇달아 바꾸면 앞 출처 세션이 모두 시한까지 남아 한 탭이 전체 64 를 쥐었다(v20m P13b).
@@ -320,12 +527,12 @@ pub const Sw = struct {
     /// 재검증 6 차 F13: 시한(`foreign_grace_us`)이 지난 남의 출처 세션 하나를 표에서 빼 돌려준다(부른 쪽이 떼고 null 까지 되풀이).
     /// 재검증 7 차(N13): 세워 둔 세션도 시한이 지나면 돌려준다(그 출처는 0).
     pub fn takeForeign(self: *Sw, now_us: i64) ?Session {
-        for (&self.sessions) |*s| if (s.browser != 0 and s.foreign_since != 0 and now_us - s.foreign_since >= foreign_grace_us) {
+        for (&self.sessions) |*s| if (s.browser != 0 and s.foreign_since != 0 and !s.visited and now_us - s.foreign_since >= foreign_grace_us) {
             const out = s.*;
             s.* = .{};
             return out;
         };
-        for (&self.parked) |*p| if (p.browser != 0 and now_us - p.since >= foreign_grace_us) {
+        for (&self.parked) |*p| if (p.browser != 0 and !p.shadow and now_us - p.since >= foreign_grace_us) {
             var out: Session = .{ .browser = p.browser, .sid_len = p.sid_len };
             @memcpy(out.sid[0..p.sid_len], p.sid[0..p.sid_len]);
             p.* = .{};
@@ -337,10 +544,10 @@ pub const Sw = struct {
     /// 아직 떼지 않은 남의 출처 세션 중 가장 이른 `foreign_since`(없으면 null — 부른 쪽이 다음 확인을 건다).
     pub fn nextForeign(self: *const Sw) ?i64 {
         var at: ?i64 = null;
-        for (self.sessions) |s| if (s.browser != 0 and s.foreign_since != 0) {
+        for (self.sessions) |s| if (s.browser != 0 and s.foreign_since != 0 and !s.visited) {
             at = if (at) |a| @min(a, s.foreign_since) else s.foreign_since;
         };
-        for (self.parked) |p| if (p.browser != 0) {
+        for (self.parked) |p| if (p.browser != 0 and !p.shadow) {
             at = if (at) |a| @min(a, p.since) else p.since;
         };
         return at;
@@ -366,7 +573,33 @@ pub const Sw = struct {
 
     /// 타깃이 다시 떴다(같은 세션 — 실측 b: 다시 attach 가 오지 않는다). requestId 가 다시 쓰일 수 있어 epoch 를 올린다.
     pub fn reloaded(self: *Sw, sid: []const u8) void {
-        if (self.find(sid)) |s| s.epoch +%= 1;
+        if (self.find(sid)) |s| {
+            s.epoch +%= 1;
+            self.noteEpoch(s.target, s.epoch);
+        }
+    }
+
+    /// 재검증 12 차: 그 세션의 워커가 멈췄다(`Inspector.targetCrashed` — 부른 쪽이 그 세션을 뗀다). 그 타깃에 다음에 붙는 세션은 다음 epoch 로
+    /// 시작한다 — 멈춘 호스트가 남아(다른 세션이 쥐었다) 같은 `targetId` 로 다시 뜨면 새 세션의 requestId 가 옛 W 의 열쇠와 겹칠 수 있다(공격 2 A13;
+    /// 실측에서는 다시 뜬 워커가 늘 새 `targetId` 였다 — 막아 둔다). 탭마다 같은 값이 서도록 「그 세션 epoch + 1」 의 최대로 둔다.
+    pub fn stopped(self: *Sw, sid: []const u8) void {
+        if (self.find(sid)) |s| self.noteEpoch(s.target, s.epoch +% 1);
+    }
+
+    /// 그 타깃의 다음 세션이 쓸 epoch(모르면 0).
+    pub fn epochOf(self: *const Sw, target: u64) u32 {
+        for (self.epochs) |e| if (e.target == target and target != 0) return e.epoch;
+        return 0;
+    }
+
+    fn noteEpoch(self: *Sw, target: u64, epoch: u32) void {
+        if (target == 0) return;
+        for (&self.epochs) |*e| if (e.target == target) {
+            e.epoch = @max(e.epoch, epoch);
+            return;
+        };
+        self.epochs[self.epochs_next] = .{ .target = target, .epoch = epoch };
+        self.epochs_next = (self.epochs_next + 1) % self.epochs.len;
     }
 
     pub fn find(self: *Sw, sid: []const u8) ?*Session {
@@ -412,8 +645,172 @@ pub const Sw = struct {
         return true;
     }
 
-    /// 탭이 닫혔다 — 자리를 비운다.
+    /// 재검증 12 차: 놓기를 보냈다 — 그 답을 기다린다(자리가 없으면 거짓 — 부른 쪽은 뗄 세션이면 곧 뗀다).
+    pub fn pendAdd(self: *Sw, browser: BrowserId, sid: []const u8, target: []const u8, id: i64, now_us: i64, detach: bool) bool {
+        if (browser == 0 or sid.len == 0 or sid.len > max_sid_bytes or target.len > max_sid_bytes or id == 0) return false;
+        for (&self.pend) |*p| if (p.since == 0) {
+            p.* = .{ .browser = browser, .id = id, .since = @max(now_us, 1), .detach = detach };
+            @memcpy(p.sid[0..sid.len], sid);
+            p.sid_len = @intCast(sid.len);
+            @memcpy(p.target[0..target.len], target);
+            p.target_len = @intCast(target.len);
+            return true;
+        };
+        return false;
+    }
+
+    /// 그 탭(닫힘·DevTools 떨어짐)의 놓기 답을 기다리던 세션을 모두 빼 돌려준다(부른 쪽이 건지기로 넘긴다 — null 까지 되풀이).
+    pub fn pendOfBrowser(self: *Sw, browser: BrowserId) ?Pend {
+        for (self.pend, 0..) |p, k| if (p.since != 0 and p.browser == browser) return self.pendTake(k);
+        return null;
+    }
+
+    /// 재검증 12 차: 그 타깃을 건지기로 넣는다(이미 있으면 그대로 — 자리가 없으면 거짓).
+    pub fn rescueAdd(self: *Sw, target: []const u8, hint: BrowserId, now_us: i64) bool {
+        return self.rescueAddAs(target, hint, now_us, false);
+    }
+
+    /// 재검증 12 차: `keep` — 다녀간 출처의 붙여 두기(같은 타깃 한 자리 — 이미 있으면 그 표시만 더한다).
+    pub fn rescueAddAs(self: *Sw, target: []const u8, hint: BrowserId, now_us: i64, keep: bool) bool {
+        if (target.len == 0 or target.len > max_sid_bytes) return false;
+        for (&self.rescue) |*x| if (x.since != 0 and std.mem.eql(u8, x.target[0..x.target_len], target)) {
+            if (keep) x.keep = true else x.release = true;
+            return true;
+        };
+        // 같은 타깃을 이미 여러 번 건졌다 — 더 하지 않는다. 재검증 12 차: 붙여 두기(`keep`)의 다시 붙음은 세지 않는다 — 손 세션은 Chromium 이 떼지 않아
+        // 되풀이되지 않는다(그 타깃이 끝나면 붙이기가 실패로 답해 지운다); 세면 다른 탭·앞 판의 건지기가 그 타깃의 붙여 두기를 막았다(실측 `v20l-reentry`
+        // 전체 판 0/20 — 같은 SW 를 앞 사례들이 세 번 넘게 건졌다).
+        const th = hashId(target);
+        const seen = for (&self.rescued) |*r| {
+            if (r.target == th and r.n > 0) break r;
+        } else null;
+        if (seen) |r| {
+            if (!keep and r.n >= rescue_per_target) return false;
+        }
+        for (&self.rescue) |*x| if (x.since == 0) {
+            x.* = .{ .hint = hint, .since = @max(now_us, 1), .next_try = now_us, .keep = keep, .release = !keep };
+            @memcpy(x.target[0..target.len], target);
+            x.target_len = @intCast(target.len);
+            if (keep) {} else if (seen) |r| r.n += 1 else {
+                self.rescued[self.rescued_next] = .{ .target = th, .n = 1 };
+                self.rescued_next = (self.rescued_next + 1) % rescue_memory;
+            }
+            return true;
+        };
+        return false;
+    }
+
+    /// 그 타깃이 붙었다 — 건지기에서 빼고 참(부른 쪽이 놓고 답 뒤에 뗀다).
+    pub fn rescueTake(self: *Sw, target: []const u8) ?Rescue {
+        if (target.len == 0) return null;
+        for (&self.rescue) |*x| if (x.since != 0 and std.mem.eql(u8, x.target[0..x.target_len], target)) {
+            const out = x.*;
+            x.* = .{};
+            return out;
+        };
+        return null;
+    }
+
+    /// 붙이기 명령 `id` 가 실패로 답했다(그 타깃이 없다) — 그 건지기를 지운다(참).
+    pub fn rescueFailed(self: *Sw, id: i64) bool {
+        for (&self.rescue) |*x| if (x.since != 0 and x.cmd_id == id) {
+            x.* = .{};
+            return true;
+        };
+        return false;
+    }
+
+    /// 지금 해 볼 건지기 하나(해 본 수를 올리고 다음 때를 미룬다 — 횟수를 넘으면 지운다). null 까지 되풀이.
+    pub fn rescueDue(self: *Sw, now_us: i64) ?*Rescue {
+        for (&self.rescue) |*x| if (x.since != 0 and x.next_try <= now_us) {
+            if (x.tries >= rescue_tries) {
+                x.* = .{};
+                continue;
+            }
+            x.tries += 1;
+            x.next_try = now_us + rescue_retry_us;
+            return x;
+        };
+        return null;
+    }
+
+    /// 가장 이른 다음 해 볼 때(없으면 null).
+    pub fn nextRescue(self: *const Sw) ?i64 {
+        var at: ?i64 = null;
+        for (self.rescue) |x| if (x.since != 0) {
+            at = if (at) |v| @min(v, x.next_try) else x.next_try;
+        };
+        return at;
+    }
+
+    pub fn rescueCount(self: *const Sw) usize {
+        var n: usize = 0;
+        for (self.rescue) |x| if (x.since != 0) {
+            n += 1;
+        };
+        return n;
+    }
+
+    fn pendTake(self: *Sw, k: usize) Pend {
+        const out = self.pend[k];
+        self.pend[k] = .{};
+        return out;
+    }
+
+    /// 그 세션의 답 `id` 가 기다리던 놓기의 것이면 빼 돌려준다.
+    pub fn pendDone(self: *Sw, sid: []const u8, id: i64) ?Pend {
+        for (self.pend, 0..) |p, k| if (p.since != 0 and p.id == id and std.mem.eql(u8, p.sid[0..p.sid_len], sid)) return self.pendTake(k);
+        return null;
+    }
+
+    /// 그 세션이 떨어졌다 — 기다리던 놓기를 빼 돌려준다(뗄 것이 없다).
+    pub fn pendGone(self: *Sw, sid: []const u8) ?Pend {
+        for (self.pend, 0..) |p, k| if (p.since != 0 and std.mem.eql(u8, p.sid[0..p.sid_len], sid)) return self.pendTake(k);
+        return null;
+    }
+
+    /// 시한(`timeout_us`)이 지난 놓기 하나를 빼 돌려준다(null 까지 되풀이).
+    pub fn pendExpired(self: *Sw, now_us: i64, timeout_us: i64) ?Pend {
+        for (self.pend, 0..) |p, k| if (p.since != 0 and now_us - p.since >= timeout_us) return self.pendTake(k);
+        return null;
+    }
+
+    /// 그 세션의 놓기 답을 기다리면 답 뒤에 떼게 둔다(참) — 남의 출처 시한 떼기가 답 앞에 떼지 않게.
+    pub fn pendMarkDetach(self: *Sw, sid: []const u8) bool {
+        for (&self.pend) |*p| if (p.since != 0 and std.mem.eql(u8, p.sid[0..p.sid_len], sid)) {
+            p.detach = true;
+            return true;
+        };
+        return false;
+    }
+
+    /// 그 탭(0 = 모두)의 놓기 답을 기다리는 수.
+    pub fn pendCount(self: *const Sw, browser: BrowserId) usize {
+        var n: usize = 0;
+        for (self.pend) |p| if (p.since != 0 and (browser == 0 or p.browser == browser)) {
+            n += 1;
+        };
+        return n;
+    }
+
+    /// 가장 이른 놓은 때(없으면 null — 부른 쪽이 시한 확인을 건다).
+    pub fn nextPend(self: *const Sw) ?i64 {
+        var at: ?i64 = null;
+        for (self.pend) |p| if (p.since != 0) {
+            at = if (at) |a| @min(a, p.since) else p.since;
+        };
+        return at;
+    }
+
+    /// 탭이 닫혔다 — 자리를 비운다(놓기 답을 기다리던 세션은 부른 쪽이 먼저 건지기로 넘긴다 — `pendOfBrowser`).
     pub fn forget(self: *Sw, browser: BrowserId) void {
+        for (&self.pend) |*p| if (p.since != 0 and p.browser == browser) {
+            p.* = .{};
+        };
+        // 재검증 12 차: 그 탭의 붙여 두기만인 건지기는 버린다(놓을 워커가 아니다 — 다른 탭에 붙이면 그 탭의 auto 세션을 Chromium 목록에서 뺀다).
+        for (&self.rescue) |*x| if (x.since != 0 and x.hint == browser and !x.release) {
+            x.* = .{};
+        };
         _ = self.detachAll(browser);
         for (&self.tabs) |*t| if (t.browser == browser) {
             t.* = .{};
@@ -522,9 +919,6 @@ pub const W = struct {
     /// 보이는 W 의 IO 는 시작 사건 뒤다 — J1).
     paired_at: i64 = 0,
     pair_tab: BrowserId = 0,
-    /// 재검증 11 차(D-v20q-2): 짝을 처음 맺은 판정의 그 W 의 기준 시각(시작 사건 ts — 0 = 모른다). 보이는 W 의 기록 IO 는 제 시작 뒤라 그 앞 IO 의
-    /// 기록은 그 W 의 것이 아니다 — 잇는 때 눈먼 때 뒤 끝의 ts → IO 지연 여유는 그 IO 가 이 시각 앞일 때만 쓴다(`Table.pairStale`).
-    pair_start: i64 = 0,
     /// 재검증 11 차(LOW-K′): 남의 출처 세션의 사본으로만 보았다(`Link.foreign_order` 에 든다). 맨 위 출처 세션의 사본이 오면 거짓으로 바꾸고
     /// `order` 로 옮긴다 — 어느 탭이든 맨 위 출처로 보는 W 는 남의 W 가 아니다.
     foreign: bool = false,
@@ -941,11 +1335,6 @@ pub const Link = struct {
     /// 재검증 10 차: 짝을 맺은 판정의 탭·단조 시각과 함께(`W.paired_at`·`pair_tab` — 처음 맺은 것만; 같은 짝을 뒤 탭이 다시 맺어도 앞 판정의
     /// 시각이 기준이다 — 그 시각 뒤에 시작한 W 는 그 기록의 주인일 수 없다).
     pub fn notePairAt(self: *Link, gpa: std.mem.Allocator, key: WKey, q: u64, browser: BrowserId, now_us: i64) std.mem.Allocator.Error!void {
-        return self.notePairFrom(gpa, key, q, browser, now_us, 0);
-    }
-
-    /// 재검증 11 차(D-v20q-2): `w_start` — 그 W 의 기준 시각(`W.pair_start` — 처음 맺은 것만).
-    pub fn notePairFrom(self: *Link, gpa: std.mem.Allocator, key: WKey, q: u64, browser: BrowserId, now_us: i64, w_start: i64) std.mem.Allocator.Error!void {
         const w = self.ws.getPtr(key) orelse {
             // 응답 전에 짝이 정해지지 않는다(짝은 응답 때) — 응답이 버려졌으면(지평) 짝만 적는다.
             try self.explained.put(gpa, q, {});
@@ -956,7 +1345,6 @@ pub const Link = struct {
             w.pair = q;
             w.paired_at = now_us;
             w.pair_tab = browser;
-            w.pair_start = w_start;
         }
         try self.explained.put(gpa, q, {});
     }
@@ -1115,7 +1503,8 @@ test "S1: 자리 상한 — 넘치면 새 세션은 세워 두고(탭마다 16·
     try testing.expectEqual(@as(u32, 1), sw.find("FFFFF").?.epoch);
     try testing.expect(!sw.result("0000", 1, true, 5)); // 지운 세션의 답은 모른다
     // 재검증 6 차: 남의 출처가 된 세션(떼기를 기다린다)은 탭 몫에 세지 않는다 — 옮겨 간 출처의 워커가 붙는다(전체 자리가 있으면).
-    var m: Sw = .{};
+    // 재검증 12 차: 붙여 두기를 끈 길(`keep_visited` 거짓 — 11 차 그대로; 붙여 두는 길은 「재검증 12 차(⑩′)」 시험).
+    var m: Sw = .{ .keep_visited = false };
     try testing.expect(m.arm(5));
     for (0..max_sessions_per_tab) |i| {
         const sid = try std.fmt.bufPrint(&buf, "{X:0>4}", .{i});
@@ -1135,7 +1524,8 @@ test "S1: 자리 상한 — 넘치면 새 세션은 세워 두고(탭마다 16·
 }
 
 test "재검증 6 차 F13: 맨 위 출처가 아닌 워커 세션은 시한 뒤 뗀다 — 맨 위 출처가 그 워커의 것이 되면 남기고 그때 VS 를 올릴 값을 준다, 떠난 출처의 워커는 시한을 세운다" {
-    var sw: Sw = .{};
+    // 재검증 12 차: 붙여 두기를 끈 길(11 차 그대로 — 붙여 두는 길은 「재검증 12 차(⑩′)」 시험).
+    var sw: Sw = .{ .keep_visited = false };
     const o1: u64 = 0x11;
     const o2: u64 = 0x22;
     const x2: u64 = 0x33;
@@ -1962,4 +2352,240 @@ test "재검증 11 차(LOW-R1) · v20q-B Q11-c: 남의 W 놓기(evictForeign)는
     // 남은 칸은 산 W 를 가리킨다(쫓긴 W 의 칸이 남지 않는다).
     var it = l.taus.valueIterator();
     while (it.next()) |e| try testing.expect(e.live > 0);
+}
+
+test "재검증 12 차: 놓기 답 기다리기(`pend`) — 답의 번호·세션이 맞을 때만 빼고, 떨어짐·탭 닫힘·시한은 빼어 건지기로(부른 쪽), 뗄 표시는 남의 출처 시한 떼기가 덧붙인다" {
+    var sw: Sw = .{};
+    try std.testing.expect(sw.arm(5));
+    try std.testing.expect(sw.pendAdd(5, "AA", "T1", 101, 1_000, false));
+    try std.testing.expect(sw.pendAdd(5, "BB", "T2", 102, 2_000, true));
+    try std.testing.expect(sw.pendAdd(6, "CC", "T3", 103, 3_000, false));
+    try std.testing.expect(!sw.pendAdd(5, "DD", "T4", 0, 3_000, false)); // 번호 없음
+    try std.testing.expectEqual(@as(usize, 2), sw.pendCount(5));
+    try std.testing.expectEqual(@as(?i64, 1_000), sw.nextPend());
+    // 다른 세션의 같은 번호·같은 세션의 다른 번호는 빼지 않는다.
+    try std.testing.expect(sw.pendDone("BB", 101) == null);
+    try std.testing.expect(sw.pendDone("AA", 102) == null);
+    // 기록이 멈춰도(세션 표를 비워도) 놓기 답은 기다린다(관찰자는 남는다).
+    _ = sw.detachAll(5);
+    try std.testing.expectEqual(@as(usize, 2), sw.pendCount(5));
+    const a = sw.pendDone("AA", 101).?;
+    try std.testing.expect(!a.detach and std.mem.eql(u8, a.targetSlice(), "T1"));
+    const g = sw.pendGone("BB").?;
+    try std.testing.expect(g.detach and std.mem.eql(u8, g.targetSlice(), "T2"));
+    try std.testing.expect(sw.pendGone("BB") == null);
+    // 시한 — 가장 이른 것부터, 탭 닫힘은 그 탭의 것을 모두.
+    try std.testing.expect(sw.pendExpired(3_000 + pend_timeout_us - 1, pend_timeout_us) == null);
+    try std.testing.expect(std.mem.eql(u8, sw.pendExpired(3_000 + pend_timeout_us, pend_timeout_us).?.sidSlice(), "CC"));
+    try std.testing.expect(sw.pendAdd(7, "FF", "T6", 105, 5_000, true));
+    try std.testing.expect(sw.pendAdd(7, "GG", "T7", 106, 5_000, false));
+    try std.testing.expect(sw.pendMarkDetach("GG"));
+    try std.testing.expect(sw.pendAdd(8, "HH", "T8", 107, 5_000, false)); // 다른 탭의 것은 남는다
+    var n: usize = 0;
+    while (sw.pendOfBrowser(7)) |p| : (n += 1) try std.testing.expect(p.detach and p.browser == 7);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(usize, 1), sw.pendCount(0));
+    try std.testing.expect(std.mem.eql(u8, sw.pendOfBrowser(8).?.sidSlice(), "HH"));
+    try std.testing.expectEqual(@as(usize, 0), sw.pendCount(0));
+    // 자리 상한.
+    var bb: [8]u8 = undefined;
+    for (0..max_pend) |k| try std.testing.expect(sw.pendAdd(9, std.fmt.bufPrint(&bb, "S{d}", .{k}) catch unreachable, "T", @intCast(k + 1), 1, false));
+    try std.testing.expect(!sw.pendAdd(9, "XX", "T", 9_999, 1, false));
+    sw.forget(9);
+    try std.testing.expectEqual(@as(usize, 0), sw.pendCount(0));
+}
+
+test "재검증 12 차: 건지기(`rescue`) — 같은 타깃은 한 번, 붙으면 빼고, 붙이기 실패 답이면 지우고, 다시 해 보는 사이·횟수를 넘으면 지운다" {
+    var sw: Sw = .{};
+    try std.testing.expect(sw.rescueAdd("T1", 5, 1_000));
+    try std.testing.expect(sw.rescueAdd("T1", 6, 1_100)); // 이미 있다 — 그대로
+    try std.testing.expect(!sw.rescueAdd("", 5, 1_000));
+    try std.testing.expect(sw.rescueAdd("T2", 0, 1_000));
+    try std.testing.expectEqual(@as(usize, 2), sw.rescueCount());
+    try std.testing.expectEqual(@as(?i64, 1_000), sw.nextRescue()); // 처음 해 보기는 곧
+    const x = sw.rescueDue(1_000).?;
+    try std.testing.expectEqual(@as(BrowserId, 5), x.hint);
+    x.cmd_id = 77;
+    const y = sw.rescueDue(1_000).?;
+    try std.testing.expect(std.mem.eql(u8, y.targetSlice(), "T2"));
+    try std.testing.expect(sw.rescueDue(1_000 + rescue_retry_us - 1) == null); // 다음 때는 사이 뒤
+    try std.testing.expectEqual(@as(?i64, 1_000 + rescue_retry_us), sw.nextRescue());
+    try std.testing.expect(sw.rescueFailed(77));
+    try std.testing.expect(!sw.rescueFailed(77));
+    try std.testing.expect(sw.rescueTake("T2") != null);
+    try std.testing.expect(sw.rescueTake("T2") == null);
+    try std.testing.expectEqual(@as(usize, 0), sw.rescueCount());
+    try std.testing.expect(sw.rescueAdd("T3", 5, 0));
+    var tries: usize = 0;
+    var now: i64 = 0;
+    while (tries < rescue_tries + 5) : (tries += 1) {
+        if (sw.rescueDue(now) == null) break;
+        now += rescue_retry_us;
+    }
+    try std.testing.expectEqual(@as(usize, rescue_tries), tries);
+    try std.testing.expectEqual(@as(usize, 0), sw.rescueCount());
+    // 한 타깃은 `rescue_per_target` 번까지(T3 은 위에서 한 번 넣었다).
+    for (1..rescue_per_target) |_| {
+        try std.testing.expect(sw.rescueAdd("T3", 5, 0));
+        try std.testing.expect(sw.rescueTake("T3") != null);
+    }
+    try std.testing.expect(!sw.rescueAdd("T3", 5, 0));
+    var bb: [8]u8 = undefined;
+    for (0..max_rescue) |k| try std.testing.expect(sw.rescueAdd(std.fmt.bufPrint(&bb, "R{d}", .{k}) catch unreachable, 5, 1));
+    try std.testing.expect(!sw.rescueAdd("RX", 5, 1));
+}
+
+test "재검증 12 차: 멈춘 워커에 다시 붙는 세션은 다음 epoch — 두 탭이 같은 값을 쓰고, 다시 뜸도 적는다(같은 targetId 의 requestId 가 옛 W 와 겹치지 않게)" {
+    var sw: Sw = .{};
+    try std.testing.expect(sw.arm(5));
+    try std.testing.expect(sw.arm(6));
+    try std.testing.expectEqual(Attach.keep, sw.attached(5, "A1", "T"));
+    try std.testing.expectEqual(Attach.keep, sw.attached(6, "B1", "T"));
+    try std.testing.expectEqual(@as(u32, 0), sw.find("A1").?.epoch);
+    // 두 탭 모두 멈춤을 본다 — 다음 epoch 는 1(두 번 오르지 않는다).
+    sw.stopped("A1");
+    sw.stopped("B1");
+    sw.detached("A1");
+    sw.detached("B1");
+    try std.testing.expectEqual(Attach.keep, sw.attached(5, "A2", "T"));
+    try std.testing.expectEqual(Attach.keep, sw.attached(6, "B2", "T"));
+    try std.testing.expectEqual(@as(u32, 1), sw.find("A2").?.epoch);
+    try std.testing.expectEqual(@as(u32, 1), sw.find("B2").?.epoch);
+    // 다시 뜸(같은 세션)도 적는다 — 그 뒤 새 세션은 그 위에서.
+    sw.reloaded("A2");
+    try std.testing.expectEqual(@as(u32, 2), sw.find("A2").?.epoch);
+    sw.detached("A2");
+    try std.testing.expectEqual(Attach.keep, sw.attached(5, "A3", "T"));
+    try std.testing.expectEqual(@as(u32, 2), sw.find("A3").?.epoch);
+    // 다른 타깃은 0.
+    try std.testing.expectEqual(Attach.keep, sw.attached(5, "C1", "U"));
+    try std.testing.expectEqual(@as(u32, 0), sw.find("C1").?.epoch);
+}
+
+test "재검증 12 차(⑩′): 다녀간 출처의 세션은 떠나도 떼지 않는다 — 떠나 있음(`away` — 밸브·맞추기 밖)·남의 출처 몫에 세지 않음·시한 떼기 없음, 돌아오면 맨 위 출처의 것(한 번 `takeReturned`), 처음부터 남의 출처였던 세션은 지금처럼 시한 뒤 뗀다" {
+    var sw: Sw = .{};
+    const A: u64 = 0xA;
+    const B: u64 = 0xB;
+    try std.testing.expect(sw.arm(5));
+    try std.testing.expectEqual(Attach.keep, sw.attachedAt(5, "S1", "TA", 10));
+    try std.testing.expectEqual(Origin.own, sw.noteOrigin("S1", A, A, 10));
+    try std.testing.expect(sw.find("S1").?.visited);
+    // 남의 출처 iframe 의 워커(처음부터 맨 위 출처가 아니었다).
+    try std.testing.expectEqual(Attach.keep, sw.attachedAt(5, "S2", "TB", 20));
+    try std.testing.expectEqual(Origin.foreign, sw.noteOrigin("S2", B, A, 20));
+    try std.testing.expect(!sw.find("S2").?.visited);
+    // 그 탭이 C 로 떠난다.
+    _ = sw.retarget(5, 0xC, 1_000);
+    const s1 = sw.find("S1").?;
+    try std.testing.expect(s1.away() and s1.foreign_since != 0);
+    try std.testing.expectEqual(@as(usize, 1), sw.foreignCount(5)); // S2 만
+    try std.testing.expectEqual(@as(usize, 1), sw.awayCount(5));
+    // 시한 뒤 — 남의 출처 S2 만 뗀다.
+    const gone = sw.takeForeign(1_000 + foreign_grace_us).?;
+    try std.testing.expect(std.mem.eql(u8, gone.sidSlice(), "S2"));
+    try std.testing.expect(sw.takeForeign(1_000 + foreign_grace_us * 10) == null);
+    try std.testing.expect(sw.find("S1") != null);
+    // A 로 돌아온다 — 맨 위 출처의 것, 돌아옴을 한 번 알린다.
+    _ = sw.retarget(5, A, 5_000_000);
+    try std.testing.expect(!sw.find("S1").?.away());
+    try std.testing.expectEqual(@as(i64, 5_000_000), sw.find("S1").?.own_since);
+    const r = sw.takeReturned(5).?;
+    try std.testing.expect(std.mem.eql(u8, r.sidSlice(), "S1"));
+    try std.testing.expect(sw.takeReturned(5) == null);
+    // 대조: 붙여 두기를 끄면 다녀간 출처도 떠나면 시한 뒤 뗀다(11 차 길).
+    var off: Sw = .{ .keep_visited = false };
+    try std.testing.expect(off.arm(5));
+    _ = off.attachedAt(5, "S1", "TA", 10);
+    _ = off.noteOrigin("S1", A, A, 10);
+    _ = off.retarget(5, 0xC, 1_000);
+    try std.testing.expect(std.mem.eql(u8, off.takeForeign(1_000 + foreign_grace_us).?.sidSlice(), "S1"));
+    // 남의 출처 몫(탭 4)이 찬 탭에서 떠나도 다녀간 출처 세션은 세워 두지 않는다(곧 떼는 길 — 남의 출처 세션만).
+    var full: Sw = .{};
+    try std.testing.expect(full.arm(8));
+    _ = full.attachedAt(8, "V", "TV", 10);
+    _ = full.noteOrigin("V", A, A, 10);
+    var sb: [8]u8 = undefined;
+    for (0..max_foreign_per_tab) |i| {
+        const sid = std.fmt.bufPrint(&sb, "F{d}", .{i}) catch unreachable;
+        _ = full.attachedAt(8, sid, sid, 20);
+        _ = full.noteOrigin(sid, 0xF0 + i, A, 20);
+    }
+    try std.testing.expectEqual(max_foreign_per_tab, full.foreignCount(8));
+    _ = full.retarget(8, 0xC, 1_000);
+    try std.testing.expect(full.find("V").?.away());
+    try std.testing.expectEqual(@as(usize, 1), full.awayCount(8));
+    for (0..max_foreign_per_tab) |_| try std.testing.expect(!std.mem.eql(u8, full.takeForeign(1_000 + foreign_grace_us).?.sidSlice(), "V"));
+    try std.testing.expect(full.takeForeign(1_000 + foreign_grace_us * 10) == null);
+}
+
+test "재검증 12 차(⑩′): 그 탭이 그 워커에 켠 세션을 쥐면 새 세션은 그림자(켜지 않고 시한 없이 쥔다), Chromium 이 뗀 다녀간 출처 세션은 다시 붙일 것으로 내주고(maru 가 뗀 것·옛 세대는 아니다), 몫(탭 16)이 차면 가장 오래 떠나 있던 세션부터 뺀다" {
+    var sw: Sw = .{};
+    try std.testing.expect(sw.arm(5));
+    _ = sw.attachedAt(5, "M1", "TA", 10);
+    _ = sw.noteOrigin("M1", 0xA, 0xA, 10);
+    sw.noteEnable("M1", 77);
+    try std.testing.expectEqual(Attach.shadow, sw.attachedAt(5, "X1", "TA", 20));
+    try std.testing.expectEqual(Attach.shadow, sw.attachedAt(5, "X1", "TA", 30)); // 다시 알려져도
+    try std.testing.expect(sw.takeForeign(std.math.maxInt(i64) / 8) == null); // 그림자는 시한 떼기가 없다
+    try std.testing.expect(sw.nextForeign() == null);
+    // 다른 탭은 그림자가 아니다.
+    try std.testing.expect(sw.arm(6));
+    try std.testing.expectEqual(Attach.keep, sw.attachedAt(6, "Y1", "TA", 40));
+    // Chromium 이 뗐다 — 다시 붙일 것으로.
+    const k = sw.keepAfterDetach("M1").?;
+    try std.testing.expect(std.mem.eql(u8, k.targetSlice(), "TA"));
+    sw.markDetaching("M1");
+    try std.testing.expect(sw.keepAfterDetach("M1") == null); // maru 가 뗀 것
+    sw.markManual("X1");
+    try std.testing.expect(sw.parked[sw.parkedIndex("X1").?].manual);
+    // 옛 세대(기록이 멈췄다)는 다시 붙이지 않는다.
+    _ = sw.attachedAt(6, "Y2", "TC", 50);
+    _ = sw.noteOrigin("Y2", 0xC, 0xC, 50);
+    _ = sw.detachAll(6);
+    try std.testing.expect(sw.keepAfterDetach("Y2") == null);
+    // 몫: 탭 7 에 떠나 있는 세션 15 개 + 맨 위 출처 1 개 — 새 세션은 가장 오래 떠난 것을 뺀다.
+    try std.testing.expect(sw.arm(7));
+    var sb: [8]u8 = undefined;
+    var tb: [8]u8 = undefined;
+    for (0..15) |i| {
+        const sid = std.fmt.bufPrint(&sb, "A{d}", .{i}) catch unreachable;
+        const tid = std.fmt.bufPrint(&tb, "T{d}", .{i}) catch unreachable;
+        try std.testing.expectEqual(Attach.keep, sw.attachedAt(7, sid, tid, 100));
+        _ = sw.noteOrigin(sid, 0x100 + i, 0x100 + i, 100);
+        _ = sw.retarget(7, 0x200 + i, 1_000 + @as(i64, @intCast(i)));
+    }
+    try std.testing.expectEqual(@as(usize, 15), sw.awayCount(7));
+    _ = sw.attachedAt(7, "N0", "TN0", 2_000);
+    _ = sw.noteOrigin("N0", 0x214, 0x214, 2_000);
+    try std.testing.expect(sw.takeEvicted() == null);
+    try std.testing.expectEqual(Attach.keep, sw.attachedAt(7, "N1", "TN1", 3_000));
+    const ev = sw.takeEvicted().?;
+    try std.testing.expect(std.mem.eql(u8, ev.sidSlice(), "A0")); // 가장 오래 떠나 있던 것
+    try std.testing.expect(sw.takeEvicted() == null);
+    try std.testing.expect(sw.find("A0") == null);
+}
+
+test "재검증 12 차: 건지기의 붙여 두기 표시 — 같은 타깃 한 자리에 표시만 더하고 꺼내면 그 표시와 함께" {
+    var sw: Sw = .{};
+    try std.testing.expect(sw.rescueAdd("T", 5, 0));
+    try std.testing.expect(sw.rescueAddAs("T", 5, 0, true));
+    try std.testing.expectEqual(@as(usize, 1), sw.rescueCount());
+    const x = sw.rescueTake("T").?;
+    try std.testing.expect(x.keep and x.hint == 5 and x.release);
+    try std.testing.expect(sw.rescueTake("T") == null);
+    // 붙여 두기만(놓을 워커가 아니다)은 그 탭이 닫히면 버리고, 놓을 워커의 것은 남긴다(다른 탭에서 건진다).
+    try std.testing.expect(sw.rescueAddAs("K", 5, 0, true));
+    try std.testing.expect(sw.rescueAdd("R", 5, 0));
+    // 붙여 두기가 먼저 든 타깃에 놓을 워커가 더해지면 그 자리는 놓을 것이다(그 탭이 닫혀도 다른 탭에서 건진다).
+    try std.testing.expect(sw.rescueAddAs("M", 5, 0, true));
+    try std.testing.expect(sw.rescueAdd("M", 5, 0));
+    try std.testing.expect(sw.rescueAddAs("O", 6, 0, true));
+    sw.forget(5);
+    try std.testing.expect(sw.rescueTake("K") == null);
+    const o = sw.rescueTake("O").?;
+    try std.testing.expect(o.hint == 6 and o.keep and !o.release);
+    const m = sw.rescueTake("M").?;
+    try std.testing.expect(m.keep and m.release);
+    const r = sw.rescueTake("R").?;
+    try std.testing.expect(r.release and !r.keep);
 }

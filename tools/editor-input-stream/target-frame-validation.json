@@ -1,0 +1,122 @@
+{
+  "rejected": [
+    {
+      "name": "hidden-label",
+      "reason": "target diagnostic label"
+    },
+    {
+      "name": "actual-label",
+      "reason": "target diagnostic label"
+    },
+    {
+      "name": "missing-snapshot",
+      "reason": "target frame snapshots"
+    },
+    {
+      "name": "boolean-time",
+      "reason": "target frame snapshots"
+    },
+    {
+      "name": "zero-time",
+      "reason": "target dropped/pending/error"
+    },
+    {
+      "name": "dropped-owner",
+      "reason": "target dropped/pending/error"
+    },
+    {
+      "name": "pending-owner",
+      "reason": "target dropped/pending/error"
+    },
+    {
+      "name": "budget-error",
+      "reason": "target dropped/pending/error"
+    },
+    {
+      "name": "time-backwards",
+      "reason": "target counters backwards"
+    },
+    {
+      "name": "missing-header",
+      "reason": "target budget header"
+    },
+    {
+      "name": "row-count",
+      "reason": "target budget overflow/owners"
+    },
+    {
+      "name": "denial-count",
+      "reason": "target budget denial count"
+    },
+    {
+      "name": "native-overflow",
+      "reason": "target budget overflow/owners"
+    },
+    {
+      "name": "extra-owner",
+      "reason": "target budget overflow/owners"
+    },
+    {
+      "name": "row-width",
+      "reason": "target budget row shape"
+    },
+    {
+      "name": "zero-owner",
+      "reason": "target budget row shape"
+    },
+    {
+      "name": "zero-clock",
+      "reason": "target budget row shape"
+    },
+    {
+      "name": "wrong-hz",
+      "reason": "target budget row shape"
+    },
+    {
+      "name": "invalid-allowed",
+      "reason": "target budget row shape"
+    },
+    {
+      "name": "boolean-allowed",
+      "reason": "target budget row shape"
+    },
+    {
+      "name": "wrong-extra-count",
+      "reason": "target counters backwards"
+    },
+    {
+      "name": "wrong-consumed-count",
+      "reason": "target counters backwards"
+    },
+    {
+      "name": "wrong-merged-count",
+      "reason": "target counters backwards"
+    },
+    {
+      "name": "interval-budget-count",
+      "reason": "target interval budget accounting"
+    },
+    {
+      "name": "idle-rearm",
+      "reason": "target continues in idle"
+    },
+    {
+      "name": "negative-counter",
+      "reason": "target frame snapshots"
+    },
+    {
+      "name": "overflow-counter",
+      "reason": "target frame snapshots"
+    },
+    {
+      "name": "float-counter",
+      "reason": "target frame snapshots"
+    }
+  ],
+  "normal_controls": 29,
+  "source_hashes": {
+    "app.json": "c5e02b71c3d9d7667317742ad840bf141c7b21ba247adca7d047ef2261d45ea2",
+    "posts.json": "ccb487671d79f1f1d1df2bb3b217302a9bb1ed55e5b0dbb455c401f9bb04c634",
+    "record.json": "4138c9ec04759e58eb7bdfbd58ae6039cbe994b81b00740130893ee844c977f8"
+  }
+}

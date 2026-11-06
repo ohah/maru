@@ -1,0 +1,1560 @@
+{
+  "kind": "frame-wake-comparison",
+  "variant": "target-coalesced",
+  "reader_dependencies": {
+    "frame_wake_report.py": "933b4b2f4e66dae8c93dabcedc7054fa4ef6a26f504aa05e07540e450935ef78",
+    "parse_stage_report.py": "8418a61c585ff2b4faf0057cd93d257e3176f885700d0f2e8d8c1098bd65196b",
+    "frame_wake_control.py": "e560d9273e47b6e84e05aff3dbd123c27692382f95fd908ef04dc96cd24139de",
+    "display_stages.py": "67d35cafb2341274bf1e43de84384b1b142fa4df683d6dc100156a0192213d96",
+    "verify.py": "af3f0760a6001832b6de3f55227f9e8c40c304bc1acfad56eb5e890298fe1020",
+    "protocol.py": "2e9daa89918d261fc85fd809bfd9de28ccaa8207400e470ea00e770e575c173f",
+    "summary_control.py": "5cdf362e130b48679ea3d65a2015f9e5a34af6ea9db7cbd9aafa5db4156d67a0",
+    "fold_control.py": "26f977716fe8ec6d24726d21abb10cae11b6832a1c3d381a6a0842366bfb88f1",
+    "bracket_control.py": "eabe91c96e64589c2fa412e2e9c6b0da6daabf9925c05e28f9bcf769730d0851",
+    "fold_reuse_control.py": "d759f62e105a0962a8cdf8c1ff1a45823a883764ba0a4595296d44ced10e4e35",
+    "target_frame_control.py": "7cd530d155e5e7c0c2234df0f59d8cf83b4ea521e65e0ccbd0131ff2fd3bff07",
+    "target_frame_budget.c.inc": "2859e0a47ed2f8b57e0f5925cb2eeb23e0faa8a56a9f7d4847562ea1ef12c937"
+  },
+  "scheduled": {
+    "kind": "parse-stage-diagnostic",
+    "head": "8f3d284f973e7981c9fce520ceb71111cf7d148d",
+    "app_sha256": "22d4f4dc5cc24a71e183d3eb1546b635d3f18b20653d6c157b10eed52fb8d1ee",
+    "processes": 6,
+    "inputs": 180,
+    "runs": [
+      {
+        "path": "typing-0",
+        "revision": 30,
+        "serial": 30,
+        "views": 1,
+        "elapsed_ms": {
+          "post_to_submit": 6.227125,
+          "queue": 0.004667,
+          "worker": 21.725708,
+          "publication": 0.000125,
+          "delivery": 0.009917,
+          "views": 0.053541,
+          "display": 38.613834,
+          "view_native_copy": 0.001584,
+          "last_post_to_syntax": 66.634917
+        },
+        "display": {
+          "generation": 67,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 10.04775,
+            "frame_prepare": 3.197084,
+            "tick_finalize": 0.012916,
+            "wait_for_swift": 0.001584,
+            "swift_prepare": 0.010083,
+            "renderer_prepare": 0.182125,
+            "arm_to_commit": 0.003333,
+            "commit_to_present": 25.158959,
+            "installed_to_present": 38.613834
+          }
+        },
+        "frame_wake": {
+          "mode": "scheduled",
+          "active": {
+            "wall_seconds": 2.094291959,
+            "cpu_ms": 1140.194,
+            "cpu_percent": 54.442934524966105,
+            "notices": 29,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 125,
+            "draw_calls": 62,
+            "presented_draws": 60,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.018093958,
+            "cpu_ms": 190.738,
+            "cpu_percent": 9.451393442009403,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 121,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 125,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 62,
+            "budget_denied": 0,
+            "permitted_projections": 62
+          },
+          "idle": {
+            "session_ticks": 121,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 5,
+            "budget_denied": 0,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            53.273584,
+            34.447625,
+            39.2425,
+            42.429167,
+            45.819166,
+            36.755958,
+            29.574666,
+            32.223708,
+            22.654334,
+            23.167541,
+            40.238542,
+            42.60975,
+            32.631291,
+            35.977792,
+            39.337834,
+            33.241542,
+            46.7605,
+            36.553875,
+            39.667833,
+            43.571916,
+            23.475917,
+            36.094625,
+            30.349042,
+            20.863251,
+            22.546125,
+            36.188333,
+            28.687416,
+            42.851333,
+            32.916916,
+            26.620417
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 1,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 10.845083
+        },
+        "memory_bytes": {
+          "peak": 340721664,
+          "baseline_resident": 308215808,
+          "final_resident": 323485696
+        }
+      },
+      {
+        "path": "shared-0",
+        "revision": 30,
+        "serial": 30,
+        "views": 2,
+        "elapsed_ms": {
+          "post_to_submit": 3.282667,
+          "queue": 0.004,
+          "worker": 21.211708,
+          "publication": 0.00025,
+          "delivery": 0.008709,
+          "views": 0.133375,
+          "display": 46.774333,
+          "view_native_copy": 0.002458,
+          "last_post_to_syntax": 71.415042
+        },
+        "display": {
+          "generation": 66,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 16.089458,
+            "frame_prepare": 5.179,
+            "tick_finalize": 0.015166,
+            "wait_for_swift": 0.002251,
+            "swift_prepare": 0.01175,
+            "renderer_prepare": 0.155458,
+            "arm_to_commit": 0.003916,
+            "commit_to_present": 25.317334,
+            "installed_to_present": 46.774333
+          }
+        },
+        "frame_wake": {
+          "mode": "scheduled",
+          "active": {
+            "wall_seconds": 2.079928208,
+            "cpu_ms": 1285.052,
+            "cpu_percent": 61.783478634374084,
+            "notices": 29,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 125,
+            "draw_calls": 61,
+            "presented_draws": 59,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.000427458,
+            "cpu_ms": 157.146,
+            "cpu_percent": 7.855621025973739,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 120,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 125,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 61,
+            "budget_denied": 0,
+            "permitted_projections": 61
+          },
+          "idle": {
+            "session_ticks": 120,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 5,
+            "budget_denied": 0,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            55.303708,
+            33.8285,
+            34.283,
+            41.299042,
+            27.623875,
+            30.981583,
+            35.455333,
+            37.728583,
+            41.086667,
+            33.316833,
+            34.462875,
+            37.813875,
+            27.736499,
+            31.114917,
+            34.471541,
+            39.245333,
+            41.169541,
+            31.25425,
+            34.598875,
+            37.931876,
+            41.2405,
+            36.217541,
+            35.052917,
+            40.910042,
+            41.429209,
+            35.733542,
+            34.732708,
+            40.534292,
+            41.389292,
+            31.400584
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 0,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 5.122084
+        },
+        "memory_bytes": {
+          "peak": 356663296,
+          "baseline_resident": 326008832,
+          "final_resident": 338231296
+        }
+      },
+      {
+        "path": "typing-1",
+        "revision": 30,
+        "serial": 30,
+        "views": 1,
+        "elapsed_ms": {
+          "post_to_submit": 2.282625,
+          "queue": 0.003333,
+          "worker": 25.600584,
+          "publication": 0.000125,
+          "delivery": 0.012874,
+          "views": 0.053959,
+          "display": 40.87525,
+          "view_native_copy": 0.00175,
+          "last_post_to_syntax": 68.82875
+        },
+        "display": {
+          "generation": 68,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 14.248083,
+            "frame_prepare": 3.056084,
+            "tick_finalize": 0.012333,
+            "wait_for_swift": 0.001416,
+            "swift_prepare": 0.013209,
+            "renderer_prepare": 0.188041,
+            "arm_to_commit": 0.003751,
+            "commit_to_present": 23.352333,
+            "installed_to_present": 40.87525
+          }
+        },
+        "frame_wake": {
+          "mode": "scheduled",
+          "active": {
+            "wall_seconds": 2.068870875,
+            "cpu_ms": 1174.783,
+            "cpu_percent": 56.78377583617924,
+            "notices": 30,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 124,
+            "draw_calls": 63,
+            "presented_draws": 61,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.0154655,
+            "cpu_ms": 243.459,
+            "cpu_percent": 12.0795419222011,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 121,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 124,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 63,
+            "budget_denied": 0,
+            "permitted_projections": 63
+          },
+          "idle": {
+            "session_ticks": 121,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 5,
+            "budget_denied": 0,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            51.410209,
+            25.342458,
+            28.7345,
+            32.048708,
+            22.117,
+            28.263334,
+            31.7125,
+            32.1395,
+            22.173,
+            27.248292,
+            28.86675,
+            32.178958,
+            22.759958,
+            39.583833,
+            30.597042,
+            32.302042,
+            22.30825,
+            28.203708,
+            28.955292,
+            33.127375,
+            22.404625,
+            29.382167,
+            29.1885,
+            32.455542,
+            22.472667,
+            26.879583,
+            29.096667,
+            32.447458,
+            23.772792,
+            28.814167
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 2,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 5.127625
+        },
+        "memory_bytes": {
+          "peak": 340033536,
+          "baseline_resident": 308084736,
+          "final_resident": 322240512
+        }
+      },
+      {
+        "path": "shared-1",
+        "revision": 30,
+        "serial": 30,
+        "views": 2,
+        "elapsed_ms": {
+          "post_to_submit": 8.903916,
+          "queue": 0.003292,
+          "worker": 20.632833,
+          "publication": 0.000167,
+          "delivery": 0.010916,
+          "views": 0.10475,
+          "display": 32.611209,
+          "view_native_copy": 0.002668,
+          "last_post_to_syntax": 62.267083
+        },
+        "display": {
+          "generation": 67,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 2.777626,
+            "frame_prepare": 5.02825,
+            "tick_finalize": 0.01375,
+            "wait_for_swift": 0.001541,
+            "swift_prepare": 0.010459,
+            "renderer_prepare": 0.128708,
+            "arm_to_commit": 0.003083,
+            "commit_to_present": 24.647792,
+            "installed_to_present": 32.611209
+          }
+        },
+        "frame_wake": {
+          "mode": "scheduled",
+          "active": {
+            "wall_seconds": 2.066246042,
+            "cpu_ms": 1295.345,
+            "cpu_percent": 62.69074319659363,
+            "notices": 29,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 124,
+            "draw_calls": 62,
+            "presented_draws": 60,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.020229208,
+            "cpu_ms": 191.815,
+            "cpu_percent": 9.49471472050908,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 121,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 124,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 62,
+            "budget_denied": 0,
+            "permitted_projections": 62
+          },
+          "idle": {
+            "session_ticks": 121,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 5,
+            "budget_denied": 0,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            54.271125,
+            36.453249,
+            35.012083,
+            39.236041,
+            42.9685,
+            31.734417,
+            36.004834,
+            41.970875,
+            45.413208,
+            33.753833,
+            35.168291,
+            38.520542,
+            28.515084,
+            31.884958,
+            35.587333,
+            38.603583,
+            28.612083,
+            35.182,
+            35.2645,
+            38.657792,
+            42.014958,
+            32.023375,
+            35.376625,
+            38.7325,
+            28.7505,
+            35.237917,
+            35.443083,
+            39.851042,
+            42.973958,
+            35.590749
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 3,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 5.765583
+        },
+        "memory_bytes": {
+          "peak": 357056512,
+          "baseline_resident": 326320128,
+          "final_resident": 339099648
+        }
+      },
+      {
+        "path": "typing-2",
+        "revision": 30,
+        "serial": 30,
+        "views": 1,
+        "elapsed_ms": {
+          "post_to_submit": 7.2915,
+          "queue": 0.003042,
+          "worker": 24.506416,
+          "publication": 0.000209,
+          "delivery": 0.012666,
+          "views": 0.0675,
+          "display": 22.475584,
+          "view_native_copy": 0.0025,
+          "last_post_to_syntax": 54.356917
+        },
+        "display": {
+          "generation": 67,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 2.560334,
+            "frame_prepare": 3.086916,
+            "tick_finalize": 0.012625,
+            "wait_for_swift": 0.001625,
+            "swift_prepare": 0.013542,
+            "renderer_prepare": 0.186333,
+            "arm_to_commit": 0.004042,
+            "commit_to_present": 16.610167,
+            "installed_to_present": 22.475584
+          }
+        },
+        "frame_wake": {
+          "mode": "scheduled",
+          "active": {
+            "wall_seconds": 2.080188125,
+            "cpu_ms": 1169.032,
+            "cpu_percent": 56.198378692311785,
+            "notices": 30,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 124,
+            "draw_calls": 62,
+            "presented_draws": 60,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.001437292,
+            "cpu_ms": 150.996,
+            "cpu_percent": 7.544378262738996,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 120,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 124,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 62,
+            "budget_denied": 0,
+            "permitted_projections": 62
+          },
+          "idle": {
+            "session_ticks": 120,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 5,
+            "budget_denied": 0,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            50.263542,
+            39.863875,
+            43.24325,
+            33.227,
+            26.806125,
+            26.60425,
+            34.349292,
+            46.730376,
+            39.2475,
+            26.644958,
+            43.280708,
+            24.855042,
+            36.734167,
+            26.739792,
+            32.707999,
+            23.09825,
+            28.284875,
+            30.538083,
+            33.367667,
+            23.554375,
+            39.476709,
+            26.963958,
+            32.025625,
+            46.947375,
+            26.713625,
+            29.048792,
+            43.683208,
+            20.364334,
+            37.045417,
+            41.018667
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 0,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 5.152
+        },
+        "memory_bytes": {
+          "peak": 339329024,
+          "baseline_resident": 308297728,
+          "final_resident": 321159168
+        }
+      },
+      {
+        "path": "shared-2",
+        "revision": 30,
+        "serial": 30,
+        "views": 2,
+        "elapsed_ms": {
+          "post_to_submit": 3.28425,
+          "queue": 0.003625,
+          "worker": 23.942083,
+          "publication": 0.0,
+          "delivery": 0.012833,
+          "views": 0.124542,
+          "display": 24.095959,
+          "view_native_copy": 0.002833,
+          "last_post_to_syntax": 51.463292
+        },
+        "display": {
+          "generation": 66,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 0.087167,
+            "frame_prepare": 5.132292,
+            "tick_finalize": 0.016625,
+            "wait_for_swift": 0.003124,
+            "swift_prepare": 0.015209,
+            "renderer_prepare": 0.149667,
+            "arm_to_commit": 0.003583,
+            "commit_to_present": 18.688292,
+            "installed_to_present": 24.095959
+          }
+        },
+        "frame_wake": {
+          "mode": "scheduled",
+          "active": {
+            "wall_seconds": 2.063718875,
+            "cpu_ms": 1264.09,
+            "cpu_percent": 61.25301344641721,
+            "notices": 30,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 123,
+            "draw_calls": 61,
+            "presented_draws": 59,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.001730667,
+            "cpu_ms": 171.333,
+            "cpu_percent": 8.559243399951368,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 120,
+            "draw_calls": 4,
+            "presented_draws": 4,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 123,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 61,
+            "budget_denied": 0,
+            "permitted_projections": 61
+          },
+          "idle": {
+            "session_ticks": 120,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 4,
+            "budget_denied": 0,
+            "permitted_projections": 4
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            47.072959,
+            38.073166,
+            45.375083,
+            30.579375,
+            34.009917,
+            39.985708,
+            40.692292,
+            33.355792,
+            34.017792,
+            37.393209,
+            41.940542,
+            30.797792,
+            34.152542,
+            38.956458,
+            40.82675,
+            34.599167,
+            34.224084,
+            39.025041,
+            31.770374,
+            33.375875,
+            35.799458,
+            37.616667,
+            27.660084,
+            30.934584,
+            34.354833,
+            38.42075,
+            41.757708,
+            32.278416,
+            35.593459,
+            38.125166
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 7,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 5.228417
+        },
+        "memory_bytes": {
+          "peak": 357171200,
+          "baseline_resident": 326025216,
+          "final_resident": 339034112
+        }
+      }
+    ]
+  },
+  "immediate": {
+    "kind": "parse-stage-diagnostic",
+    "head": "8f3d284f973e7981c9fce520ceb71111cf7d148d",
+    "app_sha256": "22d4f4dc5cc24a71e183d3eb1546b635d3f18b20653d6c157b10eed52fb8d1ee",
+    "processes": 6,
+    "inputs": 180,
+    "runs": [
+      {
+        "path": "typing-0",
+        "revision": 30,
+        "serial": 30,
+        "views": 1,
+        "elapsed_ms": {
+          "post_to_submit": 2.308251,
+          "queue": 0.001,
+          "worker": 26.301083,
+          "publication": 0.0,
+          "delivery": 0.013625,
+          "views": 0.052958,
+          "display": 18.915042,
+          "view_native_copy": 0.001583,
+          "last_post_to_syntax": 47.591959
+        },
+        "display": {
+          "generation": 67,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 0.055375,
+            "frame_prepare": 2.958584,
+            "tick_finalize": 0.013083,
+            "wait_for_swift": 0.001375,
+            "swift_prepare": 0.011083,
+            "renderer_prepare": 0.181542,
+            "arm_to_commit": 0.004042,
+            "commit_to_present": 15.689958,
+            "installed_to_present": 18.915042
+          }
+        },
+        "frame_wake": {
+          "mode": "immediate",
+          "active": {
+            "wall_seconds": 2.065014583,
+            "cpu_ms": 1189.815,
+            "cpu_percent": 57.617752910561414,
+            "notices": 30,
+            "requests": 30,
+            "fired": 30,
+            "coalesced": 0,
+            "ticks": 123,
+            "draw_calls": 62,
+            "presented_draws": 60,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.015193417,
+            "cpu_ms": 164.611,
+            "cpu_percent": 8.168496314614549,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 121,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 153,
+            "extra_session_ticks": 30,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 62,
+            "budget_denied": 0,
+            "permitted_projections": 62
+          },
+          "idle": {
+            "session_ticks": 121,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 5,
+            "budget_denied": 0,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            57.623209,
+            49.682333,
+            23.696916,
+            29.967667,
+            30.38625,
+            20.386,
+            23.788875,
+            29.476834,
+            31.704625,
+            20.469417,
+            27.051541,
+            27.218583,
+            32.021709,
+            25.067125,
+            23.875083,
+            31.796042,
+            30.572334,
+            21.186709,
+            23.928458,
+            29.698167,
+            31.701666,
+            22.565209,
+            24.025458,
+            29.199708,
+            31.804167,
+            24.744917,
+            24.85925,
+            28.041083,
+            31.988542,
+            20.915667
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 13,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 5.125125
+        },
+        "memory_bytes": {
+          "peak": 339099648,
+          "baseline_resident": 307724288,
+          "final_resident": 312590336
+        }
+      },
+      {
+        "path": "shared-0",
+        "revision": 30,
+        "serial": 30,
+        "views": 2,
+        "elapsed_ms": {
+          "post_to_submit": 8.193292,
+          "queue": 0.002958,
+          "worker": 23.828375,
+          "publication": 0.000292,
+          "delivery": 0.013833,
+          "views": 0.104209,
+          "display": 32.556166,
+          "view_native_copy": 0.002208,
+          "last_post_to_syntax": 64.699125
+        },
+        "display": {
+          "generation": 67,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 0.062625,
+            "frame_prepare": 5.116583,
+            "tick_finalize": 0.013958,
+            "wait_for_swift": 0.004834,
+            "swift_prepare": 0.01425,
+            "renderer_prepare": 0.160958,
+            "arm_to_commit": 0.006542,
+            "commit_to_present": 27.176416,
+            "installed_to_present": 32.556166
+          }
+        },
+        "frame_wake": {
+          "mode": "immediate",
+          "active": {
+            "wall_seconds": 2.08222225,
+            "cpu_ms": 1276.347,
+            "cpu_percent": 61.29734710115598,
+            "notices": 30,
+            "requests": 30,
+            "fired": 27,
+            "coalesced": 3,
+            "ticks": 124,
+            "draw_calls": 62,
+            "presented_draws": 60,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.001046083,
+            "cpu_ms": 211.989,
+            "cpu_percent": 10.593908945974034,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 120,
+            "draw_calls": 6,
+            "presented_draws": 6,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 151,
+            "extra_session_ticks": 27,
+            "existing_consumed": 3,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 72,
+            "budget_denied": 10,
+            "permitted_projections": 62
+          },
+          "idle": {
+            "session_ticks": 120,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 6,
+            "budget_denied": 0,
+            "permitted_projections": 6
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            57.791583,
+            52.438125,
+            40.076625,
+            31.894708,
+            33.243458,
+            35.315917,
+            29.824875,
+            55.805792,
+            32.02475,
+            38.853292,
+            39.005292,
+            33.450708,
+            32.104709,
+            35.439208,
+            42.285834,
+            28.802292,
+            32.116167,
+            35.476625,
+            26.535833,
+            28.840958,
+            35.058916,
+            35.517625,
+            30.138,
+            29.812041,
+            32.587041,
+            36.476,
+            41.1245,
+            32.396458,
+            36.455833,
+            38.02275
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 4,
+          "syntax_ready_on_first_present_count": 1,
+          "max_producer_lateness_ms": 5.807333
+        },
+        "memory_bytes": {
+          "peak": 360120320,
+          "baseline_resident": 327106560,
+          "final_resident": 341983232
+        }
+      },
+      {
+        "path": "typing-1",
+        "revision": 30,
+        "serial": 30,
+        "views": 1,
+        "elapsed_ms": {
+          "post_to_submit": 2.37825,
+          "queue": 0.001416,
+          "worker": 25.435,
+          "publication": 0.000125,
+          "delivery": 0.011833,
+          "views": 0.060667,
+          "display": 19.922625,
+          "view_native_copy": 0.001875,
+          "last_post_to_syntax": 47.809916
+        },
+        "display": {
+          "generation": 66,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 0.061625,
+            "frame_prepare": 3.060084,
+            "tick_finalize": 0.019458,
+            "wait_for_swift": 0.001208,
+            "swift_prepare": 0.011,
+            "renderer_prepare": 0.185042,
+            "arm_to_commit": 0.003833,
+            "commit_to_present": 16.580375,
+            "installed_to_present": 19.922625
+          }
+        },
+        "frame_wake": {
+          "mode": "immediate",
+          "active": {
+            "wall_seconds": 2.063176625,
+            "cpu_ms": 1140.628,
+            "cpu_percent": 55.28503891420347,
+            "notices": 30,
+            "requests": 30,
+            "fired": 26,
+            "coalesced": 4,
+            "ticks": 124,
+            "draw_calls": 61,
+            "presented_draws": 59,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.000228833,
+            "cpu_ms": 170.81,
+            "cpu_percent": 8.539522937673802,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 120,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 150,
+            "extra_session_ticks": 26,
+            "existing_consumed": 4,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 69,
+            "budget_denied": 8,
+            "permitted_projections": 61
+          },
+          "idle": {
+            "session_ticks": 120,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 6,
+            "budget_denied": 1,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            54.615041,
+            49.971083,
+            21.992875,
+            25.343625,
+            29.515334,
+            32.184375,
+            22.041583,
+            28.228334,
+            31.483916,
+            33.316958,
+            22.586041,
+            29.402875,
+            28.873125,
+            32.171959,
+            22.251416,
+            25.564167,
+            33.355333,
+            32.306584,
+            26.234542,
+            38.999083,
+            44.189792,
+            47.526666,
+            35.7475,
+            43.471125,
+            45.831709,
+            23.117833,
+            22.404875,
+            26.112292,
+            30.310709,
+            21.133583
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 15,
+          "syntax_ready_on_first_present_count": 1,
+          "max_producer_lateness_ms": 5.759542
+        },
+        "memory_bytes": {
+          "peak": 338788352,
+          "baseline_resident": 307740672,
+          "final_resident": 320716800
+        }
+      },
+      {
+        "path": "shared-1",
+        "revision": 30,
+        "serial": 30,
+        "views": 2,
+        "elapsed_ms": {
+          "post_to_submit": 3.507959,
+          "queue": 0.002999,
+          "worker": 25.041334,
+          "publication": 0.000125,
+          "delivery": 0.012792,
+          "views": 0.104458,
+          "display": 26.495833,
+          "view_native_copy": 0.002875,
+          "last_post_to_syntax": 55.1655
+        },
+        "display": {
+          "generation": 67,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 0.05725,
+            "frame_prepare": 5.118542,
+            "tick_finalize": 0.014124,
+            "wait_for_swift": 0.001209,
+            "swift_prepare": 0.012,
+            "renderer_prepare": 0.181208,
+            "arm_to_commit": 0.007042,
+            "commit_to_present": 21.104458,
+            "installed_to_present": 26.495833
+          }
+        },
+        "frame_wake": {
+          "mode": "immediate",
+          "active": {
+            "wall_seconds": 2.096543959,
+            "cpu_ms": 1275.47,
+            "cpu_percent": 60.836787825253516,
+            "notices": 30,
+            "requests": 30,
+            "fired": 25,
+            "coalesced": 5,
+            "ticks": 125,
+            "draw_calls": 62,
+            "presented_draws": 60,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.0175135,
+            "cpu_ms": 177.89,
+            "cpu_percent": 8.817289202773612,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 121,
+            "draw_calls": 6,
+            "presented_draws": 6,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 150,
+            "extra_session_ticks": 25,
+            "existing_consumed": 5,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 70,
+            "budget_denied": 8,
+            "permitted_projections": 62
+          },
+          "idle": {
+            "session_ticks": 121,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 6,
+            "budget_denied": 0,
+            "permitted_projections": 6
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            47.770834,
+            38.227,
+            41.53875,
+            22.943625,
+            34.893667,
+            38.304333,
+            41.662625,
+            31.63375,
+            34.995042,
+            38.396584,
+            28.392292,
+            45.020125,
+            35.102166,
+            38.423917,
+            30.441666,
+            33.906292,
+            25.733125,
+            38.507,
+            28.4895,
+            45.250292,
+            35.217417,
+            38.61975,
+            41.958125,
+            31.919583,
+            35.334917,
+            41.499292,
+            42.017792,
+            32.657667,
+            35.377792,
+            28.489125
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 4,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 5.502166
+        },
+        "memory_bytes": {
+          "peak": 356220928,
+          "baseline_resident": 326320128,
+          "final_resident": 338575360
+        }
+      },
+      {
+        "path": "typing-2",
+        "revision": 30,
+        "serial": 30,
+        "views": 1,
+        "elapsed_ms": {
+          "post_to_submit": 2.272,
+          "queue": 0.004,
+          "worker": 24.898542,
+          "publication": 8.3e-05,
+          "delivery": 0.011042,
+          "views": 0.066333,
+          "display": 23.510083,
+          "view_native_copy": 0.001541,
+          "last_post_to_syntax": 50.762083
+        },
+        "display": {
+          "generation": 67,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 0.761125,
+            "frame_prepare": 3.152666,
+            "tick_finalize": 0.0125,
+            "wait_for_swift": 0.004501,
+            "swift_prepare": 0.012333,
+            "renderer_prepare": 0.169792,
+            "arm_to_commit": 0.004333,
+            "commit_to_present": 19.392833,
+            "installed_to_present": 23.510083
+          }
+        },
+        "frame_wake": {
+          "mode": "immediate",
+          "active": {
+            "wall_seconds": 2.059773791,
+            "cpu_ms": 1162.907,
+            "cpu_percent": 56.457995779984174,
+            "notices": 30,
+            "requests": 30,
+            "fired": 25,
+            "coalesced": 5,
+            "ticks": 124,
+            "draw_calls": 62,
+            "presented_draws": 60,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.00082275,
+            "cpu_ms": 202.011,
+            "cpu_percent": 10.096396594850791,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 120,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 149,
+            "extra_session_ticks": 25,
+            "existing_consumed": 5,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 71,
+            "budget_denied": 9,
+            "permitted_projections": 62
+          },
+          "idle": {
+            "session_ticks": 120,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 5,
+            "budget_denied": 0,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            60.335708,
+            49.236583,
+            25.929375,
+            33.421875,
+            36.541416,
+            36.462917,
+            29.696625,
+            29.305541,
+            36.924292,
+            40.2075,
+            27.395666,
+            34.370291,
+            37.628,
+            36.115042,
+            30.31075,
+            29.449834,
+            32.806125,
+            36.177125,
+            26.231458,
+            29.550083,
+            32.879584,
+            36.245292,
+            26.279875,
+            43.271084,
+            46.341041,
+            39.852042,
+            26.36325,
+            29.656459,
+            33.055042,
+            37.423875
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 9,
+          "syntax_ready_on_first_present_count": 1,
+          "max_producer_lateness_ms": 5.109208
+        },
+        "memory_bytes": {
+          "peak": 338903040,
+          "baseline_resident": 307773440,
+          "final_resident": 320880640
+        }
+      },
+      {
+        "path": "shared-2",
+        "revision": 30,
+        "serial": 30,
+        "views": 2,
+        "elapsed_ms": {
+          "post_to_submit": 7.754791,
+          "queue": 0.003959,
+          "worker": 20.056125,
+          "publication": 8.3e-05,
+          "delivery": 0.010333,
+          "views": 0.103959,
+          "display": 22.173,
+          "view_native_copy": 0.002333,
+          "last_post_to_syntax": 50.10225
+        },
+        "display": {
+          "generation": 66,
+          "tick_in_progress_at_install": false,
+          "elapsed_ms": {
+            "wait_for_tick": 0.043291,
+            "frame_prepare": 4.903292,
+            "tick_finalize": 0.014792,
+            "wait_for_swift": 0.002,
+            "swift_prepare": 0.019625,
+            "renderer_prepare": 0.186541,
+            "arm_to_commit": 0.005126,
+            "commit_to_present": 16.998333,
+            "installed_to_present": 22.173
+          }
+        },
+        "frame_wake": {
+          "mode": "immediate",
+          "active": {
+            "wall_seconds": 2.081006458,
+            "cpu_ms": 1286.206,
+            "cpu_percent": 61.8069201590147,
+            "notices": 29,
+            "requests": 29,
+            "fired": 23,
+            "coalesced": 6,
+            "ticks": 125,
+            "draw_calls": 61,
+            "presented_draws": 59,
+            "repeat_generation_draws": 0
+          },
+          "idle": {
+            "wall_seconds": 2.017366292,
+            "cpu_ms": 224.562,
+            "cpu_percent": 11.131444046156393,
+            "notices": 0,
+            "requests": 0,
+            "fired": 0,
+            "coalesced": 0,
+            "ticks": 121,
+            "draw_calls": 5,
+            "presented_draws": 5,
+            "repeat_generation_draws": 0
+          }
+        },
+        "target_frame": {
+          "hz": 60,
+          "active": {
+            "session_ticks": 148,
+            "extra_session_ticks": 23,
+            "existing_consumed": 6,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 65,
+            "budget_denied": 4,
+            "permitted_projections": 61
+          },
+          "idle": {
+            "session_ticks": 121,
+            "extra_session_ticks": 0,
+            "existing_consumed": 0,
+            "merged_requests": 0,
+            "rearmed": 0,
+            "projection_attempts": 5,
+            "budget_denied": 0,
+            "permitted_projections": 5
+          }
+        },
+        "input_display": {
+          "post_to_present_ms": [
+            57.123833,
+            34.836667,
+            25.463376,
+            27.800333,
+            31.340416,
+            34.537541,
+            38.245584,
+            30.223208,
+            31.229625,
+            35.001834,
+            27.313875,
+            27.94575,
+            31.28875,
+            35.551208,
+            38.00025,
+            29.550792,
+            31.41375,
+            39.697916,
+            27.959833,
+            30.207667,
+            31.449291,
+            39.456709,
+            42.999459,
+            28.119875,
+            31.575,
+            39.277667,
+            40.556333,
+            30.924167,
+            31.576208,
+            36.764083
+          ],
+          "coalesced_keys": 0,
+          "syntax_ready_before_next_post": 3,
+          "syntax_ready_on_first_present_count": 0,
+          "max_producer_lateness_ms": 5.727084
+        },
+        "memory_bytes": {
+          "peak": 356679680,
+          "baseline_resident": 326598656,
+          "final_resident": 338264064
+        }
+      }
+    ]
+  }
+}

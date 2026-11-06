@@ -24,6 +24,7 @@ def main():
     verify.require(all(source.get(name) is True for name in ('frame_wake_control','display_stages','parse_stages','fold_reuse_control')), 'frame wake controlled build required')
     output.mkdir(mode=0o700)
     tools = list(base.HERE.glob('*.py'))+[base.HERE.parent/'editor-input-attribution/observer.py']
+    if source.get('target_frame_control'):tools.append(base.HERE/'target_frame_budget.c.inc')
     hashes = {str(p.relative_to(base.ROOT)):verify.sha(p) for p in tools}
     manifests = {}
     for mode in ('scheduled','immediate'):

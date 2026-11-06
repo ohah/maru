@@ -163,3 +163,7 @@ GPU presentedTime을 혼동하지 않는다. 세대나 시각이 없는 자료�
 추가 `--target-frame-control`은 같은 수집기에서 대상 창 `renderTick`·기존 예약 소비·투영 예산을
 대조한다. [대상 예약 결과](target-frame-results.md)는 추가 세션 tick을 따로 세며, 이전 전역
 tick 모집단과 구분한다. 실제 자료 손상은 `target_frame_review.py`로 재현한다.
+
+`frame_tail_report.py`는 모든 첫 표시를 producing permit/frame/drawable에 연결하며 공식 p95를
+유지한 채 초기 입력과 거절 기한을 보조 진단한다. 추가 `--observer-cpu` 앱은 드라이버 자신의
+thread CPU를 분리한다. [귀속·재현 결과와 재예약 보완 지점](frame-tail-results.md)을 따른다.

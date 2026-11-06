@@ -17,6 +17,9 @@
 추가 `--target-frame-control`의 대상 창 예약·투영 예산과 `target_frame_review.py`의 손상 대조는
 [대상 예약 실행/판정](../tools/editor-input-stream/target-frame-results.md)을 따른다.
 
+`frame_tail_report.py`의 전체 첫 표시 귀속과 추가 `--observer-cpu` 앱의 thread CPU 분리·
+`observer_cpu_review.py`의 실제 손상 대조는 [상위 지연 재현 계약](../tools/editor-input-stream/frame-tail-results.md)을 따른다.
+
 색 표시의 단계 분해와 timer 30/60/120Hz 대조는
 [실행·판정 계약](../tools/editor-input-latency/stage-results.md)을 따른다.
 `stages.py`는 기존 원시 시각을 다시 검증하고, `cadence.py`는 격리 설정으로 실제 입력을 비교한다.

@@ -1,0 +1,94 @@
+{
+  "rejected": [
+    {
+      "name": "metadata-label",
+      "reason": "observer CPU label"
+    },
+    {
+      "name": "actual-label",
+      "reason": "observer CPU label"
+    },
+    {
+      "name": "missing-start",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "short-row",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "boolean-time",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "zero-time",
+      "reason": "observer CPU handler/error"
+    },
+    {
+      "name": "time-backwards",
+      "reason": "observer CPU counters backwards"
+    },
+    {
+      "name": "cpu-backwards",
+      "reason": "observer CPU counters backwards"
+    },
+    {
+      "name": "calls-backwards",
+      "reason": "observer CPU counters backwards"
+    },
+    {
+      "name": "outside-handler",
+      "reason": "observer CPU handler/error"
+    },
+    {
+      "name": "start-error",
+      "reason": "observer CPU handler/error"
+    },
+    {
+      "name": "idle-start-error",
+      "reason": "observer CPU handler/error"
+    },
+    {
+      "name": "idle-end-error",
+      "reason": "observer CPU handler/error"
+    },
+    {
+      "name": "negative-time",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "negative-cpu",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "overflow-cpu",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "float-cpu",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "boolean-cpu",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "negative-calls",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "boolean-depth",
+      "reason": "observer CPU snapshots"
+    },
+    {
+      "name": "over-attributed-idle",
+      "reason": "observer CPU exceeds process CPU"
+    }
+  ],
+  "normal_controls": 22,
+  "source_hashes": {
+    "app.json": "1eda3de902450967e330c1bb1c3b352506bac098ed6078b0d19a1e3c7b53bc28",
+    "posts.json": "11e0f9a5d24da63e2feb7d9a1da7373ede4c9813626b330b2b24bf182c91a14e",
+    "record.json": "1f0ca8098090b24b2addaa9d8c2715d7a34416c46ef1f57e0dec61befb57f237"
+  }
+}

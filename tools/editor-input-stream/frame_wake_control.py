@@ -87,7 +87,7 @@ void maru_stream_frame_cpu(uint64_t *out) {
 '''
 
 
-def analyze(app, meta, require):
+def analyze(app, meta, require, retry=None):
     mode = meta.get('frame_wake_control')
     require(mode in ('scheduled','immediate') and app.get('frame_wake_mode') == mode, 'frame wake mode')
     snapshots = [app.get(name) for name in ('wake_input_start','wake_idle_start','wake_idle_end')]
@@ -105,9 +105,12 @@ def analyze(app, meta, require):
     if mode == 'scheduled':
         require(active['requests'] == 0, 'scheduled frame wake unexpectedly requested')
     else:
-        require(active['requests'] > 0 and (meta.get('target_frame_control') is True or active['fired'] > 0) and active['requests'] <= active['notices'], 'immediate frame wake not observed')
+        require(active['requests'] > 0 and (meta.get('target_frame_control') is True or active['fired'] > 0) and 0 <= active['requests']-(retry['active']['requests'] if retry else 0) <= active['notices'], 'immediate frame wake not observed')
     require(2 <= idle['wall_seconds'] <= 5 and idle['ticks'] > 0, 'frame wake idle window')
-    require(all(idle[name] == 0 for name in ('notices','requests','fired','coalesced')), 'frame wake continues in idle')
+    if retry and retry['mode']=='with_retry':
+        require(idle['notices']==0 and idle['requests']==retry['idle']['requests'] and idle['requests']==idle['fired']+idle['coalesced'], 'idle retry accounting')
+    else:
+        require(all(idle[name] == 0 for name in ('notices','requests','fired','coalesced')), 'frame wake continues in idle')
     draws = app['display_draws']
     for result,start,end in ((active,snapshots[0][0],snapshots[1][0]),(idle,snapshots[1][0],snapshots[2][0])):
         selected = [row for row in draws if start <= row[3] < end]

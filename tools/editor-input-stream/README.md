@@ -167,3 +167,11 @@ tick 모집단과 구분한다. 실제 자료 손상은 `target_frame_review.py`
 `frame_tail_report.py`는 모든 첫 표시를 producing permit/frame/drawable에 연결하며 공식 p95를
 유지한 채 초기 입력과 거절 기한을 보조 진단한다. 추가 `--observer-cpu` 앱은 드라이버 자신의
 thread CPU를 분리한다. [귀속·재현 결과와 재예약 보완 지점](frame-tail-results.md)을 따른다.
+
+
+추가 `--deferred-retry-control`은 투영 거절을 기존 대상 예약에 인계한다.
+`deferred_retry_study.py`의 `without_retry`·`with_retry` 양쪽 모두 대상 예약·60Hz 예산을
+켜고 재시도 연결만 바꾼다. `deferred_retry_report.py`가 같은 앱·짝·실제 분기를 재검증하고
+`deferred_retry_review.py`가 실제 자료의 거절 기한·요청 정산 손상을 검사한다.
+유휴 새 요청은 원시 거절과 맞아야 하며, 기존 실험의 무요청 계약을 완화하지 않는다.
+실측 결과와 제품 적용 판단은 [재시도 비교](deferred-retry-results.md)를 따른다.

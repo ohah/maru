@@ -1,0 +1,110 @@
+{
+  "rejected": [
+    {
+      "name": "metadata-mode",
+      "reason": "retry mode"
+    },
+    {
+      "name": "actual-mode",
+      "reason": "retry mode"
+    },
+    {
+      "name": "budget-baseline-disabled",
+      "reason": "retry requires target candidate in both arms"
+    },
+    {
+      "name": "missing-start",
+      "reason": "retry snapshots"
+    },
+    {
+      "name": "boolean-time",
+      "reason": "retry snapshots"
+    },
+    {
+      "name": "zero-time",
+      "reason": "retry snapshots"
+    },
+    {
+      "name": "time-backwards",
+      "reason": "retry counters backwards"
+    },
+    {
+      "name": "notices-backwards",
+      "reason": "retry counters backwards"
+    },
+    {
+      "name": "requests-backwards",
+      "reason": "retry counters backwards"
+    },
+    {
+      "name": "start-error",
+      "reason": "retry snapshots"
+    },
+    {
+      "name": "end-error",
+      "reason": "retry snapshots"
+    },
+    {
+      "name": "population",
+      "reason": "retry event header/overflow"
+    },
+    {
+      "name": "overflow",
+      "reason": "retry event header/overflow"
+    },
+    {
+      "name": "event-width",
+      "reason": "retry event shape/branch"
+    },
+    {
+      "name": "zero-owner",
+      "reason": "retry event shape/branch"
+    },
+    {
+      "name": "negative-at",
+      "reason": "retry event shape/branch"
+    },
+    {
+      "name": "boolean-at",
+      "reason": "retry event shape/branch"
+    },
+    {
+      "name": "deadline-off-by-one",
+      "reason": "retry deadline differs"
+    },
+    {
+      "name": "rate",
+      "reason": "retry event shape/branch"
+    },
+    {
+      "name": "runtime-branch",
+      "reason": "retry event shape/branch"
+    },
+    {
+      "name": "invented-notice",
+      "reason": "retry counters backwards"
+    },
+    {
+      "name": "lost-request",
+      "reason": "retry request source accounting"
+    },
+    {
+      "name": "counter-overflow",
+      "reason": "retry snapshots"
+    },
+    {
+      "name": "queue-extra-request",
+      "reason": "frame wake counters backwards"
+    },
+    {
+      "name": "unattributed-idle-fire",
+      "reason": "idle retry accounting"
+    }
+  ],
+  "normal_controls": 26,
+  "source_hashes": {
+    "app.json": "ae46c2d9f27595d4d4556d8804b4bb9b1ba7c1430171be8cfc1bf9e565349566",
+    "posts.json": "78f64e852b64dd5f07817060d4367753768eec97c2da3f6f4a25c2f93157185c",
+    "record.json": "884e1258cd90a3ce330917e1cf1a7f41da09627f66c9291128462010ab4c2246"
+  }
+}

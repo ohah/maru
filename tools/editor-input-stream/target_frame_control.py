@@ -140,7 +140,7 @@ def present(source):
     return source+'\n'+Path(__file__).with_name('target_frame_budget.c.inc').read_text()
 
 
-def analyze(app, meta, wake, require):
+def analyze(app, meta, wake, require, retry=None):
     require(app.get('target_frame_control') is True, 'target frame actual branch')
     snapshots = [app.get(name) for name in ('target_input_start','target_idle_start','target_idle_end')]
     require(all(type(row) is list and len(row) == 11 and all(type(n) is int and 0 <= n < 2**64 for n in row) for row in snapshots), 'target frame snapshots')
@@ -172,6 +172,9 @@ def analyze(app, meta, wake, require):
     active = interval(*snapshots[:2],wake['active'])
     idle = interval(*snapshots[1:],wake['idle'])
     require(active['session_ticks'] > 0 and active['permitted_projections'] > 0, 'target activity absent')
-    require(all(idle[name] == 0 for name in ('extra_session_ticks','existing_consumed','merged_requests','rearmed')), 'target continues in idle')
+    if not retry or retry['mode']!='with_retry':
+        require(all(idle[name] == 0 for name in ('extra_session_ticks','existing_consumed','merged_requests','rearmed')), 'target continues in idle')
+    else:
+        require(idle['extra_session_ticks']+idle['existing_consumed']+idle['merged_requests']==retry['idle']['requests'], 'target idle retry accounting')
     if not enabled:require(active['extra_session_ticks'] == active['existing_consumed'] == active['merged_requests'] == active['rearmed'] == active['budget_denied'] == 0, 'target baseline branch')
     return dict(hz=60,active=active,idle=idle)

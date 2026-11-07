@@ -20,6 +20,10 @@
 `frame_tail_report.py`의 전체 첫 표시 귀속과 추가 `--observer-cpu` 앱의 thread CPU 분리·
 `observer_cpu_review.py`의 실제 손상 대조는 [상위 지연 재현 계약](../tools/editor-input-stream/frame-tail-results.md)을 따른다.
 
+`prepare.py --deferred-retry-control`의 동일 대상 예산 후보 간 재시도 대조는
+`deferred_retry_study.py`·`deferred_retry_report.py`·`deferred_retry_review.py`가 수집·재계산·손상 검증을
+맡는다. [재시도 실험](../tools/editor-input-stream/deferred-retry-results.md)을 따른다.
+
 색 표시의 단계 분해와 timer 30/60/120Hz 대조는
 [실행·판정 계약](../tools/editor-input-latency/stage-results.md)을 따른다.
 `stages.py`는 기존 원시 시각을 다시 검증하고, `cadence.py`는 격리 설정으로 실제 입력을 비교한다.

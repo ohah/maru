@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 import statistics
 import frame_wake_report
+import deferred_retry_report
 import verify
 
 
@@ -56,10 +57,11 @@ def distribution(rows):
 
 def read(root):
     root=Path(root).resolve()
-    source=frame_wake_report.read(root)
+    retry=json.loads((root/'study.json').read_text()).get('kind')=='deferred-frame-comparison'
+    source=deferred_retry_report.read(root) if retry else frame_wake_report.read(root)
     verify.require(source['variant']=='target-coalesced','target comparison required')
     groups={}
-    for mode in ('scheduled','immediate'):
+    for mode in (('without_retry','with_retry') if retry else ('scheduled','immediate')):
         for flow in ('typing','shared'):
             rows=[];idle=[];first_key_checks=[]
             for run in source[mode]['runs']:
@@ -77,7 +79,7 @@ def read(root):
             tail=ordered[-math.ceil(len(rows)*.05):]
             groups[mode+'-'+flow]=dict(official=distribution(rows),first_two=distribution([r for r in rows if r['sequence']<=2]),remaining=distribution([r for r in rows if r['sequence']>2]),tail=tail,all_keys=rows,idle=idle,first_key_checks=first_key_checks)
     here=Path(__file__).resolve().parent
-    return dict(kind='target-frame-tail-attribution',head=source['scheduled']['head'],app_sha256=source['scheduled']['app_sha256'],source_readers=source['reader_dependencies'],reader_sha256=verify.sha(here/'frame_tail_report.py'),groups=groups)
+    return dict(kind='target-frame-tail-attribution',head=source['without_retry' if retry else 'scheduled']['head'],app_sha256=source['without_retry' if retry else 'scheduled']['app_sha256'],source_readers=source['reader_dependencies'],reader_sha256=verify.sha(here/'frame_tail_report.py'),groups=groups)
 
 
 if __name__=='__main__':

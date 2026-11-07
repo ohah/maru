@@ -1,0 +1,170 @@
+{
+  "kind": "deferred-retry-summary",
+  "head": "b037101a2e40a166793f875d7022d72232f57995",
+  "app_sha256": "0f496b053845e13e80dec08bf2aa15caf37bf9538810c116bd04dfa49a43c194",
+  "processes": 12,
+  "inputs": 360,
+  "groups": {
+    "without_retry-typing": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 34.086332999999996,
+        "p95_ms": 47.314458,
+        "maximum_ms": 53.562875
+      },
+      "last_syntax_median_ms": 58.192041,
+      "idle_process_cpu_ms": [
+        274.857,
+        84.172,
+        83.712
+      ],
+      "idle_driver_cpu_ms": [
+        168.008873,
+        44.741337,
+        44.723621
+      ],
+      "idle_other_cpu_ms": [
+        106.84812700000003,
+        39.430662999999996,
+        38.988379
+      ],
+      "retry_active_requests": [
+        0,
+        0,
+        0
+      ],
+      "retry_idle_requests": [
+        0,
+        0,
+        0
+      ],
+      "extra_session_ticks": [
+        27,
+        26,
+        30
+      ]
+    },
+    "without_retry-shared": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 35.933458,
+        "p95_ms": 44.63075,
+        "maximum_ms": 69.361833
+      },
+      "last_syntax_median_ms": 58.973708,
+      "idle_process_cpu_ms": [
+        166.962,
+        89.843,
+        83.353
+      ],
+      "idle_driver_cpu_ms": [
+        98.156037,
+        47.454174,
+        45.589674
+      ],
+      "idle_other_cpu_ms": [
+        68.80596299999999,
+        42.388826,
+        37.76332599999999
+      ],
+      "retry_active_requests": [
+        0,
+        0,
+        0
+      ],
+      "retry_idle_requests": [
+        0,
+        0,
+        0
+      ],
+      "extra_session_ticks": [
+        21,
+        26,
+        28
+      ]
+    },
+    "with_retry-typing": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 31.800896,
+        "p95_ms": 44.386375,
+        "maximum_ms": 56.827
+      },
+      "last_syntax_median_ms": 52.850416,
+      "idle_process_cpu_ms": [
+        228.572,
+        105.129,
+        88.676
+      ],
+      "idle_driver_cpu_ms": [
+        134.497579,
+        54.999467,
+        46.539833
+      ],
+      "idle_other_cpu_ms": [
+        94.074421,
+        50.129533,
+        42.136167
+      ],
+      "retry_active_requests": [
+        8,
+        21,
+        7
+      ],
+      "retry_idle_requests": [
+        0,
+        0,
+        0
+      ],
+      "extra_session_ticks": [
+        34,
+        29,
+        23
+      ]
+    },
+    "with_retry-shared": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 35.450041999999996,
+        "p95_ms": 46.191875,
+        "maximum_ms": 57.850709
+      },
+      "last_syntax_median_ms": 59.95,
+      "idle_process_cpu_ms": [
+        176.324,
+        87.459,
+        218.872
+      ],
+      "idle_driver_cpu_ms": [
+        99.880299,
+        46.368919,
+        123.306365
+      ],
+      "idle_other_cpu_ms": [
+        76.44370100000002,
+        41.090081000000005,
+        95.56563500000001
+      ],
+      "retry_active_requests": [
+        6,
+        6,
+        1
+      ],
+      "retry_idle_requests": [
+        0,
+        0,
+        0
+      ],
+      "extra_session_ticks": [
+        32,
+        26,
+        27
+      ]
+    }
+  },
+  "artifacts": {
+    "study": "/Users/yoonhb/.cache/maru-agent-artifacts/deferred-retry-study-1",
+    "tail": "/Users/yoonhb/.cache/maru-agent-artifacts/deferred-retry-tail-1.json",
+    "review": "/Users/yoonhb/.cache/maru-agent-artifacts/deferred-retry-review-1"
+  }
+}

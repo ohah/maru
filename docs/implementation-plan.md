@@ -1799,6 +1799,7 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [Save As 중 표시된 호버·시그니처 수명](plans/lsp-tooltip-save-as.md): 이미 표시된 시그니처의 이전 대상 잔존을 수정하고 호버와 분리해 실제 대상 적용·취소·실패를 대조한다.
 - [Save As 중 코드 액션 메뉴 수명](plans/lsp-code-action-save-as.md): 이전 메뉴 선택이 원본 디스크를 편집하는 결함을 수정하고 목록·메뉴·resolve 원본을 각각 정리한다.
 - [Save As와 위치 결과 목록의 탐색 계약](plans/lsp-location-picker-save-as.md): 복사된 경로의 탐색을 보존하고 새 서버 요청이 기존 목록의 위치 인코딩을 바꾸는 결함을 수정한다.
+- [코드 액션 결과의 인코딩](plans/lsp-code-action-result-encoding.md): 재시작 전 복사 항목의 위치를 새 서버 인코딩으로 해석하는 문제를 수정한다.
 - [코드 액션 메뉴의 버전 기록](plans/lsp-code-action-menu-snapshot.md): 새 목록이 이전 메뉴의 문서 버전을 갱신해 오래된 편집을 허용하는 문제를 수정한다.
 - [위치 검색 요청 게시](plans/lsp-location-request-publication.md): 전송 실패한 새 명령이 기존 응답의 검색 종류를 바꾸는 문제를 수정한다.
 - [위치 검색 서버 재시작](plans/lsp-location-server-restart.md): 실제 종료·새 PID의 재검색과 다른 root 종료·끄기/켜기를 검증한다.

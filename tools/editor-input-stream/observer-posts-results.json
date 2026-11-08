@@ -1,0 +1,916 @@
+{
+  "kind": "observer-posts-summary",
+  "head": "975bf56b792c7baf869eaf3bee0174ecadd9a33b",
+  "app_sha256": "727d95c2f02f629d3d87801223971486acc84dbc11118a484606d6c83ad49f87",
+  "processes": 24,
+  "inputs": 720,
+  "groups": {
+    "repeated_posts-without_retry-typing": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 34.895583,
+        "p95_ms": 44.845666,
+        "maximum_ms": 68.151958
+      },
+      "last_syntax_median_ms": 52.385875,
+      "runs": [
+        {
+          "path": "typing-0",
+          "idle_wall_seconds": 2.000423416,
+          "process_cpu_ms": 237.489,
+          "driver_cpu_ms": 142.212376,
+          "other_process_cpu_ms": 95.276624,
+          "checks": 119,
+          "read_attempts": 119,
+          "reads": 119,
+          "parses": 119,
+          "cache_hits": 0,
+          "posts_cpu_ms": 29.738911,
+          "other_driver_cpu_ms": 112.473465,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "typing-1",
+          "idle_wall_seconds": 2.016380625,
+          "process_cpu_ms": 248.753,
+          "driver_cpu_ms": 151.429169,
+          "other_process_cpu_ms": 97.32383099999998,
+          "checks": 121,
+          "read_attempts": 121,
+          "reads": 121,
+          "parses": 121,
+          "cache_hits": 0,
+          "posts_cpu_ms": 30.018542,
+          "other_driver_cpu_ms": 121.410627,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "typing-2",
+          "idle_wall_seconds": 2.000831125,
+          "process_cpu_ms": 188.903,
+          "driver_cpu_ms": 112.713785,
+          "other_process_cpu_ms": 76.18921499999999,
+          "checks": 120,
+          "read_attempts": 120,
+          "reads": 120,
+          "parses": 120,
+          "cache_hits": 0,
+          "posts_cpu_ms": 24.203207,
+          "other_driver_cpu_ms": 88.51057800000001,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        }
+      ]
+    },
+    "repeated_posts-without_retry-shared": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 32.900062500000004,
+        "p95_ms": 41.202917,
+        "maximum_ms": 78.894666
+      },
+      "last_syntax_median_ms": 44.316958,
+      "runs": [
+        {
+          "path": "shared-0",
+          "idle_wall_seconds": 2.000953334,
+          "process_cpu_ms": 254.761,
+          "driver_cpu_ms": 161.88692,
+          "other_process_cpu_ms": 92.87407999999999,
+          "checks": 120,
+          "read_attempts": 120,
+          "reads": 120,
+          "parses": 120,
+          "cache_hits": 0,
+          "posts_cpu_ms": 31.308753,
+          "other_driver_cpu_ms": 130.578167,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "shared-1",
+          "idle_wall_seconds": 2.00192825,
+          "process_cpu_ms": 120.481,
+          "driver_cpu_ms": 66.377995,
+          "other_process_cpu_ms": 54.103004999999996,
+          "checks": 120,
+          "read_attempts": 120,
+          "reads": 120,
+          "parses": 120,
+          "cache_hits": 0,
+          "posts_cpu_ms": 17.537161,
+          "other_driver_cpu_ms": 48.840834,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "shared-2",
+          "idle_wall_seconds": 2.00174475,
+          "process_cpu_ms": 232.97,
+          "driver_cpu_ms": 140.018876,
+          "other_process_cpu_ms": 92.951124,
+          "checks": 120,
+          "read_attempts": 120,
+          "reads": 120,
+          "parses": 120,
+          "cache_hits": 0,
+          "posts_cpu_ms": 28.898958,
+          "other_driver_cpu_ms": 111.11991800000001,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        }
+      ]
+    },
+    "repeated_posts-with_retry-typing": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 32.532270999999994,
+        "p95_ms": 45.547959,
+        "maximum_ms": 57.532083
+      },
+      "last_syntax_median_ms": 48.215666,
+      "runs": [
+        {
+          "path": "typing-0",
+          "idle_wall_seconds": 2.000392708,
+          "process_cpu_ms": 230.63,
+          "driver_cpu_ms": 140.404124,
+          "other_process_cpu_ms": 90.225876,
+          "checks": 120,
+          "read_attempts": 120,
+          "reads": 120,
+          "parses": 120,
+          "cache_hits": 0,
+          "posts_cpu_ms": 28.313499,
+          "other_driver_cpu_ms": 112.09062499999999,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "typing-1",
+          "idle_wall_seconds": 2.01438675,
+          "process_cpu_ms": 213.48,
+          "driver_cpu_ms": 122.17204,
+          "other_process_cpu_ms": 91.30796,
+          "checks": 121,
+          "read_attempts": 121,
+          "reads": 121,
+          "parses": 121,
+          "cache_hits": 0,
+          "posts_cpu_ms": 25.802921,
+          "other_driver_cpu_ms": 96.369119,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "typing-2",
+          "idle_wall_seconds": 2.000448084,
+          "process_cpu_ms": 186.89,
+          "driver_cpu_ms": 109.18605,
+          "other_process_cpu_ms": 77.70394999999999,
+          "checks": 120,
+          "read_attempts": 120,
+          "reads": 120,
+          "parses": 120,
+          "cache_hits": 0,
+          "posts_cpu_ms": 23.801876,
+          "other_driver_cpu_ms": 85.384174,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        }
+      ]
+    },
+    "repeated_posts-with_retry-shared": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 33.947041999999996,
+        "p95_ms": 43.485,
+        "maximum_ms": 61.030666
+      },
+      "last_syntax_median_ms": 49.466042,
+      "runs": [
+        {
+          "path": "shared-0",
+          "idle_wall_seconds": 2.014610333,
+          "process_cpu_ms": 198.107,
+          "driver_cpu_ms": 114.214633,
+          "other_process_cpu_ms": 83.892367,
+          "checks": 121,
+          "read_attempts": 121,
+          "reads": 121,
+          "parses": 121,
+          "cache_hits": 0,
+          "posts_cpu_ms": 24.111802,
+          "other_driver_cpu_ms": 90.10283100000001,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "shared-1",
+          "idle_wall_seconds": 2.018808084,
+          "process_cpu_ms": 259.094,
+          "driver_cpu_ms": 153.057499,
+          "other_process_cpu_ms": 106.03650099999999,
+          "checks": 121,
+          "read_attempts": 121,
+          "reads": 121,
+          "parses": 121,
+          "cache_hits": 0,
+          "posts_cpu_ms": 33.97688,
+          "other_driver_cpu_ms": 119.08061900000001,
+          "idle_retry_requests": 1,
+          "idle_extra_session_ticks": 1
+        },
+        {
+          "path": "shared-2",
+          "idle_wall_seconds": 2.019053541,
+          "process_cpu_ms": 208.967,
+          "driver_cpu_ms": 125.38467,
+          "other_process_cpu_ms": 83.58233000000001,
+          "checks": 121,
+          "read_attempts": 121,
+          "reads": 121,
+          "parses": 121,
+          "cache_hits": 0,
+          "posts_cpu_ms": 27.725917,
+          "other_driver_cpu_ms": 97.658753,
+          "idle_retry_requests": 1,
+          "idle_extra_session_ticks": 1
+        }
+      ]
+    },
+    "cached_posts-without_retry-typing": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 36.251771000000005,
+        "p95_ms": 46.754167,
+        "maximum_ms": 59.721
+      },
+      "last_syntax_median_ms": 53.335167,
+      "runs": [
+        {
+          "path": "typing-0",
+          "idle_wall_seconds": 2.000406042,
+          "process_cpu_ms": 183.837,
+          "driver_cpu_ms": 97.685584,
+          "other_process_cpu_ms": 86.15141599999998,
+          "checks": 120,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 120,
+          "posts_cpu_ms": 0.096758,
+          "other_driver_cpu_ms": 97.58882600000001,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "typing-1",
+          "idle_wall_seconds": 2.001947166,
+          "process_cpu_ms": 156.818,
+          "driver_cpu_ms": 81.487459,
+          "other_process_cpu_ms": 75.33054100000001,
+          "checks": 119,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 119,
+          "posts_cpu_ms": 0.086161,
+          "other_driver_cpu_ms": 81.401298,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "typing-2",
+          "idle_wall_seconds": 2.014136417,
+          "process_cpu_ms": 194.711,
+          "driver_cpu_ms": 115.670333,
+          "other_process_cpu_ms": 79.04066700000001,
+          "checks": 121,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 121,
+          "posts_cpu_ms": 0.10067,
+          "other_driver_cpu_ms": 115.569663,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        }
+      ]
+    },
+    "cached_posts-without_retry-shared": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 36.010813,
+        "p95_ms": 46.644541,
+        "maximum_ms": 71.267583
+      },
+      "last_syntax_median_ms": 54.634875,
+      "runs": [
+        {
+          "path": "shared-0",
+          "idle_wall_seconds": 2.013560125,
+          "process_cpu_ms": 170.564,
+          "driver_cpu_ms": 86.197377,
+          "other_process_cpu_ms": 84.36662299999999,
+          "checks": 121,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 121,
+          "posts_cpu_ms": 0.07962,
+          "other_driver_cpu_ms": 86.117757,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "shared-1",
+          "idle_wall_seconds": 2.019246542,
+          "process_cpu_ms": 189.849,
+          "driver_cpu_ms": 97.642712,
+          "other_process_cpu_ms": 92.20628799999999,
+          "checks": 121,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 121,
+          "posts_cpu_ms": 0.090495,
+          "other_driver_cpu_ms": 97.552217,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "shared-2",
+          "idle_wall_seconds": 2.018865542,
+          "process_cpu_ms": 205.192,
+          "driver_cpu_ms": 112.157502,
+          "other_process_cpu_ms": 93.03449800000001,
+          "checks": 121,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 121,
+          "posts_cpu_ms": 0.102716,
+          "other_driver_cpu_ms": 112.054786,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        }
+      ]
+    },
+    "cached_posts-with_retry-typing": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 28.3642085,
+        "p95_ms": 43.496542,
+        "maximum_ms": 56.953291
+      },
+      "last_syntax_median_ms": 47.88625,
+      "runs": [
+        {
+          "path": "typing-0",
+          "idle_wall_seconds": 2.019480666,
+          "process_cpu_ms": 223.068,
+          "driver_cpu_ms": 122.728165,
+          "other_process_cpu_ms": 100.33983500000001,
+          "checks": 121,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 121,
+          "posts_cpu_ms": 0.107213,
+          "other_driver_cpu_ms": 122.620952,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "typing-1",
+          "idle_wall_seconds": 2.000584375,
+          "process_cpu_ms": 83.534,
+          "driver_cpu_ms": 36.233202,
+          "other_process_cpu_ms": 47.30079800000001,
+          "checks": 120,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 120,
+          "posts_cpu_ms": 0.059127,
+          "other_driver_cpu_ms": 36.174075,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "typing-2",
+          "idle_wall_seconds": 2.016593,
+          "process_cpu_ms": 181.202,
+          "driver_cpu_ms": 98.107835,
+          "other_process_cpu_ms": 83.094165,
+          "checks": 121,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 121,
+          "posts_cpu_ms": 0.096409,
+          "other_driver_cpu_ms": 98.011426,
+          "idle_retry_requests": 1,
+          "idle_extra_session_ticks": 1
+        }
+      ]
+    },
+    "cached_posts-with_retry-shared": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 33.332458,
+        "p95_ms": 44.84575,
+        "maximum_ms": 60.677458
+      },
+      "last_syntax_median_ms": 52.513625,
+      "runs": [
+        {
+          "path": "shared-0",
+          "idle_wall_seconds": 2.001102875,
+          "process_cpu_ms": 171.364,
+          "driver_cpu_ms": 91.165539,
+          "other_process_cpu_ms": 80.19846100000001,
+          "checks": 119,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 119,
+          "posts_cpu_ms": 0.080417,
+          "other_driver_cpu_ms": 91.085122,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "shared-1",
+          "idle_wall_seconds": 2.00024775,
+          "process_cpu_ms": 216.125,
+          "driver_cpu_ms": 123.261549,
+          "other_process_cpu_ms": 92.863451,
+          "checks": 120,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 120,
+          "posts_cpu_ms": 0.106751,
+          "other_driver_cpu_ms": 123.154798,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        },
+        {
+          "path": "shared-2",
+          "idle_wall_seconds": 2.000742541,
+          "process_cpu_ms": 198.259,
+          "driver_cpu_ms": 109.942,
+          "other_process_cpu_ms": 88.317,
+          "checks": 120,
+          "read_attempts": 0,
+          "reads": 0,
+          "parses": 0,
+          "cache_hits": 120,
+          "posts_cpu_ms": 0.115921,
+          "other_driver_cpu_ms": 109.826079,
+          "idle_retry_requests": 0,
+          "idle_extra_session_ticks": 0
+        }
+      ]
+    }
+  },
+  "paired_cache_minus_repeat_process_cpu_ms": {
+    "without_retry-typing": [
+      -53.652000000000015,
+      -91.93499999999997,
+      5.808000000000021
+    ],
+    "without_retry-shared": [
+      -84.197,
+      69.368,
+      -27.77799999999999
+    ],
+    "with_retry-typing": [
+      -7.561999999999983,
+      -129.94599999999997,
+      -5.687999999999988
+    ],
+    "with_retry-shared": [
+      -26.742999999999995,
+      -42.968999999999994,
+      -10.708000000000027
+    ]
+  },
+  "shared_first_display_tail": {
+    "repeated_posts-without_retry": [
+      {
+        "path": "shared-1",
+        "sequence": 3,
+        "total_ms": 41.202917,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 1.995458,
+          "native_to_tick": 9.997584,
+          "tick_to_permit": 0.031458,
+          "projection": 1.780333,
+          "tick_finalize": 0.020167,
+          "wait_for_swift": 0.001417,
+          "swift": 0.010166,
+          "renderer": 0.164667,
+          "arm_to_commit": 0.003708,
+          "commit_to_present": 27.197959
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-0",
+        "sequence": 3,
+        "total_ms": 47.405542,
+        "denied_before_first_frame": 1,
+        "parts_ms": {
+          "post_to_native": 0.398542,
+          "native_to_tick": 23.035208,
+          "tick_to_permit": 0.031334,
+          "projection": 1.647083,
+          "tick_finalize": 0.014417,
+          "wait_for_swift": 0.001583,
+          "swift": 0.012042,
+          "renderer": 0.174041,
+          "arm_to_commit": 0.003917,
+          "commit_to_present": 22.087375
+        },
+        "denial_context": [
+          {
+            "previous_prefix": 2,
+            "budget_due_after_native_ms": 9.609584,
+            "next_permit_after_due_ms": 13.456958,
+            "next_permit_is_first_frame": true,
+            "matching_install_after_native_ms": 27.64075,
+            "matching_install_after_next_permit": true
+          }
+        ]
+      },
+      {
+        "path": "shared-1",
+        "sequence": 1,
+        "total_ms": 47.588875,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 11.679667,
+          "native_to_tick": 13.511541,
+          "tick_to_permit": 0.040459,
+          "projection": 2.150125,
+          "tick_finalize": 0.017333,
+          "wait_for_swift": 0.001875,
+          "swift": 0.017333,
+          "renderer": 0.208834,
+          "arm_to_commit": 0.004458,
+          "commit_to_present": 19.95725
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-2",
+        "sequence": 1,
+        "total_ms": 53.001083,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 18.136583,
+          "native_to_tick": 17.139792,
+          "tick_to_permit": 0.042291,
+          "projection": 2.712542,
+          "tick_finalize": 0.021208,
+          "wait_for_swift": 0.001917,
+          "swift": 0.018417,
+          "renderer": 0.2455,
+          "arm_to_commit": 0.00525,
+          "commit_to_present": 14.677583
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-0",
+        "sequence": 1,
+        "total_ms": 78.894666,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 30.112458,
+          "native_to_tick": 19.10375,
+          "tick_to_permit": 0.038542,
+          "projection": 2.67,
+          "tick_finalize": 0.023333,
+          "wait_for_swift": 0.002292,
+          "swift": 0.026125,
+          "renderer": 0.232625,
+          "arm_to_commit": 0.004958,
+          "commit_to_present": 26.680583
+        },
+        "denial_context": []
+      }
+    ],
+    "repeated_posts-with_retry": [
+      {
+        "path": "shared-2",
+        "sequence": 22,
+        "total_ms": 43.485,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 0.401,
+          "native_to_tick": 16.476208,
+          "tick_to_permit": 0.035459,
+          "projection": 1.777333,
+          "tick_finalize": 0.015458,
+          "wait_for_swift": 0.002625,
+          "swift": 0.016084,
+          "renderer": 0.157208,
+          "arm_to_commit": 0.003833,
+          "commit_to_present": 24.599792
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-2",
+        "sequence": 19,
+        "total_ms": 43.878125,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 0.391542,
+          "native_to_tick": 14.294458,
+          "tick_to_permit": 0.03425,
+          "projection": 1.840458,
+          "tick_finalize": 0.019834,
+          "wait_for_swift": 0.0025,
+          "swift": 0.014166,
+          "renderer": 0.173875,
+          "arm_to_commit": 0.00425,
+          "commit_to_present": 27.102792
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-2",
+        "sequence": 1,
+        "total_ms": 48.181708,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 12.413583,
+          "native_to_tick": 11.3855,
+          "tick_to_permit": 0.035917,
+          "projection": 1.9575,
+          "tick_finalize": 0.016417,
+          "wait_for_swift": 0.00175,
+          "swift": 0.017874,
+          "renderer": 0.176126,
+          "arm_to_commit": 0.004125,
+          "commit_to_present": 22.172916
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-0",
+        "sequence": 1,
+        "total_ms": 56.057625,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 18.300041,
+          "native_to_tick": 16.905917,
+          "tick_to_permit": 0.041125,
+          "projection": 2.644875,
+          "tick_finalize": 0.021167,
+          "wait_for_swift": 0.002042,
+          "swift": 0.019,
+          "renderer": 0.226041,
+          "arm_to_commit": 0.005125,
+          "commit_to_present": 17.892292
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-1",
+        "sequence": 1,
+        "total_ms": 61.030666,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 16.159958,
+          "native_to_tick": 16.128417,
+          "tick_to_permit": 0.036624,
+          "projection": 2.458126,
+          "tick_finalize": 0.020833,
+          "wait_for_swift": 0.002292,
+          "swift": 0.019791,
+          "renderer": 0.211459,
+          "arm_to_commit": 0.005125,
+          "commit_to_present": 25.988041
+        },
+        "denial_context": []
+      }
+    ],
+    "cached_posts-without_retry": [
+      {
+        "path": "shared-2",
+        "sequence": 5,
+        "total_ms": 46.644541,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 0.784583,
+          "native_to_tick": 19.286708,
+          "tick_to_permit": 0.031542,
+          "projection": 1.655708,
+          "tick_finalize": 0.014709,
+          "wait_for_swift": 0.001958,
+          "swift": 0.012042,
+          "renderer": 0.186208,
+          "arm_to_commit": 0.004208,
+          "commit_to_present": 24.666875
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-0",
+        "sequence": 2,
+        "total_ms": 52.067166,
+        "denied_before_first_frame": 1,
+        "parts_ms": {
+          "post_to_native": 8.624583,
+          "native_to_tick": 16.788583,
+          "tick_to_permit": 0.027917,
+          "projection": 1.949292,
+          "tick_finalize": 0.016833,
+          "wait_for_swift": 0.002458,
+          "swift": 0.013459,
+          "renderer": 0.156541,
+          "arm_to_commit": 0.004209,
+          "commit_to_present": 24.483291
+        },
+        "denial_context": [
+          {
+            "previous_prefix": 1,
+            "budget_due_after_native_ms": 9.535625,
+            "next_permit_after_due_ms": 7.280875,
+            "next_permit_is_first_frame": true,
+            "matching_install_after_native_ms": 28.980125,
+            "matching_install_after_next_permit": true
+          }
+        ]
+      },
+      {
+        "path": "shared-0",
+        "sequence": 1,
+        "total_ms": 60.636541,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 15.385083,
+          "native_to_tick": 16.847833,
+          "tick_to_permit": 0.03975,
+          "projection": 2.624459,
+          "tick_finalize": 0.021208,
+          "wait_for_swift": 0.002083,
+          "swift": 0.019292,
+          "renderer": 0.230125,
+          "arm_to_commit": 0.005333,
+          "commit_to_present": 25.461375
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-2",
+        "sequence": 1,
+        "total_ms": 69.312292,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 22.242583,
+          "native_to_tick": 17.454459,
+          "tick_to_permit": 0.036917,
+          "projection": 2.619708,
+          "tick_finalize": 0.023042,
+          "wait_for_swift": 0.001958,
+          "swift": 0.020583,
+          "renderer": 0.238792,
+          "arm_to_commit": 0.005333,
+          "commit_to_present": 26.668917
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-1",
+        "sequence": 1,
+        "total_ms": 71.267583,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 26.880042,
+          "native_to_tick": 17.534041,
+          "tick_to_permit": 0.038625,
+          "projection": 2.634459,
+          "tick_finalize": 0.024083,
+          "wait_for_swift": 0.002,
+          "swift": 0.019666,
+          "renderer": 0.254167,
+          "arm_to_commit": 0.007,
+          "commit_to_present": 23.8735
+        },
+        "denial_context": []
+      }
+    ],
+    "cached_posts-with_retry": [
+      {
+        "path": "shared-2",
+        "sequence": 26,
+        "total_ms": 44.84575,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 0.3715,
+          "native_to_tick": 17.885292,
+          "tick_to_permit": 0.037708,
+          "projection": 2.000042,
+          "tick_finalize": 0.020833,
+          "wait_for_swift": 0.002542,
+          "swift": 0.018416,
+          "renderer": 0.177542,
+          "arm_to_commit": 0.004958,
+          "commit_to_present": 24.326917
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-0",
+        "sequence": 1,
+        "total_ms": 45.584334,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 12.858084,
+          "native_to_tick": 14.99475,
+          "tick_to_permit": 0.043333,
+          "projection": 2.469834,
+          "tick_finalize": 0.022458,
+          "wait_for_swift": 0.002375,
+          "swift": 0.022083,
+          "renderer": 0.22075,
+          "arm_to_commit": 0.005084,
+          "commit_to_present": 14.945583
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-1",
+        "sequence": 2,
+        "total_ms": 47.433,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 5.786084,
+          "native_to_tick": 12.38825,
+          "tick_to_permit": 0.039916,
+          "projection": 2.005333,
+          "tick_finalize": 0.017167,
+          "wait_for_swift": 0.002,
+          "swift": 0.014875,
+          "renderer": 0.194458,
+          "arm_to_commit": 0.004417,
+          "commit_to_present": 26.9805
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-2",
+        "sequence": 1,
+        "total_ms": 53.192625,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 12.936125,
+          "native_to_tick": 17.263042,
+          "tick_to_permit": 0.047542,
+          "projection": 2.934333,
+          "tick_finalize": 0.026375,
+          "wait_for_swift": 0.002167,
+          "swift": 0.020666,
+          "renderer": 0.258167,
+          "arm_to_commit": 0.005333,
+          "commit_to_present": 19.698875
+        },
+        "denial_context": []
+      },
+      {
+        "path": "shared-1",
+        "sequence": 1,
+        "total_ms": 60.677458,
+        "denied_before_first_frame": 0,
+        "parts_ms": {
+          "post_to_native": 16.969624,
+          "native_to_tick": 16.274417,
+          "tick_to_permit": 0.044584,
+          "projection": 2.585666,
+          "tick_finalize": 0.020333,
+          "wait_for_swift": 0.001709,
+          "swift": 0.020541,
+          "renderer": 0.227959,
+          "arm_to_commit": 0.004833,
+          "commit_to_present": 24.527792
+        },
+        "denial_context": []
+      }
+    ]
+  },
+  "artifacts": {
+    "study": "/Users/yoonhb/.cache/maru-agent-artifacts/observer-posts-study-1",
+    "tail": "/Users/yoonhb/.cache/maru-agent-artifacts/observer-posts-tail-1.json",
+    "review": "/Users/yoonhb/.cache/maru-agent-artifacts/observer-posts-review-1"
+  }
+}

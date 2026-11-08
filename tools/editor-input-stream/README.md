@@ -175,3 +175,8 @@ thread CPU를 분리한다. [귀속·재현 결과와 재예약 보완 지점](f
 `deferred_retry_review.py`가 실제 자료의 거절 기한·요청 정산 손상을 검사한다.
 유휴 새 요청은 원시 거절과 맞아야 하며, 기존 실험의 무요청 계약을 완화하지 않는다.
 실측 결과와 제품 적용 판단은 [재시도 비교](deferred-retry-results.md)를 따른다.
+
+
+`--observer-posts-control`은 완료 JSON을 매 tick 다시 읽는 방식과 성공한 원문을 재사용하는 방식을
+같은 앱에서 비교한다. `observer_posts_study.py`는 이를 재시도 없음/연결과 교차해 수집한다.
+작업별 CPU·원문 신원·실제 재사용 검증과 후속 결과는 [JSON 관측 비용 분리](observer-posts-results.md)를 따른다.

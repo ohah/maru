@@ -37,7 +37,7 @@ def read(root):
         expected = ['without_retry','with_retry'] if rep%2 == 0 else ['with_retry','without_retry']
         verify.require(pair['order'] == expected, 'frame wake comparison order')
     here = Path(__file__).resolve().parent
-    readers = ('deferred_retry_report.py','deferred_retry_control.py','frame_wake_report.py','parse_stage_report.py','frame_wake_control.py','display_stages.py','verify.py','protocol.py','summary_control.py','fold_control.py','bracket_control.py','fold_reuse_control.py','target_frame_control.py','target_frame_budget.c.inc','observer_cpu.py')
+    readers = ('observer_posts_control.py','deferred_retry_report.py','deferred_retry_control.py','frame_wake_report.py','parse_stage_report.py','frame_wake_control.py','display_stages.py','verify.py','protocol.py','summary_control.py','fold_control.py','bracket_control.py','fold_reuse_control.py','target_frame_control.py','target_frame_budget.c.inc','observer_cpu.py')
     return dict(kind='deferred-frame-comparison',variant='target-coalesced' if study['source'].get('target_frame_control') else 'global-tick',reader_dependencies={name:verify.sha(here/name) for name in readers},**reports)
 
 

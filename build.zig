@@ -1708,6 +1708,11 @@ pub fn build(b: *std.Build) void {
     });
     const run_terminal_environment = b.addRunArtifact(terminal_environment_tests);
     b.step("test-terminal-environment", "Verify inherited launcher color and terminal environment isolation").dependOn(&run_terminal_environment.step);
+    const syntax_paint_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"syntax paint"} });
+    const run_syntax_paint = b.addRunArtifact(syntax_paint_tests);
+    run_syntax_paint.addArg("--maru-expect-tests=32");
+    run_syntax_paint.addArg("--maru-expect-passed=32");
+    b.step("test-editor-syntax-paint", "Verify mapped display roles without native syntax ownership").dependOn(&run_syntax_paint.step);
     const parse_request_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"parse request gate"} });
     const run_parse_request = b.addRunArtifact(parse_request_tests);
     run_parse_request.addArg("--maru-expect-tests=36");
@@ -7367,8 +7372,10 @@ pub fn build(b: *std.Build) void {
     const parse_input_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"ASYNCINPUT"} });
     const run_parse_input = b.addRunArtifact(parse_input_tests);
     run_parse_input.setCwd(b.path("."));
-    run_parse_input.addArg(if (target.result.os.tag == .macos) "--maru-expect-tests=10" else "--maru-expect-tests=7");
-    run_parse_input.addArg(if (target.result.os.tag == .macos) "--maru-expect-passed=10" else "--maru-expect-passed=1");
+    run_parse_input.addArg(if (target.result.os.tag == .macos) "--maru-expect-tests=11" else "--maru-expect-tests=8");
+    run_parse_input.addArg(if (target.result.os.tag == .macos) "--maru-expect-passed=11" else "--maru-expect-passed=1");
+    test_step.dependOn(&run_syntax_paint.step);
+    run_parse_input.step.dependOn(&run_syntax_paint.step);
     b.step("test-editor-parse-input", "Verify actual asynchronous editor input and view completion").dependOn(&run_parse_input.step);
     test_step.dependOn(&run_parse_input.step);
     macos_only_test_step.dependOn(&run_parse_input.step);

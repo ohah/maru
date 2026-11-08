@@ -29,12 +29,25 @@ pub fn init() colors.State {
 
 /// 편집 경로에서 한 번 호출한다. 프레임마다 새 작업을 게시하거나 실패한 엔진을 재생성하지 않는다.
 pub fn refresh(session: *host.AppSession, term: *host.Term) void {
+    refreshImpl(session, term, null);
+}
+
+pub fn refreshForEdit(session: *host.AppSession, term: *host.Term, edit: ?colors.EditSpan) void {
+    refreshImpl(session, term, edit);
+}
+
+fn refreshImpl(session: *host.AppSession, term: *host.Term, edit: ?colors.EditSpan) void {
     if (!ordinary(term)) return;
     dispatch.onCompleted(completed);
     const current = input(term) orelse return;
     const state = &term.rt.editor_syntax;
+    const previous = state.async_view.input;
     if (!state.async_view.begin(current, key(term))) return;
-    state.discardCompleted();
+    const mapped: ?maru.syntax_paint.Edit = if (edit) |value| .{ .start = value.start, .old_end = value.old_end, .new_end = value.new_end } else null;
+    const length = term.rt.editorDocument().opened.?.file.content.len;
+    state.bufs.paint.advance(previous, current, mapped, length, &state.bufs.byte_spans);
+    state.minimap_bufs.paint.advance(previous, current, mapped, length, &state.minimap_bufs.byte_spans);
+    state.discardForPaint(true);
     const lease = term.rt.editor_document_lease.?;
     if (state.async_view.blocked(key(term))) {
         state.pending = false;

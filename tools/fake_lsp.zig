@@ -214,6 +214,28 @@ pub fn main(init: std.process.Init) void {
     }
 }
 
+// The CAREGISTRY fixture deliberately reuses token 1 in each new process.
+// Its registry is populated by an actual list request, never by resolve data.
+var action_registry_populated = false;
+
+fn actionRegistryLog(allocator: std.mem.Allocator, uri: []const u8, event: []const u8, wire: std.json.ObjectMap) void {
+    if (!std.mem.startsWith(u8, uri, "file://") or std.mem.indexOfScalar(u8, uri, '%') != null) return;
+    var path: [std.fs.max_path_bytes + 64]u8 = undefined;
+    const z = std.fmt.bufPrintSentinel(&path, "{s}.registry.jsonl", .{uri[7..]}, 0) catch return;
+    const fd = std.c.open(z, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    const line = std.json.Stringify.valueAlloc(allocator, .{ .event = event, .pid = std.c.getpid(), .registered = action_registry_populated, .wire = std.json.Value{ .object = wire } }, .{}) catch return;
+    defer allocator.free(line);
+    var n: usize = 0;
+    while (n < line.len) {
+        const wrote = std.c.write(fd, line[n..].ptr, line.len - n);
+        if (wrote <= 0) return;
+        n += @intCast(wrote);
+    }
+    _ = std.c.write(fd, "\n", 1);
+}
+
 var answered = false;
 /// 보조 서버 역할로 떴다(첫 인자 `server`).
 var auxiliary = false;
@@ -809,6 +831,14 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         };
     };
     const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "CAREGISTRY") != null) {
+        action_registry_populated = true;
+        actionRegistryLog(allocator, req_uri, "list", obj);
+        var title: [64]u8 = undefined;
+        const label = std.fmt.bufPrint(&title, "registry:{d}", .{std.c.getpid()}) catch return;
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{.{ .title = label, .data = .{ .uri = req_uri, .token = @as(u32, 1), .registry_probe = true } }} });
+        return;
+    }
     if (auxiliary and std.mem.indexOf(u8, text, "AUXSTALL") != null) return; // 보조 서버가 메뉴 요청에 답하지 않는다(시한 관측점)
     if (auxiliary and std.mem.indexOf(u8, text, "AUXSLOW") != null) _ = usleep(150_000); // 늦지만 시한 안에 답한다
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -1081,10 +1111,38 @@ fn lazyItem(arena: std.mem.Allocator, it: *std.json.ObjectMap, uri: []const u8, 
 fn handleCodeActionResolve(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
     var uri: []const u8 = "";
     var data_edit: ?std.json.Value = null;
+    var registry_probe = false;
     if (obj.get("params")) |p| if (p == .object) if (p.object.get("data")) |d| if (d == .object) {
         uri = str(d.object.get("uri")) orelse "";
         data_edit = d.object.get("edit");
+        if (d.object.get("registry_probe")) |v| registry_probe = v == .bool and v.bool;
     };
+    if (registry_probe) {
+        actionRegistryLog(allocator, uri, "resolve", obj);
+        const params = obj.get("params") orelse return;
+        const data = params.object.get("data") orelse return;
+        const token = data.object.get("token") orelse return;
+        if (!action_registry_populated or token != .integer or token.integer != 1) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32602), .message = "unknown registry token" } });
+            return;
+        }
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const inserted = std.fmt.allocPrint(arena, "// registry {d}\n", .{std.c.getpid()}) catch return;
+        var edits: std.json.Array = .init(arena);
+        edits.append(editValue(arena, 0, 0, 0, inserted) catch return) catch return;
+        var changes: std.json.ObjectMap = .empty;
+        changes.put(arena, uri, .{ .array = edits }) catch return;
+        var edit: std.json.ObjectMap = .empty;
+        edit.put(arena, "changes", .{ .object = changes }) catch return;
+        var resolved: std.json.ObjectMap = .empty;
+        var fields = params.object.iterator();
+        while (fields.next()) |field| resolved.put(arena, field.key_ptr.*, field.value_ptr.*) catch return;
+        resolved.put(arena, "edit", .{ .object = edit }) catch return;
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .object = resolved } });
+        return;
+    }
     // Biome 꼴은 항목을 낼 때 미뤄 둔 편집을 돌려준다 — 다른 역할이 받으면 아래 제 글(`# aux lazy`)이라 어느 서버가 resolve 했는지 보인다.
     if (biome_mode) if (data_edit) |e| {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .title = "biome: resolved", .edit = e } });

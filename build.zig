@@ -6734,6 +6734,16 @@ pub fn build(b: *std.Build) void {
         run_definition_origins.addArg("--maru-expect-passed=8");
         macos_only_test_step.dependOn(&run_definition_origins.step);
     }
+    const action_registry_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CAREG"} });
+    const run_action_registry = b.addRunArtifact(action_registry_tests);
+    run_action_registry.setCwd(b.path("."));
+    run_action_registry.addArg("--maru-expect-tests=7");
+    run_action_registry.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-code-action-restart-data", "Probe process-owned code action registry data across server restart").dependOn(&run_action_registry.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_action_registry.addArg("--maru-expect-passed=7");
+        macos_only_test_step.dependOn(&run_action_registry.step);
+    }
     const action_encoding_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CAENC"} });
     const run_action_encoding = b.addRunArtifact(action_encoding_tests);
     run_action_encoding.setCwd(b.path("."));

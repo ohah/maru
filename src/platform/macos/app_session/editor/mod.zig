@@ -76348,6 +76348,146 @@ test "LOCSAVE5 pending location responses retain target lifetime guards after ac
     };
 }
 
+// Process-owned registry tokens are exercised over the real fake-server wire.
+fn actionRegistryRestartForTest(f: *SmtFixture, pid: std.c.pid_t) !void {
+    const s = f.fx.session;
+    const owner = lsp_client.readyClientFor(s, f.term).?;
+    try testing.expectEqual(@as(c_int, 0), std.c.kill(pid, std.c.SIG.KILL));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, owner, struct {
+        fn down(c: *lsp_client.Client) bool {
+            return c.phase == .restarting;
+        }
+    }.down));
+    owner.retry_at_ms = 0; // Explicit clock seam; the new process and wire are real.
+    const Ctx = struct { s: *AppSession, term: *Term, pid: std.c.pid_t };
+    try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = s, .term = f.term, .pid = pid }, struct {
+        fn up(c: Ctx) bool {
+            return (lsp_client.readyClientFor(c.s, c.term) orelse return false).proc.?.pid != c.pid;
+        }
+    }.up));
+}
+fn actionRegistryForTest(old_utf16: bool, new_utf16: bool, mode: u8) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    locationSaveEncodingForTest(old_utf16);
+    defer _ = unsetenv("MARU_FAKE_LSP_UTF16");
+    const source = "int a; // CAREGISTRY\n";
+    var f = (try SmtFixture.openRepo(testing.allocator, "source.c", source)) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(term_ops.activateSurfaceById(s, term.surface.id));
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    var frame = appendPaneFrame(s, activeLeafRectForTest(s).?, term) orelse return error.EditorPaneDidNotDraw;
+    frame.dl.deinit(testing.allocator);
+    if (mode == 8) _ = maru.session.editor.lsp_response_owner.Connection.issue(&s.editor_lsp.last_process_generation).?;
+    try testing.expect(code_action_client.quickFix(s));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, struct {
+        fn done(session: *AppSession) bool {
+            return session.code_action_menu and !session.editor_code_action.waiting;
+        }
+    }.done));
+    const owner = lsp_client.readyClientFor(s, term).?;
+    const old_pid = owner.proc.?.pid;
+    try testing.expectEqual(@as(maru.session.editor.lsp.rpc.PositionEncoding, if (old_utf16) .utf16 else .utf8), owner.encoding);
+    var old_title_buf: [64]u8 = undefined;
+    const old_title = try std.fmt.bufPrint(&old_title_buf, "registry:{d}", .{old_pid});
+    try testing.expectEqualStrings(old_title, s.editor_code_action.items.items[0].title);
+    if (mode < 5 or mode == 9) {
+        locationSaveEncodingForTest(new_utf16);
+        if (mode == 9) {
+            const issued = s.editor_lsp.last_process_generation;
+            s.loaded_config.config.lsp.enabled = false;
+            lsp_client.pump(s);
+            try testing.expectEqual(@as(usize, 0), s.editor_lsp.clients.items.len);
+            try testing.expectEqual(issued, s.editor_lsp.last_process_generation);
+            s.loaded_config.config.lsp.enabled = true;
+            const Bound = struct { s: *AppSession, term: *Term };
+            try testing.expect(pumpLspUntil(&f.fx, 3000, Bound{ .s = s, .term = term }, struct {
+                fn ready(c: Bound) bool {
+                    return lsp_client.readyClientFor(c.s, c.term) != null;
+                }
+            }.ready));
+            try testing.expect(lsp_client.readyClientFor(s, term).?.process_generation > issued);
+        } else try actionRegistryRestartForTest(&f, old_pid);
+        if (mode == 4) try actionRegistryRestartForTest(&f, lsp_client.readyClientFor(s, term).?.proc.?.pid);
+        const current = lsp_client.readyClientFor(s, term).?;
+        try testing.expectEqual(@as(maru.session.editor.lsp.rpc.PositionEncoding, if (new_utf16) .utf16 else .utf8), current.encoding);
+        if (mode != 0) {
+            if (mode == 3) settings_ops.closeContextMenu(s);
+            const dropped = s.editor_code_action.dropped_behind_overlay;
+            try testing.expect(code_action_client.quickFix(s));
+            // Mode 1 selects before consuming the new listing. Server wire
+            // order can still populate its registry before the resolve arrives.
+            if (mode != 1) {
+                try testing.expect(pumpLspUntil(&f.fx, 3000, s, struct {
+                    fn done(session: *AppSession) bool {
+                        return !session.editor_code_action.waiting;
+                    }
+                }.done));
+                try testing.expectEqual(dropped + @as(u64, if (mode == 3) 0 else 1), s.editor_code_action.dropped_behind_overlay);
+                if (mode != 3) try testing.expectEqualStrings(old_title, s.editor_code_action.items.items[0].title);
+            }
+        }
+    }
+    const live = lsp_client.readyClientFor(s, term).?;
+    if (mode == 6) live.process_generation = maru.session.editor.lsp_response_owner.Connection.issue(&s.editor_lsp.last_process_generation).?; // Model PID reuse without signalling a forged OS PID.
+    if (mode == 7) s.editor_code_action.items.items[0].process_generation = 0;
+    if (mode == 8) _ = maru.session.editor.lsp_response_owner.Connection.issue(&s.editor_lsp.last_process_generation).?;
+    const current_pid = live.proc.?.pid;
+    const resolve_before = s.editor_lsp.sent_code_action_resolves;
+    const stale = (mode < 5 and mode != 3) or mode == 6 or mode == 7 or mode == 9;
+    settings_ops.acceptContextMenu(s);
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, struct {
+        fn done(session: *AppSession) bool {
+            return !session.editor_code_action.resolve_waiting;
+        }
+    }.done));
+    if (s.editor_code_action.waiting) try testing.expect(pumpLspUntil(&f.fx, 3000, s, struct {
+        fn done(session: *AppSession) bool {
+            return !session.editor_code_action.waiting;
+        }
+    }.done));
+    try testing.expectEqual(resolve_before + @as(u64, if (stale) 0 else 1), s.editor_lsp.sent_code_action_resolves);
+    const selected_pid = if (mode == 3) current_pid else old_pid;
+    const expected = try std.fmt.allocPrint(testing.allocator, "// registry {d}\n{s}", .{ selected_pid, source });
+    defer testing.allocator.free(expected);
+    const content = term.rt.editorDocument().opened.?.file.content;
+    const applied_selected = std.mem.eql(u8, expected, content);
+    // Stale lazy selections preserve the document and send no resolve. Fresh
+    // selections still resolve their own registry entry and support Undo.
+    const safe = if (stale) std.mem.eql(u8, source, content) else applied_selected;
+    std.debug.print("CAREG case old_utf16={any} new_utf16={any} mode={d} old_pid={d} current_pid={d} applied={d} safe={any} body={s}\n", .{ old_utf16, new_utf16, mode, old_pid, current_pid, s.editor_code_action.applied, safe, content });
+    const wire = try f.fx.dir.dir.readFileAlloc(testing.io, "source.c.registry.jsonl", testing.allocator, .limited(65536));
+    defer testing.allocator.free(wire);
+    std.debug.print("CAREG wire={s}\n", .{wire});
+    try testing.expect(safe);
+    if (!stale) {
+        try testing.expectEqual(@as(usize, 1), term.rt.editorDocument().history.undo_len);
+        s.chrome_host.notice.dismiss();
+        try testing.expect(undoEdit(s, term));
+    } else try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+    try testing.expectEqualStrings(source, term.rt.editorDocument().opened.?.file.content);
+    try batchApplyDisk(&f.fx, "source.c", source);
+}
+test "CAREG1 registry action resolves on its original process" {
+    for ([_]bool{ false, true }) |utf16| try actionRegistryForTest(utf16, utf16, 255);
+}
+test "CAREG2 old registry action cannot become a different action after restart" {
+    var failures: usize = 0;
+    for ([_]bool{ false, true }) |old| for ([_]bool{ false, true }) |new| for (0..5) |mode| {
+        actionRegistryForTest(old, new, @intCast(mode)) catch |err| {
+            failures += 1;
+            std.debug.print("CAREG failed old={any} new={any} mode={d} error={s}\n", .{ old, new, mode, @errorName(err) });
+        };
+    };
+    try testing.expectEqual(@as(usize, 0), failures);
+}
+
+test "CAREG3 launch ownership rejects unknown tokens and modeled PID reuse but preserves unrelated launches" {
+    for ([_]bool{ false, true }) |utf16| for ([_]u8{ 6, 7, 8, 9 }) |mode| try actionRegistryForTest(utf16, utf16, mode);
+}
+
 const action_save_source = "int a; // CASTALL\n";
 // Non-BMP document bytes exercise UTF-8/UTF-16 offsets, not localized UI text.
 const action_encoding_source = "a\xf0\x9f\x98\x80target; // CASTALL\n";
@@ -76409,6 +76549,15 @@ fn actionEncodingForTest(old_utf16: bool, lazy: bool) !void {
                 try testing.expectEqual(dropped + 1, s.editor_code_action.dropped_behind_overlay);
             }
         }
+        if (lazy) {
+            settings_ops.closeContextMenu(s);
+            try testing.expect(code_action_client.quickFix(s));
+            const current_raw = try actionEncodingReplyForTest(probe, true, new_utf16);
+            defer testing.allocator.free(current_raw);
+            var current_result = try std.json.parseFromSlice(std.json.Value, testing.allocator, current_raw, .{});
+            defer current_result.deinit();
+            code_action_client.onResponse(s, current, s.editor_code_action.waits[0].seq, current_result.value, false, null);
+        }
         settings_ops.acceptContextMenu(s);
         if (lazy) {
             try testing.expect(s.editor_code_action.resolve_waiting);
@@ -76456,10 +76605,10 @@ test "CAENC1 ready UTF8 results retain their encoding across actual server resta
 test "CAENC2 ready UTF16 results retain their encoding across actual server restart" {
     try actionEncodingForTest(true, false);
 }
-test "CAENC3 lazy results from UTF8 server use the new resolve response encoding" {
+test "CAENC3 fresh lazy results use renegotiated encoding after UTF8 server restart" {
     try actionEncodingForTest(false, true);
 }
-test "CAENC4 lazy results from UTF16 server use the new resolve response encoding" {
+test "CAENC4 fresh lazy results use renegotiated encoding after UTF16 server restart" {
     try actionEncodingForTest(true, true);
 }
 fn actionMenuEditForTest(probe: ActionSaveProbe, start: u32) ![]u8 {

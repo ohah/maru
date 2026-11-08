@@ -2468,3 +2468,9 @@ CI의 `macOS-only gates`는 세 worker의 manifest와 실행 receipt를 검증�
 `--mode spawn-helper`는 소유한 actor 사본에서 세 syscall 순서를 비교한다.
 `resize_review.py --study <결과>/study.json --output <새 파일>`은 실측 손상을 거부한다.
 [설치 셸 보존·진단 범위와 해석](plans/pty-resize-overwrite.md)을 따른다.
+
+`mise exec -- zig build test-editor-code-action-restart-data -j2`와 `-Doptimize=ReleaseFast`는
+실제 fake 서버의 토큰 registry와 PID 교체를 통해 옛 lazy 항목의 전송 차단, 새 목록 선택·Undo,
+연결 번호의 미설정/PID 재사용 모델/다른 launch 대조를 검사한다. gate는 7개(행동 3개와 초기화
+4개)를 강제한다. 숫자 발급·고갈·일치는 `mise exec -- zig test src/session/editor/ops/lsp_response_owner.zig`로
+검사한다. [정책과 증거 경계](plans/lsp-code-action-restart-data.md)를 따른다.

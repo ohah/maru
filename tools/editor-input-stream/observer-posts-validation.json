@@ -1,0 +1,160 @@
+{
+  "rejected": [
+    {
+      "name": "mode-metadata",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts mode"
+    },
+    {
+      "name": "mode-runtime",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts mode"
+    },
+    {
+      "name": "missing-snapshot",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts snapshots"
+    },
+    {
+      "name": "boolean-clock",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts snapshots"
+    },
+    {
+      "name": "zero-clock",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts snapshots"
+    },
+    {
+      "name": "backwards-clock",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts counters backwards"
+    },
+    {
+      "name": "backwards-checks",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts counters backwards"
+    },
+    {
+      "name": "snapshot-error",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts snapshots"
+    },
+    {
+      "name": "final-source-replaced",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts final error"
+    },
+    {
+      "name": "boolean-final-error",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts final error"
+    },
+    {
+      "name": "bytes-not-text",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts bytes type"
+    },
+    {
+      "name": "invalid-base64",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "Non-base64 digit found"
+    },
+    {
+      "name": "missing-accepted-bytes",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "cached posts differ from producer"
+    },
+    {
+      "name": "other-producer-bytes",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "cached posts differ from producer"
+    },
+    {
+      "name": "invented-check",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts counter accounting"
+    },
+    {
+      "name": "unaccounted-attempt",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts counter accounting"
+    },
+    {
+      "name": "reads-exceed-attempts",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts counter accounting"
+    },
+    {
+      "name": "parses-exceed-reads",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts counter accounting"
+    },
+    {
+      "name": "lost-cache-hit",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts counter accounting"
+    },
+    {
+      "name": "silent-idle-reload",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "idle cache not reused"
+    },
+    {
+      "name": "cpu-overflow",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts snapshots"
+    },
+    {
+      "name": "negative-cpu",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts snapshots"
+    },
+    {
+      "name": "fractional-cpu",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts snapshots"
+    },
+    {
+      "name": "subcpu-exceeds-driver",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts CPU exceeds observer"
+    },
+    {
+      "name": "extra-handler-call",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts checks/handler calls differ"
+    }
+  ],
+  "normal_controls": 26,
+  "source_hashes": {
+    "app.json": "8d7e5b13e8fb4a76359f2a3bf7574ef528519c3620706bb46c8d38b59bb1308d",
+    "posts.json": "98340f099005f76cec84a630d84222da222b80da8a46c666a7288fde06ccda7c",
+    "record.json": "311992967bc72db14a986f6bb597397218d8e42a17be2c9515dc2ba855fc6be5"
+  }
+}

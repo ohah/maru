@@ -24,6 +24,10 @@
 `deferred_retry_study.py`·`deferred_retry_report.py`·`deferred_retry_review.py`가 수집·재계산·손상 검증을
 맡는다. [재시도 실험](../tools/editor-input-stream/deferred-retry-results.md)을 따른다.
 
+`prepare.py --observer-posts-control`의 완료 JSON 재읽기/재사용과 재시도 교차 비교는
+`observer_posts_study.py`·`observer_posts_report.py`·`observer_posts_review.py`가 담당한다.
+[관측 비용 분리](../tools/editor-input-stream/observer-posts-results.md)에 신원·CPU 정산과 명령을 적는다.
+
 색 표시의 단계 분해와 timer 30/60/120Hz 대조는
 [실행·판정 계약](../tools/editor-input-latency/stage-results.md)을 따른다.
 `stages.py`는 기존 원시 시각을 다시 검증하고, `cadence.py`는 격리 설정으로 실제 입력을 비교한다.

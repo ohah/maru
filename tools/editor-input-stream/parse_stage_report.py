@@ -7,6 +7,7 @@ import display_stages
 import frame_wake_control
 import target_frame_control
 import observer_cpu
+import observer_posts_control
 import deferred_retry_control
 
 
@@ -70,6 +71,11 @@ def analyze(app, producer, meta):
     observer = meta.get('observer_cpu',False)
     require(type(observer) is bool and observer == app.get('observer_cpu',False) and observer == any(name in app for name in ('observer_input_start','observer_idle_start','observer_idle_end')), 'observer CPU label')
     if observer:result['observer_cpu'] = observer_cpu.analyze(app,result['frame_wake'],require)
+    posts_mode=meta.get('observer_posts_control')
+    require((posts_mode is not None)==any(name in app for name in ('observer_posts_mode','posts_input_start','posts_idle_start','posts_idle_end','posts_accepted_base64','posts_errors')), 'observer posts label')
+    if posts_mode is not None:
+        require(observer and target and retry is not None, 'observer posts dependency')
+        result['observer_posts']=observer_posts_control.analyze(app,meta,result['observer_cpu'],require)
     return result
 
 
@@ -96,6 +102,7 @@ def read(root):
         folder = root/run['path']
         require(verify.sha(folder/'record.json') == run['record_sha256'], 'record drift')
         meta = json.loads((folder/'record.json').read_text())
+        require(type(source.get('observer_posts_control',False)) is bool and (meta.get('observer_posts_control') is not None)==source.get('observer_posts_control',False), 'observer posts source agreement')
         require(type(source.get('deferred_retry_control',False)) is bool and (meta.get('deferred_retry_control') is not None)==source.get('deferred_retry_control',False), 'retry source agreement')
         require(type(source.get('observer_cpu',False)) is bool and meta.get('observer_cpu',False) is source.get('observer_cpu',False), 'observer CPU source agreement')
         require(type(source.get('target_frame_control',False)) is bool and meta.get('target_frame_control',False) is source.get('target_frame_control',False), 'target source agreement')

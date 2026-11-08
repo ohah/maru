@@ -24,13 +24,16 @@ def provider_fingerprints():
     return {str(p):verify.sha(p) if p.is_file() else None for p in paths}
 
 
-def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None, fixture_kind="flat", bracket_control=None, fold_reuse_control=None, frame_wake_control=None, deferred_retry_control=None, observer_posts_control=None):
+def trial(build, target, size, mode, flow, period, count, kind, rep, observer=None, summary_control=None, environment_filter=None, fold_control=None, fixture_kind="flat", bracket_control=None, fold_reuse_control=None, frame_wake_control=None, deferred_retry_control=None, observer_posts_control=None, observer_work_control=None):
     target.mkdir(mode=0o700)
     (target/'profile').mkdir();(target/'host').mkdir(mode=0o700)
     data = protocol.fixture(size,fixture_kind)
     (target/'document.zig').write_bytes(data)
     (target/'config').write_text('session.keep-alive-after-quit = false\nlsp.enabled = false\neditor.wrap = false\n')
     state = json.loads((build/'source.json').read_text())
+    if state.get('observer_work_control'):
+        if observer_work_control not in ('untimed','timed') or observer_posts_control!='cached_posts' or deferred_retry_control!='with_retry':raise ValueError('observer work label and fixed controls required')
+    elif observer_work_control is not None:raise ValueError('observer work build required')
     if state.get('observer_posts_control'):
         if observer_posts_control not in ('repeated_posts','cached_posts'):raise ValueError('observer posts label required')
     elif observer_posts_control is not None:raise ValueError('observer posts build required')
@@ -66,6 +69,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
         MARU_MACOS_APP_SMOKE_MS='180000',MARU_EDITOR_IME_SMOKE='1',MARU_LATENCY_MODE=mode,MARU_LATENCY_FLOW=flow,
         MARU_LATENCY_OUTPUT=str(target/'app.json'),MARU_STREAM_READY=str(target/'ready.json'),MARU_STREAM_POSTS=str(target/'posts.json'),
         MARU_STREAM_SOURCE_RECORD=str(target/'source-record.json'),MARU_STREAM_COUNT=str(count),MARU_STREAM_WAIT_MS='30000')
+    if observer_work_control == 'timed':env['MARU_STREAM_OBSERVER_WORK']='1'
     if observer_posts_control == 'cached_posts':env['MARU_STREAM_CACHE_POSTS']='1'
     if deferred_retry_control == 'with_retry':env['MARU_STREAM_DEFERRED_FRAME_RETRY']='1'
     if frame_wake_control == 'immediate':env['MARU_STREAM_IMMEDIATE_PARSE_FRAME']='1'
@@ -78,7 +82,7 @@ def trial(build, target, size, mode, flow, period, count, kind, rep, observer=No
     meta = {'count':count,'mode':mode,'flow':flow,'size':size,'repeat':rep,'shared':flow=='shared','period_ns':period*1_000_000,'lateness_ns':20_000_000,
             'kind':kind,'fixture_bytes':len(data),'fixture_sha256':hashlib.sha256(data).hexdigest(),
             'fixture_tail_sha256':hashlib.sha256(data[3:]).hexdigest(),'load_before':os.getloadavg(),
-            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'observer_posts_control':observer_posts_control,'deferred_retry_control':deferred_retry_control,'frame_wake_control':frame_wake_control,'target_frame_control':state.get('target_frame_control',False),'observer_cpu':state.get('observer_cpu',False),'display_stages':state.get('display_stages',False),'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind,'bracket_control':bracket_control,'fold_reuse_control':fold_reuse_control}
+            'provider_before':provider_fingerprints(),'diagnostic':observer is not None,'observer_work_control':observer_work_control,'observer_posts_control':observer_posts_control,'deferred_retry_control':deferred_retry_control,'frame_wake_control':frame_wake_control,'target_frame_control':state.get('target_frame_control',False),'observer_cpu':state.get('observer_cpu',False),'display_stages':state.get('display_stages',False),'summary_control':summary_control,'fold_control':fold_control,'fixture_kind':fixture_kind,'bracket_control':bracket_control,'fold_reuse_control':fold_reuse_control}
     child = sender = None
     failure = None
     with (target/'app.log').open('w') as log, (target/'producer.log').open('w') as sender_log:

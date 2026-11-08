@@ -1,0 +1,166 @@
+{
+  "rejected": [
+    {
+      "name": "metadata-mode",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work mode"
+    },
+    {
+      "name": "actual-mode",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work mode"
+    },
+    {
+      "name": "fixed-posts-mode",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "posts mode"
+    },
+    {
+      "name": "fixed-retry-mode",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "retry mode"
+    },
+    {
+      "name": "missing-start",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work snapshots"
+    },
+    {
+      "name": "boolean-time",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work snapshots"
+    },
+    {
+      "name": "zero-time",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work snapshots"
+    },
+    {
+      "name": "backwards-time",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work counters backwards"
+    },
+    {
+      "name": "snapshot-error",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work snapshots"
+    },
+    {
+      "name": "final-error",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work final error"
+    },
+    {
+      "name": "boolean-final-error",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work final error"
+    },
+    {
+      "name": "event-width",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work event shape"
+    },
+    {
+      "name": "unknown-part",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work event shape"
+    },
+    {
+      "name": "boolean-part",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work event shape"
+    },
+    {
+      "name": "zero-begin",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work event shape"
+    },
+    {
+      "name": "reversed-event",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work event shape"
+    },
+    {
+      "name": "cpu-exceeds-wall",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work event shape"
+    },
+    {
+      "name": "zero-ordinal",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work event shape"
+    },
+    {
+      "name": "skipped-ordinal",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work ordinal"
+    },
+    {
+      "name": "overlapping-events",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work intervals overlap"
+    },
+    {
+      "name": "cpu-sum-differs",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work CPU accounting"
+    },
+    {
+      "name": "lost-coverage",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work coverage"
+    },
+    {
+      "name": "wrong-event-count",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work event count"
+    },
+    {
+      "name": "cpu-overflow",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work snapshots"
+    },
+    {
+      "name": "negative-cpu",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work snapshots"
+    },
+    {
+      "name": "fractional-cpu",
+      "expected": "rejected",
+      "actual": "rejected",
+      "reason": "observer work snapshots"
+    }
+  ],
+  "normal_controls": 27,
+  "source_hashes": {
+    "app.json": "20b7bf060e53e251ba6df0e96e41638508cd7b1e47260f5ecee729ffda5713b7",
+    "posts.json": "65cdaa7f7c8026a63664efbaa51f2efaa1b7aa28fb334f85d945e22336b6951c",
+    "record.json": "bd4633edfc09642017cf1ac574cfaea19bf4fe5ff4bd9358d431dbffc6a7f235"
+  }
+}

@@ -16,7 +16,8 @@ def output_lock(out):
         lock.close();raise ValueError('another preparation owns this output')
     return lock
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--stream',action='store_true');p.add_argument('--summary-control',action='store_true');p.add_argument('--fold-control',action='store_true');p.add_argument('--bracket-control',action='store_true');p.add_argument('--fold-reuse-control',action='store_true');p.add_argument('--parse-stages',action='store_true');p.add_argument('--display-stages',action='store_true');p.add_argument('--frame-wake-control',action='store_true');p.add_argument('--target-frame-control',action='store_true');p.add_argument('--observer-cpu',action='store_true');p.add_argument('--deferred-retry-control',action='store_true');p.add_argument('--observer-posts-control',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--stream',action='store_true');p.add_argument('--summary-control',action='store_true');p.add_argument('--fold-control',action='store_true');p.add_argument('--bracket-control',action='store_true');p.add_argument('--fold-reuse-control',action='store_true');p.add_argument('--parse-stages',action='store_true');p.add_argument('--display-stages',action='store_true');p.add_argument('--frame-wake-control',action='store_true');p.add_argument('--target-frame-control',action='store_true');p.add_argument('--observer-cpu',action='store_true');p.add_argument('--deferred-retry-control',action='store_true');p.add_argument('--observer-posts-control',action='store_true');p.add_argument('--observer-work-control',action='store_true');a=p.parse_args()
+    if a.observer_work_control and not a.observer_posts_control:p.error('observer work requires observer posts control')
     if a.observer_posts_control and not a.deferred_retry_control:p.error('observer posts requires deferred retry control')
     if a.deferred_retry_control and not a.observer_cpu:p.error('deferred retry requires observer CPU')
     if a.observer_cpu and not a.target_frame_control:p.error('observer CPU requires target frame control')
@@ -46,6 +47,7 @@ def main():
         assert prior.get('observer_cpu',False)==a.observer_cpu, 'observer CPU changed'
         assert prior.get('deferred_retry_control',False)==a.deferred_retry_control, 'deferred retry changed'
         assert prior.get('observer_posts_control',False)==a.observer_posts_control, 'observer posts changed'
+        assert prior.get('observer_work_control',False)==a.observer_work_control, 'observer work changed'
         assert prior['head']==subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(), 'HEAD changed'
         assert all(sha(ROOT/n)==h for n,h in prior['original'].items()), 'original source drift'
         assert all(sha(src/n)==h for n,h in prior['instrumented'].items()), 'private source drift'
@@ -144,6 +146,9 @@ def main():
     if a.observer_posts_control:
         import observer_posts_control
         driver_text=observer_posts_control.driver(driver_text,once)
+    if a.observer_work_control:
+        import observer_work_control
+        driver_text=observer_work_control.driver(driver_text,once)
     present=snippet('present.m.inc')
     if a.stream:present+='\n#include <sys/resource.h>'+ (HERE/'present.m.inc').read_text().split('#include <sys/resource.h>',1)[1]
     if a.bracket_control:present=bracket_control.present(present,once)
@@ -172,7 +177,7 @@ def main():
         patch('MaruAppHost.swift',lambda s:target_frame_control.swift(s,once))
         patch('app_session.zig',lambda s:target_frame_control.session(s,once))
         patch('app_session/debug_fixtures.zig',target_frame_control.witness)
-    manifest=dict(observer_posts_control=a.observer_posts_control,deferred_retry_control=a.deferred_retry_control,observer_cpu=a.observer_cpu,target_frame_control=a.target_frame_control,frame_wake_control=a.frame_wake_control,display_stages=a.display_stages,parse_stages=a.parse_stages,fold_reuse_control=a.fold_reuse_control,bracket_control=a.bracket_control,fold_control=a.fold_control,summary_control=a.summary_control,harness='independent-target-ascii-v1' if a.stream else 'closed-loop-v1',optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
+    manifest=dict(observer_work_control=a.observer_work_control,observer_posts_control=a.observer_posts_control,deferred_retry_control=a.deferred_retry_control,observer_cpu=a.observer_cpu,target_frame_control=a.target_frame_control,frame_wake_control=a.frame_wake_control,display_stages=a.display_stages,parse_stages=a.parse_stages,fold_reuse_control=a.fold_reuse_control,bracket_control=a.bracket_control,fold_control=a.fold_control,summary_control=a.summary_control,harness='independent-target-ascii-v1' if a.stream else 'closed-loop-v1',optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
     if a.stream:
         manifest['tools'].update({'stream/'+x.name:sha(x) for x in stream_dir.iterdir() if x.is_file()})
         (out/'producer.swift').write_text(protocol.expand((stream_dir/'producer.swift').read_text()))

@@ -1,0 +1,1188 @@
+{
+  "kind": "observer-work-summary",
+  "head": "cf1dd55e2cded969d456804239679737ce211c0b",
+  "app_sha256": "81709c7f8b64c92ebc2bd108a10d3844d9d081dcac659749a3701f988dbccf86",
+  "processes": 12,
+  "inputs": 360,
+  "groups": {
+    "untimed-typing": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 31.7296875,
+        "p95_ms": 42.726584,
+        "maximum_ms": 58.145916
+      },
+      "last_syntax_median_ms": 52.541625,
+      "runs": [
+        {
+          "path": "typing-0",
+          "idle_process_cpu_ms": 201.232,
+          "idle_handler_cpu_ms": 106.094625,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              }
+            },
+            "unattributed_driver_cpu_ms": null
+          },
+          "first_input_work": null
+        },
+        {
+          "path": "typing-1",
+          "idle_process_cpu_ms": 210.485,
+          "idle_handler_cpu_ms": 109.720047,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              }
+            },
+            "unattributed_driver_cpu_ms": null
+          },
+          "first_input_work": null
+        },
+        {
+          "path": "typing-2",
+          "idle_process_cpu_ms": 189.746,
+          "idle_handler_cpu_ms": 95.01675,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              }
+            },
+            "unattributed_driver_cpu_ms": null
+          },
+          "first_input_work": null
+        }
+      ]
+    },
+    "untimed-shared": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 35.5046875,
+        "p95_ms": 45.524792,
+        "maximum_ms": 61.294708
+      },
+      "last_syntax_median_ms": 53.309291,
+      "runs": [
+        {
+          "path": "shared-0",
+          "idle_process_cpu_ms": 146.942,
+          "idle_handler_cpu_ms": 69.785369,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              }
+            },
+            "unattributed_driver_cpu_ms": null
+          },
+          "first_input_work": null
+        },
+        {
+          "path": "shared-1",
+          "idle_process_cpu_ms": 192.0,
+          "idle_handler_cpu_ms": 97.719414,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              }
+            },
+            "unattributed_driver_cpu_ms": null
+          },
+          "first_input_work": null
+        },
+        {
+          "path": "shared-2",
+          "idle_process_cpu_ms": 172.386,
+          "idle_handler_cpu_ms": 89.574576,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.0,
+                "wall_ms": 0.0
+              }
+            },
+            "unattributed_driver_cpu_ms": null
+          },
+          "first_input_work": null
+        }
+      ]
+    },
+    "timed-typing": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 30.703771,
+        "p95_ms": 45.164083,
+        "maximum_ms": 46.6685
+      },
+      "last_syntax_median_ms": 50.925459,
+      "runs": [
+        {
+          "path": "typing-0",
+          "idle_process_cpu_ms": 150.49,
+          "idle_handler_cpu_ms": 71.232409,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.236913,
+                "wall_ms": 0.285335
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 65.45525,
+                "wall_ms": 101.669462
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.914287,
+                "wall_ms": 0.947829
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 1.62279,
+                "wall_ms": 1.652085
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.190501,
+                "wall_ms": 0.215545
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.153299,
+                "wall_ms": 0.177961
+              }
+            },
+            "unattributed_driver_cpu_ms": 2.5552899999999994
+          },
+          "first_input_work": {
+            "post_to_native": {
+              "total": {
+                "window_ms": 9.924666,
+                "tracked_wall_overlap_ms": 0.526459,
+                "fully_contained_cpu_ms": 0.349042,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 9.398207
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 9.924666,
+                  "tracked_wall_overlap_ms": 0.002083,
+                  "fully_contained_cpu_ms": 0.001875,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.922583
+                },
+                "frontmost_app": {
+                  "window_ms": 9.924666,
+                  "tracked_wall_overlap_ms": 0.502167,
+                  "fully_contained_cpu_ms": 0.3255,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.422499
+                },
+                "global_source": {
+                  "window_ms": 9.924666,
+                  "tracked_wall_overlap_ms": 0.005041,
+                  "fully_contained_cpu_ms": 0.004791,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.919625
+                },
+                "view_source": {
+                  "window_ms": 9.924666,
+                  "tracked_wall_overlap_ms": 0.014126,
+                  "fully_contained_cpu_ms": 0.014,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.91054
+                },
+                "header_copy": {
+                  "window_ms": 9.924666,
+                  "tracked_wall_overlap_ms": 0.001792,
+                  "fully_contained_cpu_ms": 0.001709,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.922874
+                },
+                "live_state": {
+                  "window_ms": 9.924666,
+                  "tracked_wall_overlap_ms": 0.00125,
+                  "fully_contained_cpu_ms": 0.001167,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.923416
+                }
+              }
+            },
+            "native_to_tick": {
+              "total": {
+                "window_ms": 9.316709,
+                "tracked_wall_overlap_ms": 0.0,
+                "fully_contained_cpu_ms": 0.0,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 9.316709
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 9.316709,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316709
+                },
+                "frontmost_app": {
+                  "window_ms": 9.316709,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316709
+                },
+                "global_source": {
+                  "window_ms": 9.316709,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316709
+                },
+                "view_source": {
+                  "window_ms": 9.316709,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316709
+                },
+                "header_copy": {
+                  "window_ms": 9.316709,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316709
+                },
+                "live_state": {
+                  "window_ms": 9.316709,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316709
+                }
+              }
+            }
+          }
+        },
+        {
+          "path": "typing-1",
+          "idle_process_cpu_ms": 187.098,
+          "idle_handler_cpu_ms": 94.924961,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 121,
+                "cpu_ms": 0.215544,
+                "wall_ms": 0.254002
+              },
+              "frontmost_app": {
+                "calls": 121,
+                "cpu_ms": 89.524583,
+                "wall_ms": 138.329416
+              },
+              "global_source": {
+                "calls": 121,
+                "cpu_ms": 0.801957,
+                "wall_ms": 0.836201
+              },
+              "view_source": {
+                "calls": 121,
+                "cpu_ms": 1.437715,
+                "wall_ms": 1.492955
+              },
+              "header_copy": {
+                "calls": 121,
+                "cpu_ms": 0.175126,
+                "wall_ms": 0.203959
+              },
+              "live_state": {
+                "calls": 121,
+                "cpu_ms": 0.14409,
+                "wall_ms": 0.171383
+              }
+            },
+            "unattributed_driver_cpu_ms": 2.5299479999999903
+          },
+          "first_input_work": {
+            "post_to_native": {
+              "total": {
+                "window_ms": 16.110375,
+                "tracked_wall_overlap_ms": 0.750584,
+                "fully_contained_cpu_ms": 0.519208,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 15.359791
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 16.110375,
+                  "tracked_wall_overlap_ms": 0.001958,
+                  "fully_contained_cpu_ms": 0.001708,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.108417
+                },
+                "frontmost_app": {
+                  "window_ms": 16.110375,
+                  "tracked_wall_overlap_ms": 0.728958,
+                  "fully_contained_cpu_ms": 0.499041,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 15.381417
+                },
+                "global_source": {
+                  "window_ms": 16.110375,
+                  "tracked_wall_overlap_ms": 0.006,
+                  "fully_contained_cpu_ms": 0.005584,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.104375
+                },
+                "view_source": {
+                  "window_ms": 16.110375,
+                  "tracked_wall_overlap_ms": 0.011209,
+                  "fully_contained_cpu_ms": 0.010833,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.099166
+                },
+                "header_copy": {
+                  "window_ms": 16.110375,
+                  "tracked_wall_overlap_ms": 0.001417,
+                  "fully_contained_cpu_ms": 0.001209,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.108958
+                },
+                "live_state": {
+                  "window_ms": 16.110375,
+                  "tracked_wall_overlap_ms": 0.001042,
+                  "fully_contained_cpu_ms": 0.000833,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.109333
+                }
+              }
+            },
+            "native_to_tick": {
+              "total": {
+                "window_ms": 13.830208,
+                "tracked_wall_overlap_ms": 0.0,
+                "fully_contained_cpu_ms": 0.0,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 13.830208
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 13.830208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 13.830208
+                },
+                "frontmost_app": {
+                  "window_ms": 13.830208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 13.830208
+                },
+                "global_source": {
+                  "window_ms": 13.830208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 13.830208
+                },
+                "view_source": {
+                  "window_ms": 13.830208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 13.830208
+                },
+                "header_copy": {
+                  "window_ms": 13.830208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 13.830208
+                },
+                "live_state": {
+                  "window_ms": 13.830208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 13.830208
+                }
+              }
+            }
+          }
+        },
+        {
+          "path": "typing-2",
+          "idle_process_cpu_ms": 187.3,
+          "idle_handler_cpu_ms": 93.726878,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 121,
+                "cpu_ms": 0.243541,
+                "wall_ms": 0.289826
+              },
+              "frontmost_app": {
+                "calls": 121,
+                "cpu_ms": 87.580044,
+                "wall_ms": 140.719496
+              },
+              "global_source": {
+                "calls": 121,
+                "cpu_ms": 0.967879,
+                "wall_ms": 1.011998
+              },
+              "view_source": {
+                "calls": 121,
+                "cpu_ms": 1.652589,
+                "wall_ms": 1.691582
+              },
+              "header_copy": {
+                "calls": 121,
+                "cpu_ms": 0.213498,
+                "wall_ms": 0.242
+              },
+              "live_state": {
+                "calls": 121,
+                "cpu_ms": 0.152121,
+                "wall_ms": 0.181547
+              }
+            },
+            "unattributed_driver_cpu_ms": 2.8142850000000124
+          },
+          "first_input_work": {
+            "post_to_native": {
+              "total": {
+                "window_ms": 9.317375,
+                "tracked_wall_overlap_ms": 0.426622,
+                "fully_contained_cpu_ms": 0.283333,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 8.890753
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 9.317375,
+                  "tracked_wall_overlap_ms": 0.001208,
+                  "fully_contained_cpu_ms": 0.001083,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316167
+                },
+                "frontmost_app": {
+                  "window_ms": 9.317375,
+                  "tracked_wall_overlap_ms": 0.412666,
+                  "fully_contained_cpu_ms": 0.269958,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 8.904709
+                },
+                "global_source": {
+                  "window_ms": 9.317375,
+                  "tracked_wall_overlap_ms": 0.003458,
+                  "fully_contained_cpu_ms": 0.003334,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.313917
+                },
+                "view_source": {
+                  "window_ms": 9.317375,
+                  "tracked_wall_overlap_ms": 0.007416,
+                  "fully_contained_cpu_ms": 0.007291,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.309959
+                },
+                "header_copy": {
+                  "window_ms": 9.317375,
+                  "tracked_wall_overlap_ms": 0.000916,
+                  "fully_contained_cpu_ms": 0.000792,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316459
+                },
+                "live_state": {
+                  "window_ms": 9.317375,
+                  "tracked_wall_overlap_ms": 0.000958,
+                  "fully_contained_cpu_ms": 0.000875,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.316417
+                }
+              }
+            },
+            "native_to_tick": {
+              "total": {
+                "window_ms": 9.260875,
+                "tracked_wall_overlap_ms": 0.0,
+                "fully_contained_cpu_ms": 0.0,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 9.260875
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 9.260875,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.260875
+                },
+                "frontmost_app": {
+                  "window_ms": 9.260875,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.260875
+                },
+                "global_source": {
+                  "window_ms": 9.260875,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.260875
+                },
+                "view_source": {
+                  "window_ms": 9.260875,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.260875
+                },
+                "header_copy": {
+                  "window_ms": 9.260875,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.260875
+                },
+                "live_state": {
+                  "window_ms": 9.260875,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 9.260875
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "timed-shared": {
+      "first_display": {
+        "count": 90,
+        "median_ms": 35.5786045,
+        "p95_ms": 44.674041,
+        "maximum_ms": 61.725584
+      },
+      "last_syntax_median_ms": 58.012166,
+      "runs": [
+        {
+          "path": "shared-0",
+          "idle_process_cpu_ms": 134.215,
+          "idle_handler_cpu_ms": 63.696416,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.162287,
+                "wall_ms": 0.194999
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 59.278673,
+                "wall_ms": 96.81854
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.649579,
+                "wall_ms": 0.680836
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 1.187335,
+                "wall_ms": 1.215961
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.142206,
+                "wall_ms": 0.167498
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.133707,
+                "wall_ms": 0.158457
+              }
+            },
+            "unattributed_driver_cpu_ms": 2.0633339999999976
+          },
+          "first_input_work": {
+            "post_to_native": {
+              "total": {
+                "window_ms": 22.977833,
+                "tracked_wall_overlap_ms": 0.560707,
+                "fully_contained_cpu_ms": 0.373624,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 22.417126
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 22.977833,
+                  "tracked_wall_overlap_ms": 0.002208,
+                  "fully_contained_cpu_ms": 0.001958,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 22.975625
+                },
+                "frontmost_app": {
+                  "window_ms": 22.977833,
+                  "tracked_wall_overlap_ms": 0.542916,
+                  "fully_contained_cpu_ms": 0.356667,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 22.434917
+                },
+                "global_source": {
+                  "window_ms": 22.977833,
+                  "tracked_wall_overlap_ms": 0.004583,
+                  "fully_contained_cpu_ms": 0.004416,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 22.97325
+                },
+                "view_source": {
+                  "window_ms": 22.977833,
+                  "tracked_wall_overlap_ms": 0.009125,
+                  "fully_contained_cpu_ms": 0.009,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 22.968708
+                },
+                "header_copy": {
+                  "window_ms": 22.977833,
+                  "tracked_wall_overlap_ms": 0.001042,
+                  "fully_contained_cpu_ms": 0.000916,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 22.976791
+                },
+                "live_state": {
+                  "window_ms": 22.977833,
+                  "tracked_wall_overlap_ms": 0.000833,
+                  "fully_contained_cpu_ms": 0.000667,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 22.977
+                }
+              }
+            },
+            "native_to_tick": {
+              "total": {
+                "window_ms": 16.226208,
+                "tracked_wall_overlap_ms": 0.0,
+                "fully_contained_cpu_ms": 0.0,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 16.226208
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 16.226208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.226208
+                },
+                "frontmost_app": {
+                  "window_ms": 16.226208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.226208
+                },
+                "global_source": {
+                  "window_ms": 16.226208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.226208
+                },
+                "view_source": {
+                  "window_ms": 16.226208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.226208
+                },
+                "header_copy": {
+                  "window_ms": 16.226208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.226208
+                },
+                "live_state": {
+                  "window_ms": 16.226208,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.226208
+                }
+              }
+            }
+          }
+        },
+        {
+          "path": "shared-1",
+          "idle_process_cpu_ms": 201.823,
+          "idle_handler_cpu_ms": 108.731126,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 120,
+                "cpu_ms": 0.222827,
+                "wall_ms": 0.269957
+              },
+              "frontmost_app": {
+                "calls": 120,
+                "cpu_ms": 102.752916,
+                "wall_ms": 159.631003
+              },
+              "global_source": {
+                "calls": 120,
+                "cpu_ms": 0.917293,
+                "wall_ms": 0.961411
+              },
+              "view_source": {
+                "calls": 120,
+                "cpu_ms": 1.593494,
+                "wall_ms": 1.632296
+              },
+              "header_copy": {
+                "calls": 120,
+                "cpu_ms": 0.193537,
+                "wall_ms": 0.223672
+              },
+              "live_state": {
+                "calls": 120,
+                "cpu_ms": 0.177998,
+                "wall_ms": 0.206371
+              }
+            },
+            "unattributed_driver_cpu_ms": 2.7722249999999917
+          },
+          "first_input_work": {
+            "post_to_native": {
+              "total": {
+                "window_ms": 17.709334,
+                "tracked_wall_overlap_ms": 0.773333,
+                "fully_contained_cpu_ms": 0.516958,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 16.936001
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 17.709334,
+                  "tracked_wall_overlap_ms": 0.001708,
+                  "fully_contained_cpu_ms": 0.001375,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.707626
+                },
+                "frontmost_app": {
+                  "window_ms": 17.709334,
+                  "tracked_wall_overlap_ms": 0.750917,
+                  "fully_contained_cpu_ms": 0.49625,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.958417
+                },
+                "global_source": {
+                  "window_ms": 17.709334,
+                  "tracked_wall_overlap_ms": 0.005416,
+                  "fully_contained_cpu_ms": 0.005125,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.703918
+                },
+                "view_source": {
+                  "window_ms": 17.709334,
+                  "tracked_wall_overlap_ms": 0.012334,
+                  "fully_contained_cpu_ms": 0.011875,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.697
+                },
+                "header_copy": {
+                  "window_ms": 17.709334,
+                  "tracked_wall_overlap_ms": 0.001708,
+                  "fully_contained_cpu_ms": 0.001292,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.707626
+                },
+                "live_state": {
+                  "window_ms": 17.709334,
+                  "tracked_wall_overlap_ms": 0.00125,
+                  "fully_contained_cpu_ms": 0.001041,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.708084
+                }
+              }
+            },
+            "native_to_tick": {
+              "total": {
+                "window_ms": 16.988791,
+                "tracked_wall_overlap_ms": 0.0,
+                "fully_contained_cpu_ms": 0.0,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 16.988791
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 16.988791,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.988791
+                },
+                "frontmost_app": {
+                  "window_ms": 16.988791,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.988791
+                },
+                "global_source": {
+                  "window_ms": 16.988791,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.988791
+                },
+                "view_source": {
+                  "window_ms": 16.988791,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.988791
+                },
+                "header_copy": {
+                  "window_ms": 16.988791,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.988791
+                },
+                "live_state": {
+                  "window_ms": 16.988791,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.988791
+                }
+              }
+            }
+          }
+        },
+        {
+          "path": "shared-2",
+          "idle_process_cpu_ms": 120.999,
+          "idle_handler_cpu_ms": 55.309462,
+          "idle": {
+            "parts": {
+              "local_focus": {
+                "calls": 117,
+                "cpu_ms": 0.180996,
+                "wall_ms": 0.209581
+              },
+              "frontmost_app": {
+                "calls": 117,
+                "cpu_ms": 51.006461,
+                "wall_ms": 80.027419
+              },
+              "global_source": {
+                "calls": 117,
+                "cpu_ms": 0.641535,
+                "wall_ms": 0.666533
+              },
+              "view_source": {
+                "calls": 117,
+                "cpu_ms": 1.224961,
+                "wall_ms": 1.248666
+              },
+              "header_copy": {
+                "calls": 117,
+                "cpu_ms": 0.149997,
+                "wall_ms": 0.169579
+              },
+              "live_state": {
+                "calls": 117,
+                "cpu_ms": 0.130911,
+                "wall_ms": 0.149996
+              }
+            },
+            "unattributed_driver_cpu_ms": 1.8975620000000077
+          },
+          "first_input_work": {
+            "post_to_native": {
+              "total": {
+                "window_ms": 17.251708,
+                "tracked_wall_overlap_ms": 0.712249,
+                "fully_contained_cpu_ms": 0.496417,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 16.539459
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 17.251708,
+                  "tracked_wall_overlap_ms": 0.002208,
+                  "fully_contained_cpu_ms": 0.001875,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.2495
+                },
+                "frontmost_app": {
+                  "window_ms": 17.251708,
+                  "tracked_wall_overlap_ms": 0.683292,
+                  "fully_contained_cpu_ms": 0.468833,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 16.568416
+                },
+                "global_source": {
+                  "window_ms": 17.251708,
+                  "tracked_wall_overlap_ms": 0.007833,
+                  "fully_contained_cpu_ms": 0.007458,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.243875
+                },
+                "view_source": {
+                  "window_ms": 17.251708,
+                  "tracked_wall_overlap_ms": 0.015291,
+                  "fully_contained_cpu_ms": 0.015084,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.236417
+                },
+                "header_copy": {
+                  "window_ms": 17.251708,
+                  "tracked_wall_overlap_ms": 0.001875,
+                  "fully_contained_cpu_ms": 0.001667,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.249833
+                },
+                "live_state": {
+                  "window_ms": 17.251708,
+                  "tracked_wall_overlap_ms": 0.00175,
+                  "fully_contained_cpu_ms": 0.0015,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.249958
+                }
+              }
+            },
+            "native_to_tick": {
+              "total": {
+                "window_ms": 17.444334,
+                "tracked_wall_overlap_ms": 0.0,
+                "fully_contained_cpu_ms": 0.0,
+                "boundary_events": 0,
+                "unattributed_wall_ms": 17.444334
+              },
+              "parts": {
+                "local_focus": {
+                  "window_ms": 17.444334,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.444334
+                },
+                "frontmost_app": {
+                  "window_ms": 17.444334,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.444334
+                },
+                "global_source": {
+                  "window_ms": 17.444334,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.444334
+                },
+                "view_source": {
+                  "window_ms": 17.444334,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.444334
+                },
+                "header_copy": {
+                  "window_ms": 17.444334,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.444334
+                },
+                "live_state": {
+                  "window_ms": 17.444334,
+                  "tracked_wall_overlap_ms": 0.0,
+                  "fully_contained_cpu_ms": 0.0,
+                  "boundary_events": 0,
+                  "unattributed_wall_ms": 17.444334
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "first_syntax_ready": 0
+}

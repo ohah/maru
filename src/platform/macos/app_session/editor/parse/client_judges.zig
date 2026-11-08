@@ -202,3 +202,71 @@ pub fn special(comptime Fixture: type) !void {
     try std.testing.expect(fx.term.rt.editor_syntax.parse_result == null);
     try std.testing.expect(fx.term.rt.editor_syntax.provider != null);
 }
+
+/// 아래 한국어 문자열은 표시 UI가 아니라 UTF-8·CRLF 편집을 검증하는 본문 fixture다.
+/// 실제 편집 경로에서 대기 화면을 먼저 읽는다. 완료를 기다린 결과만 보면 깜빡임을 놓친다.
+pub fn paintContinuity(comptime Fixture: type) !void {
+    var fx = try Fixture.initWithSyntax(a, true);
+    defer fx.deinit(a);
+    try pump(fx.term);
+    fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+    try std.testing.expect(editor.insertText(fx.session, fx.term, "const value = 1;\r\n// 한글\r\n"));
+    try pump(fx.term);
+    const peer = try editor.openSharedViewInActivePane(fx.session, fx.term);
+    for ([_]*host.Term{ fx.term, peer }) |term| {
+        const doc = term.rt.editorDocument().opened.?;
+        const state = &term.rt.editor_syntax;
+        const rows = colors.lineColors(state, a, doc.file.content, doc.file.lines, 0, doc.file.lines.lineCount(), 4, &.{}, .inherit);
+        try std.testing.expect(rows.len > 0 and rows[0].len > 0);
+        _ = colors.minimapColors(state, a, doc.file.content, doc.file.lines, 0, doc.file.lines.lineCount(), 4, &.{}, .inherit);
+        try std.testing.expect(state.bufs.paint.input != null);
+        try std.testing.expect(state.minimap_bufs.paint.input != null);
+    }
+    const old_rows = colors.lineColors(&fx.term.rt.editor_syntax, a, fx.term.rt.editorDocument().opened.?.file.content, fx.term.rt.editorDocument().opened.?.file.lines, 0, fx.term.rt.editorDocument().opened.?.file.lines.lineCount(), 4, &.{}, .inherit);
+    const first_row = try a.dupe(maru.chrome.components.editor_view.content.ColorSpan, old_rows[0]);
+    defer a.free(first_row);
+    const before = try a.dupe(maru.chrome.components.editor_view.syntax_colors.ByteSpan, fx.term.rt.editor_syntax.bufs.byte_spans.items);
+    defer a.free(before);
+    const capacity = fx.term.rt.editor_syntax.bufs.byte_spans.capacity;
+    fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+    try std.testing.expect(editor.insertText(fx.session, fx.term, "// 새 줄\r\n"));
+    // worker가 끝나더라도 완료 전달 전에는 provider가 없어야 한다.
+    for ([_]*host.Term{ fx.term, peer }) |term| {
+        const state = &term.rt.editor_syntax;
+        const doc = term.rt.editorDocument().opened.?;
+        try std.testing.expect(state.pending);
+        try std.testing.expect(state.provider == null and state.parse_result == null);
+        try std.testing.expect(!colors.matchesInput(state, state.async_view.input.?.document, doc.file.revision));
+        try std.testing.expectEqual(@as(usize, 0), state.symbols.items.len);
+        try std.testing.expectEqual(@as(usize, 0), state.bracket_navigation.entries.items.len);
+        const rows = colors.lineColors(state, a, doc.file.content, doc.file.lines, 0, doc.file.lines.lineCount(), 4, &.{}, .inherit);
+        try std.testing.expect(rows.len > 1 and rows[1].len > 0);
+        try std.testing.expectEqualDeep(first_row, rows[1]);
+        const mini = colors.minimapColors(state, a, doc.file.content, doc.file.lines, 0, doc.file.lines.lineCount(), 4, &.{}, .inherit);
+        try std.testing.expect(mini.len > 1 and mini[1].len > 0);
+        for (before, state.bufs.byte_spans.items) |old, mapped| {
+            try std.testing.expectEqual(old.role, mapped.role);
+            try std.testing.expectEqual(old.end + "// 새 줄\r\n".len, mapped.end);
+        }
+    }
+    try std.testing.expectEqual(capacity, fx.term.rt.editor_syntax.bufs.byte_spans.capacity);
+    // 실패 중단에서는 임시 색을 현재 결과처럼 계속 보여 주지 않는다.
+    fx.term.rt.editor_syntax.pending = false;
+    const changed = fx.term.rt.editorDocument().opened.?;
+    const stopped = colors.lineColors(&fx.term.rt.editor_syntax, a, changed.file.content, changed.file.lines, 0, 2, 4, &.{}, .inherit);
+    try std.testing.expectEqual(@as(usize, 0), stopped.len);
+    fx.term.rt.editor_syntax.pending = true;
+    try std.testing.expect(editor.insertText(fx.session, fx.term, "// 연속\n"));
+    try std.testing.expect(fx.term.rt.editor_syntax.bufs.paint.input != null);
+    try std.testing.expect(editor.undoEdit(fx.session, fx.term));
+    try std.testing.expect(fx.term.rt.editor_syntax.bufs.paint.input != null);
+    try pump(fx.term);
+    try pump(peer);
+    try oracle(fx.term);
+    try oracle(peer);
+    // 문법 교체와 알 수 없는 편집은 표시 캐시도 버린다.
+    fx.term.rt.editor_grammar = .none;
+    editor.resetSyntaxForGrammar(fx.session, fx.term);
+    try std.testing.expect(fx.term.rt.editor_syntax.bufs.paint.input == null);
+    try std.testing.expectEqual(@as(usize, 0), fx.term.rt.editor_syntax.bufs.byte_spans.items.len);
+}

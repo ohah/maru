@@ -1,5 +1,10 @@
 # 검증 매트릭스
 
+구문 강조 연속성은 **구현·검증 중**: `test-editor-syntax-paint`는 삽입/삭제 경계·UTF-8 byte 보정·
+신원/길이 오류와 할당 없는 갱신을, `test-editor-parse-input`은 실제 공유 뷰의 대기 색·미니맵·
+구조 조회 불가·현재 완료와 cold parse의 일치를 검사한다.
+[구현과 한계](plans/editor-highlight-continuity.md). OS 입력·픽셀 증거는 별도로 기록한다.
+
 코드 액션 결과 인코딩: `test-editor-code-action-encoding`은 실제 새 PID의 UTF-8/UTF-16
 협상 뒤 이전 edit·새 resolve·새 메뉴의 정확한 본문과 Undo를 24조건으로 검사한다.
 [검증 범위](plans/lsp-code-action-result-encoding.md)는 실제 프로세스/협상과 직접 응답을 구분한다.

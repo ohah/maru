@@ -57,6 +57,7 @@ pub const ColorBufs = struct {
     /// 위 층의 낱말로 옮긴 재료 — 역할이 정해진 스팬과 줄 경계.
     byte_spans: std.ArrayList(syntax_colors.ByteSpan) = .empty,
     line_bounds: std.ArrayList(syntax_colors.LineBounds) = .empty,
+    paint: maru.syntax_paint.Cache = .{},
 
     pub fn deinit(self: *ColorBufs, allocator: std.mem.Allocator) void {
         self.spans.deinit(allocator);
@@ -144,6 +145,11 @@ pub const State = struct {
 
     /// cursor·캐시를 먼저 비우고 완료의 마지막 native 참조는 worker에 돌려준다.
     pub fn discardCompleted(self: *State) void {
+        self.discardForPaint(false);
+    }
+
+    /// 위치를 보정한 표시 값만 남긴다. native 자원의 반환 순서는 일반 폐기와 같다.
+    pub fn discardForPaint(self: *State, keep_paint: bool) void {
         std.debug.assert(self.provider == null or self.parse_result != null);
         clearInputProofs(self);
         // cursor와 캐시가 별도 native 참조를 가진다. 기존 보유 참조를 반환하기 전에 모두 놓는다.
@@ -160,10 +166,10 @@ pub const State = struct {
         self.crumb_bounds.clearRetainingCapacity();
         self.crumb_syms.clearRetainingCapacity();
         self.bufs.spans.clearRetainingCapacity();
-        self.bufs.byte_spans.clearRetainingCapacity();
+        if (!keep_paint) self.bufs.paint.clear(&self.bufs.byte_spans);
         self.bufs.line_bounds.clearRetainingCapacity();
         self.minimap_bufs.spans.clearRetainingCapacity();
-        self.minimap_bufs.byte_spans.clearRetainingCapacity();
+        if (!keep_paint) self.minimap_bufs.paint.clear(&self.minimap_bufs.byte_spans);
         self.minimap_bufs.line_bounds.clearRetainingCapacity();
         if (self.provider) |*old| old.deinit();
         if (self.parse_result) |*old| old.release();
@@ -760,7 +766,6 @@ pub fn lineColorsInto(
     /// 괄호 쌍 색(§5.1d) — 3층, 구문·semantic 위. 미니맵은 비운다(VS Code 도 미니맵에는 안 칠한다).
     brackets: BracketMarks,
 ) []const []const content.ColorSpan {
-    const p = &(self.provider orelse return &.{});
     if (line_count == 0) return &.{};
 
     // 축의 길이는 **렌더가 받는 것**을 따른다 — 접히면 보이는 줄 수다.
@@ -788,26 +793,41 @@ pub fn lineColorsInto(
         .end = @intCast(end_line.contentEnd()),
     };
 
-    p.spansForRange(allocator, doc_content, range, &bufs.spans);
-    if (bufs.spans.items.len == 0 and extra.len == 0 and brackets.toks.len == 0) return &.{}; // 2층이 있으면 1층 캡처도 있다(글자가 있어야 토큰이 있다) — `extra` 검사는 방어(적대적 2회차 B20: 등가)
+    if (self.provider) |*p| {
+        // 실패한 새 조회가 이전 캐시의 증명을 남기지 않도록 먼저 무효화한다.
+        bufs.paint = .{};
+        p.spansForRange(allocator, doc_content, range, &bufs.spans);
+        if (bufs.spans.items.len == 0 and extra.len == 0 and brackets.toks.len == 0) return &.{}; // 2층이 있으면 1층 캡처도 있다(글자가 있어야 토큰이 있다) — `extra` 검사는 방어(적대적 2회차 B20: 등가)
 
-    // **여기부터는 중립이 소유한다**(`chrome…editor_view.syntax_colors`, §2m.112). 이 파일에 있는
-    // 동안 「마지막이 이긴다」와 탭 열 계산이 macOS 것이었고, Windows 가 색을 칠하려면 같은 규칙을
-    // 다시 적어야 했다. 여기서 하는 일은 **재료를 그 층의 낱말로 옮기는 것**뿐이다.
-    //
-    // **역할이 `null` 인 스팬은 버린다** — 옛 코드가 `roleOf(...) orelse continue` 로 **건너뛰던**
-    // 것과 같은 뜻이다(덮어쓰지 않는다). 그래서 경계에서 버려도 결과가 바뀌지 않는다.
-    bufs.byte_spans.clearRetainingCapacity();
-    bufs.byte_spans.ensureTotalCapacity(allocator, bufs.spans.items.len) catch return &.{};
-    for (bufs.spans.items) |sp| {
-        const role = maru.syntax_colors.roleForCapture(sp.capture) orelse continue;
-        bufs.byte_spans.appendAssumeCapacity(.{ .start = sp.start, .end = sp.end, .role = role });
+        // **여기부터는 중립이 소유한다**(`chrome…editor_view.syntax_colors`, §2m.112). 이 파일에 있는
+        // 동안 「마지막이 이긴다」와 탭 열 계산이 macOS 것이었고, Windows 가 색을 칠하려면 같은 규칙을
+        // 다시 적어야 했다. 여기서 하는 일은 **재료를 그 층의 낱말로 옮기는 것**뿐이다.
+        //
+        // **역할이 `null` 인 스팬은 버린다** — 옛 코드가 `roleOf(...) orelse continue` 로 **건너뛰던**
+        // 것과 같은 뜻이다(덮어쓰지 않는다). 그래서 경계에서 버려도 결과가 바뀌지 않는다.
+        bufs.byte_spans.clearRetainingCapacity();
+        bufs.byte_spans.ensureTotalCapacity(allocator, bufs.spans.items.len) catch return &.{};
+        for (bufs.spans.items) |sp| {
+            const role = maru.syntax_colors.roleForCapture(sp.capture) orelse continue;
+            bufs.byte_spans.appendAssumeCapacity(.{ .start = sp.start, .end = sp.end, .role = role });
+        }
+        // **2층을 섞는다**(§8.2i) — 창 범위 안의 것만, 문서 순서로 병합하되 같은 시작이면 2층이 뒤(「마지막이 이긴다」). 1층 목록은 이미 문서
+        // 순서이고 2층도 그렇다(서버가 relative 로 내고 편집 밀기가 순서를 지킨다) — 병합 한 번이면 된다.
+        if (extra.len > 0) mergeSecondLayer(allocator, bufs, extra, range) catch return &.{};
+        // **3층 — 괄호 쌍 색**(§5.1d). 글자색 장식이라 구문·semantic 색을 이긴다(VS Code `inlineClassName`). 같은 시작이면 뒤에 둔다.
+        if (brackets.toks.len > 0) mergeBracketLayer(allocator, bufs, brackets, range) catch return &.{};
+
+        if (self.async_view.enabled) {
+            if (self.async_view.input) |current| {
+                if (matchesInput(self, current.document, current.revision))
+                    bufs.paint.remember(current, @intCast(doc_content.len), .{ .start = range.start, .end = range.end }, &bufs.byte_spans);
+            }
+        }
+    } else {
+        const current = self.async_view.input orelse return &.{};
+        if (!self.async_view.enabled or !self.pending or !bufs.paint.matches(current, doc_content.len)) return &.{};
+        // 보관한 역할 값만 사용한다. semantic·괄호 층을 중복 병합하지 않는다.
     }
-    // **2층을 섞는다**(§8.2i) — 창 범위 안의 것만, 문서 순서로 병합하되 같은 시작이면 2층이 뒤(「마지막이 이긴다」). 1층 목록은 이미 문서
-    // 순서이고 2층도 그렇다(서버가 relative 로 내고 편집 밀기가 순서를 지킨다) — 병합 한 번이면 된다.
-    if (extra.len > 0) mergeSecondLayer(allocator, bufs, extra, range) catch return &.{};
-    // **3층 — 괄호 쌍 색**(§5.1d). 글자색 장식이라 구문·semantic 색을 이긴다(VS Code `inlineClassName`). 같은 시작이면 뒤에 둔다.
-    if (brackets.toks.len > 0) mergeBracketLayer(allocator, bufs, brackets, range) catch return &.{};
 
     // 줄 경계는 **CRLF 를 아는 쪽**이 준다(`LineIndex.Line.contentEnd()`).
     bufs.line_bounds.clearRetainingCapacity();

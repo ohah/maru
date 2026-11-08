@@ -10094,7 +10094,7 @@ fn rebuildMappedVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void 
 fn refreshSyntaxForInput(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) void {
     retainLegacySyntaxForSpecialView(self, term);
     if (term.rt.editor_syntax.async_view.enabled) {
-        parse_client.refresh(self, term);
+        parse_client.refreshForEdit(self, term, edit);
         return;
     }
     const state = term.rt.editorDocument();
@@ -78381,6 +78381,11 @@ test "MOV21 command arrows stay inside physical LF CRLF blank and Unicode lines"
         try testing.expectEqual(line.start, term.rt.editor_selection.?.start());
         try testing.expectEqual(line.contentEnd(), term.rt.editor_selection.?.end());
     }
+}
+
+test "ASYNCINPUT 공유 뷰 본문과 미니맵은 native 해제 후에도 보정한 표시를 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/client_judges.zig").paintContinuity(PaneFixture);
 }
 
 test "ASYNCINPUT 첫 생성과 연속 입력은 메인 파싱 없이 최신 판만 설치한다" {

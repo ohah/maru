@@ -40,7 +40,8 @@ sequenceDiagram
 이 진단은 bash/stty의 **소유한 임시 사본**만 ad-hoc 재서명하고 독립 ioctl interposer를 읽힌다.
 설치된 `/bin/bash`·`/bin/stty`는 읽기 전용이며 앞뒤 파일 hash를 확인한다.
 서명으로 바뀔 수 있는 header/LINKEDIT와 실행 코드를 구분해, otool의 `__TEXT,__text` 데이터를
-정규화한 fingerprint도 원본/사본이 같은지 확인한다. 외부 구현 소스나 역어셈블은 읽지 않는다.
+정규화한 fingerprint도 원본/사본이 같은지 확인한다. 이 최초 syscall 대조는 외부 구현 소스나
+역어셈블을 읽지 않았다. 아래 후속 원인 조사는 Apple 공개 셸 소스와 설치 bash의 호출 위치를 대조했다.
 
 일반 재실행 40회에서는 재현되지 않았지만 이를 수리 증거로 세지 않는다. 수동 trace도 syscall 간격을
 바꾸므로 재현율·제품 발생률·성능 측정에 쓰지 않는다. gate로 순서를 선택한 대조가 인과 증거다.
@@ -77,3 +78,45 @@ gate 파일 조회가 성공한 ioctl 뒤의 errno에 섞이는 초기 관측기
 
 공개 API 근거는 Apple [동적 라이브러리 사용/함수 interposition](https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/100-Articles/UsingDynamicLibraries.html),
 설치 SDK의 `sys/ioctl.h`·`sys/ioccom.h`와 `winsize`다. trace/반실험은 제품 native helper의 서명/admission 증거를 대체하지 않는다.
+
+
+## 후속 원인과 실제 앱 비교 — 2026-11-07~08
+
+설치된 macOS bash 3.2.57의 Readline은 tty 설정을 조회하기 전에 현재 winsize를 읽고 같은 값을
+다시 쓴다. 백그라운드 readline의 tty 접근을 제어하려는 처리이며, 두 syscall 사이에 앱의 resize가
+끼면 직전에 읽은 로컬 값이 최신 크기를 덮어쓴다. 영구 설정 캐시가 아니다.
+Apple [Readline 경로](https://github.com/apple-oss-distributions/bash/blob/51bf3fc6f26e9517c3a2e4bc3d208f9b39b87178/bash-3.2/lib/readline/rltty.c#L140-L153)와
+설치 bash의 read-only disassembly·소유한 사본의 backtrace를 대조했다. 외부 코드를 제품에 복사하지 않았다.
+
+실제 Maru in-process 앱에서 38→30열 적용 뒤 bash SET를 재개하자 model은 30열, kernel은 38열이었다.
+반대 순서는 30열로 일치했다. SET를 재개하기 전에 bash의 SIGWINCH 수신 표시가 0→1로 변한 것도
+확인했다. 따라서 신호 유실로 분류하거나 내부 mutex·native spawn만으로 해결됐다고 주장하지 않는다.
+
+| 후속 조건 | 관측과 범위 |
+| --- | --- |
+| 공식 Ghostty 1.4.0 + 계측한 bash 사본 | 실제 창을 줄여 PTY 119→99열 적용 뒤 bash SET를 재개하면 119열로 회귀. 순서를 반대로 하면 99열 유지. 창 너비와 kernel을 관측했으며 Ghostty 내부 화면 모델·픽셀 깨짐은 미검증. |
+| 시스템 zsh 5.9 독립 PTY | fork/helper 각 1,000회와 resize 없는 1,000회에서 snapshot 불일치 미관측. 일반 크기 갱신 경로의 SET는 Apple 공개 소스에서도 주석 처리되어 있다. |
+| 실제 Maru + 시스템 bash/zsh | syscall 계측·gate 없이 각 200명령의 실행 확인과 AX resize 100회. 변경 후 관측한 PTY 크기는 예상 치수와 일치했고 전후 model/kernel도 일치했다. |
+| Maru 긴 ASCII 명령 | 두 셸 모두 208자 입력 후 95열 줄바꿈의 예상 cursor 32열과 실제값이 일치. native Metal PNG와 실행 결과의 정확한 문자열을 확인했다. |
+
+zsh 근거는 Apple [일반 크기 갱신 경로](https://github.com/apple-oss-distributions/zsh/blob/666e91a595af505ef61d5f9b87df7a014a4937c6/zsh/Src/utils.c#L1871-L1934)다.
+zpty의 새 PTY 생성 경로와 모든 사용자 설정까지 같은 성질이라고 일반화하지 않는다.
+시스템 초기화 파일 간섭은 시험 자식에만 sandbox-exec 읽기 거부를 적용해 분리했다.
+시스템 셸·초기화 파일은 수정하지 않았다. 이는 무격리 사용자 설정 전체의 검증이 아니다.
+앱 입력은 대상 PID CGEvent와 AX 창 변경이며 실제 HID/IME 검증으로 세지 않는다.
+
+명령 확인 없이 빠르게 주입한 초기 집합은 키 합침/누락으로 완전한 입력 성공 자료에서 제외했다.
+최종 집합은 명령별 실행 확인을 기다렸다. 외부 창 캡처 실패와 native capture 허용 환경 누락도
+따로 보존했고, Maru의 최종 PNG는 기존 허용 환경으로 얻었다. 관측 불일치 0회는 경쟁의 불가능성이나
+제품 수리를 증명하지 않는다. 초기화 오류 채널·session-host·사용자 설정·다른 OS 범위는 여전히 남는다.
+
+로컬 원문은 `~/Documents/maru-validation/pty-resize-app-20261107/root-cause.md`와
+`~/Documents/maru-validation/pty-shell-comparison-20261108/README.md` 및 `accepted-summary.json`에 보존한다.
+설치 사본·진단 바이너리·사용자 경로가 포함된 원문은 공개 fixture로 올리지 않는다.
+
+## 채택한 처리 방향
+
+사용자 논의(2026-11-08)에 따라 **macOS bash 3.2 호환성 문제로 범위를 좁혀 관리**한다.
+전체 셸에 주기적 크기 재적용이나 자식의 의도적인 stty 변경을 덮어쓰는 정책은 추가하지 않는다.
+제품 runtime 변경은 보류한다. 기본 zsh와 이번 자연 입력 집합에서 미관측인 결과를 bash 문제의
+해결 증거로 사용하지 않는다. 후속 수정은 실제 제품 영향과 셸별 범위를 검증한 뒤 별도로 결정한다.

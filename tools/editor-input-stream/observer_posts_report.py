@@ -33,7 +33,7 @@ def read(root):
         flow,rep=pair['path'].split('-')
         verify.require(pair['order']==order_for(flow,int(rep)),'observer posts comparison order')
     here=Path(__file__).resolve().parent
-    readers=('observer_posts_report.py','observer_posts_control.py','observer_posts.swift.inc','parse_stage_report.py','verify.py','protocol.py','summary_control.py','fold_control.py','bracket_control.py','fold_reuse_control.py','frame_wake_control.py','target_frame_control.py','target_frame_budget.c.inc','observer_cpu.py','deferred_retry_control.py','display_stages.py')
+    readers=('observer_work_control.py','observer_posts_report.py','observer_posts_control.py','observer_posts.swift.inc','parse_stage_report.py','verify.py','protocol.py','summary_control.py','fold_control.py','bracket_control.py','fold_reuse_control.py','frame_wake_control.py','target_frame_control.py','target_frame_budget.c.inc','observer_cpu.py','deferred_retry_control.py','display_stages.py')
     return dict(kind='observer-posts-comparison',variant='target-coalesced',reader_dependencies={n:verify.sha(here/n) for n in readers},**reports)
 
 

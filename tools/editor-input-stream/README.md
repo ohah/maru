@@ -180,3 +180,8 @@ thread CPU를 분리한다. [귀속·재현 결과와 재예약 보완 지점](f
 `--observer-posts-control`은 완료 JSON을 매 tick 다시 읽는 방식과 성공한 원문을 재사용하는 방식을
 같은 앱에서 비교한다. `observer_posts_study.py`는 이를 재시도 없음/연결과 교차해 수집한다.
 작업별 CPU·원문 신원·실제 재사용 검증과 후속 결과는 [JSON 관측 비용 분리](observer-posts-results.md)를 따른다.
+
+
+`--observer-work-control`은 기존 검사를 유지하고 남은 handler 작업별 CPU/wall과 첫 입력 구간을
+계측한다. `observer_work_study.py`의 같은 앱 켬/끔 비교와 `observer_work_report.py`의
+경계 CPU 비례 배분 금지·신원·구간 정산은 [작업별 귀속](observer-work-results.md)을 따른다.

@@ -159,6 +159,8 @@ pub const Client = struct {
     diagnostic_seq: u32 = 0,
     phase: Phase = .missing,
     proc: ?lsp_process.Process = null,
+    /// A launch identity survives PID reuse and is never reset with restart backoff.
+    process_generation: u64 = 0,
     inbuf: std.ArrayList(u8) = .empty,
     encoding: lsp.rpc.PositionEncoding = .utf16,
     restarts: u8 = 0,
@@ -300,6 +302,8 @@ pub fn trustKeyLabel(key: lsp.trust.Key, buf: []u8) []const u8 {
 
 pub const State = struct {
     clients: std.ArrayList(Client) = .empty,
+    /// Kept across stopAll/client replacement while displayed actions may survive.
+    last_process_generation: u64 = 0,
     /// 문법마다 고른 서버(§8.2a 「서버 찾기」 — 찾아지는 첫 후보). 세션 동안 기억하고, 「없음」이면 gate 가 다시 고른다.
     resolved: std.EnumArray(maru.session.editor.language.Grammar, ?lsp.servers.Server) = .initFill(null),
     /// 묻는 중인 root(모달의 주인 — 시트의 경로 줄)와 그 신뢰 키. 답이 오면 그 키의 클라이언트가 움직인다.
@@ -1638,11 +1642,16 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
         c.phase = .missing;
         return;
     };
+    const generation = maru.session.editor.lsp_response_owner.Connection.issue(&self.editor_lsp.last_process_generation) orelse {
+        c.phase = .failed;
+        return;
+    };
     const proc = lsp_process.spawn(self.allocator, exe, c.server.args, c.root, view.envp) catch {
         scheduleRestart(self, c, now_ms);
         return;
     };
     c.proc = proc;
+    c.process_generation = generation;
     recordLaunch(self, c, exe, view.envp);
     c.inbuf.clearRetainingCapacity();
     c.encoding = .utf16;

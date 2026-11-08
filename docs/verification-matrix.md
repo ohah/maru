@@ -5615,3 +5615,11 @@ fork/helper 양쪽에서 대조한다. PID·rc·값·append 순서와 커널 크
 사본 실행 코드 fingerprint, 완료·reap·timeout과 실측 손상 33가설/동등 순서 대조를 검사한다.
 과거 미계측 1건의 writer나 제품 수정을 소급 단정하지 않는다.
 [계측과 미검증 경계](plans/pty-resize-overwrite.md)를 따른다.
+
+## 서버 재시작 뒤 lazy 코드 액션 토큰
+
+`test-editor-code-action-restart-data`의 CAREG1~3은 실제 프로세스/목록/resolve wire와
+직접 제품 API 선택을 사용한다. 20개 재시작 조합·같은 프로세스 2개·identity 모델 6개·실제 Client 제거/재생성 2개를
+구분하고, 옛 항목 선택의 resolve 전송 수 0·본문/Undo/디스크 보존을 검사한다. PID 재사용은
+실제 커널 PID 조작이 아닌 같은 PID/다른 연결 번호의 명시적 모델이다. HID/픽셀이나 실제 SDK
+검증으로 확대하지 않는다. [계획과 최초 실패](plans/lsp-code-action-restart-data.md)를 따른다.

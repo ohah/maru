@@ -1815,3 +1815,6 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [PTY native spawn 비교 PoC](plans/pty-native-spawn-poc.md) — syscall 모형 비교와 제품 이관 판단.
 - [PTY helper 적용 조건·셸 수명 PoC](plans/pty-helper-lifecycle.md) — job control·resize와 제품 적용 전 설계 검토.
 - [PTY 크기 재기록 인과 대조](plans/pty-resize-overwrite.md) — writer·순서·반사실을 구분하는 독립 계측.
+
+
+- [서버 재시작 뒤 코드 액션 resolve 데이터](plans/lsp-code-action-restart-data.md): 실제 토큰 충돌 재현·옛 lazy 항목의 실행 소유 검증과 전송 차단.

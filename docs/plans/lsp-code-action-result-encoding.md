@@ -51,3 +51,10 @@ skip/filter를 유지하며 등록 수를 passed 합계로 더하지 않는다. 
 `action-encoding-after.log`, `action-encoding-final-debug.log`·`action-encoding-final-releasefast.log`,
 `action-encoding-abi-full.log`다. 조건별 PID·관측값과 최종 소스 SHA는
 `action-encoding-final-cases.json`, ABI 음성 대조는 `action-encoding-abi-mutation.json`에 둔다.
+
+## 후속 연결 소유 정책
+
+[재시작 데이터 수명](lsp-code-action-restart-data.md)의 승인된 변경으로 옛 lazy 항목은
+재시작 뒤 취소한다. CAENC3/4는 재시작 뒤 새로 요청한 lazy 목록과 새 resolve 응답의
+현재 인코딩을 대조한다. ready의 원래 응답 인코딩 보존과 20조건은 유지한다. 위 최초
+재현·검증 기록의 옛 lazy 항목 대조와 후속 정책의 전제를 구분한다.

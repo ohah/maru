@@ -23,7 +23,8 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* v253: location results own their published search kind. */
 /* v254: pending code action snapshots are independent of the displayed menu. */
 /* v255: copied code action edit ranges retain their response encoding. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 255u
+/* v256: LSP launches and lazy code action data carry connection identities. */
+#define MARU_MACOS_APP_HOST_ABI_VERSION 256u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);

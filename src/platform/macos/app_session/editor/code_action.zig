@@ -41,6 +41,8 @@ pub const Owned = struct {
     origin: u8 = 0,
     /// Copied edit ranges keep the response encoding even if this server restarts.
     encoding: lsp.rpc.PositionEncoding,
+    /// Lazy data belongs to this launch, independently of its executable name.
+    process_generation: u64,
 
     fn deinit(self: *Owned, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
@@ -212,6 +214,7 @@ pub fn onResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, result: ?s
                 .exe = c.server.exe,
                 .origin = @intCast(w[1]),
                 .encoding = c.encoding,
+                .process_generation = c.process_generation,
             }) catch {
                 self.allocator.free(raw);
                 self.allocator.free(title);
@@ -297,6 +300,13 @@ pub fn accept(self: *AppSession, index: usize) void {
     };
     if (item.has_edit) {
         applyRaw(self, item.raw, item.encoding);
+        return;
+    }
+    // A ready edit is already self-contained. Lazy data can instead reference
+    // the old process's registry; do not reinterpret that token in a new launch.
+    if (!response_owner.Connection.matches(item.process_generation, c.process_generation)) {
+        st.notified_none += 1;
+        self.showNoticeKey(.ca_none);
         return;
     }
     // resolve — 항목 JSON 그대로, 그 서버에.

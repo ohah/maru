@@ -1814,6 +1814,7 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [PTY stdio 소유권](plans/pty-stdio-ownership.md) — 닫힌 표준 FD 충돌과 slave CLOEXEC, 실제 터미널 회귀.
 - [PTY native spawn 비교 PoC](plans/pty-native-spawn-poc.md) — syscall 모형 비교와 제품 이관 판단.
 - [PTY helper 적용 조건·셸 수명 PoC](plans/pty-helper-lifecycle.md) — job control·resize와 제품 적용 전 설계 검토.
+- [PTY helper 초기화 실패 전달 PoC](plans/pty-helper-init-status.md) — stage/errno·EOF/readiness·deadline·회수의 독립 대조.
 - [PTY 크기 재기록 인과 대조](plans/pty-resize-overwrite.md) — writer·순서·반사실을 구분하는 독립 계측.
 
 

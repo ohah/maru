@@ -2474,3 +2474,12 @@ CI의 `macOS-only gates`는 세 worker의 manifest와 실행 receipt를 검증�
 연결 번호의 미설정/PID 재사용 모델/다른 launch 대조를 검사한다. gate는 7개(행동 3개와 초기화
 4개)를 강제한다. 숫자 발급·고갈·일치는 `mise exec -- zig test src/session/editor/ops/lsp_response_owner.zig`로
 검사한다. [정책과 증거 경계](plans/lsp-code-action-restart-data.md)를 따른다.
+
+
+## PTY helper 초기화 실패 전달 PoC
+
+`python3 tools/pty-spawn-poc/init_status.py --output <새 외부 경로>`는
+독립 native helper의 55계약을 C O0/O2 각각 검사한다.
+`python3 tools/pty-spawn-poc/init_status_controls.py --output <새 외부 경로>`는
+6개 결함의 행동 거부와 원본·분할 전송 정상 대조를 검사한다.
+[실험 wire·준비 완료의 한계·제품 적용 전 조건](plans/pty-helper-init-status.md)을 따른다.

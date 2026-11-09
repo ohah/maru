@@ -71,7 +71,8 @@ macOS 26.5.1 arm64·clang 17·SDK 26.2에서 bash 20조건 × fork/helper × C O
    실제 target readiness/종료는 구분한다. 사전 준비부터의 단일 deadline과 부모의 정확한 child/group 회수를 설계한다.
 5. 요청/오류 FD는 target에 남기지 않는다. 기존 tty·cwd·login·foreground/cleanup 계약을 모형이 아닌 실제 `PtySession`으로 재검증한다.
 
-지금의 모형은 초기화 실패를 126/127로만 관측한다. errno/stage 전달과 제품 성공 상태 전이는 아직 구현하지 않았다.
+기존 모형은 초기화 실패를 126/127로만 관측한다. 후속 [실패 전달 PoC](pty-helper-init-status.md)는
+독립 native helper에서 stage/errno·EOF와 readiness·기한·회수를 검증한다. 제품 성공 상태 전이는 미구현이다.
 서명된 GUI/CLI/frozen-host 실증, 실패 채널, signal 상속·동시 spawn, 사용자 셸 설정,
 다른 macOS 버전·host upgrade/reattach 검증 전에는 helper 채택이나 제품 이관 완료를 주장하지 않는다.
 

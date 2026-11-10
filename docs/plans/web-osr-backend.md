@@ -3787,6 +3787,21 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         찾아 CEF 가 번호를 다시 쓰면 판정자가 틀린 셈을 낼 수 있다(제품 아님). ㉘ **LOW-Z2**(판정자·측정 손잡이) — swwait `keepmax` 의 「40 s idle」 는
         고정 글이고, `SW_FUZZ_AWAYGAP=1` 이면 퍼즈 시험의 힘 단언(`churn_l.links * 10 >= seeds`)이 떨어진다(WRONG 수는 0 — 그 손잡이의 합격 조건은
         WRONG 0 뿐). 앞 차의 ①–㉓ 그대로.
+      - **집중 검증(14 차 고침 `2bb5a38d6` 의 3 회차 — 검증자 v20t, 2026-11-11)**: SEVERE 0. 기록 `scratchpad/w9d2_v20t/ROUNDS.md`(탐침 `probes.patch`).
+        1 회차(코드 — (번호, `t_io_us`)가 아직 부딪히거나 생을 잘못 가르는가): 넣는 곳과 보는 곳이 모두 같은 `Candidate.t_io_us` 이고 탭 사이 사본은 한
+        사건이라 같은 IO — 틀린 본문 길 없음, 다시 쓴 번호에서만의 잃는 쪽 셋(아래 ㉙–㉛, 탐침으로 ㉙·㉚ 확인). 2 회차(보통 흐름에서 13 차가 건지던 본문을
+        잃는가 — `24d427f45` 와 차례로, 같은 판정자): 제 본문 swcdp 843 → 861·v20l 542 → 544(흔들리는 판에서 늘었다), swwait·v20m 같음, 모든 판 PASS·WRONG 0
+        — 준 판 없음. 3 회차: 퍼즈(ReleaseSafe) 열여섯 세계 × 씨앗 1 000 000–1 999 999(1 600 만 판·1 억 7 080 만 쪽) **WRONG 0**(힘 단언·「앞 생은 바탕과
+        같다」 포함), 앞 생의 IO 를 1 µs 앞으로 둔 탐침 퍼즈 100 000 판 WRONG 0; 변이(새 줄 — 고른 8 개, 실패 수로만, 변이마다 복원 확인) **8/8 잡힘** — 다만
+        A(`bad` 의 생 비교 걷음)·B(잇기의 `c.t_io_us == x.io` 걷음)·C(`evict` 열쇠의 IO → 0)는 저마다 시험 하나만 잡는다(얇다 — 공허하지는 않다). 새 시험
+        다섯은 모두 고친 열쇠가 없으면 떨어진다. 가벼운 회귀(`2bb5a38d6`, 한 번씩): 순수 398/398, `--review-body-swwait` 19/19·`-swcdp` 48/48·`-v20m` 10/10·
+        `-v20l` 15/15, `--network-body` 92/92, `--network` 173/173.
+      - **남는 틈 더함(v20t — 모두 다시 쓴 번호에서만, 잃는 쪽)**: ㉙ **R1-a** — `Verdict.ambiguous` 는 번호(`q = w.pair`)만 싣고 생(IO)이 없어
+        `swPointedAmbiguous(x.q)` 가 같은 번호의 **새 생** 후보를 `ambiguous` 로 끝낸다 — 새 생의 제 P 는 본문을 잃는다(틀린 본문 아님; 14 차가 건드리지 않은
+        갈래라 `24d427f45` 에도 같다; 고칠 방향: `Verdict.ambiguous` 에도 `io` 를 싣고 같은 생만 끝낸다). ㉚ **R1-b**(이론·기존) — `swpend`·`wdefer` 는 번호
+        열쇠라, 미룬 앞 생이 10 s(`wspan_keep_us`) 안에 같은 번호의 새 생에 `swpend` 를 덮이면 `resolveDefer` 가 건너뛰어 앞 생의 어둠이 서지 않는다(C3b′
+        구멍 — 실측 번호 재사용 간격은 18.8 분). ㉛ **R1-c**(메모리) — 같은 W 에 같은 번호의 다른 생이 오면(`bad`) 둘째 생의 `explained` 칸은 쫓아낼 때
+        지우지 않는다(칸당 수십 바이트, 기록하는 탭이 없어지면 `Link.clear` 가 비운다).
       - **14 차가 바꾼 형(리베이스)**: `sw_mod.Life`·`W.pair_io`·`Verdict.link.io`, `Link.explained`(열쇠 `Life`)·`notePairAt(…, life, …)`·
         `isExplained(q, io)`, 퍼즈 `SwFuzzCfg.stale`·`stale_life_gap_us`·`stale_life_target`. 고친 파일: `net_body_sw.zig`·`net_body_table.zig`·
         `build/web_sidecar.zig`(시험 수 393 → 398)·`src/cli/mcp.zig`·`docs/control-plane-browser.md`·이 계획.

@@ -5629,3 +5629,12 @@ fork/helper 양쪽에서 대조한다. PID·rc·값·append 순서와 커널 크
 구분하고, 옛 항목 선택의 resolve 전송 수 0·본문/Undo/디스크 보존을 검사한다. PID 재사용은
 실제 커널 PID 조작이 아닌 같은 PID/다른 연결 번호의 명시적 모델이다. HID/픽셀이나 실제 SDK
 검증으로 확대하지 않는다. [계획과 최초 실패](plans/lsp-code-action-restart-data.md)를 따른다.
+
+
+## PTY helper 초기화 실패 전달 PoC
+
+`python3 tools/pty-spawn-poc/init_status.py --output <새 외부 경로>`는
+독립 native helper의 55계약을 C O0/O2 각각 검사한다.
+`python3 tools/pty-spawn-poc/init_status_controls.py --output <새 외부 경로>`는
+6개 결함의 행동 거부와 원본·분할 전송 정상 대조를 검사한다.
+[실험 wire·준비 완료의 한계·제품 적용 전 조건](plans/pty-helper-init-status.md)을 따른다.

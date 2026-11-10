@@ -94,3 +94,18 @@ See [causal findings and limits](../../docs/plans/pty-resize-overwrite.md).
 
 Before causal capture, an owned GET/SET probe compares native return values and errno
 with and without the observer. Failed observer conformance prevents study publication.
+
+
+## Helper initialization status channel
+
+```sh
+python3 tools/pty-spawn-poc/init_status.py --output /tmp/maru-init-new
+python3 tools/pty-spawn-poc/init_status_controls.py --output /tmp/maru-init-controls-new
+```
+
+The independent native helper reports a bounded version/stage/errno frame.
+55 distinct contracts run in C O0/O2; EOF and exit zero are never target readiness.
+Six compiled behavioral mutations must be rejected, while the original and
+bytewise request transmission pass. New output directories retain partial cohorts.
+This does not change the product or select a signed helper deployment strategy.
+See [wire, ownership and validation limits](../../docs/plans/pty-helper-init-status.md).

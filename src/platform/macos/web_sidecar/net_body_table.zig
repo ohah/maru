@@ -1613,7 +1613,7 @@ pub const Table = struct {
         if (t.wdefer.get(request)) |d| if (t.swpend.get(request) == d.io) return;
         const kv = t.swpend.fetchRemove(request) orelse return;
         t.swpend_tombs.removed(&t.swpend, 1);
-        if (!self.link.isExplained(request)) t.sw_dark_from = @min(t.sw_dark_from, kv.value);
+        if (!self.link.isExplained(request, kv.value)) t.sw_dark_from = @min(t.sw_dark_from, kv.value);
     }
 
     /// 재검증 5 차 S3: 이 기록은 설명되었다(짝이 된 W·실패로 정한 W).
@@ -2426,7 +2426,7 @@ pub const Table = struct {
                 continue;
             }
             if (t.swpend.remove(req)) t.swpend_tombs.removed(&t.swpend, 1);
-            if (!self.link.isExplained(req)) self.swDark(t, d.io);
+            if (!self.link.isExplained(req, d.io)) self.swDark(t, d.io);
         }
     }
 
@@ -3901,13 +3901,13 @@ pub const Table = struct {
         }
         if (r.state == .failed) {
             swExplain(t, cand.request);
-            try self.link.notePairAt(gpa, r.wkey, cand.request, t.browser, now_us);
+            try self.link.notePairAt(gpa, r.wkey, .{ .request = cand.request, .io = cand.t_io_us }, t.browser, now_us);
             self.link.noteBad(r.wkey);
             try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = .request_failed, .flags = .{ .credentialed = cand.cef_credentialed } } });
             _ = t.cands.orderedRemove(ci);
             return;
         }
-        try self.link.notePairAt(gpa, r.wkey, cand.request, t.browser, now_us);
+        try self.link.notePairAt(gpa, r.wkey, .{ .request = cand.request, .io = cand.t_io_us }, t.browser, now_us);
         swExplain(t, cand.request);
         try self.emit(gpa, .{ .sw_paired = .{ .browser = t.browser, .request = cand.request, .wrid = r.rid } });
         if (!self.sw_link_body) {
@@ -4235,7 +4235,7 @@ pub const Table = struct {
             const r = t.swrec.items[t.swrec_head];
             const pend = t.swpend.get(r.request);
             // 앞 끝이 설명되었거나(어느 탭에서든) 끝났다(그때 어둠이 섰다) — 넘긴다. 같은 번호의 다시 시작은 새 칸이다(IO 시각이 다르다).
-            if (pend == null or pend.? != r.t_io_us or self.link.isExplained(r.request)) {
+            if (pend == null or pend.? != r.t_io_us or self.link.isExplained(r.request, r.t_io_us)) {
                 if (pend != null and pend.? == r.t_io_us and t.swpend.remove(r.request)) t.swpend_tombs.removed(&t.swpend, 1);
                 t.swrec_head += 1;
                 continue;
@@ -4364,8 +4364,10 @@ pub const Table = struct {
                     return true;
                 }
                 // C6·C7′: 그 기록이 이 탭에 있고(탭 사이 사본 — 같은 번호), 아직 잇지 않았고, CEF 가 성공으로 끝냈고, 상태가 같다.
+                // 재검증 14 차(LOW-R1): 같은 생이어야 한다(번호와 IO — 사본은 같은 IO). CEF 가 다시 쓴 번호의 새 기록은 앞 생과 짝을 맺은 W 의 기록이
+                // 아니다 — 그 W 의 메모 응답(옛 τ)을 받은 P 가 새 기록의 본문을 받았다(13 차).
                 const ci = for (t.cands.items, 0..) |c, n| {
-                    if (c.request == x.q) break n;
+                    if (c.request == x.q and c.t_io_us == x.io) break n;
                 } else {
                     try self.swNote(gpa, t, &p, x.q, .not_in_tab);
                     return true;
@@ -11005,7 +11007,7 @@ test "W9d② 재검증 5 차 S3a: 워커 W 가 서비스 워커 갈래 기록의
     try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
     // 짝은 W 의 응답 때 — S3a 는 본문을 잇지 않아 곧 ambiguous(설명된 기록 — 어둠이 아니다).
     try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(701));
-    try testing.expect(h.table.link.isExplained(701));
+    try testing.expect(h.table.link.isExplained(701, t0 + 400));
     try testing.expectEqual(std.math.maxInt(i64), h.table.tabOf(5).?.sw_dark_from);
     try pFetch(&h, 5, "p.1", u, t0, t0 + 9_500, t0 + 9_000 + sw_wall_off, .{});
     try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
@@ -11316,8 +11318,19 @@ test "W9d② 재검증 5 차 S3b 퍼즈: 맞물린 표 — 이은 본문은 늘 
     const two_c = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .share = true, .omit = true, .omit_n = 6, .ts_lag_max = if (lag45) 45_000 else 10_700, .urls = 12, .tab2 = true, .fifo = true, .att6_early = true, .stop5 = true, .reload = true, .reattach = true, .lag6 = true, .delay1 = true, .edge = true, .edge_after_half = true, .paused = true, .away = true, .name = "two-tabs+churn" });
     const churn_l = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .ts_lag_max = if (lag45) 45_000 else 10_700, .urls = 12, .fifo = true, .reload = true, .reattach = true, .delay1 = true, .edge = true, .edge_after_half = true, .paused = true, .away = true, .name = "gentle+blind+share+churn+lose" });
     const two_cl = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .omit_n = 6, .ts_lag_max = if (lag45) 45_000 else 10_700, .urls = 12, .tab2 = true, .fifo = true, .att6_early = true, .stop5 = true, .reload = true, .reattach = true, .lag6 = true, .delay1 = true, .edge = true, .edge_after_half = true, .paused = true, .away = true, .name = "two-tabs+churn+lose" });
+    // 재검증 14 차(LOW-R1): 다시 쓴 번호 — 모든 기록 번호에 앞 생의 짝이 남은 세계 둘(`stale` — 검증 v20s 1 회차가 WRONG 1 을 찾은 `share` 와 가장 거친
+    // 둘째 탭 세계). 13 차 코드는 `share` 의 씨앗 96013 에서 틀린 본문을 낸다.
+    const share_s = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .ts_lag_max = 10_700, .urls = 12, .fifo = true, .paused = true, .stale = true, .name = "gentle+blind+share+lose+stale" });
+    const two_cl_s = try swFuzz(.{ .seeds = seeds, .seed_from = from, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .omit_n = 6, .ts_lag_max = if (lag45) 45_000 else 10_700, .urls = 12, .tab2 = true, .fifo = true, .att6_early = true, .stop5 = true, .reload = true, .reattach = true, .lag6 = true, .delay1 = true, .edge = true, .edge_after_half = true, .paused = true, .away = true, .stale = true, .name = "two-tabs+churn+lose+stale" });
     // 모든 세계를 돈 뒤에 단언한다(앞 세계가 실패해도 뒤 세계의 수를 남긴다 — 330 000 판, 계획 「재검증 12 차」).
-    for ([_]@TypeOf(gap){ rough, rough_clock, gap, skew, real, real_gap, share, two, two_x, edge, churn, two_c, churn_l, two_cl }) |r| try testing.expectEqual(@as(usize, 0), r.wrong);
+    for ([_]@TypeOf(gap){ rough, rough_clock, gap, skew, real, real_gap, share, two, two_x, edge, churn, two_c, churn_l, two_cl, share_s, two_cl_s }) |r| try testing.expectEqual(@as(usize, 0), r.wrong);
+    // 재검증 14 차(LOW-R1): 앞 생은 아무것도 바꾸지 않는다 — 이은 수·어둠 판이 바탕 세계와 같다(새 생이 앞 생의 「설명됨」 을 물려받지 않는다).
+    for ([_][2]@TypeOf(gap){ .{ share, share_s }, .{ two_cl, two_cl_s } }) |x| {
+        try testing.expectEqual(x[0].links, x[1].links);
+        try testing.expectEqual(x[0].links6, x[1].links6);
+        try testing.expectEqual(x[0].dark, x[1].dark);
+        try testing.expectEqual(x[0].dark6, x[1].dark6);
+    }
     // 재검증 13 차(RISK-T1): 처음 만남의 어둠이 50 ms 에서 `blind_io_lag_us` 로 넓어져 `edge` 판의 절반(어둠 안을 그대로 치는 판)은 잇지 않는다 —
     // 위 끝을 판당 0.8 로(330 000 판 실측은 계획 「재검증 13 차」).
     try testing.expect(edge.links * 5 >= seeds * 4);
@@ -11509,11 +11522,11 @@ test "재검증 6 차 F16(탐침 v20l D1b): 하나만 닫혀도 그 자리는 �
     try t.closed(gpa_t, 7);
     try testing.expectEqual(std.math.maxInt(i64), t.link.visibleSince(7));
     // 8 이 기록한다 — 색인은 남는다(탭 사이에 나눈다 — K3).
-    try testing.expect(t.link.isExplained(9) and t.link.taus.count() == 1);
+    try testing.expect(t.link.isExplained(9, 0) and t.link.taus.count() == 1);
     try t.closed(gpa_t, 8);
     try testing.expect(!t.anyRecording());
     try testing.expectEqual(std.math.maxInt(i64), t.link.visibleSince(8));
-    try testing.expect(!t.link.isExplained(9) and t.link.taus.count() == 0 and t.link.ws.count() == 0);
+    try testing.expect(!t.link.isExplained(9, 0) and t.link.taus.count() == 0 and t.link.ws.count() == 0);
 }
 
 // ── 재검증 6 차(최종 코드 검증 1–10 회차 v20l 의 결함 — 탐침을 고친 뒤의 기준으로) ──────────────────────────────────────────────
@@ -12519,7 +12532,15 @@ test "재검증 7 차 기준 · v20m R7-a: F16b — W_a 의 응답 뒤 다른 �
 ///   - `edge` — 재검증 11 차(D-v20q-2): 판의 1/3 에서 타깃 1 의 눈먼 때 끝 바로 앞(3 ms 안)에 시작한 W(시작·응답을 잃는다 — 기록 IO 는 6–45 ms 뒤,
 ///     실측 무더기 최대 42.5 ms)와 그 끝 + 5.2–45.2 ms 에 시작한 같은 주소의 보이는 W(제 기록 없음)·그 W 의 P 를 둔다(IO 가 뒤 W 의 시작 앞인 꼴과 뒤인
 ///     꼴 모두).
-const SwFuzzCfg = struct { seeds: usize, skew_max: i64 = 0, gap: i64 = 0, gentle: bool = false, ts_lag_max: i64 = 0, omit: bool = false, blind: bool = false, seed_from: usize = 0, name: []const u8 = "", urls: usize = 6, share: bool = false, lose: u8 = 0, tab2: bool = false, omit_n: u8 = 12, fifo: bool = false, att6_early: bool = false, stop5: bool = false, reload: bool = false, reattach: bool = false, lag6: bool = false, delay1: bool = false, edge: bool = false, edge_after: bool = false, paused: bool = false, edge_after_half: bool = false, away: bool = false, away_gap: bool = false, edge_lag: u32 = 39_000 };
+///   - `stale` — 재검증 14 차(LOW-R1 — 검증 v20s 1 회차의 탐침 `SW_FUZZ_STALEX` 를 들였다): CEF 는 기록 번호를 다시 쓴다(실측 — 다른 기록 세션·같은
+///     탭의 18.8 분 뒤). 판의 모든 기록 번호에 같은 번호의 앞 생(IO 가 `stale_life_gap_us` 앞)이 W 와 짝을 맺은 채 남아 있다(최악). 앞 생의 W 는 τ
+///     없이(τ 색인에 들지 않는다 — 메모 응답의 꼴은 따로 시험한다) 「설명됨」 만 남긴다. 13 차(번호만 열쇠)는 이 세계에서 C3b′ 가 꺼져 틀린 본문을
+///     낸다(`gentle+blind+share+lose` 씨앗 96013). 고친 뒤에는 앞 생이 아무것도 바꾸지 않는다 — 같은 씨앗의 바탕 세계와 이은 수·어둠 판이 같다.
+const SwFuzzCfg = struct { seeds: usize, skew_max: i64 = 0, gap: i64 = 0, gentle: bool = false, ts_lag_max: i64 = 0, omit: bool = false, blind: bool = false, seed_from: usize = 0, name: []const u8 = "", urls: usize = 6, share: bool = false, lose: u8 = 0, tab2: bool = false, omit_n: u8 = 12, fifo: bool = false, att6_early: bool = false, stop5: bool = false, reload: bool = false, reattach: bool = false, lag6: bool = false, delay1: bool = false, edge: bool = false, edge_after: bool = false, paused: bool = false, edge_after_half: bool = false, away: bool = false, away_gap: bool = false, edge_lag: u32 = 39_000, stale: bool = false };
+
+/// 재검증 14 차(`stale`): 앞 생의 IO 는 이만큼 앞(10 분 — 실측 다시 씀은 수 분 뒤), 그 W 의 타깃은 판의 타깃과 겹치지 않는다.
+const stale_life_gap_us: i64 = 600_000_000;
+const stale_life_target: u64 = 0x57a1e;
 
 fn swFuzz(cfg_in: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, dark6: usize, links6: usize, stops: usize } {
     // 재검증 12 차(측정 손잡이 `SW_FUZZ_OLDFACTS=1`): 새 사실(`paused`) 없이 — 11 차의 세계 그대로(다시 뜸·새 워커도 눈먼 때)에서 넓은 꼴을 잰다.
@@ -12963,6 +12984,14 @@ fn swFuzz(cfg_in: SwFuzzCfg) !struct { wrong: usize, links: usize, dark: usize, 
         }.lt);
         var now: i64 = 0;
         var seen_fetch: usize = 0;
+        if (cfg.stale) for (fs.items) |f| {
+            const sk: sw_mod.WKey = .{ .target = stale_life_target, .rid = f.q };
+            const io_prev = f.io - stale_life_gap_us;
+            try h.table.link.noteResponse(gpa_t, sk, 0, false, false, 200);
+            try h.table.link.notePairAt(gpa_t, sk, .{ .request = f.q, .io = io_prev }, 5, io_prev + 1_000);
+        };
+        // 앞 생을 정말 두었다(세계의 이빨 — 고친 뒤에는 결과가 바탕과 같아 빠져도 모른다).
+        if (cfg.stale and fs.items.len > 0) try testing.expect(h.table.link.isExplained(fs.items[0].q, fs.items[0].io - stale_life_gap_us));
         if (dump_seed != null and dump_seed.? == seed) {
             std.debug.print("\n[fuzz dump away +{d}..+{d} toff {d}]", .{ aw0 -| rec_start, aw1 -| rec_start, toff });
             std.debug.print("\n[fuzz dump {s} seed {d}] rec_start {d} rec6 +{d} late_worker {} att {d},{d} en {d},{d} att6 {d},{d} en6 {d},{d} reload tgt {d} at +{d} vis +{d} notes +{d},+{d} · reattach tab {d} tgt {d} off +{d} att +{d} en +{d} · edge {} after {} · paused2 {} paused6 {} w2run +{d} rl_paused {} rl_en +{d}\n", .{ cfg.name, seed, rec_start, rec6 - rec_start, late_worker, att[1] - rec_start, att[2] - rec_start, en[1] - rec_start, en[2] - rec_start, att6[1] - rec_start, att6[2] - rec_start, en6[1] - rec_start, en6[2] - rec_start, rl_tg, rl_at - rec_start, rl_vis - rec_start, rl_note[0] - rec_start, rl_note[1] - rec_start, ra_tab, ra_tg, ra_off - rec_start, ra_att - rec_start, ra_en - rec_start, edge_round, edge_after, paused2, paused6, w2run - rec_start, rl_paused, rl_en - rec_start });
@@ -15008,7 +15037,7 @@ test "재검증 11 차(LOW-P4) · v20q-B Q19-g: pairStale 한 번의 값 — 32 
     const io: i64 = 50_000_000;
     const wk: sw_mod.WKey = .{ .target = 1, .rid = sw_mod.hashId("w.1") };
     try h.table.link.noteResponse(gpa_t, wk, io + 1_000 + sw_wall_off, false, false, 200);
-    try h.table.link.notePairAt(gpa_t, wk, 4242, 5, io + 2_000);
+    try h.table.link.notePairAt(gpa_t, wk, .{ .request = 4242, .io = io }, 5, io + 2_000);
     for (0..ntabs) |i| {
         const t = h.table.tabOf(@intCast(5 + i)).?;
         var rb: [24]u8 = undefined;
@@ -15305,4 +15334,97 @@ test "재검증 13 차(RISK-T1): 처음 만남의 눈먼 때 끝 뒤 ts → IO �
 test "재검증 13 차(LOW-F1 — 퍼즈 판정자): 같은 쓰기(τ)를 나눈 HEAD 둘은 같은 빈 바이트다 — `rough` 씨앗 818239(12 차 판정자는 HEAD 마다 다른 본문 id 를 주어 WRONG 1 로 셌다); 판정자는 그 밖에서 그대로 엄격하다(206 조각·다른 쓰기)" {
     const rough = try swFuzz(.{ .seeds = 1, .seed_from = 818239, .share = true, .fifo = true, .name = "rough(818239)" });
     try testing.expectEqual(@as(usize, 0), rough.wrong);
+}
+
+test "재검증 14 차(LOW-R1 — 검증 v20s 1 회차): CEF 가 다시 쓴 기록 번호가 앞 생의 「설명됨」 을 물려받지 않는다 — 퍼즈 씨앗 96013(gentle+blind+share+lose)의 모든 기록 번호에 앞 생의 짝을 두어도 틀린 본문이 없고 이은 수·어둠이 바탕과 같다(13 차는 C3b′ 가 꺼져 P p.0 이 W.11 의 기록 2011 을 받았다)" {
+    const base = try swFuzz(.{ .seeds = 1, .seed_from = 96013, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .ts_lag_max = 10_700, .urls = 12, .fifo = true, .paused = true, .name = "v14-R1 base" });
+    const stale = try swFuzz(.{ .seeds = 1, .seed_from = 96013, .gentle = true, .blind = true, .share = true, .lose = 20, .omit = true, .ts_lag_max = 10_700, .urls = 12, .fifo = true, .paused = true, .stale = true, .name = "v14-R1 stale" });
+    try testing.expectEqual(@as(usize, 0), base.wrong);
+    try testing.expectEqual(@as(usize, 0), stale.wrong);
+    try testing.expectEqual(base.links, stale.links);
+    try testing.expectEqual(base.dark, stale.dark);
+}
+
+test "재검증 14 차(LOW-R1 — 같은 번호의 새 생): CEF 가 다시 쓴 기록 번호 — 앞 생과 짝을 맺은 W 의 메모 응답(옛 τ)을 받은 P 는 같은 번호의 새 생(다른 주소의 새 기록)에 잇지 않는다(13 차는 그 새 기록의 본문을 붙였다); 새 생은 제 P 에 잇는다" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/api/feed";
+    const v = sw_origin ++ "/other";
+    const t0: i64 = 10_000_000;
+    // 앞 생 — 기록 801(u)·W 7.1·P p.1 은 제 본문을 받고 기록은 끝난다.
+    _ = try h.cand(5, 801, u, t0 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+    h.table.cefEndReceived(5, 801, t0 + 9_500, true, 9);
+    try pFetch(&h, 5, "p.1", u, t0, t0 + 9_200, t0 + 9_000 + sw_wall_off, .{});
+    try swRun(&h, t0 + 10_000, t0 + 200_000);
+    try testing.expectEqual(@as(?u64, 801), fetchedFor(&h, "p.1"));
+    try testing.expectEqual(@as(?State, .captured), h.ended.get(801));
+    // 새 생 — 같은 번호 801 이 다른 주소(v)의 새 기록으로 온다(W 7.2). 그 사이 워커가 7.1 의 응답 메모로 u 의 P p.2 에 답한다(옛 τ).
+    const t1 = t0 + 2_000_000;
+    _ = try h.cand(5, 801, v, t1 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.2", v, t1 + 200, t1 + 9_000, .{});
+    h.table.cefEndReceived(5, 801, t1 + 9_500, true, 7);
+    try pFetch(&h, 5, "p.2", u, t1 + 9_600, t1 + 9_700, t0 + 9_000 + sw_wall_off, .{});
+    try pFetch(&h, 5, "p.3", v, t1 + 100, t1 + 9_800, t1 + 9_000 + sw_wall_off, .{});
+    try swRun(&h, t1 + 10_000, t1 + 12_000_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.2"));
+    try testing.expect(h.notes.get(.not_in_tab) >= 1);
+    try testing.expectEqual(@as(?u64, 801), fetchedFor(&h, "p.3"));
+}
+
+test "재검증 14 차(LOW-R1 — 탭 사이 사본의 생): 한 탭에서 실패로 정한 W 의 기록은 그 생 그대로 다른 탭의 사본도 설명한다 — W 를 보지 못한 탭의 사본이 짝 없이 끝나도 그 탭은 어둡지 않다(사본은 같은 IO)" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    try swSetup(&h, 6, true);
+    const u = sw_origin ++ "/fail";
+    const t0: i64 = 10_000_000;
+    for ([_]BrowserId{ 5, 6 }) |b| _ = try h.cand(b, 950, u, t0 + 400, .{ .sw = true });
+    // 탭 5 의 세션만 W 를 본다 — 응답 없이 실패(기록은 실패로 정해져 설명된다).
+    try wev(&h, 5, 1, .{ .sent = .{ .rid = "7.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 200 } }, t0 + 250);
+    try wev(&h, 5, 1, .{ .failed = .{ .rid = "7.1", .ts_us = t0 + 5_000 } }, t0 + 5_050);
+    h.table.cefEndReceived(5, 950, t0 + 5_500, false, 0);
+    h.table.cefEndReceived(6, 950, t0 + 5_500, false, 0);
+    try swRun(&h, t0 + 10_000, t0 + 12_000_000);
+    try testing.expect(h.table.link.isExplained(950, t0 + 400));
+    try testing.expectEqual(@as(usize, 0), h.table.tabOf(6).?.swpend.count());
+    try testing.expectEqual(std.math.maxInt(i64), h.table.tabOf(6).?.sw_dark_from);
+    try testing.expectEqual(std.math.maxInt(i64), h.table.tabOf(5).?.sw_dark_from);
+}
+
+test "재검증 14 차(LOW-R1 — C3b′ 의 생): 끝난 기록·미룸을 정한 기록은 그 생이 설명되었을 때만 어둠을 세우지 않는다 — 같은 번호의 앞 생의 짝은 설명이 아니다(13 차는 그것을 물려받아 어둠이 서지 않았다)" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const t = h.table.tabOf(5).?;
+    const io: i64 = 20_000_000;
+    const old_io = io - stale_life_gap_us;
+    // `swEnded` — 그 생이 설명됨: 어둠 없음.
+    try t.swpend.put(gpa_t, 950, io);
+    try h.table.link.notePairAt(gpa_t, sw_mod.WKey.of(1, 0, "x.1"), .{ .request = 950, .io = io }, 5, io + 10);
+    h.table.swEnded(5, 950);
+    try testing.expectEqual(std.math.maxInt(i64), t.sw_dark_from);
+    // `swEnded` — 앞 생만 설명됨: 그 IO 부터 어둠.
+    try t.swpend.put(gpa_t, 951, io + 100);
+    try h.table.link.notePairAt(gpa_t, sw_mod.WKey.of(1, 0, "x.2"), .{ .request = 951, .io = old_io }, 5, old_io + 10);
+    h.table.swEnded(5, 951);
+    try testing.expectEqual(io + 100, t.sw_dark_from);
+    // `resolveDefer` — 미룬 기록의 창을 잊었다(`wspan_floor`): 그 생이 설명됨이면 어둠 없음, 앞 생만이면 어둠.
+    t.sw_dark_from = std.math.maxInt(i64);
+    try t.swpend.put(gpa_t, 952, io + 200);
+    try h.table.link.notePairAt(gpa_t, sw_mod.WKey.of(1, 0, "x.3"), .{ .request = 952, .io = io + 200 }, 5, io + 210);
+    try t.wdefer.put(gpa_t, 952, .{ .url = 1, .method = 1, .lo = 0, .hi = 1, .io = io + 200, .until = 0 });
+    t.wspan_floor = 10;
+    t.wdefer_until = 0;
+    h.table.resolveDefer(t, io + 1_000_000);
+    try testing.expectEqual(@as(usize, 0), t.wdefer.count());
+    try testing.expectEqual(std.math.maxInt(i64), t.sw_dark_from);
+    try t.swpend.put(gpa_t, 953, io + 300);
+    try h.table.link.notePairAt(gpa_t, sw_mod.WKey.of(1, 0, "x.4"), .{ .request = 953, .io = old_io }, 5, old_io + 10);
+    try t.wdefer.put(gpa_t, 953, .{ .url = 1, .method = 1, .lo = 0, .hi = 1, .io = io + 300, .until = 0 });
+    t.wdefer_until = 0;
+    t.wdefer_epoch +%= 1;
+    h.table.resolveDefer(t, io + 1_000_000);
+    try testing.expectEqual(io + 300, t.sw_dark_from);
 }

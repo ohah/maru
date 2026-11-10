@@ -3743,3 +3743,50 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
         v20l/v20m 의 같은 번호 새 칸·`pw=400`, swwait `keepmax`. 고친 파일: `web_osr.zig`·`net_body.zig`·`net_body_sw.zig`·`net_body_table.zig`·
         `build/web_sidecar.zig`(시험 수)·`src/cli/mcp.zig`·`docs/control-plane-browser.md`·`docs/development-commands.md`·판정자
         `network_body_{swcdp,swwait,v20l,v20m}_check.zig`·이 계획.
+    - **재검증 14 차(13 차 고침 `24d427f45` 의 최종 검증 20 회차 — 검증자 v20s, 2026-11-10)**: SEVERE 0, LOW 가운데 사용자가 지금 고치기로 한 LOW-R1 과
+      글 LOW-D1·D2·D4 를 고쳤다. 기록 `scratchpad/w9d2_v20s/`(`ROUNDS_1-10.md`·`ROUNDS_11-20.md`·탐침 `probes_a.patch`·`probes_b.patch`)·
+      `scratchpad/w9d2_v14/`(이번 고침의 로그·변이·판정).
+      - **LOW-R1(같은 번호의 새 생 — 5 차부터)**: CEF 는 기록 번호를 다시 쓴다(실측 — 기록 세션 103 과 111 에 같은 번호, `f_swcdp_1` 의 286474 가
+        같은 탭에서 18.8 분 뒤 새 후보로). 짝(`W.pair`)과 C3b′ 의 「설명됨」(`Link.explained`)은 **번호만**을 열쇠로 두어, 다시 쓴 번호의 새 기록이 앞
+        생의 것을 물려받았다. 길 둘: ① 새 서비스 워커 갈래 기록이 태어나자마자 「설명됨」 이라 C3b′ 가 그 기록을 보지 않는다(검증 v20s 1 회차 — 모든
+        기록 번호가 묵은 최악 퍼즈 1 400 만 쪽에 WRONG 1, 씨앗 96013: 묵은 번호 넷 + 잃은 응답 + τ 나눔이 겹쳐야), ② 앞 생과 짝을 맺은 W 가 `ws` 에
+        남아 있는 동안 워커가 그 W 의 응답 메모(옛 τ — A1 복제는 τ 를 지닌다)로 P 에 답하면 잇기 판정이 그 번호의 후보를 찾아 **새 생**(다른 주소의 새
+        기록)의 본문을 그 P 에 붙였다(이번에 순수 시험으로 냈다 — 13 차 코드에서 `expected null, found 801`). 고침: 기록의 생을 (번호, 그 시작의 IO 시각
+        `Candidate.t_io_us`)로 가른다(`sw_mod.Life` — 탭 사이 사본은 한 CEF 사건이라 같은 IO). `explained` 의 열쇠·`isExplained(q, io)`(C3b′ 의 세 곳
+        `swEnded`·`resolveDefer`·`swPendingMin` 은 이미 그 생의 IO 를 들고 있다), `notePairAt` 이 생을 받고 `W.pair_io` 를 적으며(같은 W 에 같은 번호의
+        다른 생이 오면 `bad`), 잇기 판정(`Verdict.link.io`)은 같은 생의 후보에만 잇는다 — 다른 생이면 `not_in_tab`(잃는 쪽). 쫓아내기(`evict`·
+        `evictForeign`)는 같은 열쇠로 지운다. 동작이 바뀌는 것은 다시 쓴 번호뿐이고 모두 잃는 쪽이다.
+      - **퍼즈 세계 둘(`SwFuzzCfg.stale`)**: 검증 v20s 의 탐침 `SW_FUZZ_STALEX`(모든 기록 번호를 판 앞에 「설명됨」 으로)를 제품 API 로 들였다 — 판의 모든
+        기록 번호에 앞 생(IO 가 10 분 앞, τ 없는 W)의 짝을 둔다. `gentle+blind+share+lose+stale`·`two-tabs+churn+lose+stale`. 고친 뒤 앞 생은 아무것도
+        바꾸지 않아야 하므로 이은 수(두 탭)·어둠 판(두 탭)이 바탕 세계와 **같음**을 단언한다.
+      - **글(LOW-D1·D2·D4)**: MCP `browser_network_record`·control-plane 에 — 서비스 워커가 멈추거나 다시 뜬 알림 뒤 약 1.3 s(다시 뜸의 눈먼 때 앞뒤 1 s +
+        처음 만남의 폭 300 ms) 안에 시작한 그 워커 fetch 본문은 `ambiguous`(LOW-D1), 멈춤 훑기는 시한 떼기를 기다리는 남의 출처 세션·몫 밖에 세운 세션을
+        건너뛰어 그 3 초 안의 다시 뜸은 멈추지 않고 떠 본문을 잃는다(그 탭의 뒤 서비스 워커 본문도 기록을 다시 켤 때까지 잃을 수 있다 — 틀린 본문은
+        아니다, LOW-D2·D4). 제품 동작은 바꾸지 않았다.
+      - **판정·시험**: 순수 `zig build test-web-sidecar` **398/398**(원장 393 → 398 — net_body_table 263 → 267·net_body_sw 37 → 38: R1 씨앗 96013
+        (모든 기록 번호에 앞 생), 메모 응답의 새 생(②), 탭 사이 사본의 생(실패로 정한 W), C3b′ 의 생(`swEnded`·`resolveDefer` 를 곧바로), `Link` 의 생 단위 시험;
+        Q19-e·Q11-c 는 짝에 0 이 아닌 IO 를 주고 `explained ≤ ws` 를 본다). 고치기 전(13 차와 같은 뜻 — 이 작업 트리 사본에서 열쇠만 번호로 되돌림, 순수 시험
+        ②는 `24d427f45` 그대로도): 씨앗 96013 WRONG 1(이은 2·어둠 0 — 바탕은 WRONG 0·어둠 1), ② `expected null, found 801`, C3b′ 의 생은 어둠이 서지 않음 —
+        세 시험 실패, 고친 뒤 통과. 퍼즈(ReleaseSafe) 열여섯 세계 × 씨앗 0–999 999(1 600 만 판·1 억 7 086 만 쪽) **WRONG 0**(시험 통과 — 힘 단언과 「앞 생은
+        바탕과 같다」 포함: `share`·`share+stale` 이은 310 011·어둠 520 607 그대로, `two-tabs+churn+lose`(+stale) 182 524·87 464·535 233·690 880 그대로),
+        `SW_FUZZ_AWAYGAP=1` 열여섯 × 1 000 000 판 **WRONG 0**(힘 단언 `churn_l` 91 583 < 100 000 하나만 떨어짐 — 아래 ㉘, 「앞 생은 바탕과 같다」 는 통과).
+        대조: 13 차 뜻의 사본으로 같은 열여섯 세계 × 103 000 판 — `share+stale` **WRONG 1**(어둠 판 0 — C3b′ 가 꺼짐; 다른 세계 0). 변이(새 줄만 16 개 —
+        C3b′ 세 곳·짝 두 곳의 IO 를 0 으로, 잇기의 생 비교 걷음, `bad` 의 생 비교 걷음, `pair_io`·`explained` 두 넣기·`contains`·쫓아내기 두 곳의 열쇠, 판정의
+        `io` 빼기, 퍼즈 세계의 앞 생 = 지금 생·앞 생 넣기 걷음; 판정은 실패 수로만, 기준 통과 뒤, 변이마다 `cmp` 복원 확인 — 모두 같았다): 첫 판 **12/16**
+        잡힘 — 살아남은 넷(`swEnded`·`resolveDefer` 의 IO — `swPendingMin` 이 설명된 칸을 먼저 지워 끝·미룸 갈래에 닿지 않았다, 실패 갈래 짝의 IO — 다른
+        탭 사본만 본다, 퍼즈의 앞 생 넣기 걷음 — 고친 뒤에는 결과가 바탕과 같다)에 시험 둘(탭 사이 사본의 생·C3b′ 의 생)과 퍼즈의 「앞 생을 정말 두었다」
+        단언을 더해 다시 — **16/16** 잡힘. 실제 CEF(이 고침의 빌드, 1 분 부하 3–7, 한 번씩 — 다시 돌린 것 없음): `--review-body-swwait` 19/19, `-swcdp`
+        48/48, `-v20m` 10/10, `-v20l` 15/15, `--network-body` 92/92, `--network` 173/173, `-v20fb` 336/336(`V20F_HOSTLOG`). 게이트 12(`fmt-check`·`check-task-split`·
+        `check-doc-links`·`check-doc-line-refs`·`check-config-docs`·`check-mobile-contract`·`check-macos-app-host`·`macos-app-host-swift-check`·
+        `check-boundaries`·`check-wasm-sync`·`web-sidecar`·`check-targets`) 통과, CLI `test-cli-failure-contract` 832 통과·1 skip.
+      - **남는 틈·후속(범위 결정으로 고치지 않았다)**: ㉔ **LOW-P1** — 몫 밖에 세운 세션(그림자 아님)은 제 멈춤 알림에도 떼지 않는다(`stopTarget` 의 세운
+        세션 훑기는 그림자만, `stopWorker` 의 `!known` 갈래는 세운 세션을 아는 것으로 친다) — 그 3 초 안에 다시 뜨면 D-v20r-1 꼴(어둠, 재현 못 함; 고칠
+        방향: 제 알림이면 세운 세션도 `stopping`). ㉕ **LOW-D1** — 멈춘 뒤 약 1.3 s 의 서비스 워커 본문은 잃는다(글로 적었다 — 동작 그대로). ㉖ **LOW-S1**
+        (이론) — 건너뛴 세션의 제 멈춤 알림이 다시 뜬 뒤 늦게 닿으면 `stopTarget` 이 같은 `targetId` 의 새(다시 뜬 워커의 멈춰 붙은) 세션도 뗀다 — 걸리지
+        않지만 그 탭은 다음 이동까지 그 워커를 잃는다(재현하지 않음). ㉗ **LOW-J**(판정자) — `network_body_check`·`r1`·`r3` 는 (번호[, 탭])의 첫 칸을
+        찾아 CEF 가 번호를 다시 쓰면 판정자가 틀린 셈을 낼 수 있다(제품 아님). ㉘ **LOW-Z2**(판정자·측정 손잡이) — swwait `keepmax` 의 「40 s idle」 는
+        고정 글이고, `SW_FUZZ_AWAYGAP=1` 이면 퍼즈 시험의 힘 단언(`churn_l.links * 10 >= seeds`)이 떨어진다(WRONG 수는 0 — 그 손잡이의 합격 조건은
+        WRONG 0 뿐). 앞 차의 ①–㉓ 그대로.
+      - **14 차가 바꾼 형(리베이스)**: `sw_mod.Life`·`W.pair_io`·`Verdict.link.io`, `Link.explained`(열쇠 `Life`)·`notePairAt(…, life, …)`·
+        `isExplained(q, io)`, 퍼즈 `SwFuzzCfg.stale`·`stale_life_gap_us`·`stale_life_target`. 고친 파일: `net_body_sw.zig`·`net_body_table.zig`·
+        `build/web_sidecar.zig`(시험 수 393 → 398)·`src/cli/mcp.zig`·`docs/control-plane-browser.md`·이 계획.

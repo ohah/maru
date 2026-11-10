@@ -1,0 +1,526 @@
+{
+  "schema": 1,
+  "complete": true,
+  "head": "940a6c1edff4d1127f8d494c1cbdfcbbc4f05f12",
+  "app_sha256": "731c876b469eac432badb3530873b35cc545f38a29fc5713bbd182f4a89bc4b8",
+  "producer_sha256": "383c0d0e97c4d87b3ed5992d5147e8a30d4bbc2921c313fe94d484672a039763",
+  "raw_root": "/Users/yoonhb/.cache/maru-agent-artifacts/input-display-study-1",
+  "processes": 12,
+  "inputs": 360,
+  "first_inputs_included": true,
+  "source_policy": "original scheduling; no frame wake, target frame, retry or observer policy experiment",
+  "aggregation": "pooled per-condition keys; median and nearest-rank p95; no phase-quantile summation",
+  "reader_sha256": "7afa3e1ba88d441164241b6ae7e8b3a6587c3589d2e2df8c27a808354706e012",
+  "base_reader_sha256": "59bbafda7e9b112bf48737a56e193585756a371a43773bf846021a5ae336e915",
+  "modes": {
+    "untimed": {
+      "typing": {
+        "processes": 3,
+        "keys": 90,
+        "total": {
+          "count": 90,
+          "median": 28.018812500000003,
+          "p95": 37.458958,
+          "maximum": 46.814
+        },
+        "native_to_present": {
+          "count": 90,
+          "median": 25.9541035,
+          "p95": 34.701583,
+          "maximum": 37.291541
+        },
+        "parts": {
+          "post_to_native": {
+            "count": 90,
+            "median": 0.709354,
+            "p95": 3.347333,
+            "maximum": 16.603458
+          },
+          "native_to_tick": {
+            "count": 90,
+            "median": 5.9940625,
+            "p95": 10.185833,
+            "maximum": 15.799
+          },
+          "frame_prepare": {
+            "count": 90,
+            "median": 1.181396,
+            "p95": 1.356375,
+            "maximum": 1.682791
+          },
+          "tick_finalize": {
+            "count": 90,
+            "median": 0.013729,
+            "p95": 0.018083,
+            "maximum": 0.018834
+          },
+          "wait_for_swift": {
+            "count": 90,
+            "median": 0.000958,
+            "p95": 0.001375,
+            "maximum": 0.001542
+          },
+          "swift_prepare": {
+            "count": 90,
+            "median": 0.0114585,
+            "p95": 0.017166,
+            "maximum": 0.020375
+          },
+          "renderer_before_drawable": {
+            "count": 90,
+            "median": 0.11327100000000001,
+            "p95": 0.139291,
+            "maximum": 0.145208
+          },
+          "terminal_drawable": {
+            "count": 90,
+            "median": 0.018146,
+            "p95": 0.023167,
+            "maximum": 0.02425
+          },
+          "overlay_drawable": {
+            "count": 90,
+            "median": 0.0049585,
+            "p95": 0.006875,
+            "maximum": 0.012792
+          },
+          "renderer_other": {
+            "count": 90,
+            "median": 0.0549795,
+            "p95": 0.071,
+            "maximum": 0.127292
+          },
+          "arm_to_commit": {
+            "count": 90,
+            "median": 0.003375,
+            "p95": 0.004208,
+            "maximum": 0.008
+          },
+          "commit_to_present": {
+            "count": 90,
+            "median": 18.02975,
+            "p95": 26.282541,
+            "maximum": 27.406166
+          }
+        },
+        "drawable_failures": {
+          "terminal": 0,
+          "overlay": 0
+        },
+        "renderer_total": {
+          "count": 90,
+          "median": 0.19195800000000002,
+          "p95": 0.23716700000000002,
+          "maximum": 0.280833
+        }
+      },
+      "shared": {
+        "processes": 3,
+        "keys": 90,
+        "total": {
+          "count": 90,
+          "median": 33.8786035,
+          "p95": 50.663291,
+          "maximum": 54.9145
+        },
+        "native_to_present": {
+          "count": 90,
+          "median": 32.5407915,
+          "p95": 39.276708,
+          "maximum": 48.51775
+        },
+        "parts": {
+          "post_to_native": {
+            "count": 90,
+            "median": 0.7255005,
+            "p95": 6.05475,
+            "maximum": 22.283959
+          },
+          "native_to_tick": {
+            "count": 90,
+            "median": 8.6120415,
+            "p95": 12.841208,
+            "maximum": 19.393416
+          },
+          "frame_prepare": {
+            "count": 90,
+            "median": 1.9207085,
+            "p95": 2.109333,
+            "maximum": 2.201458
+          },
+          "tick_finalize": {
+            "count": 90,
+            "median": 0.0167295,
+            "p95": 0.021333,
+            "maximum": 0.026375
+          },
+          "wait_for_swift": {
+            "count": 90,
+            "median": 0.0015205000000000002,
+            "p95": 0.003166,
+            "maximum": 0.004417
+          },
+          "swift_prepare": {
+            "count": 90,
+            "median": 0.0133335,
+            "p95": 0.018917,
+            "maximum": 0.023042
+          },
+          "renderer_before_drawable": {
+            "count": 90,
+            "median": 0.09825,
+            "p95": 0.119292,
+            "maximum": 0.142708
+          },
+          "terminal_drawable": {
+            "count": 90,
+            "median": 0.019958,
+            "p95": 0.025875,
+            "maximum": 0.362166
+          },
+          "overlay_drawable": {
+            "count": 90,
+            "median": 0.005353999999999999,
+            "p95": 0.007792,
+            "maximum": 0.258167
+          },
+          "renderer_other": {
+            "count": 90,
+            "median": 0.0565625,
+            "p95": 0.072875,
+            "maximum": 0.078167
+          },
+          "arm_to_commit": {
+            "count": 90,
+            "median": 0.0038125,
+            "p95": 0.005,
+            "maximum": 0.005583
+          },
+          "commit_to_present": {
+            "count": 90,
+            "median": 22.0157505,
+            "p95": 27.294208,
+            "maximum": 28.410959
+          }
+        },
+        "drawable_failures": {
+          "terminal": 0,
+          "overlay": 0
+        },
+        "renderer_total": {
+          "count": 90,
+          "median": 0.181396,
+          "p95": 0.23800000000000002,
+          "maximum": 0.7434999999999999
+        }
+      }
+    },
+    "timed": {
+      "typing": {
+        "processes": 3,
+        "keys": 90,
+        "total": {
+          "count": 90,
+          "median": 33.1770625,
+          "p95": 41.565208,
+          "maximum": 47.044333
+        },
+        "native_to_present": {
+          "count": 90,
+          "median": 31.812,
+          "p95": 39.266167,
+          "maximum": 42.538542
+        },
+        "parts": {
+          "post_to_native": {
+            "count": 90,
+            "median": 0.6913335,
+            "p95": 4.022958,
+            "maximum": 16.611792
+          },
+          "native_to_tick": {
+            "count": 90,
+            "median": 10.164291500000001,
+            "p95": 15.005333,
+            "maximum": 16.043042
+          },
+          "frame_prepare": {
+            "count": 90,
+            "median": 1.1998955,
+            "p95": 1.341084,
+            "maximum": 1.478375
+          },
+          "tick_finalize": {
+            "count": 90,
+            "median": 0.0138955,
+            "p95": 0.018208,
+            "maximum": 0.019209
+          },
+          "wait_for_swift": {
+            "count": 90,
+            "median": 0.0011045,
+            "p95": 0.001833,
+            "maximum": 0.004417
+          },
+          "swift_prepare": {
+            "count": 90,
+            "median": 0.012854,
+            "p95": 0.0185,
+            "maximum": 0.02275
+          },
+          "renderer_before_drawable": {
+            "count": 90,
+            "median": 0.1241255,
+            "p95": 0.146458,
+            "maximum": 0.157
+          },
+          "terminal_drawable": {
+            "count": 90,
+            "median": 0.0193125,
+            "p95": 0.025042,
+            "maximum": 0.027208
+          },
+          "overlay_drawable": {
+            "count": 90,
+            "median": 0.0048955000000000005,
+            "p95": 0.008083,
+            "maximum": 0.287292
+          },
+          "renderer_other": {
+            "count": 90,
+            "median": 0.058271,
+            "p95": 0.071,
+            "maximum": 0.074959
+          },
+          "arm_to_commit": {
+            "count": 90,
+            "median": 0.003791,
+            "p95": 0.00475,
+            "maximum": 0.005209
+          },
+          "commit_to_present": {
+            "count": 90,
+            "median": 19.530771,
+            "p95": 25.806167,
+            "maximum": 26.648167
+          }
+        },
+        "drawable_failures": {
+          "terminal": 0,
+          "overlay": 0
+        },
+        "cpu": {
+          "observer_in_native_to_present": {
+            "wall_ms": {
+              "count": 90,
+              "median": 0.8721245,
+              "p95": 1.218832,
+              "maximum": 1.384292
+            },
+            "contained_cpu_ms": {
+              "count": 90,
+              "median": 0.606896,
+              "p95": 0.8715,
+              "maximum": 1.051082
+            },
+            "boundary_intervals": {
+              "count": 90,
+              "median": 0.0,
+              "p95": 0,
+              "maximum": 0
+            }
+          },
+          "native_handler_in_native_to_present": {
+            "wall_ms": {
+              "count": 90,
+              "median": 3.884583,
+              "p95": 7.244375,
+              "maximum": 8.165833
+            },
+            "contained_cpu_ms": {
+              "count": 90,
+              "median": 3.8213340000000002,
+              "p95": 4.050416,
+              "maximum": 5.247
+            },
+            "boundary_intervals": {
+              "count": 90,
+              "median": 0.0,
+              "p95": 0,
+              "maximum": 0
+            }
+          }
+        },
+        "observer_native_interval_overlaps": 0,
+        "renderer_total": {
+          "count": 90,
+          "median": 0.2073545,
+          "p95": 0.24633300000000002,
+          "maximum": 0.460541
+        }
+      },
+      "shared": {
+        "processes": 3,
+        "keys": 90,
+        "total": {
+          "count": 90,
+          "median": 34.814333500000004,
+          "p95": 44.958791,
+          "maximum": 50.934917
+        },
+        "native_to_present": {
+          "count": 90,
+          "median": 33.780208,
+          "p95": 41.862209,
+          "maximum": 45.046208
+        },
+        "parts": {
+          "post_to_native": {
+            "count": 90,
+            "median": 0.7021459999999999,
+            "p95": 5.052834,
+            "maximum": 17.122625
+          },
+          "native_to_tick": {
+            "count": 90,
+            "median": 9.122854,
+            "p95": 17.191125,
+            "maximum": 18.453
+          },
+          "frame_prepare": {
+            "count": 90,
+            "median": 1.916146,
+            "p95": 2.046542,
+            "maximum": 2.16225
+          },
+          "tick_finalize": {
+            "count": 90,
+            "median": 0.0165415,
+            "p95": 0.020833,
+            "maximum": 0.028625
+          },
+          "wait_for_swift": {
+            "count": 90,
+            "median": 0.0015,
+            "p95": 0.003459,
+            "maximum": 0.005042
+          },
+          "swift_prepare": {
+            "count": 90,
+            "median": 0.0132295,
+            "p95": 0.021583,
+            "maximum": 0.024291
+          },
+          "renderer_before_drawable": {
+            "count": 90,
+            "median": 0.100375,
+            "p95": 0.122083,
+            "maximum": 0.157458
+          },
+          "terminal_drawable": {
+            "count": 90,
+            "median": 0.020854499999999998,
+            "p95": 0.028542,
+            "maximum": 1.105541
+          },
+          "overlay_drawable": {
+            "count": 90,
+            "median": 0.005188,
+            "p95": 0.009208,
+            "maximum": 0.345667
+          },
+          "renderer_other": {
+            "count": 90,
+            "median": 0.0589165,
+            "p95": 0.07075,
+            "maximum": 0.094291
+          },
+          "arm_to_commit": {
+            "count": 90,
+            "median": 0.003833,
+            "p95": 0.005208,
+            "maximum": 0.008333
+          },
+          "commit_to_present": {
+            "count": 90,
+            "median": 20.911896,
+            "p95": 26.996292,
+            "maximum": 27.496083
+          }
+        },
+        "drawable_failures": {
+          "terminal": 0,
+          "overlay": 0
+        },
+        "cpu": {
+          "observer_in_native_to_present": {
+            "wall_ms": {
+              "count": 90,
+              "median": 0.9227495,
+              "p95": 1.236833,
+              "maximum": 1.737208
+            },
+            "contained_cpu_ms": {
+              "count": 90,
+              "median": 0.6467715,
+              "p95": 0.907167,
+              "maximum": 1.122209
+            },
+            "boundary_intervals": {
+              "count": 90,
+              "median": 0.0,
+              "p95": 0,
+              "maximum": 1
+            }
+          },
+          "native_handler_in_native_to_present": {
+            "wall_ms": {
+              "count": 90,
+              "median": 6.217854,
+              "p95": 9.282875,
+              "maximum": 10.094417
+            },
+            "contained_cpu_ms": {
+              "count": 90,
+              "median": 6.141521,
+              "p95": 6.368792,
+              "maximum": 6.72675
+            },
+            "boundary_intervals": {
+              "count": 90,
+              "median": 0.0,
+              "p95": 0,
+              "maximum": 0
+            }
+          }
+        },
+        "observer_native_interval_overlaps": 0,
+        "renderer_total": {
+          "count": 90,
+          "median": 0.18725000000000003,
+          "p95": 0.25487499999999996,
+          "maximum": 1.2707080000000002
+        }
+      }
+    }
+  },
+  "cpu_interpretation": "inclusive thread CPU wholly contained in each key native-to-present window; boundary CPU is not proportioned",
+  "validation": {
+    "rejected_faults": 24,
+    "normal_controls": 48,
+    "equivalent_controls": 1,
+    "path": "/Users/yoonhb/.cache/maru-agent-artifacts/input-display-review-3/summary.json",
+    "sha256": "f2bc4d373a3dab0dbc532fa65ef275ace691c7047a90a726411783be0a8b4ed5",
+    "source_hashes": {
+      "app.json": "541d1717d33a526777ef2b6e4135b58bbc3ddb20f570b02fbd5a30873924cc16",
+      "posts.json": "cd9c2a6dc883589a58cd94c4ef38b2f91e54a000a97c13a31d12b1f76a7a4564",
+      "record.json": "ed5357d1ceb97e17f5112584485624c00b2711c108e750d0f3d351abbd1e7a8e"
+    }
+  },
+  "reader_audit": {
+    "actual_cohort_contract": "three process repetitions and all six run paths required in each mode, independently of advertised pairs",
+    "original_report_sha256": "877ffa55d0db8d3705361978f82a46b044f6448c8c6fede86a66c75542f298a4",
+    "recomputed_report_sha256": "f4c5ee3d3526a17225cf822e62eaf5edb4e508faf4d0a3c768e6c0104a4e0dea",
+    "measured_run_results_unchanged": true
+  }
+}

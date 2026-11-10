@@ -68,6 +68,18 @@ class InputDisplay(unittest.TestCase):
             app,event,key=fixture();mutate(app)
             with self.subTest(mutation=faults.index(mutate)),self.assertRaises(ValueError):report.intervals(app,[key],'timed',11)
 
+    def test_declared_pairs_do_not_replace_actual_cohort(self):
+        source={'app_sha256':'fixed'}
+        manifest=dict(source=source,repetitions=3,runs=[dict(path=f'{flow}-{rep}') for rep in range(3) for flow in ('typing','shared')])
+        report.cohort_manifest(manifest,source)
+        reordered=copy.deepcopy(manifest)
+        reordered['runs'].reverse()
+        report.cohort_manifest(reordered,source)
+        faults=[lambda m:m.update(repetitions=1,runs=m['runs'][:2]),lambda m:m.update(repetitions=1),lambda m:m.update(repetitions=2),lambda m:m['runs'].pop(),lambda m:m['runs'].__setitem__(0,copy.deepcopy(m['runs'][1])),lambda m:m.update(source={'app_sha256':'foreign'})]
+        for mutate in faults:
+            changed=copy.deepcopy(manifest);mutate(changed)
+            with self.assertRaises(ValueError):report.cohort_manifest(changed,source)
+
     def test_untimed_control_keeps_counts_and_does_not_claim_cpu(self):
         app,event,key=fixture()
         app.update(input_display_mode='untimed',input_intervals=[],input_finish_handler_begin=0)

@@ -104,6 +104,14 @@ def analyze(app, producer, meta, mode):
     return dict(parent=parent, keys=rows, drawable_failures=dict(terminal=header[2], overlay=header[3]), observer_completed_handlers=len(own[0]), observer_inclusive_cpu_ms=sum(row[4] for row in own[0])/1e6 if mode == 'timed' else None)
 
 
+def cohort_manifest(manifest, source):
+    expected = {f'{flow}-{rep}' for rep in range(3) for flow in ('typing', 'shared')}
+    verify.require(manifest.get('source') == source, 'input display source pairing')
+    verify.require(manifest.get('repetitions') == 3, 'input display three process repetitions required')
+    rows = manifest.get('runs')
+    verify.require(type(rows) is list and len(rows) == len(expected) and all(type(row) is dict and type(row.get('path')) is str for row in rows) and {row.get('path') for row in rows} == expected, 'input display actual cohort population')
+
+
 def read(root):
     root = Path(root).resolve()
     study = json.loads((root / 'study.json').read_text())
@@ -114,9 +122,9 @@ def read(root):
     reports = {}
     for mode in MODES:
         folder = root / mode
-        common = parse_stage_report.read(folder)
         manifest = json.loads((folder / 'study.json').read_text())
-        verify.require(manifest['source'] == source, 'input display source pairing')
+        cohort_manifest(manifest, source)
+        common = parse_stage_report.read(folder)
         runs = []
         for item in manifest['runs']:
             target = folder / item['path']
@@ -139,7 +147,7 @@ def read(root):
     for pair in pairs:
         repetition = int(pair['path'].rsplit('-', 1)[1])
         verify.require(pair['order'] == list(MODES if repetition % 2 == 0 else MODES[::-1]), 'input display execution order')
-    return dict(kind='current-input-display', source=source, **reports)
+    return dict(kind='current-input-display', source=source, reader_sha256=verify.sha(Path(__file__)), base_reader_sha256=verify.sha(Path(parse_stage_report.__file__)), **reports)
 
 
 if __name__ == '__main__':

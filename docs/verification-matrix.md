@@ -1,8 +1,8 @@
 # 검증 매트릭스
 
-현재 제품의 입력→첫 표시 귀속은 **부분 구현**: 첫 표시의 frame/drawable 소유권·구간 합·
-획득 대기와 입력/관측 handler CPU 계측, 합성 및 실제 시계 검사와 외부 앱 빌드를 확인했다.
-실제 Mac 수집과 원시 자료 손상 대조는 대기 중이다. [진단 계약과 진행](plans/editor-current-input-display.md).
+현재 제품의 입력→첫 표시 귀속은 **구현**: frame/drawable 소유권·구간 합·획득 대기와
+입력/관측 handler CPU를 실제 12프로세스·360입력으로 확인했다. 독립 재계산과 실제 자료 손상 대조를
+통과했으며, commit→present의 GPU/큐·표시 대기와 handler 내부 CPU 세분화는 후속 범위다. [진단 계약과 진행](plans/editor-current-input-display.md).
 
 구문 강조 연속성은 **구현**: `test-editor-syntax-paint`는 삽입/삭제 경계·UTF-8 byte 보정·
 신원/길이 오류와 할당 없는 갱신을, `test-editor-parse-input`은 실제 공유 뷰의 대기 색·미니맵·

@@ -1,6 +1,6 @@
 # GPU 종료 후 표시 timing 진단
 
-상태: 진단 관측기·판정기·수집기·독립 손상 도구 구현. 합성 검사 포함 147개 통과. macOS 11 target 제품 진단 앱 빌드는 통과했다. 실제 수집·실제 자료 손상 대조는 미착수다.
+상태: 진단 구현·합성 검사 포함 147개·macOS 11 target 진단 빌드·실제 12프로세스/360입력 수집·독립 재계산·실제 자료 손상 대조 완료. 관측기 off/on에서 지연 분포가 달라져 관측된 패턴을 무관측 제품의 원인으로 확정하지 않는다.
 
 ## 진단 계약
 
@@ -38,8 +38,36 @@ python3 -m unittest discover -s tools/editor-input-stream -p 'test_*.py'
 
 첫 진단 앱 빌드에서 제품 macOS 11 target에 macOS 12/14 API를 무조건 사용한 호환성 오류를 확인했다. `DisplayTiming`과 호출부에 macOS 14 availability 경계를 추가했고, macOS 11 target 독립 typecheck를 통과했다. 미지원 환경은 unsupported 기록으로 남고 reader가 유효 수집으로 받지 않는다. 실패 빌드는 `~/.cache/maru-agent-artifacts/display-timing-build-1`에 보존한다.
 
-합성 검사는 24개 독립 값/시계/상태 오류와 늦은 callback·중복 timestamp·관측 구간 공백/중첩·음수 잔여·disabled 설정 유지·첫 drawable 연결 실패를 검사한다. 실제 원시 자료 손상 대조는 아직 수행하지 않았다. callback body 비용은 selector dispatch와 OS display-link 전체 비용을 포함하지 않으므로 off/on 전체 입력 지연도 함께 비교한다.
+합성 검사는 24개 독립 값/시계/상태 오류와 늦은 callback·중복 timestamp·관측 구간 공백/중첩·음수 잔여·disabled 설정 유지·첫 drawable 연결 실패를 검사한다. 실제 원시 자료의 독립 손상 24개도 모두 거절했으며 정상 전후 대조 48개와 등가 대조 1개를 유지했다. callback body 비용은 selector dispatch와 OS display-link 전체 비용을 포함하지 않으므로 off/on 전체 입력 지연도 함께 비교한다.
 
 관측기는 display-link 기본 선호 범위를 변경하지 않는다. 관측기 생성 자체가 OS의 갱신 정책이나 main run loop 부하에 영향을 줄 수 있으므로 on 자료를 관측기 없는 제품의 완전한 대체로 보지 않는다. off/on 차이를 일정 비용으로 빼서 보정하지 않는다. 설정 동일성은 observer가 샘플링한 시점 사이의 일시적 변경까지 증명하지 않는다.
 
 고정 진단 빌드: `~/.cache/maru-agent-artifacts/display-timing-build-2`. 제품 HEAD `d39f1d942a47939c63df30605e857a0c83518e95`, 앱 SHA-256 `d3aa34b7ffda79bafd1141194c69e9f9b4ff2773d06fc1639ac487597c21d26b`. 계측 소스와 실행 파일 해시를 receipt에 대조했다. 실제 수집은 사용자 조작 중단 확인 뒤 실행한다.
+
+## 실제 수집과 판정
+
+사용자가 진행을 확인한 뒤 `~/.cache/maru-agent-artifacts/display-timing-study-1`에 12프로세스·360입력을 수집했다. `report.json`과 별도 `recomputed.json`이 일치했다. `display-timing-review-1`에 독립 손상과 원본 해시를 보존했다. 측정 뒤 도구 소스의 변경은 없었다.
+
+모든 프로세스에서 화면 ID 5·maximumFramesPerSecond 75·앱 frame-loop 60Hz·displaySyncEnabled true·presentsWithTransaction false·maximumDrawableCount 3을 읽었다. 레이어 주소는 프로세스별로 다르며 각각 안에서는 유지됐다. on 조건의 callback 예상 구간 중앙값은 13.338208ms였다. 화면이 보고한 상한과 실제 관측된 구간을 별개 값으로 보존한다.
+
+각 뷰 on 조건의 첫 입력 표시 90개 중앙값(ms):
+
+| 관측 구간 | 일반 | 공유 |
+|---|---:|---:|
+| GPU 종료→다음 관측 timestamp | 3.508 | 1.111 |
+| 다음 관측 timestamp→drawable presentedTime | 13.341 | 13.341 |
+
+이 중앙값들을 더해 전체 중앙값으로 제시하지 않는다. 0.02ms 이내를 기술용 허용폭으로 삼으면 일반 87개·공유 81개가 약 한 주기의 잔여를 보였다. 일반 2개·공유 8개는 다음 관측 timestamp 부근에 표시됐고, 일반 1개는 약 두 주기의 잔여였다. 공유 1개는 예상 구간 공백과 약 13.245ms의 잔여로 별도 보존한다. 이 분류는 관측 패턴이며 vblank를 놓친 원인이나 compositor 내부 처리 단계의 판정이 아니다.
+
+공유 `shared-1`의 첫 입력은 GPU 종료를 포함하는 예상 구간이 0개였다. 이전 callback의 targetTimestamp부터 다음 callback의 timestamp까지 약 13.43ms의 관측 공백이 있었고 다음 관측 timestamp는 GPU 종료 후 0.449ms였다. 이 구간을 보간하거나 입력을 제외하지 않았다. 전체 shared on callback 중 target보다 늦게 호출된 것은 6개였으며 예상 경계와 callback 진입 시각을 혼동하지 않았다.
+
+callback은 일반·공유 각각 693개였다. body 누적 시간은 각각 3.717/4.137ms, 개별 body 중앙값은 프로세스별 약 0.004~0.005ms다. body 밖의 OS/selector 비용과 refresh 정책 영향은 여기에 포함되지 않는다.
+
+native→첫 표시 분포(ms):
+
+| 뷰 | off 중앙값 / p95 | on 중앙값 / p95 |
+|---|---:|---:|
+| 일반 | 31.842 / 44.049 | 25.990 / 39.328 |
+| 공유 | 32.648 / 42.139 | 25.988 / 39.336 |
+
+프로세스별로는 공유 마지막 pair에서 off 32.314ms/on 34.755ms로 on 중앙값이 더 컸다. 일정한 개선이나 계측 비용을 주장하지 않는다. 새 display link를 등록한 조건의 분포가 달라졌으므로 약 한 주기 잔여 패턴을 무관측 제품의 원인으로 확정하거나 제품 예약 변경의 근거로 단독 사용하지 않는다. 다음 조사는 외부 추적 등 관측기 개입을 줄인 증거와 대조하는 것이다.

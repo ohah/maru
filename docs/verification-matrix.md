@@ -1,6 +1,6 @@
 # 검증 매트릭스
 
-표시 timing 진단은 **부분 구현**: 레이어 runtime 설정·같은 NSScreen의 CADisplayLink 시각 기록과 판정기를 작성했다. 합성 검사 포함 147개와 macOS 11 target 진단 앱 빌드가 통과했다. 실제 off/on 수집·실제 자료 손상 대조는 미검증이다. [계약과 진행](plans/editor-display-timing.md).
+표시 timing 진단은 **구현**: 레이어 runtime 설정·같은 NSScreen의 CADisplayLink 시각을 실제 12프로세스/360입력으로 수집했다. 합성 검사 포함 147개·진단 빌드·독립 재계산·실제 자료 손상 24개 대조를 통과했다. off/on 지연 분포가 달라 무관측 제품의 원인 판정은 보류한다. [계약과 진행](plans/editor-display-timing.md).
 
 GPU 제출→첫 표시 귀속은 **구현**: 검사 135개·독립 Metal API·실제 12프로세스/360입력·독립 재계산·실제 자료 손상 24개 대조를 통과했다. 큰 구간은 GPU 종료 이후이며 compositor·표시 예약 원인 분리는 미검증이다. [진단 계약과 진행](plans/editor-submit-display.md).
 

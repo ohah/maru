@@ -5633,3 +5633,10 @@ fork/helper 양쪽에서 대조한다. PID·rc·값·append 순서와 커널 크
 구분하고, 옛 항목 선택의 resolve 전송 수 0·본문/Undo/디스크 보존을 검사한다. PID 재사용은
 실제 커널 PID 조작이 아닌 같은 PID/다른 연결 번호의 명시적 모델이다. HID/픽셀이나 실제 SDK
 검증으로 확대하지 않는다. [계획과 최초 실패](plans/lsp-code-action-restart-data.md)를 따른다.
+
+
+## PTY fork 초기화 실패 전달
+
+`mise exec -- zig build test-pty-stdio -j2`는 Debug·ReleaseFast 각각48조건을 검사한다.
+기존20조건과 실제 fork 자식의 오류·채널 경계·회수·동시 spawn28조건을 구분한다.
+[실제 전달 경계와 미검증 범위](plans/pty-fork-setup-status.md)를 따른다.

@@ -1,3 +1,5 @@
+/// Fixed fork/exec failure codec; independent of platform syscalls.
+pub const child_setup_status = @import("pty/child_setup_status.zig");
 pub const types = @import("pty/types.zig");
 pub const session = @import("pty/session.zig");
 /// Windows 백엔드의 순수 조립부(커맨드라인 인용·환경 블록 내용). **모든 타깃에서** 컴파일되므로 여기 배럴에

@@ -7916,8 +7916,8 @@ pub fn build(b: *std.Build) void {
         const judges = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/pty_stdio.zig"), .target = target, .optimize = pty_optimize, .link_libc = true, .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "pty_stdio_probe", .module = options.createModule() } } }) });
         const run_judges = b.addRunArtifact(judges);
         run_judges.setCwd(b.path("."));
-        run_judges.addArg("--maru-expect-tests=20");
-        run_judges.addArg("--maru-expect-passed=20");
+        run_judges.addArg("--maru-expect-tests=48");
+        run_judges.addArg("--maru-expect-passed=48");
         pty_stdio_step.dependOn(&run_judges.step);
         if (pty_optimize == optimize) macos_only_test_step.dependOn(&run_judges.step);
     };

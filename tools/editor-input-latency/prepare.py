@@ -16,7 +16,8 @@ def output_lock(out):
         lock.close();raise ValueError('another preparation owns this output')
     return lock
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--stream',action='store_true');p.add_argument('--summary-control',action='store_true');p.add_argument('--fold-control',action='store_true');p.add_argument('--bracket-control',action='store_true');p.add_argument('--fold-reuse-control',action='store_true');p.add_argument('--parse-stages',action='store_true');p.add_argument('--display-stages',action='store_true');p.add_argument('--frame-wake-control',action='store_true');p.add_argument('--target-frame-control',action='store_true');p.add_argument('--observer-cpu',action='store_true');p.add_argument('--deferred-retry-control',action='store_true');p.add_argument('--observer-posts-control',action='store_true');p.add_argument('--observer-work-control',action='store_true');p.add_argument('--input-display',action='store_true');p.add_argument('--submit-display',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--stream',action='store_true');p.add_argument('--summary-control',action='store_true');p.add_argument('--fold-control',action='store_true');p.add_argument('--bracket-control',action='store_true');p.add_argument('--fold-reuse-control',action='store_true');p.add_argument('--parse-stages',action='store_true');p.add_argument('--display-stages',action='store_true');p.add_argument('--frame-wake-control',action='store_true');p.add_argument('--target-frame-control',action='store_true');p.add_argument('--observer-cpu',action='store_true');p.add_argument('--deferred-retry-control',action='store_true');p.add_argument('--observer-posts-control',action='store_true');p.add_argument('--observer-work-control',action='store_true');p.add_argument('--input-display',action='store_true');p.add_argument('--submit-display',action='store_true');p.add_argument('--display-timing',action='store_true');a=p.parse_args()
+    if a.display_timing and not a.submit_display:p.error('display timing requires submit display attribution')
     if a.submit_display and not a.input_display:p.error('submit display requires input display attribution')
     if a.input_display and (not a.display_stages or a.frame_wake_control or a.target_frame_control or a.observer_cpu or a.observer_posts_control or a.observer_work_control or a.deferred_retry_control):p.error('input display requires display stages without experimental scheduling or observer controls')
     if a.observer_work_control and not a.observer_posts_control:p.error('observer work requires observer posts control')
@@ -52,6 +53,7 @@ def main():
         assert prior.get('observer_work_control',False)==a.observer_work_control, 'observer work changed'
         assert prior.get('input_display',False)==a.input_display, 'input display changed'
         assert prior.get('submit_display',False)==a.submit_display, 'submit display changed'
+        assert prior.get('display_timing',False)==a.display_timing, 'display timing changed'
         assert prior['head']==subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(), 'HEAD changed'
         assert all(sha(ROOT/n)==h for n,h in prior['original'].items()), 'original source drift'
         assert all(sha(src/n)==h for n,h in prior['instrumented'].items()), 'private source drift'
@@ -159,6 +161,9 @@ def main():
     if a.submit_display:
         import submit_display
         driver_text=submit_display.driver(driver_text,once)
+    if a.display_timing:
+        import display_timing
+        driver_text=display_timing.driver(driver_text,once)
     present=snippet('present.m.inc')
     if a.stream:present+='\n#include <sys/resource.h>'+ (HERE/'present.m.inc').read_text().split('#include <sys/resource.h>',1)[1]
     if a.bracket_control:present=bracket_control.present(present,once)
@@ -193,7 +198,7 @@ def main():
         patch('MaruAppHost.swift',lambda s:target_frame_control.swift(s,once))
         patch('app_session.zig',lambda s:target_frame_control.session(s,once))
         patch('app_session/debug_fixtures.zig',target_frame_control.witness)
-    manifest=dict(submit_display=a.submit_display,input_display=a.input_display,observer_work_control=a.observer_work_control,observer_posts_control=a.observer_posts_control,deferred_retry_control=a.deferred_retry_control,observer_cpu=a.observer_cpu,target_frame_control=a.target_frame_control,frame_wake_control=a.frame_wake_control,display_stages=a.display_stages,parse_stages=a.parse_stages,fold_reuse_control=a.fold_reuse_control,bracket_control=a.bracket_control,fold_control=a.fold_control,summary_control=a.summary_control,harness='independent-target-ascii-v1' if a.stream else 'closed-loop-v1',optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
+    manifest=dict(display_timing=a.display_timing,submit_display=a.submit_display,input_display=a.input_display,observer_work_control=a.observer_work_control,observer_posts_control=a.observer_posts_control,deferred_retry_control=a.deferred_retry_control,observer_cpu=a.observer_cpu,target_frame_control=a.target_frame_control,frame_wake_control=a.frame_wake_control,display_stages=a.display_stages,parse_stages=a.parse_stages,fold_reuse_control=a.fold_reuse_control,bracket_control=a.bracket_control,fold_control=a.fold_control,summary_control=a.summary_control,harness='independent-target-ascii-v1' if a.stream else 'closed-loop-v1',optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
     if a.stream:
         manifest['tools'].update({'stream/'+x.name:sha(x) for x in stream_dir.iterdir() if x.is_file()})
         (out/'producer.swift').write_text(protocol.expand((stream_dir/'producer.swift').read_text()))

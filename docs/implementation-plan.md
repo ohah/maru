@@ -92,6 +92,7 @@ macOS 로컬 shell 1개 surface
 - [구문 파싱 비동기화](plans/editor-async-parse.md) — 승인한 실패 중단·명시적 복구 정책으로 일반 입력과 완료 표시를 연결했다. 비교·병합은 기존 동기 경로를 유지한다. GUI 지연 개선량은 별도 실측 범위다.
 - [현재 제품의 입력→첫 표시 구간 귀속](plans/editor-current-input-display.md) — 제품 정책을 유지한 12프로세스·360입력과 실제 자료 손상 대조를 완료했다. 큰 관측 구간은 commit→present이며, GPU/큐·표시 대기와 입력 handler 내부 CPU의 추가 분리가 남았다.
 - [GPU 제출→첫 표시 구간 귀속](plans/editor-submit-display.md) — 12프로세스·360입력과 실제 자료 손상 대조 완료. 큰 구간은 GPU 종료 이후이며 표시 예약·cadence 원인 분리는 남았다.
+- [GPU 종료 후 표시 timing 진단](plans/editor-display-timing.md) — 진단 관측기·판정기·빌드 검증 완료. 실제 비교 수집·실제 자료 손상 대조는 미착수.
 - [비동기 입력 중 구문 강조 연속성](plans/editor-highlight-continuity.md) — 사용자 승인 후 표시 전용 캐시 보정과 제품 입력 경로 구현 완료. PR #4707 CI 통과·머지와 메인의 AppKit·실제 두벌식 검증을 확인했다. 간섭 실행을 제외한 별도 24프로세스·720입력 비교도 완료했으며 일관된 지연 개선은 확인하지 못했다. 이전 native 트리를 현재 구조 판정에 사용하지 않는다.
 - [비동기 파싱의 실제 입력 표시 지연](plans/editor-input-latency.md) — 외부 고정 주기 48프로세스·1,440입력에 이어 준비 뒤 6프로세스의 주소·스택을 조사했다. 비동기 메인에서 접힘·심볼 트리 순회가 반복 관측됐다. 준비 실패·훅 경로 복구 확인·환경 허용 목록을 별도 기록한다.
 - [비동기 완료의 심볼 요약 준비](plans/editor-async-sticky-preparation.md) — 실제 두 뷰의 첫 조회 재구축을 재현하고 워커 준비·취소·선택적 OOM 보존을 구현했다. Native 집중 검증 및 동일 바이너리 GUI 대조 48회/1,440입력을 완료했다. 접힘 캐시 소유권 변경은 포함하지 않는다.

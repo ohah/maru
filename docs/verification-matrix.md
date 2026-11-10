@@ -1,5 +1,7 @@
 # 검증 매트릭스
 
+GPU 제출→첫 표시 귀속은 **구현**: 검사 135개·독립 Metal API·실제 12프로세스/360입력·독립 재계산·실제 자료 손상 24개 대조를 통과했다. 큰 구간은 GPU 종료 이후이며 compositor·표시 예약 원인 분리는 미검증이다. [진단 계약과 진행](plans/editor-submit-display.md).
+
 현재 제품의 입력→첫 표시 귀속은 **구현**: frame/drawable 소유권·구간 합·획득 대기와
 입력/관측 handler CPU를 실제 12프로세스·360입력으로 확인했다. 독립 재계산과 실제 자료 손상 대조를
 통과했으며, commit→present의 GPU/큐·표시 대기와 handler 내부 CPU 세분화는 후속 범위다. [진단 계약과 진행](plans/editor-current-input-display.md).

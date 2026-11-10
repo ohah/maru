@@ -144,6 +144,7 @@ const page_js = "var P=new URLSearchParams(location.search);" ++
     "if(P.get('wk')){try{new SharedWorker('/g/wk.js?s=1')}catch(e){};try{window.__w=new Worker('/g/wk.js?d=1')}catch(e){}}" ++
     "var fs=(P.get('if')||'').split(',').filter(function(x){return x});for(var q=0;q<fs.length;q++){var f=document.createElement('iframe');f.src=decodeURIComponent(fs[q]);document.body.appendChild(f);await new Promise(function(r){f.onload=r;setTimeout(r,6000)})}" ++
     // 재검증 12 차: `pw` — 첫 fetch 앞에 기다린다(ms). 떠 있던 SW 에 붙는 눈먼 때 + 지연(50 ms)의 본문은 어둠이라(넓은 꼴) 본문을 세는 꼴은 그 뒤에 받는다.
+    // 재검증 13 차(RISK-T1): 처음 만남의 어둠이 눈먼 때 끝 + 300 ms(`net_body_table.blind_io_lag_us`)로 넓어져 사례의 `pw` 를 150 → 400 ms 로.
     "var n=+(P.get('n')||0);var K=P.get('k')||'k';var ms=+(P.get('ms')||0);var pw=+(P.get('pw')||0);if(pw)await new Promise(function(r){setTimeout(r,pw)});" ++
     "for(var i=0;i<n;i++){await fetch('/g/x?k='+K+i,{cache:'no-store'}).then(function(r){return r.text()}).catch(function(){});if(ms)await new Promise(function(r){setTimeout(r,ms)})}" ++
     "document.title='ready'})";
@@ -272,7 +273,21 @@ const Run = struct {
 
     fn take(self: *Run, m: msg.Message) void {
         switch (m) {
-            .net_begin => |v| self.begins.append(self.gpa, .{ .browser = v.browser, .request = v.request, .url = self.gpa.dupe(u8, v.url) catch &.{}, .expected = v.flags2.body_expected, .sw = v.flags.service_worker, .session = self.on_session.get(v.browser) orelse 0 }) catch {},
+            .net_begin => |v| {
+                // 재검증 13 차: CEF 는 request 번호를 다시 쓴다(앞 사례의 기록과 같은 번호가 몇 분 뒤 다른 요청에 — 실측 `g_v20l_e` 의 270989). 앞 기록
+                // 세션의 끝이 이미 온 같은 번호면 새 칸을 연다 — 전에는 새 기록이 앞 기록의 본문을 제 것으로 읽어 「틀린 본문」 으로 셌다(판정자의 티 —
+                // `v20l-r14-loop` 한 판의 WRONG 1·세션 다름 1). 같은 세션의 다시 시작은 그대로 한 칸(끝 수 단언을 지킨다).
+                const cur = self.on_session.get(v.browser) orelse 0;
+                var i = self.bodies.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const b = &self.bodies.items[i];
+                    if (b.request != v.request or b.browser != v.browser) continue;
+                    if (b.ends >= 1 and b.session != cur) self.bodies.append(self.gpa, .{ .browser = v.browser, .request = v.request }) catch {};
+                    break;
+                }
+                self.begins.append(self.gpa, .{ .browser = v.browser, .request = v.request, .url = self.gpa.dupe(u8, v.url) catch &.{}, .expected = v.flags2.body_expected, .sw = v.flags.service_worker, .session = cur }) catch {};
+            },
             .net_response => |v| {
                 const b = self.body(v.browser, v.request);
                 var it = net_fields.HeaderIterator.init(v.headers);
@@ -481,9 +496,16 @@ fn tally(r: *Run, browser: u64, at: usize, needle: []const u8) Tally {
             const w = std.fmt.bufPrint(&want, "{{\"n\":\"{s}\"}}", .{x.xbody}) catch "";
             if (x.xbody.len > 0 and std.mem.eql(u8, x.data.items, w)) {
                 if (b.sw) t.sw_own += 1 else t.page_own += 1;
-            } else t.wrong += 1;
+            } else {
+                t.wrong += 1;
+                // 재검증 13 차(진단): 틀린 본문의 기록을 적는다(판정자 로그 — 어느 기록·세션인지).
+                std.debug.print("v20l WRONG req={d} url={s} x-body={s} body={s} begin session={d} body session={d} ends={d}\n", .{ b.request, b.url[0..@min(b.url.len, 120)], x.xbody, x.data.items[0..@min(x.data.items.len, 80)], b.session, x.session, x.ends });
+            }
         }
-        if (x.ends >= 1 and b.session != 0 and x.session != b.session) t.bad_session += 1;
+        if (x.ends >= 1 and b.session != 0 and x.session != b.session) {
+            t.bad_session += 1;
+            std.debug.print("v20l bad session req={d} url={s} begin session={d} body session={d} state={s} ends={d}\n", .{ b.request, b.url[0..@min(b.url.len, 120)], b.session, x.session, @tagName(x.state), x.ends });
+        }
     };
     return t;
 }
@@ -787,7 +809,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         // ② A 가 기록한다.
         const on = recordOn(&r, tab_a);
         const at = r.begins.items.len;
-        try r.goO(tab_a, 0, "/g/p?b=1&n=30&k=capR&pw=150");
+        try r.goO(tab_a, 0, "/g/p?b=1&n=30&k=capR&pw=400");
         const ready = r.pumpTitle(tab_a, "ready", 25_000);
         r.pump(3000);
         const t = tally(&r, tab_a, at, "/g/x?k=capR");
@@ -843,7 +865,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const log_at3 = logSize(stderr_path);
         const on_b = recordOn(&r, tab_b);
         const at = r.begins.items.len;
-        try r.goO(tab_b, 1, "/g/p?b=2&n=20&k=manyB&pw=150");
+        try r.goO(tab_b, 1, "/g/p?b=2&n=20&k=manyB&pw=400");
         const ready_b = r.pumpTitle(tab_b, "ready", 20_000);
         r.pump(4000);
         const log3 = readLog(gpa, stderr_path, log_at3);
@@ -963,6 +985,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         var lost_ctrl: usize = 0;
         for ([_][]const u8{ "none", "dead", "abort", "none" }, 0..) |m, i| {
             _ = recordOn(&r, tab_a);
+            // 재검증 13 차(RISK-T1): 켤 때 떠 있던 SW 와 처음 만난다 — 그 어둠(눈먼 때 끝 + 300 ms) 밖에서 받는다(이 꼴이 재는 것은 실패한 fetch 뒤의 잇기).
+            r.pump(400);
             const la = logSize(stderr_path);
             const at = r.begins.items.len;
             var pb: [128]u8 = undefined;
@@ -1025,7 +1049,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             _ = recordOn(&r, meas);
             const at = r.begins.items.len;
             var pb: [96]u8 = undefined;
-            try r.goO(meas, 0, try std.fmt.bufPrint(&pb, "/g/p?b=1&n=20&k=lk{d}&pw=150", .{phase}));
+            try r.goO(meas, 0, try std.fmt.bufPrint(&pb, "/g/p?b=1&n=20&k=lk{d}&pw=400", .{phase}));
             const done = r.pumpTitle(meas, "ready", 30_000);
             r.pump(4000);
             var nb: [64]u8 = undefined;

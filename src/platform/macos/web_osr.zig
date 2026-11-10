@@ -1159,12 +1159,62 @@ test "W9d② 재검증 9 차: a hardened (release) build does not pass the sidec
     defer kept.deinit(gpa);
     var i: usize = 0;
     while (out[i]) |e| : (i += 1) try kept.append(gpa, std.mem.span(e));
-    try std.testing.expectEqual(@as(usize, 5), kept.items.len);
+    // 재검증 13 차(LOW-H1): 앞머리 `MARU_WEB_SW_` 전부를 빼므로 `MARU_WEB_SW_CDPX` 도 빠진다(9 차는 `MARU_WEB_SW_CDP=` 이름 하나였다).
+    try std.testing.expectEqual(@as(usize, 4), kept.items.len);
     try std.testing.expectEqualStrings("HOME=/Users/x", kept.items[0]);
-    try std.testing.expectEqualStrings("MARU_WEB_SW_CDPX=1", kept.items[1]);
-    try std.testing.expectEqualStrings("MARU_WEB_OSR_DIR=/dev", kept.items[2]);
-    try std.testing.expectEqualStrings("PATH=/usr/bin", kept.items[3]);
-    try std.testing.expectEqualStrings("MARU_WEB_TESTX=1", kept.items[4]);
+    try std.testing.expectEqualStrings("MARU_WEB_OSR_DIR=/dev", kept.items[1]);
+    try std.testing.expectEqualStrings("PATH=/usr/bin", kept.items[2]);
+    try std.testing.expectEqualStrings("MARU_WEB_TESTX=1", kept.items[3]);
+}
+
+test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every env knob the sidecar reads — the 12th-revision MARU_WEB_SW_* knobs and any name found in the sidecar sources" {
+    const gpa = std.testing.allocator;
+    // 12 차 손잡이 넷(검증 v20r-B 14 회차의 재현 — 9 차 규칙은 넷을 모두 넘겼다)과 그 밖의 앞머리 아래 이름.
+    const env = [_:null]?[*:0]const u8{ "HOME=/Users/x", "MARU_WEB_SW_WAIT=0", "MARU_WEB_SW_WAIT_FILTER=sw", "MARU_WEB_SW_WAIT_STOPDETACH=0", "MARU_WEB_SW_KEEP=0", "MARU_WEB_SW_FUTURE_KNOB=1", "PATH=/usr/bin" };
+    var list: std.ArrayList(?[*:0]const u8) = .empty;
+    defer list.deinit(gpa);
+    const out = (try hostEnv(gpa, &list, &env)).?;
+    var kept: std.ArrayList([]const u8) = .empty;
+    defer kept.deinit(gpa);
+    var i: usize = 0;
+    while (out[i]) |e| : (i += 1) try kept.append(gpa, std.mem.span(e));
+    try std.testing.expectEqual(@as(usize, 2), kept.items.len);
+    try std.testing.expectEqualStrings("HOME=/Users/x", kept.items[0]);
+    try std.testing.expectEqualStrings("PATH=/usr/bin", kept.items[1]);
+    // sidecar 소스가 `getenv("…")` 로 읽는 이름은 모두 릴리스 판에서 빠져야 한다 — 이름을 목록에 더하는 것을 잊어도(12 차의 꼴) 여기서 걸린다.
+    // 효과로 본다: 그 이름의 `NAME=1` 을 `hostEnv` 에 넣어 남지 않는지(이름을 하나도 못 찾으면 실패 — 조용히 지나가지 않게).
+    const sources = [_][]const u8{
+        @embedFile("web_sidecar/net_body.zig"),
+        @embedFile("web_sidecar/browsers.zig"),
+        @embedFile("web_sidecar/new_tab.zig"),
+        @embedFile("web_sidecar/context_menu.zig"),
+        @embedFile("web_sidecar/devtools.zig"),
+    };
+    var names: usize = 0;
+    for (sources) |src| {
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, src, at, "getenv(\"")) |k| {
+            const name_at = k + "getenv(\"".len;
+            const name_end = std.mem.indexOfScalarPos(u8, src, name_at, '"') orelse break;
+            at = name_end;
+            const name = src[name_at..name_end];
+            if (!std.mem.startsWith(u8, name, "MARU_")) continue;
+            names += 1;
+            var buf: [128]u8 = undefined;
+            const entry = try std.fmt.bufPrintSentinel(&buf, "{s}=1", .{name}, 0);
+            const one = [_:null]?[*:0]const u8{entry.ptr};
+            var l2: std.ArrayList(?[*:0]const u8) = .empty;
+            defer l2.deinit(gpa);
+            const o2 = (try hostEnv(gpa, &l2, &one)).?;
+            if (o2[0] != null) {
+                std.debug.print("sidecar env knob passed to the release host: {s}\n", .{name});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    // 오늘 이 다섯 파일이 `getenv` 로 읽는 자리는 열다섯이다(이름 열넷 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳; 제품 코드에서 `getenv` 를 부르는 sidecar
+    // 파일은 이 다섯뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈 손잡이). 줄면 훑기가 소스를 못 읽은 것이다.
+    try std.testing.expect(names >= 15);
 }
 
 test "a hardened (release) build ignores the development env overrides" {
@@ -1591,8 +1641,14 @@ fn envDir() ?[]const u8 {
 /// W9d② 재검증 9 차(LOW-C·E1): sidecar 의 판정자·진단 전용 환경 변수(`MARU_WEB_TEST_*` — 본문 맞추기 로그·서비스 워커 응답 버리기·CPU 그리기·
 /// 판정자 클립보드 등, `MARU_WEB_SW_CDP` — 워커 CDP 끄기). sidecar 는 앱의 환경을 물려받아(`lsp_process.spawn` 의 `envp` null) 그 변수가 든
 /// 셸에서 띄운 릴리스 maru 의 sidecar 에서도 켜졌다(서비스 워커 본문을 잃는다 — 틀린 본문은 아니다). `MARU_WEB_OSR_DIR` 처럼 릴리스 판은 넘기지 않는다.
+/// 재검증 13 차(LOW-H1): 이름 하나가 아니라 **앞머리** `MARU_WEB_SW_` 전부를 뺀다 — 12 차가 더한 대조 손잡이 넷(`MARU_WEB_SW_WAIT`·`_WAIT_FILTER`·
+/// `_WAIT_STOPDETACH`·`_KEEP`)이 이름 목록에 없어 릴리스 host 로 넘어갔다(`MARU_WEB_SW_WAIT_FILTER=sw` 면 기록하는 탭의 전용 워커가 시작하지 않았다).
+/// sidecar 가 읽는 손잡이는 모두 이 두 앞머리 아래에 둔다 — 새 손잡이도 이름을 더하지 않고 빠진다(시험이 sidecar 소스의 `getenv` 이름을 모두 본다).
+pub const dev_only_host_env_prefixes = [_][]const u8{ "MARU_WEB_TEST_", "MARU_WEB_SW_" };
+
 fn devOnlyHostEnv(entry: []const u8) bool {
-    return std.mem.startsWith(u8, entry, "MARU_WEB_TEST_") or std.mem.startsWith(u8, entry, "MARU_WEB_SW_CDP=");
+    for (dev_only_host_env_prefixes) |prefix| if (std.mem.startsWith(u8, entry, prefix)) return true;
+    return false;
 }
 
 /// 릴리스 판의 sidecar 환경 — `environ` 에서 `devOnlyHostEnv` 를 뺀 것(null 로 끝난다, `list` 가 쥔다 — 띄운 뒤 놓는다).

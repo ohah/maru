@@ -151,6 +151,7 @@ const page_js = "var P=new URLSearchParams(location.search);" ++
     "if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}" ++
     "var fs=(P.get('if')||'').split(',').filter(function(x){return x});for(var q=0;q<fs.length;q++){var f=document.createElement('iframe');f.src=decodeURIComponent(fs[q]);document.body.appendChild(f);await new Promise(function(r){f.onload=r;setTimeout(r,6000)})}" ++
     // 재검증 12 차: `pw` — 첫 fetch 앞에 기다린다(ms — 떠 있던 SW 에 붙는 눈먼 때 + 지연의 본문은 어둠이다).
+    // 재검증 13 차(RISK-T1): 그 지연 폭이 50 → 300 ms(`net_body_table.blind_io_lag_us`)로 넓어져 사례의 기다림을 150 → 400 ms 로(`r13-flood` 의 대조 B).
     "var n=+(P.get('n')||0);var K=P.get('k')||'k';var pw=+(P.get('pw')||self.PWD||0);if(pw)await new Promise(function(r){setTimeout(r,pw)});" ++
     "for(var i=0;i<n;i++){await fetch('/g/x?k='+K+i,{cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}" ++
     "document.title='ready:'+K})";
@@ -279,7 +280,21 @@ const Run = struct {
 
     fn take(self: *Run, m: msg.Message) void {
         switch (m) {
-            .net_begin => |v| self.begins.append(self.gpa, .{ .browser = v.browser, .request = v.request, .url = self.gpa.dupe(u8, v.url) catch &.{}, .expected = v.flags2.body_expected, .sw = v.flags.service_worker, .session = self.on_session.get(v.browser) orelse 0 }) catch {},
+            .net_begin => |v| {
+                // 재검증 13 차: CEF 는 request 번호를 다시 쓴다(앞 사례의 기록과 같은 번호가 몇 분 뒤 다른 요청에 — 실측 `g_v20l_e` 의 270989). 앞 기록
+                // 세션의 끝이 이미 온 같은 번호면 새 칸을 연다 — 전에는 새 기록이 앞 기록의 본문을 제 것으로 읽어 「틀린 본문」 으로 셌다(판정자의 티 —
+                // `v20l-r14-loop` 한 판의 WRONG 1·세션 다름 1). 같은 세션의 다시 시작은 그대로 한 칸(끝 수 단언을 지킨다).
+                const cur = self.on_session.get(v.browser) orelse 0;
+                var i = self.bodies.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const b = &self.bodies.items[i];
+                    if (b.request != v.request or b.browser != v.browser) continue;
+                    if (b.ends >= 1 and b.session != cur) self.bodies.append(self.gpa, .{ .browser = v.browser, .request = v.request }) catch {};
+                    break;
+                }
+                self.begins.append(self.gpa, .{ .browser = v.browser, .request = v.request, .url = self.gpa.dupe(u8, v.url) catch &.{}, .expected = v.flags2.body_expected, .sw = v.flags.service_worker, .session = cur }) catch {};
+            },
             .net_response => |v| {
                 const b = self.body(v.browser, v.request);
                 var it = net_fields.HeaderIterator.init(v.headers);
@@ -857,7 +872,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const la0 = logSize(stderr_path);
         _ = recordOn(&r, tab_b);
         var at = r.begins.items.len;
-        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl0_&pw=150");
+        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl0_&pw=400");
         const ready0 = r.pumpTitle(tab_b, "ready", 20_000);
         r.pump(3000);
         const t0 = tally(&r, tab_b, at, "/g/x?k=fl0_");
@@ -880,7 +895,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const lb = logSize(stderr_path);
         const on_b = recordOn(&r, tab_b);
         at = r.begins.items.len;
-        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl1_&pw=150");
+        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl1_&pw=400");
         const ready1 = r.pumpTitle(tab_b, "ready", 20_000);
         r.pump(3000);
         const t1 = tally(&r, tab_b, at, "/g/x?k=fl1_");
@@ -896,7 +911,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const lr = logSize(stderr_path);
         _ = recordOn(&r, tab_b);
         at = r.begins.items.len;
-        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl2_&pw=150");
+        try r.goO(tab_b, 2, "/g/p?b=8&n=20&k=fl2_&pw=400");
         const ready2 = r.pumpTitle(tab_b, "ready", 20_000);
         r.pump(3000);
         const t2 = tally(&r, tab_b, at, "/g/x?k=fl2_");

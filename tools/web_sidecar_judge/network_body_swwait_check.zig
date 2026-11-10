@@ -72,7 +72,7 @@ extern "c" fn fgets(buf: [*]u8, n: c_int, f: *FILE) ?[*]u8;
 extern "c" fn pclose(f: *FILE) c_int;
 
 /// 재검증 12 차(`keepmem`): 출처를 여럿 만들려고 더 여는 서버(포트마다 다른 출처).
-var extra_ports: [24]u16 = @splat(0);
+var extra_ports: [128]u16 = @splat(0);
 
 fn startServer() !void {
     port = try listenOn();
@@ -789,6 +789,60 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
 
     // 재검증 12 차(⑩′ — 붙여 두기의 값): 기록하는 A 가 출처 스물(포트마다)을 차례로 다녀간다(출처마다 SW). 다녀간 출처의 세션은 탭 몫 16 까지 붙여
     // 두고 넘으면 가장 오래 떠나 있던 것부터 뗀다 — 그 출처로 돌아오면 처음 만남(어둠). helper 프로세스의 RSS 합을 출처 넷마다·40 초 놀린 뒤에 잰다.
+    // 검증 v20r-B(15 회차 탐침 `SWWAIT_ONLY=keepmax`): 탭 T(`SWWAIT_KM_T`, 기본 1)가 저마다 다른 출처 N(`SWWAIT_KM_N`, 기본 100)을 다녀간다(탭 몫 16·
+    // 전체 64 를 넘는다 — 탭이 여럿이면 남의 탭 세션을 빼는 `evictAway(0)` 길). 기록 중 RSS, 모두 끈 뒤 40 초 놀린 RSS, 그 뒤 기록하지 않는 B 로 처음·가운데·
+    // 마지막 출처에 가 boot 가 느는가(놀이로 멈췄으면 +1 — 남은 세션이 쥐고 있으면 +0).
+    if (std.c.getenv("SWWAIT_ONLY") != null and enabled("keepmax")) {
+        const nt: usize = if (std.c.getenv("SWWAIT_KM_T")) |v| (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 1) else 1;
+        const no: usize = if (std.c.getenv("SWWAIT_KM_N")) |v| (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 100) else 100;
+        const m = @min(nt * no, extra_ports.len);
+        for (0..m) |k| extra_ports[k] = try listenOn();
+        var u: [160]u8 = undefined;
+        var tabs: [8]u64 = undefined;
+        for (0..@min(nt, tabs.len)) |i| {
+            tabs[i] = 180 + i;
+            try openTab(&r, tabs[i]);
+            session += 1;
+            if (std.c.getenv("SWWAIT_KM_NOREC") == null) _ = recordOn(&r, tabs[i], session); // 대조: 기록 없이 같은 길
+        }
+        const r0 = helperRss(host.pid);
+        var ok: usize = 0;
+        var rb: [900]u8 = undefined;
+        var rn: usize = 0;
+        mark("keepmax", "begin");
+        for (0..m) |k| {
+            const id = tabs[k % nt];
+            if (try goUrlReady(&r, id, std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/sww/b/p", .{extra_ports[k]}) catch "")) ok += 1;
+            if ((k + 1) % 20 == 0) {
+                const x = helperRss(host.pid);
+                const piece = std.fmt.bufPrint(rb[rn..], " {d}:{d}MiB/{d}", .{ k + 1, x.kb / 1024, x.n }) catch break;
+                rn += piece.len;
+            }
+        }
+        for (tabs[0..nt]) |id| try r.navigate(id, "/blank");
+        r.pump(40_000);
+        const r_idle = helperRss(host.pid);
+        for (tabs[0..nt]) |id| recordOff(&r, id);
+        r.pump(40_000);
+        const r_off = helperRss(host.pid);
+        var boots_line: [200]u8 = undefined;
+        var bn: usize = 0;
+        var kept: usize = 0;
+        for ([_]usize{ 0, m / 2, m - 1 }) |k| {
+            const b0 = boots.load(.monotonic);
+            _ = try goUrlReady(&r, tab_b, std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/sww/b/p", .{extra_ports[k]}) catch "");
+            r.pump(1000);
+            const d = boots.load(.monotonic) - b0;
+            if (d == 0) kept += 1;
+            const piece = std.fmt.bufPrint(boots_line[bn..], " #{d}:+{d}", .{ k, d }) catch break;
+            bn += piece.len;
+        }
+        try r.navigate(tab_b, "/blank");
+        mark("keepmax", "end");
+        report(ok == m and kept == 0, "swwait-keepmax", std.fmt.bufPrint(&detail, "tabs {d} × origins {d} · ready {d}/{d} · helper RSS start {d} MiB/{d} ·{s} · 40 s idle (still recording) {d} MiB/{d} · all off + 40 s {d} MiB/{d} · boots on revisit after off{s} (kept running {d})", .{ nt, no, ok, m, r0.kb / 1024, r0.n, rb[0..rn], r_idle.kb / 1024, r_idle.n, r_off.kb / 1024, r_off.n, boots_line[0..bn], kept }) catch "");
+        for (tabs[0..nt]) |id| try r.host.send(.{ .destroy_browser = id });
+        r.pump(500);
+    }
     if (enabled("keepmem")) {
         const m: usize = 20;
         for (0..m) |k| extra_ports[k] = try listenOn();

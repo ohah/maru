@@ -727,8 +727,9 @@ fn rescueTick(_: [*c]c.cef_task_t) callconv(.c) void {
             continue;
         };
         // 붙여 두기만(놓을 워커가 아니다)은 그 탭에서만 — 그 탭이 닫혔으면 버린다(다른 탭에 붙였다 떼면 그 탭의 auto 세션이 Chromium 의 auto 목록에서
-        // 빠져 기록을 꺼도 떨어지지 않았다 — 회귀 `v20l-r15-race`).
-        if (!x.release and entry.id != x.hint) {
+        // 빠져 기록을 꺼도 떨어지지 않았다 — 회귀 `v20l-r15-race`). 재검증 13 차: 그 사이 그 탭의 기록이 끝났거나 다시 켰으면(세대가 올랐다) 버린다 —
+        // 새 기록에서 맨 위였던 적 없는 출처의 세션을 다시 붙여 기록이 끝날 때까지 워커를 살려 두지 않게.
+        if (!x.release and (entry.id != x.hint or !sw.keepCurrent(x.*))) {
             x.* = .{};
             continue;
         }
@@ -819,6 +820,39 @@ fn detachSession(browser: BrowserId, sid: []const u8) void {
     _ = swQueue(browser, null, "Target.detachFromTarget", params);
 }
 
+/// 재검증 13 차(D-v20r-1·LOW-L1): 세션 `sid` 의 워커가 멈췄다(`Inspector.targetCrashed` — `stopAllWorkers`·SW 렌더러 죽음·메모리 압박) — 그 워커를
+/// 쥔 maru 세션을 **모든 탭에서**(산 세션·옛 세대·그림자, 표에 없는 세션은 놓기 답을 기다리던 것; 시한 떼기를 기다리는 남의 출처·몫 밖 세션은 그대로 —
+/// `Sw.stopTarget`) 곧 뗀다. Chromium 은 세션이 남은 멈춘 호스트를 다시 써서 다시 뜬 워커가
+/// 같은 `targetId` 로 멈추지 않고 떴다(새 auto 세션은 떠 있는 워커에 붙어 처음 만남 — 어둠, 그 사이의 기록은 설명되지 않아 그 출처를 기록하는 탭이
+/// 기록이 끝날 때까지 어두웠다). 모두 떼면 다시 뜸은 새 호스트로 새로 멈춰 붙는다. 놓기 답을 기다리던 세션도 기다리지 않는다(멈춘 워커에는 놓을
+/// 것이 없다 — 답 앞에 떨어져도 건지지 않는다).
+fn stopWorker(browser: BrowserId, sid: []const u8) void {
+    const known = sw.find(sid) != null or sw.isParked(sid);
+    const th = sw.stopTarget(sid);
+    var n: usize = 0;
+    while (sw.takeStopping()) |x| : (n += 1) {
+        const xs = x.sid[0..x.sid_len];
+        _ = sw.pendGone(xs);
+        detachSession(x.browser, xs);
+    }
+    // 표에 없는 세션은 maru 가 이미 뗌을 보냈거나(남의 출처 시한·몫·끔 — 표에서 뺄 때 늘 뗀다) 놓기 답 뒤에 뗄 세션이다 — 뒤의 것만 곧 뗀다(앞의 것에
+    // 또 보내면 iframe 워커가 쏟아질 때 뗌 명령만 늘었다 — `v20m-r13-flood` 1 426 → 2 047).
+    if (!known) if (sw.pendGone(sid) != null) {
+        detachSession(browser, sid);
+        n += 1;
+    };
+    dbg("sw-stop-detach b={d} sid={s} target={x} sessions={d}", .{ browser, sid, th, n });
+}
+
+/// 몫으로 뺀 다녀간 출처 세션을 뗀다(그 출처로 돌아오면 처음 만남 — 어둠).
+fn detachEvicted(now: i64) void {
+    while (sw.takeEvicted()) |x| {
+        dbg("sw-evict b={d} sid={s} target={s}", .{ x.browser, x.sidSlice(), x.targetSlice() });
+        table.workerDetached(x.browser, blindKey(x.target), now);
+        if (!sw.pendMarkDetach(x.sidSlice())) detachSession(x.browser, x.sidSlice());
+    }
+}
+
 /// 페이지 세션의 `Target.attachedToTarget`·`detachedFromTarget`.
 fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
     const attached = std.mem.eql(u8, method, "Target.attachedToTarget");
@@ -866,9 +900,10 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
     // 재검증 12 차: 건지던 타깃이 붙었다(건지기의 붙이기든 auto-attach 든) — 놓은 뒤 답을 기다린다(뗄 세션은 그 뒤에 뗀다). 눈먼 때는 멈춰 붙음
     // (`paused` — Chromium 이 알린 것)으로만 가른다: 건진 워커에 붙은 이 세션의 enable 앞에 다른 세션(건지기)이 그 워커를 놓을 수 있다.
     const paused = waiting;
-    const rescued = sw.rescueTake(target_id);
+    const rescued = sw.rescueTake(target_id, browser);
     if (rescued) |x| {
-        dbg("sw-rescued b={d} sid={s} target={s} keep={}", .{ browser, sid, target_id, x.keep });
+        // 재검증 13 차: Chromium 이 알린 값(`paused`)도 적는다 — 아래 `waiting` 은 건진 세션이면 늘 참으로 둔다(놓기를 보낸다).
+        dbg("sw-rescued b={d} sid={s} target={s} keep={} release={} paused={}", .{ browser, sid, target_id, x.keep, x.release, paused });
         waiting = true;
     }
     // 기록하는 탭이고 걸어 둔 auto-attach 의 서비스 워커면 둔다 — 아니면(밸브로 멈춤·떼는 중·옛 세대·다른 꼴) 곧 뗀다(공격 2 A1).
@@ -881,32 +916,28 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
         if (waiting) return release(browser, sid, target_id, true);
         return detachSession(browser, sid);
     }
-    // 재검증 12 차: 몫으로 뺀 다녀간 출처 세션을 뗀다(그 출처로 돌아오면 처음 만남 — 어둠).
-    while (sw.takeEvicted()) |x| {
-        dbg("sw-evict b={d} sid={s} target={s}", .{ x.browser, x.sidSlice(), x.targetSlice() });
-        table.workerDetached(x.browser, blindKey(x.target), now);
-        if (!sw.pendMarkDetach(x.sidSlice())) detachSession(x.browser, x.sidSlice());
-    }
+    // 재검증 12 차: 몫(전체 64)으로 뺀 다녀간 출처 세션을 뗀다(그 출처로 돌아오면 처음 만남 — 어둠).
+    detachEvicted(now);
     if (a == .park) {
-        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=park waiting={}", .{ browser, sid, kind, target_id, waiting });
-        if (rescued != null) sw.markManual(sid);
+        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=park waiting={} paused={}", .{ browser, sid, kind, target_id, waiting, paused });
         if (waiting) release(browser, sid, target_id, false);
         return ensureForeignCheck();
     }
     if (a == .shadow) {
         // 재검증 12 차: 이 탭이 그 워커에 켠 세션(다녀간 출처의 붙여 둔 세션)을 이미 쥐었다 — 켜지 않고 쥐어만 둔다(눈먼 때 없음).
-        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=shadow waiting={}", .{ browser, sid, kind, target_id, waiting });
-        if (rescued != null) sw.markManual(sid);
+        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=shadow waiting={} paused={}", .{ browser, sid, kind, target_id, waiting, paused });
         if (waiting) release(browser, sid, target_id, false);
         return;
     }
-    if (rescued != null) sw.markManual(sid);
-    // 붙여 두기의 다시 붙음은 그 탭에서만 다녀간 출처의 것이다(그 탭이 닫혀 다른 탭이 건졌으면 보통 세션).
-    if (rescued) |x| if (x.keep and x.hint == browser) sw.markVisited(sid);
+    // 붙여 두기의 다시 붙음은 그 탭에서만 다녀간 출처의 것이다(그 탭이 닫혀 다른 탭이 건졌으면 보통 세션). 재검증 13 차: 그 사이 기록을 끄고 다시
+    // 켰으면(세대가 올랐다) 보통 세션 — 새 기록에서 맨 위였던 적 없는 출처를 붙여 두지 않는다.
+    if (rescued) |x| if (x.hint == browser and sw.keepCurrent(x)) sw.markVisited(sid);
     // 재검증 6 차 F13: 워커 스크립트 주소의 출처가 맨 위 출처가 아니면(다른 출처 iframe 의 워커·이동 중) 시한 뒤 뗀다(`foreignCheck`).
     // 재검증 7 차(N13): 남의 출처 세션은 탭마다 따로 묶은 몫(`max_foreign_per_tab`)까지만 — 넘으면 세워 둔다.
     const origin = sw.noteOrigin(sid, table_mod.originHash(url), table.topOriginOf(browser), now);
-    dbg("sw-attached b={d} sid={s} type={s} target={s} keep=true own={} waiting={} url={s}", .{ browser, sid, kind, target_id, origin == .own, waiting, url[0..@min(url.len, 160)] });
+    dbg("sw-attached b={d} sid={s} type={s} target={s} keep=true own={} waiting={} paused={} url={s}", .{ browser, sid, kind, target_id, origin == .own, waiting, paused, url[0..@min(url.len, 160)] });
+    // 재검증 13 차(LOW-Q1): 탭 몫(16)의 빼기는 맨 위 출처의 세션으로 정해진 뒤(`noteOrigin`)에 선다 — 그 뺀 세션을 뗀다.
+    detachEvicted(now);
     if (origin == .drop) {
         if (waiting) return release(browser, sid, target_id, true);
         return detachSession(browser, sid);
@@ -939,9 +970,15 @@ fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t
     // 재검증 12 차: 놓기의 답(세션이 표에 있든 없든 — 기록하지 않는 탭·떼는 세션) — 뗄 세션이면 이제 뗀다.
     if (!test_noreply) if (sw_mod.resultId(m)) |rid| if (sw.pendDone(sid, rid)) |p| pendFinished(p, .reply);
     const s = sw.live(sid) orelse {
-        // 재검증 12 차: 모르는·옛 세대·세워 둔 세션의 워커도 다시 뜨면 멈춘다(그 세션이 붙어 있는 동안) — 곧 놓는다.
-        if (sw_wait) if (sw_mod.eventMethod(m)) |method| if (std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash")) {
-            if (browserOfCef(browser.*.get_identifier.?(browser))) |bid| release(bid, sid, "", false);
+        // 재검증 12 차: 모르는·옛 세대·세워 둔 세션의 워커도 다시 뜨면 멈춘다(그 세션이 붙어 있는 동안) — 곧 놓는다. 재검증 13 차: 그 워커의
+        // `targetId` 를 안다면 넘긴다(놓기 답 앞에 떨어지면 건진다).
+        if (sw_wait) if (sw_mod.eventMethod(m)) |method| {
+            if (std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash")) {
+                if (browserOfCef(browser.*.get_identifier.?(browser))) |bid| release(bid, sid, sw.targetOf(sid), false);
+            } else if (stop_detach and std.mem.eql(u8, method, "Inspector.targetCrashed")) {
+                // 재검증 13 차(D-v20r-1·LOW-L1): 세운·그림자·옛 세대·모르는 세션도 멈춘 워커를 쥐지 않게 뗀다(`stopWorker`).
+                if (browserOfCef(browser.*.get_identifier.?(browser))) |bid| stopWorker(bid, sid);
+            }
         };
         return 1;
     };
@@ -962,15 +999,13 @@ fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t
     }
     const method = sw_mod.eventMethod(m) orelse return 1;
     if (std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash") or std.mem.eql(u8, method, "Inspector.targetCrashed")) {
-        if (stop_detach and sw_wait and std.mem.eql(u8, method, "Inspector.targetCrashed")) {
-            dbg("sw-stop-detach b={d} sid={s}", .{ id, sid });
-            sw.stopped(sid);
-            sw.markDetaching(sid);
-            detachSession(id, sid);
-        }
+        // 재검증 12 차: 멈춤에 그 세션을 뗀다 — 다음 시작은 새로 멈춰 붙는다. 재검증 13 차(D-v20r-1): 그 워커를 쥔 다른 세션(그림자·세운 세션·다른
+        // 탭의 것)도 함께 — 하나라도 남으면 Chromium 이 멈춘 호스트를 다시 써 멈추지 않고 뜬다(`stopWorker`).
+        if (stop_detach and sw_wait and std.mem.eql(u8, method, "Inspector.targetCrashed")) stopWorker(id, sid);
         sw.reloaded(sid);
         // 재검증 12 차: 다시 뜬 워커가 멈춰 있으면(그 세션이 멈춰 붙인 버전 — Chromium `should_pause_on_start`) 곧 놓는다(Playwright `CRServiceWorker`).
-        if (sw_wait and std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash")) release(id, sid, "", false);
+        // 재검증 13 차: 그 워커의 `targetId` 를 넘긴다(놓기 답 앞에 세션이 떨어지면 건진다 — 전에는 빈 글이라 건지지 못했다).
+        if (sw_wait and std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash")) release(id, sid, s.targetSlice(), false);
         // 재검증 7 차: 새 epoch 의 앞뒤를 눈먼 때로 — 다시 뜬 워커의 첫 요청이 시작 사건 없이 올 수 있다.
         table.workerReloaded(gpa, id, blindKey(s.target), machUs()) catch {};
     }
@@ -1010,7 +1045,8 @@ fn workerEvent(id: BrowserId, s: *const sw_mod.Session, method: []const u8, m: [
                     xs = kv.value_ptr.string;
                 };
             };
-            dbg("sw-wresp b={d} t={x} rid={s} tau={d} disk={} status={d} excl={} xs={s} now={d}", .{ id, s.target, v.rid, v.tau, v.disk, v.status, v.excluded, xs, now });
+            // 재검증 13 차: `start` — 그 W 의 `timing.requestTime`(µs — 짝의 기록 IO 와 견주어 requestTime − IO 의 지연을 잰다, 계획 「재검증 13 차」).
+            dbg("sw-wresp b={d} t={x} rid={s} tau={d} disk={} status={d} excl={} xs={s} now={d} start={d}", .{ id, s.target, v.rid, v.tau, v.disk, v.status, v.excluded, xs, now, v.start_us });
         },
         .failed => |v| dbg("sw-wfail b={d} rid={s}", .{ id, v.rid }),
     };

@@ -1015,6 +1015,9 @@ pub const W = struct {
     bad: bool = false,
     /// 짝(CEF 기록 번호 — 0 = 아직). 탭 둘이 다른 짝을 주면 `bad`.
     pair: u64 = 0,
+    /// 재검증 14 차(LOW-R1): 짝 기록의 그 생의 IO 시각(`Candidate.t_io_us` — 탭 사이 사본은 같은 IO). CEF 는 기록 번호를 다시 쓴다(실측 — 다른
+    /// 기록 세션·같은 탭의 18.8 분 뒤) — 번호만으로는 앞 생과 새 생을 가르지 못한다. 짝·「설명됨」 은 (번호, 이 IO) 의 것이다.
+    pair_io: i64 = 0,
     /// 재검증 10 차(구조 규칙 — 잇는 때 다시 본다): 짝을 처음 맺은 판정의 단조 시각과 그 탭(`notePairAt`). 그 뒤에 안 것(다른 W 의 자리·눈먼 때)이
     /// 그 판정을 무르는지 P 를 잇는 때 본다(`Table.pairStale`) — 그 시각 뒤에 시작한 보이는 W 는 그 기록의 주인일 수 없다(기록은 판정 앞에 왔고,
     /// 보이는 W 의 IO 는 시작 사건 뒤다 — J1).
@@ -1126,9 +1129,13 @@ pub const Verdict = union(enum) {
     skip,
     /// 잇지 않는다 — `q`(0 이 아니면) 를 `ambiguous` 로 끝낸다.
     ambiguous: struct { reason: Reason, q: u64 = 0 },
-    /// q 에 P 의 본문을 붙인다(C0·C3b′·C6·C7′ 은 부른 쪽 — 표).
-    link: struct { q: u64, w: WKey, status: u16 },
+    /// q 에 P 의 본문을 붙인다(C0·C3b′·C6·C7′ 은 부른 쪽 — 표). 재검증 14 차(LOW-R1): `io` 는 짝 기록의 그 생(`W.pair_io`) — 부른 쪽은 같은 번호의
+    /// 다른 생(다시 쓴 번호의 새 기록)에 잇지 않는다.
+    link: struct { q: u64, io: i64 = 0, w: WKey, status: u16 },
 };
+
+/// 재검증 14 차(LOW-R1): CEF 기록 하나의 그 생 — 번호와 그 시작의 IO 시각(`Candidate.t_io_us`). CEF 는 번호를 다시 쓴다.
+pub const Life = struct { request: u64, io: i64 };
 
 /// τ 색인 상한(sidecar 전체 W 수)과 쫓아내는 묶음.
 pub const max_ws: usize = 16_384;
@@ -1166,8 +1173,10 @@ pub const Link = struct {
     hop_order: std.ArrayList(i64) = .empty,
     /// 지평 — 쫓아낸 τ 의 최대(홉 τ 포함). 이하 τ 의 P 는 `ambiguous`, 이하 τ 의 새 W 는 넣지 않는다(공격 1 M6).
     horizon: i64 = 0,
-    /// 어느 탭의 표에서든 W 와 짝이 된 CEF 기록 번호(C3b′ 의 「설명됨」 — 탭 사이 사본이 같은 번호다, K3).
-    explained: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// 어느 탭의 표에서든 W 와 짝이 된 CEF 기록(C3b′ 의 「설명됨」 — 탭 사이 사본이 같은 번호·같은 IO 다, K3). 재검증 14 차(LOW-R1): 열쇠는 번호가
+    /// 아니라 그 생(`Life` — 번호, IO). 번호만이면 CEF 가 다시 쓴 번호의 새 기록이 태어나자마자 앞 생의 「설명됨」 을 물려받아 C3b′ 가 그 기록을
+    /// 보지 않았다(검증 v20s 1 회차 — 퍼즈 최악 1 400 만 쪽에 WRONG 1).
+    explained: std.AutoHashMapUnmanaged(Life, void) = .empty,
     /// 탭마다 VS(벽시계 µs — C3a): 기록을 켠 때·붙은 워커 세션의 enable 답의 최대.
     vs: [max_tabs]struct { browser: BrowserId = 0, wall_us: i64 = 0 } = @splat(.{}),
     /// sidecar 가 본 벽시계 − 단조 시계의 최대와, 그보다 뒤로 뛴 가장 큰 폭(µs — 공격 1 M7: 기록 전에 벽시계가 뒤로 뛰면 그 전 메모의 τ 가 VS
@@ -1282,7 +1291,7 @@ pub const Link = struct {
                 self.horizon = @max(self.horizon, w.tau);
                 if (self.taus.remove(w.tau)) gone[1] += 1;
             }
-            if (w.pair != 0 and self.explained.remove(w.pair)) gone[2] += 1;
+            if (w.pair != 0 and self.explained.remove(.{ .request = w.pair, .io = w.pair_io })) gone[2] += 1;
             if (self.ws.remove(k)) gone[0] += 1;
         }
         self.order.replaceRangeAssumeCapacity(0, n, &.{});
@@ -1312,7 +1321,7 @@ pub const Link = struct {
                 e.live -|= 1;
                 if (e.live == 0 and !e.hop and self.taus.remove(w.tau)) gone[1] += 1;
             };
-            if (w.pair != 0 and self.explained.remove(w.pair)) gone[2] += 1;
+            if (w.pair != 0 and self.explained.remove(.{ .request = w.pair, .io = w.pair_io })) gone[2] += 1;
             if (self.ws.remove(k)) gone[0] += 1;
         }
         self.foreign_order.replaceRangeAssumeCapacity(0, n, &.{});
@@ -1430,24 +1439,26 @@ pub const Link = struct {
 
     /// 표가 W 의 짝을 정했다(W 의 응답 때 — 공격 3 H3). 탭 둘이 다른 기록을 주면 그 W 는 `bad`.
     pub fn notePair(self: *Link, gpa: std.mem.Allocator, key: WKey, q: u64) std.mem.Allocator.Error!void {
-        return self.notePairAt(gpa, key, q, 0, 0);
+        return self.notePairAt(gpa, key, .{ .request = q, .io = 0 }, 0, 0);
     }
 
     /// 재검증 10 차: 짝을 맺은 판정의 탭·단조 시각과 함께(`W.paired_at`·`pair_tab` — 처음 맺은 것만; 같은 짝을 뒤 탭이 다시 맺어도 앞 판정의
     /// 시각이 기준이다 — 그 시각 뒤에 시작한 W 는 그 기록의 주인일 수 없다).
-    pub fn notePairAt(self: *Link, gpa: std.mem.Allocator, key: WKey, q: u64, browser: BrowserId, now_us: i64) std.mem.Allocator.Error!void {
+    /// 재검증 14 차(LOW-R1): 짝은 기록의 그 생(`life` — 번호, IO)이다. 같은 W 에 같은 번호의 다른 생이 오면 다른 짝이다(`bad`).
+    pub fn notePairAt(self: *Link, gpa: std.mem.Allocator, key: WKey, life: Life, browser: BrowserId, now_us: i64) std.mem.Allocator.Error!void {
         const w = self.ws.getPtr(key) orelse {
             // 응답 전에 짝이 정해지지 않는다(짝은 응답 때) — 응답이 버려졌으면(지평) 짝만 적는다.
-            try self.explained.put(gpa, q, {});
+            try self.explained.put(gpa, life, {});
             return;
         };
-        if (w.pair != 0 and w.pair != q) w.bad = true;
+        if (w.pair != 0 and (w.pair != life.request or w.pair_io != life.io)) w.bad = true;
         if (w.pair == 0) {
-            w.pair = q;
+            w.pair = life.request;
+            w.pair_io = life.io;
             w.paired_at = now_us;
             w.pair_tab = browser;
         }
-        try self.explained.put(gpa, q, {});
+        try self.explained.put(gpa, life, {});
     }
 
     /// 표가 W 의 짝을 의심해 끝냈다(둘 이상의 타깃·갈림) — 그 W 를 가리키는 P 는 `ambiguous`.
@@ -1455,8 +1466,9 @@ pub const Link = struct {
         if (self.ws.getPtr(key)) |w| w.bad = true;
     }
 
-    pub fn isExplained(self: *const Link, q: u64) bool {
-        return self.explained.contains(q);
+    /// 재검증 14 차(LOW-R1): 그 생(번호와 그 IO)이 설명되었다 — 같은 번호의 앞 생의 짝은 새 생을 설명하지 않는다.
+    pub fn isExplained(self: *const Link, q: u64, io: i64) bool {
+        return self.explained.contains(.{ .request = q, .io = io });
     }
 
     /// C3a(τ 가 VS 앞) — 잇지 않는다. 재검증 6 차 F16b: 그래도 τ 로 W 와 그 짝을 찾아 가리킨 기록을 `ambiguous` 로 끝낸다(C7′ — 「P 가 가리켰지만
@@ -1504,7 +1516,7 @@ pub const Link = struct {
         if (w.sig.method != p.method or w.sig.range != p.range) return .{ .ambiguous = .{ .reason = .sig } };
         if (w.status == 206) return .{ .ambiguous = .{ .reason = .partial } };
         if (w.pair == 0) return .wait; // 짝이 아직(시한 뒤 `unpaired`)
-        return .{ .link = .{ .q = w.pair, .w = key, .status = w.status } };
+        return .{ .link = .{ .q = w.pair, .io = w.pair_io, .w = key, .status = w.status } };
     }
 };
 
@@ -1846,7 +1858,7 @@ test "S2 C4: τ 가 꼭 하나 — 같은 τ 의 디스크 아닌 W 둘은 영�
     try l.notePair(gpa_t, s, 70);
     try l.notePair(gpa_t, s, 71);
     try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .bad_worker, .q = 70 } }, l.decide(5, 7_000, .network, .{}));
-    try testing.expect(l.isExplained(70) and l.isExplained(71));
+    try testing.expect(l.isExplained(70, 0) and l.isExplained(71, 0));
     // 짝을 의심해 끝낸 W.
     const u = WKey.of(1, 0, "u");
     try l.noteResponse(gpa_t, u, 8_000, false, false, 200);
@@ -1868,7 +1880,7 @@ test "S2 지평: 넘쳐 쫓아낸 τ 이하는 ambiguous, 그 이하 τ 의 새 
     try l.noteResponse(gpa_t, WKey.of(1, 0, "x"), 999_999, false, false, 200);
     try testing.expectEqual(@as(i64, 10_000 + evict_batch - 1), l.horizon);
     try testing.expectEqual(Reason.horizon, l.decide(5, 10_000, .network, .{}).ambiguous.reason);
-    try testing.expect(!l.isExplained(100));
+    try testing.expect(!l.isExplained(100, 0));
     try testing.expect(l.decide(5, 10_000 + evict_batch, .network, .{}) == .link);
     // 지평 이하 τ 의 늦은 W 는 넣지 않는다 — 그 τ 의 P 는 여전히 지평으로.
     try l.noteResponse(gpa_t, WKey.of(1, 0, "late"), 10_005, false, false, 200);
@@ -2286,13 +2298,15 @@ test "재검증 10 차(MED-P2) · v20p-B Q19-e: 응답한 W 의 표(ws·taus·ex
             const k = WKey.of(8, 0, try std.fmt.bufPrint(&buf, "r{d}", .{i}));
             const a = clock_gettime_nsec_np(16);
             try l.noteResponse(gpa_t, k, 1_700_000_000_000_000 + @as(i64, @intCast(i)) * 10, false, false, 200);
-            try l.notePair(gpa_t, k, 1_000_000 + i);
+            // 재검증 14 차: 짝은 그 생(번호, IO)으로 — 쫓아낼 때 같은 열쇠로 지워야 `explained` 가 묶인다.
+            try l.notePairAt(gpa_t, k, .{ .request = 1_000_000 + i, .io = 2_000_000 + @as(i64, @intCast(i)) }, 0, 0);
             total += clock_gettime_nsec_np(16) - a;
         }
         worst_mean = @max(worst_mean, total / max_ws);
         try testing.expect(tombsOf(&l.ws) * 4 <= l.ws.capacity());
         try testing.expect(tombsOf(&l.taus) * 4 <= l.taus.capacity());
         try testing.expect(tombsOf(&l.explained) * 4 <= l.explained.capacity());
+        try testing.expect(l.explained.count() <= l.ws.count());
     }
     std.debug.print("\n[10 차 Q19-e] ws {d} cap {d} · worst round mean {d} ns · ws removed {d} rebuilds {d}\n", .{ l.ws.count(), l.ws.capacity(), worst_mean, l.ws_tombs.total, l.ws_tombs.rebuilds });
     // 재검증 11 차(LOW-T — 검증 v20q 변이 Q11): 다시 짓기는 지운 수가 자리의 1/4 에 닿을 때마다 한 번 — 다시 지은 뒤 셈을 0 으로 두지 않으면(지울
@@ -2408,7 +2422,7 @@ test "재검증 11 차(LOW-K′) · v20q R3-a: 같은 W 를 남의 출처로 보
     try testing.expect(for (l.order.items) |k| {
         if (k.target == w1.target and k.rid == w1.rid) break true;
     } else false);
-    try l.notePairAt(gpa_t, w1, 31, 5, 100);
+    try l.notePairAt(gpa_t, w1, .{ .request = 31, .io = 0 }, 5, 100);
     const v0 = l.decide(5, 5_000, .network, get);
     // 남의 사본으로만 본 W3(τ 6 000) — 상한(`>=`)에서 놓인다.
     const w3 = WKey.of(3, 0, "w3");
@@ -2421,7 +2435,7 @@ test "재검증 11 차(LOW-K′) · v20q R3-a: 같은 W 를 남의 출처로 보
     const w2 = WKey.of(2, 0, "w2");
     try l.noteSent(gpa_t, w2, get);
     try l.noteResponse(gpa_t, w2, 5_000, false, false, 200);
-    try l.notePairAt(gpa_t, w2, 77, 5, 200);
+    try l.notePairAt(gpa_t, w2, .{ .request = 77, .io = 0 }, 5, 200);
     const v1 = l.decide(5, 5_000, .network, get);
     std.debug.print("\n[v20q R3-a] before {s} · w1 kept {} · w3 evicted {} (τ 칸 {}) · horizon {d} · after {s}\n", .{ @tagName(v0), kept, gone3, l.taus.contains(6_000), l.horizon, @tagName(v1) });
     try testing.expect(v0 == .link and kept and gone3 and !l.taus.contains(6_000) and l.horizon == 0);
@@ -2442,7 +2456,7 @@ test "재검증 11 차(LOW-R1) · v20q-B Q11-c: 남의 W 놓기(evictForeign)는
         if (i % 4 == 0) {
             const k = WKey.of(10, 0, try std.fmt.bufPrint(&buf, "p{d}", .{i}));
             try l.noteResponseFrom(gpa_t, k, tau + 3, false, false, 200, true);
-            try l.notePairAt(gpa_t, k, 5_000_000 + i, 6, 1);
+            try l.notePairAt(gpa_t, k, .{ .request = 5_000_000 + i, .io = 7_000_000 + @as(i64, @intCast(i)) }, 6, 1);
         }
     }
     std.debug.print("\n[v20q Q11-c] after {d} rounds: ws {d} foreign_order {d} taus {d} explained {d} horizon {d}\n", .{ rounds, l.ws.count(), l.foreign_order.items.len, l.taus.count(), l.explained.count(), l.horizon });
@@ -2802,4 +2816,24 @@ test "재검증 13 차(D-v20r-1·LOW-L1): 워커가 멈추면 그 워커를 쥔 
     // 표에 없는 세션은 모른다(부른 쪽이 그것만 뗀다).
     try std.testing.expectEqual(@as(u64, 0), sw.stopTarget("ZZ"));
     try std.testing.expect(sw.takeStopping() == null);
+}
+
+test "재검증 14 차(LOW-R1): 짝·「설명됨」 은 기록의 그 생(번호, IO)이다 — 같은 번호의 앞 생은 새 생을 설명하지 않고, 잇기 판정은 그 생을 싣고, 한 W 에 같은 번호의 다른 생이 오면 그 W 는 나쁘다" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    l.raiseVisible(5, 1_000);
+    const k = WKey.of(1, 0, "1.1");
+    try l.noteResponse(gpa_t, k, 2_000_000, false, false, 200);
+    l.ws.getPtr(k).?.sig = .{ .method = 1 };
+    try l.notePairAt(gpa_t, k, .{ .request = 77, .io = 100 }, 5, 10);
+    try testing.expect(l.isExplained(77, 100));
+    try testing.expect(!l.isExplained(77, 200));
+    try testing.expectEqual(Verdict{ .link = .{ .q = 77, .io = 100, .w = k, .status = 200 } }, l.decide(5, 2_000_000, .network, .{ .method = 1 }));
+    // 응답이 버려진 W(표에 없다)의 짝도 그 생으로 적는다.
+    try l.notePairAt(gpa_t, WKey.of(1, 0, "1.2"), .{ .request = 78, .io = 300 }, 5, 20);
+    try testing.expect(l.isExplained(78, 300) and !l.isExplained(78, 0));
+    // 같은 W 에 같은 번호의 다른 생 — 다른 짝이다.
+    try l.notePairAt(gpa_t, k, .{ .request = 77, .io = 200 }, 5, 30);
+    try testing.expect(l.ws.get(k).?.bad);
+    try testing.expect(l.decide(5, 2_000_000, .network, .{ .method = 1 }) == .ambiguous);
 }

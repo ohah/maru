@@ -14,8 +14,8 @@ LSP·formatter의 grouped spawn을 그대로 쓰는 이관은 제어 터미널 �
   join은 pause/resume용 버퍼를 보존하는 API다.
 - 반복 가능한 셸/reader 회귀는 `MARU_INTERACTIVE_SHELL=/bin/sh zig build test-pty`와 ReleaseFast를 사용한다.
   사용자 셸/dotfile을 쓰는 기본 opt-in 실행의 시작 시한은 별도 모집단으로 보존한다.
-- 남은 범위: PTY 전체 native 이관은 setsid·제어 터미널·foreground·login·cwd 폴백을
-  실제 OS에서 대조하는 PoC가 먼저다. 이번 변경은 임의의 주변 FD 전체 차단을 구현하지 않는다.
+- PTY 전체 native 이관은 채택하지 않았다. 비교 PoC는 별도 조사 자료이며,
+  이번 변경은 임의의 주변 FD 전체 차단을 구현하지 않는다.
 
 최종 로컬·경계·원격 CI 결과와 제한은 Draft PR 본문/checks가 기록한다.
 
@@ -37,3 +37,7 @@ peer close를 보류한 채 원래 EOF 기대를 적용하면 두 모드에서 C
 
 후속 [native spawn 비교 PoC](pty-native-spawn-poc.md)는 제어 터미널·cwd 폴백의 실제 OS 차이를 기록한다.
 제품 backend 이관과 비교 모형의 결과를 구분한다.
+
+
+후속 [fork 초기화 실패 전달](pty-fork-setup-status.md)은 기존20조건을 유지하고28개 실패/상태 조건을 더해
+`test-pty-stdio`를 두 모드 각각48개로 확장한다. 제품은 fork/exec를 유지한다.

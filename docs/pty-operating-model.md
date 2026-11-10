@@ -39,12 +39,20 @@ openpty
 앱이나 세션 호스트가 stdin/stdout/stderr 일부를 닫은 상태에서도 PTY를 만들 수 있다.
 `openpty`가 0~2번에 준 master/slave는 부모에서 `F_DUPFD_CLOEXEC`로 3번 이상으로 옮긴다.
 원본을 닫은 직후 소유 FD 번호를 갱신하므로, 두 번째 이동이나 후속 준비가 실패해도 현재 소유한 끝점을 회수한다.
-두 끝점과 wake pipe는 fork 직전에 CLOEXEC다. 자식의 `dup2(slave, 0/1/2)`와 master close가
+두 끝점과 wake/setup-status pipe는 fork 직전에 CLOEXEC다. 자식의 `dup2(slave, 0/1/2)`와 master close가
 서로 충돌하지 않고, stdio의 CLOEXEC는 서로 다른 FD로부터의 dup2로 해제된다.
 
 기존 `openpty → fork → setsid → TIOCSCTTY → exec`와 login wrapper, cwd의 HOME/상속 폴백은 유지한다.
-전체 주변 FD allowlist와 openpty 생성 시점의 원자적 상속 차단은 후속 native 이관에서 검토한다.
+전체 주변 FD allowlist와 openpty 생성 시점의 원자적 상속 차단은 별도 설계·검증 범위다.
+이번 실패 전달에서 native/helper 이관을 채택하지 않는다.
 [검증 계획](plans/pty-stdio-ownership.md)은 실제 터미널 probe와 셸/reader 통합 검사를 구분한다.
+
+## 자식 초기화 실패 전달
+
+macOS는 fork/exec 방식을 유지하면서 CLOEXEC pipe로 setsid·제어 터미널·stdio·execve 실패의
+stage/native errno를 부모에게 전달한다. 실패 child는 세션 반환 전에 회수하고 FD를 닫는다.
+EOF나 종료 코드126/127을 셸 준비 완료 또는 초기화 실패로 추정하지 않는다.
+[실제 경계·기한·제품 검증](plans/pty-fork-setup-status.md)을 따른다.
 
 ## 기본 흐름
 

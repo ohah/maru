@@ -2,6 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin"); // 이 파일은 macOS 전용이지만 테스트는 Linux CI에서도 컴파일된다 — skip 가드용
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
+const setup_status = @import("child_setup_status.zig");
+// Only the writer lifetime across fork is serialized, not child setup or shell startup.
+// Otherwise a concurrently forked PTY can retain another spawn's status writer.
+var setup_fork_lock: std.c.pthread_mutex_t = .{};
 const inherited_env = @import("../inherited_env.zig");
 const agent_log_format = @import("../agent_log_format.zig");
 // maru 자체 terminfo 로컬 캐시(경로·버전·컴파일 명령)의 단일 출처. `maru terminfo` 서브커맨드(cli)와 공유해,
@@ -641,7 +645,25 @@ pub const PtySession = struct {
         self.owns_child_lifecycle.store(true, .release);
     }
 
+    pub const SpawnFailure = struct {
+        stage: setup_status.Stage,
+        native_errno: u32,
+        child_pid: std.c.pid_t,
+    };
+
     pub fn spawn(allocator: std.mem.Allocator, request: types.SpawnRequest) !PtySession {
+        var failure: ?SpawnFailure = null;
+        return spawnReporting(allocator, request, &failure) catch |err| {
+            // Logging stays in the parent; the forked child only writes fixed bytes.
+            if (failure) |f| std.log.scoped(.pty).warn("child setup failed: stage={s} errno={d} pid={d}", .{ @tagName(f.stage), f.native_errno, f.child_pid });
+            return err;
+        };
+    }
+
+    /// Synchronous diagnostic sink, not a transport field or a shell-ready event.
+    /// Only a validated native child failure populates it; local channel errors do not.
+    pub fn spawnReporting(allocator: std.mem.Allocator, request: types.SpawnRequest, failure: *?SpawnFailure) !PtySession {
+        failure.* = null;
         try validateRequest(request);
 
         // login=true면 login(1)으로 감싸 전체 로그인 세션을 셋업한다(Terminal.app·Ghostty와 동일).
@@ -709,13 +731,46 @@ pub const PtySession = struct {
         // EAGAIN까지 비울 수 있게(블로킹 없이). close-wake는 poll만 깨우고 read는 안 하므로 영향 없다.
         try setNonBlocking(wake_fds[0]);
 
+        // The child reports failures before exec through its own CLOEXEC writer.
+        // Move both ends above stdio so dup2 cannot overwrite the report channel.
+        if (std.c.pthread_mutex_lock(&setup_fork_lock) != .SUCCESS) return error.ChildSetupLockFailed;
+        var setup_lock_owned = true;
+        defer if (setup_lock_owned) {
+            _ = std.c.pthread_mutex_unlock(&setup_fork_lock);
+        };
+        var setup_fds: [2]std.c.fd_t = undefined;
+        if (std.c.pipe(&setup_fds) != 0) return error.PipeFailed;
+        defer closeFd(setup_fds[0]);
+        var setup_writer_owned = true;
+        defer if (setup_writer_owned) closeFd(setup_fds[1]);
+        try moveAboveStdio(&setup_fds[0]);
+        try moveAboveStdio(&setup_fds[1]);
+        try setCloseOnExec(setup_fds[0]);
+        try setCloseOnExec(setup_fds[1]);
+        try setNonBlocking(setup_fds[0]);
+        const deadline = try setupMonotonicMillis() + child_setup_timeout_ms;
+
         const pid = std.c.fork();
         if (pid < 0) return error.ForkFailed;
-
         if (pid == 0) {
-            childExec(command_z, argv_storage.argv.ptr, env_storage.envpPtr(), cwd_z, master_fd, slave_fd);
+            _ = std.c.close(setup_fds[0]);
+            childExec(command_z, argv_storage.argv.ptr, env_storage.envpPtr(), cwd_z, master_fd, slave_fd, setup_fds[1]);
         }
-
+        closeFd(setup_fds[1]);
+        setup_writer_owned = false;
+        _ = std.c.pthread_mutex_unlock(&setup_fork_lock);
+        setup_lock_owned = false;
+        const reported = readChildSetupStatus(setup_fds[0], deadline) catch |err| {
+            if (!abortSetupChild(pid, master_fd)) return error.ChildSetupReapFailed;
+            return err;
+        };
+        if (reported) |f| {
+            failure.* = .{ .stage = f.stage, .native_errno = f.native_errno, .child_pid = pid };
+            if (!abortSetupChild(pid, master_fd)) return error.ChildSetupReapFailed;
+            return childSetupError(f.stage);
+        }
+        // EOF alone cannot distinguish exec from an unreported child death.
+        // Keep the session/exit lifecycle for fast exits, including 126/127.
         closeFd(slave_fd);
         return .{
             .master_fd = std.atomic.Value(std.posix.fd_t).init(master_fd),
@@ -1915,11 +1970,11 @@ fn childExec(
     cwd: ?[:0]const u8,
     master_fd: std.posix.fd_t,
     slave_fd: std.posix.fd_t,
+    setup_fd: std.posix.fd_t,
 ) noreturn {
-    // Child process에서는 Zig error를 부모에게 안전하게 돌려줄 수 없다.
-    // 실패 지점별로 보수적인 exit code를 남기고 즉시 종료해 parent가 lifecycle event로 관측하게 한다.
-    if (std.c.setsid() < 0) std.c._exit(126);
-    if (std.c.ioctl(slave_fd, tio_cs_ctty, @as(c_int, 0)) < 0) std.c._exit(126);
+    // No allocation, logger or locks between fork and exec. Snapshot errno before writing.
+    if (std.c.setsid() < 0) childSetupFailed(setup_fd, .session, 126);
+    if (std.c.ioctl(slave_fd, tio_cs_ctty, @as(c_int, 0)) < 0) childSetupFailed(setup_fd, .terminal, 126);
     if (cwd) |dir| {
         // cwd 실패는 setsid/ioctl/dup2와 달리 **복구 가능**하다: 요청한 디렉터리가 사라졌거나(복원/TOCTOU — 검사
         // 후 spawn 사이 삭제) 접근 불가여도 셸을 잃는 것보다 다른 디렉터리에서라도 여는 게 낫다. 죽지 않고(_exit
@@ -1929,15 +1984,79 @@ fn childExec(
             if (homeFromEnv(envp)) |home| _ = std.c.chdir(home);
         }
     }
-    if (std.c.dup2(slave_fd, 0) < 0) std.c._exit(126);
-    if (std.c.dup2(slave_fd, 1) < 0) std.c._exit(126);
-    if (std.c.dup2(slave_fd, 2) < 0) std.c._exit(126);
+    if (std.c.dup2(slave_fd, 0) < 0) childSetupFailed(setup_fd, .stdin, 126);
+    if (std.c.dup2(slave_fd, 1) < 0) childSetupFailed(setup_fd, .stdout, 126);
+    if (std.c.dup2(slave_fd, 2) < 0) childSetupFailed(setup_fd, .stderr, 126);
 
     _ = std.c.close(master_fd);
     if (slave_fd > 2) _ = std.c.close(slave_fd);
 
     _ = std.c.execve(command.ptr, argv, envp);
-    std.c._exit(127);
+    childSetupFailed(setup_fd, .exec, 127);
+}
+
+// This bounds only the fork/pre-exec reporting interval, not shell startup or login.
+const child_setup_timeout_ms: i64 = 5_000;
+fn setupMonotonicMillis() error{ChildSetupClockFailed}!i64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return error.ChildSetupClockFailed;
+    return ts.sec * 1000 + @divTrunc(ts.nsec, std.time.ns_per_ms);
+}
+fn childSetupFailed(fd: std.posix.fd_t, stage: setup_status.Stage, exit_code: u8) noreturn {
+    const native_errno: u32 = @backingInt(std.posix.errno(@as(c_int, -1)));
+    const bytes = setup_status.encode(.{ .stage = stage, .native_errno = native_errno });
+    var sent: usize = 0;
+    while (sent < bytes.len) {
+        const n = std.c.write(fd, bytes[sent..].ptr, bytes.len - sent);
+        if (n > 0) {
+            sent += @intCast(n);
+            continue;
+        }
+        if (n < 0 and std.posix.errno(n) == .INTR) continue;
+        break;
+    }
+    std.c._exit(exit_code);
+}
+fn readChildSetupStatus(fd: std.posix.fd_t, deadline: i64) !?setup_status.Failure {
+    var bytes: [setup_status.frame_size + 1]u8 = undefined;
+    var used: usize = 0;
+    while (true) {
+        const remaining = deadline - try setupMonotonicMillis();
+        if (remaining <= 0) return error.ChildSetupTimedOut;
+        var item: std.c.pollfd = .{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 };
+        const rc = std.c.poll(@ptrCast(&item), 1, @intCast(remaining));
+        if (rc < 0) {
+            if (std.posix.errno(rc) == .INTR) continue;
+            return error.ChildSetupReadFailed;
+        }
+        if (rc == 0) continue;
+        if (item.revents & std.c.POLL.NVAL != 0) return error.ChildSetupReadFailed;
+        const n = std.c.read(fd, bytes[used..].ptr, bytes.len - used);
+        if (n < 0) {
+            const err = std.posix.errno(n);
+            if (err == .INTR or err == .AGAIN) continue;
+            return error.ChildSetupReadFailed;
+        }
+        if (n == 0) return if (used == 0) null else try setup_status.decode(bytes[0..used]);
+        used += @intCast(n);
+        if (used > setup_status.frame_size) return error.InvalidChildSetupStatus;
+    }
+}
+fn abortSetupChild(pid: std.c.pid_t, master_fd: std.posix.fd_t) bool {
+    if (tryReap(pid) != .alive) return true;
+    // Before setsid there is no child-owned group. Never signal the parent's group.
+    if (getpgid(pid) == pid) _ = std.c.kill(-pid, .KILL);
+    _ = std.c.kill(pid, .KILL);
+    reapBoundedAfterKill(pid, master_fd);
+    return tryReap(pid) != .alive;
+}
+fn childSetupError(stage: setup_status.Stage) error{ ChildSessionFailed, ChildTerminalFailed, ChildStdioFailed, ChildExecFailed } {
+    return switch (stage) {
+        .session => error.ChildSessionFailed,
+        .terminal => error.ChildTerminalFailed,
+        .stdin, .stdout, .stderr => error.ChildStdioFailed,
+        .exec => error.ChildExecFailed,
+    };
 }
 
 /// envp("KEY=VALUE" C 문자열들, null 종단 배열)에서 HOME 값을 찾는다(없으면 null). child의 chdir 폴백용 —

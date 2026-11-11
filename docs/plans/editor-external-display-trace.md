@@ -45,3 +45,9 @@ Darwin SDK `notify.h`의 `notify_cancel` 계약은 마지막 token 취소 시 �
 Linux `check`에서 기존 `net_block`의 2 MiB URL·32규칙 반복 벽시계 500ms 단언이 실패했다. 실패 job 130473917693의 로그를 보존했다. CPU 경쟁 제어 재현에서 단독 wall/CPU 162/162ms, 한 코어 8중 경쟁 1240/157ms로 같은 계산이 실패했다. 기존 성능 원칙에 따라 예산 500ms는 유지하고 `std.Io.Clock.cpu_thread`로 판정하며 벽시계는 로그로 남긴다. 계산량 4배 변이도 CPU 689ms로 실패했으므로 부하 대기만 빼고 계산 비용 회귀 탐지는 유지한다. 원래 CI 실패의 CPU 시간은 기록되지 않았으므로 동일 원인을 직접 관측했다고 확대하지 않는다.
 
 제어 artifact는 `~/.cache/maru-agent-artifacts/ci-4716-netcpu`의 binary·source·receipt·로그다. 수정 후 CPU 경쟁 조건 wall/CPU 1298/161ms 통과, macOS 정식 CLI 전체 877통과·1건너뜀이었다. production matcher는 바꾸지 않고 시험의 시계·설명만 고쳤다. fixture의 끝 조각 c가 맞지 않아 KMP가 아니라 URL 분해 반복을 재는 사실도 주석과 시험 이름에 반영했다. 새 커밋의 원격 CI 완료는 별도로 확인한다.
+
+### CPU 시계 수정 이후의 추가 판정
+
+새 Linux 실행(job 130485558427)에서 같은 반복 분해 fixture가 maru root CPU 213ms, CLI root CPU 521ms를 기록해 CLI가 다시 실패했다. 원래 CI 실패를 CPU 대기만으로 설명할 수 없으며, 시계 변경만으로는 충분하지 않았다.
+
+제품 `net_block_table.decideTabBudget`은 URL을 한 번 나누고 모든 규칙이 `Budget`을 공유한다. 시험도 이 경로로 수정했다. 기존 fixture의 끝 조각 불일치는 예산 미소모 음성 대조로 유지하고, 마지막 단위를 c로 바꿔 실제 KMP 스캔과 공유 예산 고갈을 검사한다. 첫 규칙은 정해진 범위를 모두 보아 불일치, 나머지는 예산 부족으로 문서화된 막는 판정이다. 규칙별 예산 초기화 변이는 시간과 관계없이 잔여 예산 단언에서 실패했다. Linux 한 코어 8중 경쟁에서 수정 fixture wall/CPU 91/10ms 통과, macOS 정식 CLI 전체 877통과·1건너뜀이었다. 500ms CPU 선은 재앙 감지용으로 유지했으며 production matcher는 수정하지 않았다.

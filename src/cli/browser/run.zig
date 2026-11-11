@@ -615,19 +615,26 @@ fn publishResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const
 
     // 폴더를 뜻하는 꼴(N-h1·N-h3)은 아무것도 만들기 전에 — 있는 폴더면 「폴더다」, 아니면 「폴더를 뜻한다」.
     if (directoryPath(target)) {
-        const st = dir.statFile(io, target, .{}) catch return error.DirectoryPath;
-        return if (st.kind == .directory) error.IsDir else error.DirectoryPath;
+        var directory = dir.openDir(io, target, .{}) catch return error.DirectoryPath;
+        directory.close(io);
+        return error.IsDir;
     }
     // 재검증 4 차 뒤 B10-1: 마지막 조각이 심볼릭 링크면 쓰지 않는다 — rename 은 링크를 따르지 않아 링크를 지운 자리에 파일을 썼다(폴더를 가리키는
     // 링크는 진짜 폴더처럼 거절되지 않고 사라졌다). 폴더를 가리키면 폴더처럼, 그 밖(파일·없는 대상)은 「링크다」 — 링크를 바꾸지도, 가리키는 파일을
     // 덮지도 않는다(가리키는 파일에 쓰는 길은 고르지 않았다 — `--out` 이 남의 파일을 덮는 길이 생긴다). 가운데 조각의 링크(`<링크된 폴더>/x`)는
     // 그대로 따른다. 확인과 rename 사이에 링크로 바뀌는 경쟁은 같은 사용자의 일이라 막지 않는다.
-    if (dir.statFile(io, target, .{ .follow_symlinks = false })) |lst| {
-        if (lst.kind == .sym_link) {
-            const st = dir.statFile(io, target, .{}) catch return error.OutputIsSymLink;
-            return if (st.kind == .directory) error.IsDir else error.OutputIsSymLink;
-        }
-    } else |_| {}
+    // Zig 0.17의 Linux statFile은 경로 조각의 NAMETOOLONG을 panic으로 처리한다.
+    // 링크 여부만 필요하므로 readLink를 쓴다. 한 바이트로도 링크임을 알 수 있고,
+    // 내용이 잘려도 상관없다. 이 경로는 긴 조각·중간 링크 확장의 오류도 반환한다.
+    var link_probe: [1]u8 = undefined;
+    if (dir.readLink(io, target, &link_probe)) |_| {
+        var directory = dir.openDir(io, target, .{}) catch return error.OutputIsSymLink;
+        directory.close(io);
+        return error.IsDir;
+    } else |err| switch (err) {
+        error.NotLink, error.FileNotFound, error.NotDir => {},
+        else => return err,
+    }
     var af = try dir.createFileAtomic(io, target, .{
         .permissions = std.Io.File.Permissions.fromMode(0o600),
         .replace = true,
@@ -1504,4 +1511,31 @@ test "W9d② 재검증 5 차 R10(v20k): --out 공격 — 링크 고리·긴 이�
     }
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "adir/f", &buf));
+}
+
+test "publishResult: 긴 조각과 링크 확장도 panic 없이 거절하고 255바이트 이름은 보존한다" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var long: [300]u8 = undefined;
+    @memset(&long, 'a');
+    try std.testing.expectError(error.NameTooLong, publishResult(tmp.dir, io, &long, "BODY"));
+    // 최종 링크는 원래 계약대로 링크 오류이며, 중간 링크의 긴 대상은 이름 오류다.
+    try tmp.dir.symLink(io, &long, "long-target", .{});
+    try std.testing.expectError(error.OutputIsSymLink, publishResult(tmp.dir, io, "long-target", "BODY"));
+    try std.testing.expectError(error.NameTooLong, publishResult(tmp.dir, io, "long-target/result", "BODY"));
+    var suffix: [304]u8 = undefined;
+    @memcpy(suffix[0..300], &long);
+    @memcpy(suffix[300..], "/out");
+    try std.testing.expectError(error.NameTooLong, publishResult(tmp.dir, io, &suffix, "BODY"));
+    @memcpy(suffix[300..], "/../");
+    try std.testing.expectError(error.DirectoryPath, publishResult(tmp.dir, io, &suffix, "BODY"));
+    try std.testing.expectError(error.NameTooLong, publishResult(tmp.dir, io, long[0..256], "BODY"));
+    try publishResult(tmp.dir, io, long[0..255], "KEEP");
+    var bytes: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, long[0..255], &bytes));
+    var target: [300]u8 = undefined;
+    const count = try tmp.dir.readLink(io, "long-target", &target);
+    try std.testing.expectEqualSlices(u8, &long, target[0..count]);
 }

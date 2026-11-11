@@ -39,3 +39,9 @@ python3 -m unittest discover -s tools/editor-input-stream -p 'test_*.py'
 ## 머지 전 소유권 검증
 
 Darwin SDK `notify.h`의 `notify_cancel` 계약은 마지막 token 취소 시 연결 FD도 닫는 것이다. 기존 `Notification.close`가 추가 `os.close`를 호출해, 취소 직후 같은 번호로 열린 다른 파일을 닫는 결함을 실제 재사용 회귀 검사로 재현했다. 중복 close를 제거하고 취소 결과를 확인하도록 고쳤다. 실제 알림 전달·반복 취소와 취소 뒤 FD 재사용 보존을 검증했다. 이 수정은 외부 Python 추적기의 정리 경로이며 진단 앱 binary와 product source는 바꾸지 않는다. 실제 편집기 예비 측정·surface 연결은 여전히 미검증이다.
+
+## 추가 CI 성능 판정 수정
+
+Linux `check`에서 기존 `net_block`의 2 MiB URL·32규칙 반복 벽시계 500ms 단언이 실패했다. 실패 job 130473917693의 로그를 보존했다. CPU 경쟁 제어 재현에서 단독 wall/CPU 162/162ms, 한 코어 8중 경쟁 1240/157ms로 같은 계산이 실패했다. 기존 성능 원칙에 따라 예산 500ms는 유지하고 `std.Io.Clock.cpu_thread`로 판정하며 벽시계는 로그로 남긴다. 계산량 4배 변이도 CPU 689ms로 실패했으므로 부하 대기만 빼고 계산 비용 회귀 탐지는 유지한다. 원래 CI 실패의 CPU 시간은 기록되지 않았으므로 동일 원인을 직접 관측했다고 확대하지 않는다.
+
+제어 artifact는 `~/.cache/maru-agent-artifacts/ci-4716-netcpu`의 binary·source·receipt·로그다. 수정 후 CPU 경쟁 조건 wall/CPU 1298/161ms 통과, macOS 정식 CLI 전체 877통과·1건너뜀이었다. production matcher는 바꾸지 않고 시험의 시계·설명만 고쳤다. fixture의 끝 조각 c가 맞지 않아 KMP가 아니라 URL 분해 반복을 재는 사실도 주석과 시험 이름에 반영했다. 새 커밋의 원격 CI 완료는 별도로 확인한다.

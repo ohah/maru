@@ -174,6 +174,15 @@ pub const BrowserMethod = enum {
     /// `needs_network_permission`). block grant 가 없으면 `remove`·`clear`·`list`·`strict off` 는 모달 없이 `-32002`. 곧 답한다(op 줄 없음).
     /// op.arg=정규형 인자 JSON. **op_kind=31 고정**(W9d④ 32, W9e 33–36).
     network_block,
+    /// `browser.networkMock {id, action:"add"|"remove"|"clear"|"list"|"strict", pattern?, types?, methods?, response?, rules?, on?}`(W9d④ —
+    /// Chromium 전용) → `{rules:[…], other_rules, total, max, bytes:{…}, added?, replaced?, removed?, state, strict:{…}, page_site, unrecorded,
+    /// busy, skipped_unknown_page, service_worker:{…}, warnings?}`. 그 탭의 응답을 에이전트가 만든 것으로 바꾸는 규칙(패턴은 막기와 같은 문법 —
+    /// `net_block`, 응답은 `net_mock_rules` 의 허용 목록)과 가짜 엄격 모드. **`browser_network_mock` scope**(사이트에 묶인 grant — 사용자 탭은
+    /// 사이트마다 확인 모달, 에이전트가 연 탭은 묻지 않는다 — D1). 세 겹 위에 선다: 그 탭의 `browser_network` grant 가 지금 문서를 덮어야 하고
+    /// (없으면 모달 없이 `-32002 needs_network_permission`), 그 탭의 `browser` grant 가 있어야 한다(`add`·`strict on` — 없으면 모달 없이 `-32002
+    /// needs_browser_permission`: 가짜 문서·스크립트는 그 사이트로서 코드를 돌린다). mock grant 가 없으면 `remove`·`clear`·`list`·`strict off`
+    /// 는 모달 없이 `-32002`. 곧 답한다(op 줄 없음). op.arg=정규형 인자 JSON(본문은 base64). **op_kind=32 고정**(W9e 33–36).
+    network_mock,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -212,6 +221,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "networkRequest")) return .network_request;
     if (eq(rest, "networkRecord")) return .network_record;
     if (eq(rest, "networkBlock")) return .network_block;
+    if (eq(rest, "networkMock")) return .network_mock;
     return null;
 }
 
@@ -250,6 +260,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .network_request => "networkRequest",
         .network_record => "networkRecord",
         .network_block => "networkBlock",
+        .network_mock => "networkMock",
     };
 }
 
@@ -260,7 +271,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
@@ -269,7 +280,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
         // W9d①: 네트워크 목록·자세히(CEF 자원 요청 처리기 — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock => true,
             else => false,
         },
     };
@@ -558,6 +569,8 @@ pub const NetworkParams = struct {
     clear: bool = false,
     /// W9d③: 막힌 요청만.
     blocked: bool = false,
+    /// W9d④: 가짜 규칙이 답했거나 리다이렉트 홉을 준 요청만.
+    mocked: bool = false,
 
     pub fn typeNames(self: *const NetworkParams) []const []const u8 {
         return self.types[0..self.type_count];
@@ -803,7 +816,7 @@ fn onlyKeys(obj: std.json.ObjectMap, allowed: []const []const u8) ParamError!voi
 /// W9d①: `browser.network` params — 새 메서드라 키를 엄격히 본다.
 pub fn parseNetworkParams(params: ?std.json.Value) ParamError!NetworkParams {
     const obj = try paramsObject(params);
-    try onlyKeys(obj, &.{ "id", "page", "page_size", "types", "method", "status", "url_contains", "before_req", "clear", "blocked" });
+    try onlyKeys(obj, &.{ "id", "page", "page_size", "types", "method", "status", "url_contains", "before_req", "clear", "blocked", "mocked" });
     var p: NetworkParams = .{};
     if (try optU32FromObj(obj, "page")) |v| {
         if (v > max_network_page) return error.InvalidParams;
@@ -859,6 +872,7 @@ pub fn parseNetworkParams(params: ?std.json.Value) ParamError!NetworkParams {
     };
     p.clear = try optBoolFromObj(obj, "clear", false);
     p.blocked = try optBoolFromObj(obj, "blocked", false); // W9d③
+    p.mocked = try optBoolFromObj(obj, "mocked", false); // W9d④
     return p;
 }
 
@@ -899,6 +913,10 @@ pub fn serializeNetworkArg(gpa: std.mem.Allocator, p: NetworkParams) std.mem.All
         s.write(p.clear) catch |e| break :blk e;
         if (p.blocked) {
             s.objectField("blocked") catch |e| break :blk e;
+            s.write(true) catch |e| break :blk e;
+        }
+        if (p.mocked) {
+            s.objectField("mocked") catch |e| break :blk e;
             s.write(true) catch |e| break :blk e;
         }
         s.endObject() catch |e| break :blk e;
@@ -1131,21 +1149,328 @@ fn blockReasonMessage(reason: []const u8) []const u8 {
     return cp.ErrorCode.invalid_params.defaultMessage();
 }
 
-/// W9d③: 앱이 실행 단계에서 거절한 까닭(`{"reason","message","index"?}`) — 이유마다 코드: 권한(`needs_network_permission`·`needs_grant`)은
-/// -32002, 바꾸기 상한(`resource_busy`)은 -32603, 그 밖(`too_many_rules`·`no_site`·`unknown_rule`)은 -32602.
+/// W9d③·④: 앱이 실행 단계에서 거절한 까닭(`{"reason","message","index"?,"resource"?}`) — 이유마다 코드: 권한(`needs_network_permission`·
+/// `needs_browser_permission`·`needs_grant`)은 -32002, 바꾸기·본문 상한(`resource_busy` — 앱 본문 32 MiB 면 `resource:"browser-mock-bytes"`)은
+/// -32603, 그 밖(`too_many_rules`·`no_site`·`unknown_rule`·`tab_bytes_exceeded`)은 -32602.
 fn serializeBlockFailure(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) std.mem.Allocator.Error![]u8 {
-    const parsed = std.json.parseFromSlice(struct { reason: []const u8, message: []const u8, index: ?u32 = null }, gpa, payload, .{}) catch |e| switch (e) {
+    const parsed = std.json.parseFromSlice(struct { reason: []const u8, message: []const u8, index: ?u32 = null, resource: ?[]const u8 = null }, gpa, payload, .{}) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return cp.serializeError(gpa, id, .internal_error, "browser op failed", null),
     };
     defer parsed.deinit();
     const r = parsed.value.reason;
-    const code: cp.ErrorCode = if (eq(r, "needs_network_permission") or eq(r, "needs_grant")) .unauthorized else if (eq(r, "resource_busy")) .internal_error else .invalid_params;
+    const code: cp.ErrorCode = if (eq(r, "needs_network_permission") or eq(r, "needs_browser_permission") or eq(r, "needs_grant")) .unauthorized else if (eq(r, "resource_busy")) .internal_error else .invalid_params;
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = r });
     if (parsed.value.index) |i| try data.put(gpa, "index", .{ .integer = i });
+    if (parsed.value.resource) |res| try data.put(gpa, "resource", .{ .string = res }); // W9d④: 앱 본문 상한(`browser-mock-bytes`)
     return cp.serializeError(gpa, id, code, parsed.value.message, .{ .object = data });
+}
+
+// ── W9d④: browser.networkMock ──────────────────────────────────────────────────────────────────────────────
+
+pub const NetworkMockAction = enum { add, remove, clear, list, strict };
+
+const ws_mock_rules = @import("web_sidecar/net_mock_rules.zig");
+
+/// 인자의 거절 까닭 — `-32602` 의 `data.reason`(와 `data.index` — 몇 번째 종류·메서드, `data.header` — 어느 머리).
+pub const MockParamWhy = struct {
+    reason: []const u8 = "",
+    index: ?usize = null,
+    header: []const u8 = "",
+    buf: [64]u8 = undefined,
+    header_buf: [256]u8 = undefined,
+};
+
+pub const NetworkMockParams = struct {
+    action: NetworkMockAction,
+    /// `add`·`remove` 의 패턴 — 정규형(op.arg 가 들고 간다).
+    pattern: []const u8 = "",
+    types: u32 = 0,
+    methods: u8 = 0,
+    /// `add` 의 응답 — 검사를 지났다(본문은 디코드한 바이트 — 이 값이 쥔다).
+    status: u16 = 200,
+    content_type: []const u8 = ws_mock_rules.default_text_type,
+    headers: std.ArrayList(ws_mock_rules.Header) = .empty,
+    body: []u8 = &.{},
+    rules: [ws_mock_rules.max_rules]u32 = undefined,
+    rule_count: usize = 0,
+    on: ?bool = null,
+
+    pub fn deinit(self: *NetworkMockParams, gpa: std.mem.Allocator) void {
+        self.headers.deinit(gpa);
+        gpa.free(self.body);
+        self.body = &.{};
+    }
+};
+
+/// `browser.networkMock` params — 새 메서드라 키를 엄격히 본다(action 마다 받는 키도). 패턴은 정규형으로, 응답은 `net_mock_rules` 로 검사한다 —
+/// 거절이면 `why` 에 까닭(op 이 아니라 `-32602` + `data.reason`). `norm_buf` 는 정규형 패턴을 담는다(op.arg 를 만들 때까지 살아 있어야 한다).
+pub fn parseNetworkMockParams(gpa: std.mem.Allocator, params: ?std.json.Value, why: *MockParamWhy, norm_buf: *[ws_net_block.max_pattern_bytes]u8) (ParamError || std.mem.Allocator.Error)!NetworkMockParams {
+    const obj = try paramsObject(params);
+    const action_text = strFromObj(obj, "action") catch return error.InvalidParams;
+    const action = std.meta.stringToEnum(NetworkMockAction, action_text) orelse return error.InvalidParams;
+    var p: NetworkMockParams = .{ .action = action };
+    errdefer p.deinit(gpa);
+    switch (action) {
+        .add => try onlyKeys(obj, &.{ "id", "action", "pattern", "types", "methods", "response" }),
+        .remove => try onlyKeys(obj, &.{ "id", "action", "pattern", "rules" }),
+        .clear, .list => try onlyKeys(obj, &.{ "id", "action" }),
+        .strict => try onlyKeys(obj, &.{ "id", "action", "on" }),
+    }
+    if (obj.get("pattern")) |v| switch (v) {
+        .string => |text| switch (ws_net_block.parse(text)) {
+            .ok => |pp| {
+                const n = pp.norm();
+                @memcpy(norm_buf[0..n.len], n);
+                p.pattern = norm_buf[0..n.len];
+            },
+            .err => |w| {
+                why.reason = if (w == .not_ascii) "not_ascii" else std.fmt.bufPrint(&why.buf, "pattern_invalid:{s}", .{w.name()}) catch "pattern_invalid";
+                return error.InvalidParams;
+            },
+        },
+        else => return error.InvalidParams,
+    };
+    if (obj.get("types")) |v| switch (v) {
+        .array => |a| {
+            if (a.items.len == 0 or a.items.len > max_network_types) return error.InvalidParams;
+            for (a.items, 0..) |item, i| {
+                const name = switch (item) {
+                    .string => |t| t,
+                    else => return error.InvalidParams,
+                };
+                p.types |= ws_mock_rules.typeBits(name) orelse {
+                    why.reason = "types_invalid";
+                    why.index = i;
+                    return error.InvalidParams;
+                };
+            }
+        },
+        else => return error.InvalidParams,
+    };
+    if (obj.get("methods")) |v| switch (v) {
+        .array => |a| {
+            if (a.items.len == 0 or a.items.len > ws_mock_rules.method_names.len) return error.InvalidParams;
+            for (a.items, 0..) |item, i| {
+                const name = switch (item) {
+                    .string => |t| t,
+                    else => return error.InvalidParams,
+                };
+                p.methods |= ws_mock_rules.methodBit(name) orelse {
+                    why.reason = "methods_invalid";
+                    why.index = i;
+                    return error.InvalidParams;
+                };
+            }
+        },
+        else => return error.InvalidParams,
+    };
+    if (obj.get("rules")) |v| switch (v) {
+        .array => |a| {
+            if (a.items.len == 0 or a.items.len > ws_mock_rules.max_rules) return error.InvalidParams;
+            for (a.items) |item| switch (item) {
+                .integer => |n| {
+                    if (n < 1 or n > std.math.maxInt(u32)) return error.InvalidParams;
+                    p.rules[p.rule_count] = @intCast(n);
+                    p.rule_count += 1;
+                },
+                else => return error.InvalidParams,
+            };
+        },
+        else => return error.InvalidParams,
+    };
+    switch (action) {
+        .add => {
+            if (p.pattern.len == 0) return error.InvalidParams;
+            try parseMockResponse(gpa, obj.get("response"), &p, why);
+        },
+        .remove => if (p.pattern.len == 0 and p.rule_count == 0) return error.InvalidParams,
+        .strict => p.on = switch (obj.get("on") orelse {
+            why.reason = "strict_needs_on";
+            return error.InvalidParams;
+        }) {
+            .bool => |b| b,
+            else => {
+                why.reason = "strict_needs_on";
+                return error.InvalidParams;
+            },
+        },
+        .clear, .list => {},
+    }
+    return p;
+}
+
+/// `response:{status?, content_type?, headers?:{이름:값}, body? | body_base64?}` — 없으면 빈 200(글). 검사는 sidecar 와 같은 함수
+/// (`net_mock_rules.checkResponse`).
+fn parseMockResponse(gpa: std.mem.Allocator, value: ?std.json.Value, p: *NetworkMockParams, why: *MockParamWhy) (ParamError || std.mem.Allocator.Error)!void {
+    const resp = switch (value orelse std.json.Value{ .object = .empty }) {
+        .object => |o| o,
+        else => return error.InvalidParams,
+    };
+    try onlyKeys(resp, &.{ "status", "content_type", "headers", "body", "body_base64" });
+    if (resp.get("status")) |v| switch (v) {
+        .integer => |n| {
+            if (n < 0 or n > 999) {
+                why.reason = "status_invalid";
+                return error.InvalidParams;
+            }
+            p.status = @intCast(n);
+        },
+        else => return error.InvalidParams,
+    };
+    const text_body = try optStrFromObj(resp, "body");
+    const b64_body = try optStrFromObj(resp, "body_base64");
+    if (text_body != null and b64_body != null) {
+        why.reason = "body_both";
+        return error.InvalidParams;
+    }
+    if (text_body) |t| {
+        if (t.len > ws_mock_rules.max_body_bytes) {
+            why.reason = "body_too_large";
+            return error.InvalidParams;
+        }
+        p.body = try gpa.dupe(u8, t);
+    }
+    if (b64_body) |t| {
+        const n = ws_mock_rules.base64Len(t) orelse {
+            why.reason = "base64_invalid";
+            return error.InvalidParams;
+        };
+        if (n > ws_mock_rules.max_body_bytes) {
+            why.reason = "body_too_large";
+            return error.InvalidParams;
+        }
+        const out = try gpa.alloc(u8, n);
+        if (!ws_mock_rules.base64Decode(out, t)) {
+            gpa.free(out);
+            why.reason = "base64_invalid";
+            return error.InvalidParams;
+        }
+        p.body = out;
+    }
+    p.content_type = (try optStrFromObj(resp, "content_type")) orelse if (b64_body != null) ws_mock_rules.default_binary_type else ws_mock_rules.default_text_type;
+    if (resp.get("headers")) |v| switch (v) {
+        .object => |h| {
+            var it = h.iterator();
+            while (it.next()) |kv| {
+                const val = switch (kv.value_ptr.*) {
+                    .string => |s| s,
+                    else => return error.InvalidParams,
+                };
+                try p.headers.append(gpa, .{ .name = kv.key_ptr.*, .value = val });
+            }
+        },
+        else => return error.InvalidParams,
+    };
+    if (ws_mock_rules.checkResponse(.{ .status = p.status, .content_type = p.content_type, .headers = p.headers.items, .body_len = p.body.len }, p.types)) |f| {
+        why.reason = f.why.name();
+        if (f.header.len != 0) {
+            const n = @min(f.header.len, why.header_buf.len);
+            @memcpy(why.header_buf[0..n], f.header[0..n]);
+            why.header = why.header_buf[0..n];
+        }
+        return error.InvalidParams;
+    }
+}
+
+/// 모달 전에 action 만 엿본다 — 바꾸기를 더하는(모달로 물을 만한) 꼴인가(`add`·`strict on`). 형식이 틀리면 참(모달 뒤의 파싱이 답한다).
+pub fn networkMockWantsGrant(params: ?std.json.Value) bool {
+    const obj = paramsObject(params) catch return true;
+    const action = std.meta.stringToEnum(NetworkMockAction, strFromObj(obj, "action") catch return true) orelse return true;
+    return switch (action) {
+        .add => true,
+        .strict => switch (obj.get("on") orelse return true) {
+            .bool => |b| b,
+            else => true,
+        },
+        else => false,
+    };
+}
+
+/// op.arg — 앱이 다시 푼다(`{action, pattern?, types?, methods?, response?:{status, content_type, headers:[[이름,값]…], body_base64}, rules?, on?}`).
+pub fn serializeNetworkMockArg(gpa: std.mem.Allocator, p: *const NetworkMockParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |e| break :blk e;
+        s.objectField("action") catch |e| break :blk e;
+        s.write(@tagName(p.action)) catch |e| break :blk e;
+        if (p.pattern.len > 0) {
+            s.objectField("pattern") catch |e| break :blk e;
+            s.write(p.pattern) catch |e| break :blk e;
+        }
+        if (p.types != 0) {
+            s.objectField("types") catch |e| break :blk e;
+            s.write(p.types) catch |e| break :blk e;
+        }
+        if (p.methods != 0) {
+            s.objectField("methods") catch |e| break :blk e;
+            s.write(p.methods) catch |e| break :blk e;
+        }
+        if (p.action == .add) {
+            s.objectField("response") catch |e| break :blk e;
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("status") catch |e| break :blk e;
+            s.write(p.status) catch |e| break :blk e;
+            s.objectField("content_type") catch |e| break :blk e;
+            s.write(p.content_type) catch |e| break :blk e;
+            s.objectField("headers") catch |e| break :blk e;
+            s.beginArray() catch |e| break :blk e;
+            for (p.headers.items) |h| s.write([2][]const u8{ h.name, h.value }) catch |e| break :blk e;
+            s.endArray() catch |e| break :blk e;
+            s.objectField("body_base64") catch |e| break :blk e;
+            s.beginWriteRaw() catch |e| break :blk e;
+            aw.writer.writeByte('"') catch |e| break :blk e;
+            std.base64.standard.Encoder.encodeWriter(&aw.writer, p.body) catch |e| break :blk e;
+            aw.writer.writeByte('"') catch |e| break :blk e;
+            s.endWriteRaw();
+            s.endObject() catch |e| break :blk e;
+        }
+        if (p.rule_count > 0) {
+            s.objectField("rules") catch |e| break :blk e;
+            s.write(p.rules[0..p.rule_count]) catch |e| break :blk e;
+        }
+        if (p.on) |v| {
+            s.objectField("on") catch |e| break :blk e;
+            s.write(v) catch |e| break :blk e;
+        }
+        s.endObject() catch |e| break :blk e;
+    }) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+/// `-32602` 에 `data.reason`(와 `data.index`·`data.header`). 까닭이 없는 형식 오류는 균일 invalid_params.
+fn mockParamError(gpa: std.mem.Allocator, id: cp.Id, why: *const MockParamWhy) std.mem.Allocator.Error![]u8 {
+    if (why.reason.len == 0) return errorResponse(gpa, id, .invalid_params);
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "reason", .{ .string = why.reason });
+    if (why.index) |i| try data.put(gpa, "index", .{ .integer = @intCast(i) });
+    if (why.header.len != 0) try data.put(gpa, "header", .{ .string = why.header });
+    return cp.serializeError(gpa, id, .invalid_params, mockReasonMessage(why.reason), .{ .object = data });
+}
+
+fn mockReasonMessage(reason: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, reason, "pattern_invalid")) return "invalid pattern — use scheme://host[:port]/path with * wildcards (http, https or *), no #fragment or user@";
+    if (eq(reason, "not_ascii")) return "patterns are ASCII only — write the host in punycode and the path percent-encoded";
+    if (eq(reason, "types_invalid")) return "unknown resource type (service_worker, shared_worker and preload cannot be chosen — service workers and shared workers never see mocks: other tabs of the site share them)";
+    if (eq(reason, "methods_invalid")) return "methods are GET, HEAD, POST, PUT, PATCH, DELETE or OPTIONS";
+    if (eq(reason, "status_invalid")) return "status must be 200 to 599";
+    if (eq(reason, "location_required")) return "a redirect status needs a Location header";
+    if (eq(reason, "location_invalid")) return "Location must be an http(s) URL or a path starting with / (ASCII, no spaces, at most 2 KiB)";
+    if (eq(reason, "body_not_allowed")) return "204, 205 and 304 responses have no body";
+    if (eq(reason, "header_invalid")) return "invalid header — names are tokens, values printable ASCII; at most 32 headers and 8 KiB";
+    if (eq(reason, "header_forbidden")) return "this header cannot be mocked (cookies, browser state headers, downloads and framing headers are refused; Content-Type goes in content_type)";
+    if (eq(reason, "content_type_invalid")) return "content_type must look like type/subtype; params (ASCII, at most 256 bytes)";
+    if (eq(reason, "content_type_downloads")) return "this content type would download when it answers a document — pick a type pages render, or set types without document, iframe and object";
+    if (eq(reason, "body_both")) return "give body or body_base64, not both";
+    if (eq(reason, "base64_invalid")) return "body_base64 is not standard padded base64";
+    if (eq(reason, "body_too_large")) return "a mock body is at most 512 KiB";
+    if (eq(reason, "strict_needs_on")) return "strict needs on:true or on:false";
+    return cp.ErrorCode.invalid_params.defaultMessage();
 }
 
 pub fn parseDialogParams(params: ?std.json.Value) ParamError!void {
@@ -1728,7 +2053,7 @@ pub fn serializeNavigateResult(gpa: std.mem.Allocator, id: cp.Id) std.mem.Alloca
 }
 
 fn writeNavigateResult(s: *std.json.Stringify, id: cp.Id) !void {
-    try writeNavigateLoadedResult(s, id, null, null);
+    try writeNavigateLoadedResult(s, id, null, null, null);
 }
 
 /// `browser.navigate` 성공 — Chromium 탭은 첫 불러오기를 기다려 `loaded` 를 싣는다(W9a — 엔진이 결과 `"true"`/`"false"` 로 준다).
@@ -1739,9 +2064,11 @@ pub fn serializeNavigateLoadedResult(gpa: std.mem.Allocator, id: cp.Id, result: 
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     var loaded: ?bool = if (std.mem.eql(u8, result, "true")) true else if (std.mem.eql(u8, result, "false")) false else null;
     // W9d③: 막기 규칙이 그 이동을 막았다 — 엔진이 `{"loaded":false,"blocked":true,"block_rule":N}` 를 준다(그 칸만 싣는다).
+    // W9d④: 주 프레임 문서가 가짜였다 — `{"loaded":…,"mocked":true,"mock_rule":N}`.
     var block_rule: ?u32 = null;
+    var mock_rule: ?u32 = null;
     if (result.len > 0 and result[0] == '{') {
-        const parsed = std.json.parseFromSlice(struct { loaded: bool = false, blocked: bool = false, block_rule: u32 = 0 }, gpa, result, .{}) catch |e| switch (e) {
+        const parsed = std.json.parseFromSlice(struct { loaded: bool = false, blocked: bool = false, block_rule: u32 = 0, mocked: bool = false, mock_rule: u32 = 0 }, gpa, result, .{}) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => null,
         };
@@ -1749,13 +2076,14 @@ pub fn serializeNavigateLoadedResult(gpa: std.mem.Allocator, id: cp.Id, result: 
             defer p.deinit();
             loaded = p.value.loaded;
             if (p.value.blocked and p.value.block_rule != 0) block_rule = p.value.block_rule;
+            if (p.value.mocked and p.value.mock_rule != 0) mock_rule = p.value.mock_rule;
         }
     }
-    (writeNavigateLoadedResult(&s, id, loaded, block_rule)) catch return error.OutOfMemory;
+    (writeNavigateLoadedResult(&s, id, loaded, block_rule, mock_rule)) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool, block_rule: ?u32) !void {
+fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool, block_rule: ?u32, mock_rule: ?u32) !void {
     try beginResult(s, id);
     try s.objectField("ok");
     try s.write(true);
@@ -1767,6 +2095,12 @@ fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool, b
         try s.objectField("blocked");
         try s.write(true);
         try s.objectField("block_rule");
+        try s.write(r);
+    }
+    if (mock_rule) |r| {
+        try s.objectField("mocked");
+        try s.write(true);
+        try s.objectField("mock_rule");
         try s.write(r);
     }
     try endResult(s);
@@ -2404,6 +2738,16 @@ fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.Collec
                     try s.write(b.strict);
                     try s.endObject();
                 }
+                // W9d④: 가짜 규칙·엄격이 있을 때만(탭 제목의 ▣ 와 같은 신호).
+                if (w.mocking) |m| {
+                    try s.objectField("mocking");
+                    try s.beginObject();
+                    try s.objectField("rules");
+                    try s.write(m.rules);
+                    try s.objectField("strict");
+                    try s.write(m.strict);
+                    try s.endObject();
+                }
                 try s.objectField("methods");
                 try s.beginArray();
                 inline for (@import("type_info_fields").fields(BrowserMethod)) |f| {
@@ -2488,8 +2832,8 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else if (bmethod == .network_record and result.len > 0 and result[0] == '{')
                 // W9d② 적대 리뷰 3 회차 D6: 실행 단계에서 지켜보기가 없다(네트워크 grant 만 철회됐다) — 모달 전 검사와 같은 -32002·`needs_network_permission`.
                 serializeReasonError(gpa, req.id, .unauthorized, result)
-            else if (bmethod == .network_block and result.len > 0 and result[0] == '{')
-                serializeBlockFailure(gpa, req.id, result) // W9d③: 까닭마다 코드
+            else if ((bmethod == .network_block or bmethod == .network_mock) and result.len > 0 and result[0] == '{')
+                serializeBlockFailure(gpa, req.id, result) // W9d③·④: 까닭마다 코드
             else
                 cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
         };
@@ -2542,7 +2886,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid dialog payload", null),
         },
         // W9d①: 앱이 준 결과 객체(링이 만든 JSON)를 그대로 싣는다 — 객체가 아니면 내부 오류.
-        .network, .network_request, .network_record, .network_block => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
+        .network, .network_request, .network_record, .network_block, .network_mock => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid network payload", null),
         },
@@ -3155,6 +3499,25 @@ pub fn browserOpFromRequest(
             } else if (!net_ok and networkBlockWantsGrant(req.params)) return .{ .err = try needsNetworkPermissionFor(gpa, req.id, .block) };
         }
     }
+    // W9d④: 가짜는 세 겹 위에 선다 — 네트워크 grant 가 지금 문서를 덮어야 하고(막기와 같다), 바꾸기를 더하는 꼴(`add`·`strict on`)은 그 탭의
+    // `browser` grant 도 있어야 한다(가짜 문서·스크립트는 그 사이트로서 코드를 돌린다 — `executeScript` 보다 큰 힘이 되지 않게, 계획 §13 P1-4).
+    // 둘 다 모달 없이 `-32002` + 까닭. mock grant 가 없는 caller 의 `remove`·`clear`·`list`·`strict off` 는 모달 없이 거절한다.
+    if (bmethod == .network_mock) {
+        if (pane_selector) |pane| {
+            const host = targetHost(snapshot, target_id);
+            const net_ok = grants.authorizes(pane, target_id, .browser_network, host);
+            const adds = networkMockWantsGrant(req.params);
+            const browser_ok = grants.authorizes(pane, target_id, .browser, host);
+            if (!authorized) {
+                if (!net_ok) return .{ .err = try needsNetworkPermissionFor(gpa, req.id, .mock) };
+                if (!adds) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+                if (!browser_ok) return .{ .err = try needsBrowserPermission(gpa, req.id) };
+            } else if (adds) {
+                if (!net_ok) return .{ .err = try needsNetworkPermissionFor(gpa, req.id, .mock) };
+                if (!browser_ok) return .{ .err = try needsBrowserPermission(gpa, req.id) };
+            }
+        }
+    }
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
 
     // ── 7. execute_script params 사전 검증(id 길이·args wire). 이제 authorized만 도달하므로 invalid_params가 oracle 아님. ──
@@ -3227,6 +3590,17 @@ pub fn browserOpFromRequest(
             const p = parseNetworkBlockParams(req.params, &why, &norm_buf) catch return .{ .err = try blockParamError(gpa, req.id, &why) };
             break :blk try serializeNetworkBlockArg(gpa, &p);
         },
+        // W9d④: 가짜 — 패턴은 정규형, 응답은 허용 목록·상태·content_type·본문 검사(거절은 `-32602` + `data.reason`·`data.index`·`data.header`).
+        .network_mock => blk: {
+            var why: MockParamWhy = .{};
+            var norm_buf: [ws_net_block.max_pattern_bytes]u8 = undefined;
+            var p = parseNetworkMockParams(gpa, req.params, &why, &norm_buf) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return .{ .err = try mockParamError(gpa, req.id, &why) },
+            };
+            defer p.deinit(gpa);
+            break :blk try serializeNetworkMockArg(gpa, &p);
+        },
         .subscribe => unreachable, // 위에서 이미 분기
         .open => unreachable, // 위(id 파싱 앞)에서 이미 분기
     };
@@ -3283,16 +3657,26 @@ fn needsNetworkPermission(gpa: std.mem.Allocator, id: cp.Id) std.mem.Allocator.E
     return needsNetworkPermissionFor(gpa, id, .record);
 }
 
-/// W9d②·③: 네트워크 권한이 먼저 — 무엇을 하려 했는지 메시지에(본문 기록·요청 막기).
-fn needsNetworkPermissionFor(gpa: std.mem.Allocator, id: cp.Id, what: enum { record, block }) std.mem.Allocator.Error![]u8 {
+/// W9d②·③·④: 네트워크 권한이 먼저 — 무엇을 하려 했는지 메시지에(본문 기록·요청 막기·가짜 응답).
+fn needsNetworkPermissionFor(gpa: std.mem.Allocator, id: cp.Id, what: enum { record, block, mock }) std.mem.Allocator.Error![]u8 {
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = "needs_network_permission" });
     const message = switch (what) {
         .record => "recording response bodies needs this tab's network permission first — run maru browser network on this tab",
         .block => "blocking requests needs this tab's network permission first — run maru browser network on this tab",
+        .mock => "mocking responses needs this tab's network permission first — run maru browser network on this tab",
     };
     return cp.serializeError(gpa, id, .unauthorized, message, .{ .object = data });
+}
+
+/// W9d④: 가짜 응답 전에 그 탭의 제어 권한(`browser` grant — 그 탭에서 스크립트를 돌리는 권한)이 없다 — `-32002` 에
+/// `data.reason:"needs_browser_permission"`(확인 모달 없이). 가짜 문서·스크립트는 그 사이트로서 코드를 돌린다(계획 §13 P1-4).
+fn needsBrowserPermission(gpa: std.mem.Allocator, id: cp.Id) std.mem.Allocator.Error![]u8 {
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "reason", .{ .string = "needs_browser_permission" });
+    return cp.serializeError(gpa, id, .unauthorized, "mocking responses runs code as this site — it needs this tab's control permission first (any browser command on this tab asks for it, e.g. maru browser get-url)", .{ .object = data });
 }
 
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a `serializeError` 재사용). 편의 wrapper(1d와 동일).
@@ -4420,7 +4804,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
     // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 14), webkit.get("methods").?.array.items.len);
+    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 15), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
@@ -4428,7 +4812,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
     // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console. W9c③: upload.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock" };
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock", "networkMock" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -6651,4 +7035,191 @@ test "W9d③ v20b R14d: 인자 경계·나쁜 입력 — 규칙 번호 u32 끝·
         },
         else => return error.Unexpected,
     }
+}
+
+// ── W9d④: browser.networkMock ──
+// 시험이 증명하는 것: 메서드 번호(op_kind 32)·이름·엔진(Chromium 만), 모달 전 검사의 차례(WebKit -32008 → 네트워크 grant 없음 -32002
+// needs_network_permission → browser grant 없는 add·strict on 은 -32002 needs_browser_permission → mock grant 없는 remove·clear·list·strict off 는
+// 모달 없이 -32002 → add·strict on 은 needs_grant), 인자의 엄격한 키와 까닭(패턴·종류·메서드·상태·Location·본문·머리·content_type — `data.index`·
+// `data.header`), op.arg 의 정규형(본문은 base64), 앱의 거절 까닭(needs_browser_permission·tab_bytes_exceeded·resource_busy 의 resource),
+// navigate 결과의 mocked.
+
+fn mockReq(comptime params: []const u8) []const u8 {
+    return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkMock\",\"params\":{\"id\":12," ++ params ++ "}}";
+}
+
+fn expectMockErr(bytes: []const u8, grants: *const cpg.PaneGrantStore, code: cp.ErrorCode, reason: ?[]const u8, extra: ?struct { index: ?i64 = null, header: ?[]const u8 = null }) !void {
+    switch (try dispatchEngine(bytes, grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(code)), try errCode(e));
+            if (reason) |r| {
+                const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, e, .{});
+                defer parsed.deinit();
+                const data = parsed.value.object.get("error").?.object.get("data").?.object;
+                try testing.expectEqualStrings(r, data.get("reason").?.string);
+                if (extra) |x| {
+                    if (x.index) |i| try testing.expectEqual(i, data.get("index").?.integer);
+                    if (x.header) |h| try testing.expectEqualStrings(h, data.get("header").?.string);
+                }
+            }
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedErr;
+        },
+        else => return error.ExpectedErr,
+    }
+}
+
+test "W9d④: networkMock 은 32 — Chromium 만, 모달 전 검사의 차례(-32008 → needs_network_permission → needs_browser_permission → mock grant 없는 remove·clear·list·strict off 는 -32002 → add·strict on 은 모달)" {
+    try testing.expectEqual(@as(u8, 32), @as(u8, @backingInt(BrowserMethod.network_mock)));
+    try testing.expectEqual(BrowserMethod.network_mock, parseBrowserMethod("networkMock").?);
+    try testing.expectEqualStrings("networkMock", browserMethodWireName(.network_mock));
+    try testing.expect(!engineSupports(.webkit, .network_mock) and engineSupports(.chromium, .network_mock));
+    const add = mockReq("\"action\":\"add\",\"pattern\":\"https://example/api/*\",\"types\":[\"xhr\"],\"response\":{\"body\":\"{}\",\"content_type\":\"application/json\"}");
+    const list = mockReq("\"action\":\"list\"");
+    const strict_on = mockReq("\"action\":\"strict\",\"on\":true");
+    const strict_off = mockReq("\"action\":\"strict\",\"on\":false");
+    var grants: cpg.PaneGrantStore = .{};
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkMock\",\"params\":{\"id\":11,\"action\":\"list\"}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        else => return error.ExpectedErr,
+    }
+    for ([_][]const u8{ add, list, strict_on }) |req| try expectMockErr(req, &grants, .unauthorized, "needs_network_permission", null);
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    // browser grant 가 없다 — 바꾸기를 더하는 꼴은 모달 없이 needs_browser_permission(가짜는 그 사이트로서 코드를 돌린다).
+    try expectMockErr(add, &grants, .unauthorized, "needs_browser_permission", null);
+    try expectMockErr(strict_on, &grants, .unauthorized, "needs_browser_permission", null);
+    try expectMockErr(list, &grants, .unauthorized, null, null);
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    try expectEngineNeedsGrant(add, &grants, .browser_network_mock);
+    try expectEngineNeedsGrant(strict_on, &grants, .browser_network_mock);
+    try expectMockErr(list, &grants, .unauthorized, null, null);
+    try expectMockErr(strict_off, &grants, .unauthorized, null, null);
+    try expectMockErr(mockReq("\"action\":\"clear\""), &grants, .unauthorized, null, null);
+    try expectMockErr(mockReq("\"action\":\"remove\",\"rules\":[1]"), &grants, .unauthorized, null, null);
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_mock, .host = cpg.GrantHost.init("example") });
+    switch (try dispatchEngine(mockReq("\"action\":\"add\",\"pattern\":\"HTTPS://Example/api/*\",\"types\":[\"xhr\"],\"methods\":[\"get\",\"POST\"],\"response\":{\"status\":201,\"content_type\":\"application/json\",\"headers\":{\"X-Mock\":\"1\"},\"body\":\"hi\"}"), &grants)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.network_mock, op.method);
+            try testing.expectEqual(capmod.ScopeClass.browser_network_mock, op.pane_grant.?.scope);
+            try testing.expectEqualStrings("{\"action\":\"add\",\"pattern\":\"https://example/api/*\",\"types\":8192,\"methods\":5,\"response\":{\"status\":201,\"content_type\":\"application/json\",\"headers\":[[\"X-Mock\",\"1\"]],\"body_base64\":\"aGk=\"}}", op.arg);
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+    // browser grant 를 잃으면(메뉴 철회) mock grant 가 있어도 바꾸기는 needs_browser_permission, 보기는 그대로 된다.
+    grants.revoke(10, 12, .browser);
+    try expectMockErr(add, &grants, .unauthorized, "needs_browser_permission", null);
+    switch (try dispatchEngine(list, &grants)) {
+        .op => |op| testing.allocator.free(op.arg),
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+}
+
+test "W9d④: networkMock 인자 — action 마다 키, 패턴·종류·메서드·상태·Location·본문·머리·content_type 의 까닭과 index·header" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_mock, .host = cpg.GrantHost.init("example") });
+    const Case = struct { req: []const u8, reason: []const u8, index: ?i64 = null, header: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"ws://a.test/\""), .reason = "pattern_invalid:scheme" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://한.test/\""), .reason = "not_ascii" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"types\":[\"xhr\",\"service_worker\"]"), .reason = "types_invalid", .index = 1 },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"types\":[\"preload\"]"), .reason = "types_invalid", .index = 0 },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"types\":[\"script\",\"image\",\"shared_worker\"]"), .reason = "types_invalid", .index = 2 }, // 결정 A 2026-11-11
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"methods\":[\"GET\",\"PROPFIND\"]"), .reason = "methods_invalid", .index = 1 },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":101}"), .reason = "status_invalid" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":302}"), .reason = "location_required" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":302,\"headers\":{\"Location\":\"//evil.test/\"}}"), .reason = "location_invalid", .header = "Location" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":204,\"body\":\"x\"}"), .reason = "body_not_allowed" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"headers\":{\"Set-Cookie\":\"a=1\"}}"), .reason = "header_forbidden", .header = "Set-Cookie" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"headers\":{\"Accept-CH\":\"Sec-CH-UA\"}}"), .reason = "header_forbidden", .header = "Accept-CH" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"headers\":{\"X-A\":\"caf\\u00e9\"}}"), .reason = "header_invalid", .header = "X-A" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"content_type\":\"nope\"}"), .reason = "content_type_invalid" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"body_base64\":\"AAA=\"}"), .reason = "content_type_downloads" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"body\":\"a\",\"body_base64\":\"YQ==\"}"), .reason = "body_both" },
+        .{ .req = mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"types\":[\"xhr\"],\"response\":{\"body_base64\":\"Y Q==\"}"), .reason = "base64_invalid" },
+        .{ .req = mockReq("\"action\":\"strict\""), .reason = "strict_needs_on" },
+    }) |c| try expectMockErr(c.req, &grants, .invalid_params, c.reason, .{ .index = c.index, .header = c.header });
+    // 종류로 문서를 빼면 바이트 본문도 된다.
+    switch (try dispatchEngine(mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"types\":[\"xhr\"],\"response\":{\"body_base64\":\"AAA=\"}"), &grants)) {
+        .op => |op| testing.allocator.free(op.arg),
+        else => return error.ExpectedOp,
+    }
+    // 513 KiB 본문 — body_too_large.
+    const big = try testing.allocator.alloc(u8, 513 * 1024);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+    const req = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkMock\",\"params\":{{\"id\":12,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{{\"body\":\"{s}\"}}}}}}", .{big});
+    defer testing.allocator.free(req);
+    try expectMockErr(req, &grants, .invalid_params, "body_too_large", null);
+    for ([_][]const u8{
+        mockReq("\"action\":\"nope\""),
+        mockReq("\"action\":\"add\""),
+        mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"rules\":[1]"),
+        mockReq("\"action\":\"list\",\"pattern\":\"https://a.test/\""),
+        mockReq("\"action\":\"remove\""),
+        mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"x\":1}"),
+        mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"headers\":{\"X-A\":1}}"),
+    }) |bad| try expectMockErr(bad, &grants, .invalid_params, null, null);
+}
+
+test "W9d④: 앱의 거절 까닭 — needs_browser_permission 은 -32002, 앱 본문 상한은 -32603 resource, tab_bytes_exceeded 는 -32602, navigate 결과의 mocked" {
+    const req = mockReq("\"action\":\"list\"");
+    const Case = struct { payload: []const u8, code: cp.ErrorCode, reason: []const u8 };
+    for ([_]Case{
+        .{ .payload = "{\"reason\":\"needs_browser_permission\",\"message\":\"m\"}", .code = .unauthorized, .reason = "needs_browser_permission" },
+        .{ .payload = "{\"reason\":\"resource_busy\",\"message\":\"m\",\"resource\":\"browser-mock-bytes\"}", .code = .internal_error, .reason = "browser-mock-bytes" },
+        .{ .payload = "{\"reason\":\"tab_bytes_exceeded\",\"message\":\"m\"}", .code = .invalid_params, .reason = "tab_bytes_exceeded" },
+    }) |c| {
+        const out = try serializeBrowserResponseStatus(testing.allocator, req, .failed, c.payload);
+        defer testing.allocator.free(out);
+        try testing.expectEqual(@as(i64, @backingInt(c.code)), try errCode(out));
+        try testing.expect(std.mem.indexOf(u8, out, c.reason) != null);
+    }
+    const nav = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.navigate\",\"params\":{\"id\":12,\"url\":\"https://a.test/\"}}";
+    const mocked = try serializeBrowserResponseStatus(testing.allocator, nav, .success, "{\"loaded\":true,\"mocked\":true,\"mock_rule\":4}");
+    defer testing.allocator.free(mocked);
+    try testing.expect(std.mem.indexOf(u8, mocked, "\"loaded\":true,\"mocked\":true,\"mock_rule\":4") != null);
+}
+
+// W9d④ 스모크에서 찾은 빈 곳: `network --mocked` 의 `mocked` 키가 거르기 params 에 없어 -32602 였다. 받고(참·거짓만), 앱으로 넘기는 인자에 싣는다.
+test "W9d④: network 거르기 params 의 mocked — 받아서 앱 인자에 싣고, 참·거짓이 아니면 거절, 없으면 싣지 않는다" {
+    const v = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"mocked\":true}", .{});
+    defer v.deinit();
+    const p = try parseNetworkParams(v.value);
+    try testing.expect(p.mocked and !p.blocked);
+    const arg = try serializeNetworkArg(testing.allocator, p);
+    defer testing.allocator.free(arg);
+    try testing.expect(std.mem.indexOf(u8, arg, "\"mocked\":true") != null);
+    const bad = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"mocked\":1}", .{});
+    defer bad.deinit();
+    try testing.expectError(error.InvalidParams, parseNetworkParams(bad.value));
+    const none = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1}", .{});
+    defer none.deinit();
+    const plain = try serializeNetworkArg(testing.allocator, try parseNetworkParams(none.value));
+    defer testing.allocator.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "mocked") == null);
+}
+
+test "W9d④ 변이: networkMock 인자 — 빈 methods 배열은 거절(0 은 「모든 메서드」 라 빈 목록이 그 뜻이 되면 안 된다)" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_mock, .host = cpg.GrantHost.init("example") });
+    try expectMockErr(mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"methods\":[]"), &grants, .invalid_params, null, null);
 }

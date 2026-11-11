@@ -213,6 +213,15 @@ pub const Entry = struct {
     blocked: bool = false,
     sw_not_applied: bool = false,
     block_rule: u32 = 0,
+    /// W9d④: 마지막 응답을 가짜 규칙이 줬다(`mocked`) / 가짜 규칙이 리다이렉트 홉을 줬다(`mock_redirected` — 마지막 응답은 진짜일 수 있다).
+    /// 둘 중 하나면 `mock_rule` 이 그 규칙(sidecar 의 `net_end` — 막기 표시와 함께 오지 않는다). `mock_first` — 시작 때 이미 가짜로 골랐다
+    /// (`flags2.mocked` — 본문을 CDP 로 받지 않는다). `mock_body_id` — 끝날 때 그 규칙의 본문 번호(본문은 maru 의 원본에서 — 규칙을 바꾸면
+    /// 번호가 달라 그때의 본문이 아니다).
+    mocked: bool = false,
+    mock_redirected: bool = false,
+    mock_rule: u32 = 0,
+    mock_first: bool = false,
+    mock_body_id: u32 = 0,
     summary_bytes: usize = 0,
     detail_bytes: usize = 0,
     /// W9d②: 본문 — sidecar 가 `body_expected` 로 알린 요청만(끝은 꼭 하나 온다).
@@ -404,9 +413,17 @@ pub const View = struct {
     cookie_host: []const u8 = "",
     /// W9d③: 이 읽는 쪽(pane)이 이 탭에 둔 막기 규칙의 패턴 — 막힌 기록에 `block_pattern` 으로 싣는다(다른 pane 의 규칙은 번호만).
     block_patterns: []const BlockPattern = &.{},
+    /// W9d④: 이 읽는 쪽(pane)이 이 탭에 둔 가짜 규칙 — 가짜였던 기록에 `mock_pattern`, 본문(`body_state:"mocked"`)은 그 규칙의 지금 본문에서
+    /// (번호가 같을 때만). 다른 pane 의 규칙은 번호만.
+    mock_rules: []const MockRule = &.{},
 
     fn blockPattern(self: View, rule: u32) ?[]const u8 {
         for (self.block_patterns) |b| if (b.id == rule) return b.pattern;
+        return null;
+    }
+
+    fn mockRule(self: View, rule: u32) ?MockRule {
+        for (self.mock_rules) |m| if (m.id == rule) return m;
         return null;
     }
 
@@ -435,6 +452,9 @@ pub const View = struct {
 /// W9d③: 막기 규칙 하나의 번호와 정규형 패턴(`View.block_patterns`).
 pub const BlockPattern = struct { id: u32, pattern: []const u8 };
 
+/// W9d④: 가짜 규칙 하나의 번호·정규형 패턴·지금 본문과 그 번호(`View.mock_rules`).
+pub const MockRule = struct { id: u32, pattern: []const u8, body: []const u8 = "", body_id: u32 = 0 };
+
 /// 목록 거르기(`browser.network`). 비어 있으면 거르지 않는다. 투영된 값으로만 본다.
 pub const Query = struct {
     page: usize = 0,
@@ -451,6 +471,8 @@ pub const Query = struct {
     clear: bool = false,
     /// W9d③: 막기 규칙이 막은 요청만.
     blocked: bool = false,
+    /// W9d④: 가짜 규칙이 응답(또는 리다이렉트 홉)을 준 요청만.
+    mocked: bool = false,
 };
 
 /// 요청이 들어올 때 app 이 아는 것(`Ring.begin`).
@@ -607,7 +629,7 @@ pub const Ring = struct {
             return;
         }
         try self.flushUnrecorded(gpa, budget);
-        var e: Entry = .{ .seq = self.next_seq, .request = v.request, .flags = v.flags, .resource_type = v.resource_type, .start_ms = v.time_ms, .summary_bytes = summary, .detail_bytes = detail_len, .body_expected = v.flags2.body_expected, .body_state = if (v.flags2.body_expected) .pending else .none };
+        var e: Entry = .{ .seq = self.next_seq, .request = v.request, .flags = v.flags, .resource_type = v.resource_type, .start_ms = v.time_ms, .summary_bytes = summary, .detail_bytes = detail_len, .body_expected = v.flags2.body_expected, .body_state = if (v.flags2.body_expected) .pending else .none, .mock_first = v.flags2.mocked };
         errdefer e.deinit(gpa);
         e.method = try gpa.dupe(u8, v.method);
         e.url = try gpa.dupe(u8, v.url);
@@ -708,9 +730,25 @@ pub const Ring = struct {
         e.end_ms = v.time_ms;
         e.blocked = v.flags.blocked; // W9d③
         e.sw_not_applied = v.flags.sw_not_applied;
-        e.block_rule = v.rule_id;
+        e.block_rule = if (v.flags.blocked or v.flags.sw_not_applied) v.rule_id else 0;
+        e.mocked = v.flags.mocked; // W9d④
+        e.mock_redirected = v.flags.mock_redirected;
+        e.mock_rule = if (v.flags.mocked or v.flags.mock_redirected) v.rule_id else 0;
         _ = self.live.remove(v.request);
         self.noteEnded(v.request, e.seq);
+    }
+
+    /// W9d④: 진행 중인 그 요청이 주 프레임 문서(이동)인가 — navigate 결과의 `mocked`·사용자 알림(그 문서가 가짜였다).
+    pub fn isMainDocument(self: *Ring, request: u64) bool {
+        const e = self.liveEntry(request) orelse return false;
+        return e.flags.main_frame and e.resource_type == 0;
+    }
+
+    /// W9d④: 끝나기 전에 그 요청을 준 가짜의 본문 번호를 적는다(sidecar 가 실제로 준 번호 — `net_end.mock_body_id`; 본문은 maru 의 원본에서, 그
+    /// 규칙의 지금 번호와 같을 때만 보인다).
+    pub fn stampMockBody(self: *Ring, request: u64, body_id: u32) void {
+        const e = self.liveEntry(request) orelse return;
+        e.mock_body_id = body_id;
     }
 
     /// 끝난 요청을 최근 끝에 적는다(가장 오래된 자리를 덮는다). 한 번호의 자리는 많아야 하나다 — 끝은 진행 중 기록에만 오고, 그 기록을 연
@@ -1151,6 +1189,7 @@ fn bodyResponseVisible(view: View, e: *const Entry) bool {
 const Matcher = struct {
     fn matches(e: *const Entry, view: View, q: Query, url_buf: []u8) bool {
         if (q.blocked and !e.blocked) return false; // W9d③
+        if (q.mocked and !(e.mocked or e.mock_redirected)) return false; // W9d④
         if (q.types.len > 0) {
             const name = policy.resourceTypeName(e.resource_type);
             var any = false;
@@ -1311,6 +1350,32 @@ fn writeCommon(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []u
             try s.write(pattern);
         }
     }
+    // W9d④: 가짜 — 응답을 줬다·리다이렉트 홉을 줬다, 그 규칙 번호(패턴은 그 규칙을 둔 pane 에게만). 상태·크기는 가짜의 것이다.
+    if (e.mocked or e.mock_redirected) {
+        if (e.mocked) {
+            try s.objectField("mocked");
+            try s.write(true);
+        }
+        if (e.mock_redirected) {
+            try s.objectField("mock_redirected");
+            try s.write(true);
+        }
+        try s.objectField("mock_rule");
+        try s.write(e.mock_rule);
+        if (view.mockRule(e.mock_rule)) |m| {
+            try s.objectField("mock_pattern");
+            try s.write(m.pattern);
+        }
+    }
+}
+
+/// W9d④: 가짜 응답의 본문 — maru 의 원본(그 규칙을 둔 pane 에게만, 끝날 때의 본문 번호가 지금도 같을 때만). HEAD 는 빈 본문.
+fn mockBody(e: *const Entry, view: View) ?[]const u8 {
+    if (!e.mocked) return null;
+    const m = view.mockRule(e.mock_rule) orelse return null;
+    if (m.body_id != e.mock_body_id) return null;
+    if (std.mem.eql(u8, e.method, "HEAD")) return "";
+    return m.body;
 }
 
 fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []u8, body: BodyView) !void {
@@ -1343,8 +1408,15 @@ fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []
         try s.objectField("redirects");
         try s.write(shown_hops);
     }
-    // W9d②: 본문 — 기록한 요청만(상태와 보이면 크기).
-    if (e.body_expected) {
+    // W9d④: 가짜의 본문 — 에이전트가 준 바이트라 W9d② 의 본문 grant·UB1 게이트를 걸지 않는다(크기는 그 규칙을 둔 pane 에게만).
+    if (e.mocked) {
+        try s.objectField("body_state");
+        try s.write("mocked");
+        if (mockBody(e, view)) |b| {
+            try s.objectField("body_size");
+            try s.write(b.len);
+        }
+    } else if (e.body_expected) {
         const state = bodyStateName(e, view, body);
         try s.objectField("body_state");
         try s.write(state);
@@ -1510,6 +1582,7 @@ fn writeDetail(w: *std.Io.Writer, e: *const Entry, view: View, body: BodyView) !
 /// W9d②: 자세히의 본문 칸 — 상태(보이지 않으면 그 까닭), 보이고 다 받았으면 크기·글/바이너리·표시, 바이트를 청했으면 한 조각(64 KiB 까지 —
 /// 글은 글자 경계에서 자르고, 바이너리는 base64). 크기 넘침이면 풀어 낸 크기.
 fn writeBody(s: *std.json.Stringify, e: *const Entry, view: View, body: BodyView) !void {
+    if (e.mocked) return writeMockBody(s, e, view, body);
     const state = bodyStateName(e, view, body);
     try s.objectField("body_state");
     try s.write(state);
@@ -1559,6 +1632,51 @@ fn writeBody(s: *std.json.Stringify, e: *const Entry, view: View, body: BodyView
     }
     try s.objectField("body");
     if (e.body_flags.binary) {
+        var b64: [std.base64.standard.Encoder.calcSize(max_body_read_bytes)]u8 = undefined;
+        try s.write(std.base64.standard.Encoder.encode(&b64, bytes[start..end]));
+    } else try s.write(bytes[start..end]);
+}
+
+/// W9d④: 가짜의 본문 칸 — `body_state:"mocked"`, 그 규칙을 둔 pane 에게만 크기와(청했으면) 한 조각(글이면 UTF-8, 아니면 base64). 규칙을 지웠거나
+/// 바꿨으면 `body_unavailable:"rule_changed"`(그때의 본문을 maru 가 더 쥐지 않는다).
+fn writeMockBody(s: *std.json.Stringify, e: *const Entry, view: View, body: BodyView) !void {
+    try s.objectField("body_state");
+    try s.write("mocked");
+    const bytes = mockBody(e, view) orelse {
+        // 제 규칙인데 본문 번호가 다르다 — 그 사이 응답을 바꿨다(다른 pane 의 규칙이면 아무것도 싣지 않는다).
+        if (view.mockRule(e.mock_rule) != null) {
+            try s.objectField("body_unavailable");
+            try s.write("rule_changed");
+        }
+        return;
+    };
+    const binary = !std.unicode.utf8ValidateSlice(bytes);
+    try s.objectField("body_size");
+    try s.write(bytes.len);
+    try s.objectField("body_encoding");
+    try s.write(if (binary) "base64" else "utf-8");
+    if (!body.q.want) return;
+    const max: usize = @min(@max(body.q.max_bytes, 1), max_body_read_bytes);
+    var start: usize = @min(body.q.offset, bytes.len);
+    var end: usize = @min(start + max, bytes.len);
+    if (!binary) {
+        start = charStart(bytes, start);
+        end = charStart(bytes, @min(start + max, bytes.len));
+        if (end == start and start < bytes.len) {
+            end = start + 1;
+            while (end < bytes.len and (bytes[end] & 0xC0) == 0x80) end += 1;
+        }
+    }
+    try s.objectField("body_offset");
+    try s.write(start);
+    try s.objectField("body_returned");
+    try s.write(end - start);
+    if (end < bytes.len) {
+        try s.objectField("body_next_offset");
+        try s.write(end);
+    }
+    try s.objectField("body");
+    if (binary) {
         var b64: [std.base64.standard.Encoder.calcSize(max_body_read_bytes)]u8 = undefined;
         try s.write(std.base64.standard.Encoder.encode(&b64, bytes[start..end]));
     } else try s.write(bytes[start..end]);
@@ -3702,4 +3820,78 @@ test "W9d③: 막힌 요청 — 목록·자세히에 blocked·block_rule(패턴�
     defer d.deinit();
     try testing.expect(d.value.object.get("blocked").?.bool);
     try testing.expectEqual(@as(i64, -20), d.value.object.get("error_code").?.integer);
+}
+
+fn detailJsonBody(t: *T, who: Authorizer, view: View, req: u64, want: bool) !std.json.Parsed(std.json.Value) {
+    const d = try t.ring.detail(testing.allocator, who, view, req, .{ .want = want });
+    defer testing.allocator.free(d);
+    return std.json.parseFromSlice(std.json.Value, testing.allocator, d, .{});
+}
+
+// ── W9d④: 가짜였던 요청 ──
+// 시험이 증명하는 것: sidecar 의 끝 표시(`mocked`·`mock_redirected`·규칙)가 기록에 남고 목록·자세히에 `mocked`·`mock_rule` 로 실린다, 패턴과 본문은
+// 그 규칙을 둔 읽는 쪽(`View.mock_rules`)에게만, 본문 상태는 `mocked`(본문 grant 가 없어도 — 에이전트가 준 바이트), 본문은 끝날 때의 번호가 같을 때만
+// (바꿨으면 `rule_changed`), HEAD 는 빈 본문, 거르기 `mocked`, 가짜 리다이렉트 뒤의 진짜 응답은 보통 규칙(본문 기록), 막기 표시와 함께 오지 않는다.
+
+test "W9d④: 가짜였던 요청 — 목록·자세히에 mocked·mock_rule(패턴·본문은 주인에게만), body_state mocked, 바꾼 규칙은 rule_changed, HEAD 빈 본문, 거르기 mocked" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = 1, .flags2 = .{ .mocked = true }, .resource_type = 13, .url = "https://a.test/api", .host = "a.test" }, .{ .top_host = "a.test" });
+    t.ring.stampMockBody(1, 40);
+    t.ring.end(.{ .browser = 1, .request = 1, .received = 3, .flags = .{ .mocked = true }, .rule_id = 5 });
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = 2, .flags2 = .{ .mocked = true }, .method = "HEAD", .resource_type = 13, .url = "https://a.test/api", .host = "a.test" }, .{ .top_host = "a.test" });
+    t.ring.stampMockBody(2, 40);
+    t.ring.end(.{ .browser = 1, .request = 2, .flags = .{ .mocked = true }, .rule_id = 5 });
+    try t.begin(3, "https://a.test/redir", .{});
+    t.ring.end(.{ .browser = 1, .request = 3, .received = 9, .flags = .{ .mock_redirected = true }, .rule_id = 6 });
+    try t.begin(4, "https://a.test/plain", .{});
+    t.ring.end(.{ .browser = 1, .request = 4, .received = 1 });
+    const owner: View = .{ .mock_rules = &.{.{ .id = 5, .pattern = "https://a.test/api", .body = "abc", .body_id = 40 }} };
+    {
+        const json = try t.ring.list(testing.allocator, 7, owner, .{}, .{});
+        defer testing.allocator.free(json);
+        const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+        defer p.deinit();
+        const m = rowOf(p, 1).?;
+        try testing.expect(m.get("mocked").?.bool);
+        try testing.expectEqual(@as(i64, 5), m.get("mock_rule").?.integer);
+        try testing.expectEqualStrings("https://a.test/api", m.get("mock_pattern").?.string);
+        try testing.expectEqualStrings("mocked", m.get("body_state").?.string); // 본문 grant 가 없어도
+        try testing.expectEqual(@as(i64, 3), m.get("body_size").?.integer);
+        const r = rowOf(p, 3).?;
+        try testing.expect(r.get("mock_redirected").?.bool and r.get("mocked") == null);
+        try testing.expect(rowOf(p, 4).?.get("mock_rule") == null);
+    }
+    {
+        // 다른 pane — 번호만(패턴·본문 크기 없음), 거르기 mocked 는 가짜·가짜 리다이렉트만.
+        const json = try t.ring.list(testing.allocator, 7, .{}, .{ .mocked = true }, .{});
+        defer testing.allocator.free(json);
+        const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+        defer p.deinit();
+        try testing.expectEqual(@as(usize, 3), p.value.object.get("requests").?.array.items.len);
+        try testing.expect(rowOf(p, 1).?.get("mock_pattern") == null and rowOf(p, 1).?.get("body_size") == null);
+    }
+    {
+        var d = try detailJsonBody(&t, 7, owner, 1, true);
+        defer d.deinit();
+        try testing.expectEqualStrings("abc", d.value.object.get("body").?.string);
+        var h = try detailJsonBody(&t, 7, owner, 2, true);
+        defer h.deinit();
+        try testing.expectEqual(@as(i64, 0), h.value.object.get("body_size").?.integer); // HEAD
+        const changed: View = .{ .mock_rules = &.{.{ .id = 5, .pattern = "https://a.test/api", .body = "new", .body_id = 41 }} };
+        var c = try detailJsonBody(&t, 7, changed, 1, true);
+        defer c.deinit();
+        try testing.expectEqualStrings("rule_changed", c.value.object.get("body_unavailable").?.string);
+        try testing.expect(c.value.object.get("body") == null);
+    }
+}
+
+test "W9d④ 변이: 주 문서는 주 프레임의 문서 요청뿐 — 주 프레임이 낸 fetch 의 가짜는 navigate 를 「가짜였다」 로 만들지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = 1, .flags = .{ .main_frame = true }, .flags2 = .{ .mocked = true }, .resource_type = 0, .url = "https://a.test/", .host = "a.test" }, .{ .top_host = "a.test" });
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = 2, .flags = .{ .main_frame = true }, .flags2 = .{ .mocked = true }, .resource_type = 13, .url = "https://a.test/api", .host = "a.test" }, .{ .top_host = "a.test" });
+    try testing.expect(t.ring.isMainDocument(1));
+    try testing.expect(!t.ring.isMainDocument(2));
 }

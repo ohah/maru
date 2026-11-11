@@ -141,9 +141,10 @@ fn dispatchCall(call: *table_mod.Call) void {
     if (host == null) return drop(call, .send_failed);
     defer object.release(host);
     if (!ensureObserver(host, entry.cef_id, entry.id)) return drop(call, .send_failed);
-    // W9d③ 2 차 검증 LOW-A2-3: 에이전트의 이동(뒤로·앞으로·새로 고침·누르기·스크립트)은 사용자의 D2 토큰을 가져가지 못한다 — 보내기 전에 거둔다.
-    // 인자까지 본다(5 차 검증 LOW — 화면 밖까지 찍기는 resize 처리기를 돌린다): 그래서 인자가 다 모인 여기서, 메시지를 만들기 전에(만들면 인자를
-    // 넘겨준다).
+    // 이동을 시작할 수 있는 에이전트의 호출(뒤로·앞으로·새로 고침·누르기·스크립트) — 사용자의 D2 토큰을 거두지 않고 다툼으로 둔다(W9d④ v1 검증
+    // SEVERE-2, 사용자 결정 2026-11-11 「고침」: W9d③ 2 차 검증 LOW-A2-3 의 거두기는 겹친 `Runtime.evaluate` 하나로 사용자가 친 주소·새로 고침의 주
+    // 문서를 가짜·막힘으로 만들었다 — 가를 수 없으면 사용자 것, 진짜). 인자까지 본다(5 차 검증 LOW — 화면 밖까지 찍기는 resize 처리기를 돌린다):
+    // 그래서 인자가 다 모인 여기서, 메시지를 만들기 전에(만들면 인자를 넘겨준다).
     const starts = table_mod.startsNavigationCall(allocator, call.method(), call.params.items);
     const browser_id = call.browser;
     const json = table.buildMessage(allocator, call) catch |e| return drop(call, switch (e) {
@@ -151,7 +152,7 @@ fn dispatchCall(call: *table_mod.Call) void {
         error.OutOfMemory => .send_failed,
     });
     defer allocator.free(json);
-    if (starts) @import("blocking.zig").agentNavigate(browser_id);
+    if (starts) @import("blocking.zig").agentDevtoolsCall(browser_id);
     if (host.*.send_dev_tools_message.?(host, json.ptr, json.len) == 0) drop(call, .send_failed);
 }
 

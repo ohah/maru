@@ -123,6 +123,8 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.OutWithOffset => "--out writes the whole body to the file — drop --offset (use --offset without --out to print one piece)",
         error.InvalidBlockAction => "network-block needs exactly one of --add <pattern>, --remove <pattern>, --rule <n>, --clear, --list or --strict on|off",
         error.InvalidBlockArgs => "network-block: --add/--remove take a pattern (scheme://host[:port]/path, * wildcards), --rule a rule number, --type goes with --add, --strict takes on or off; at most 32 patterns or rules",
+        error.InvalidMockAction => "network-mock needs exactly one of --add <pattern>, --remove <pattern>, --rule <n>, --clear, --list or --strict on|off",
+        error.InvalidMockArgs => "network-mock: --add/--remove take one pattern, --rule a rule number, --status a number, --header 'Name: value' (up to 32), one of --body/--body-file/--body-base64; response options and --type/--method go with --add, --strict takes on or off",
     };
 }
 
@@ -159,6 +161,27 @@ fn runRequest(
         defer browser.freeUpload(allocator, abs);
         return runPlainRequest(io, allocator, .{ .upload = abs }, stdout, stderr);
     }
+    // W9d④: `--body-file` 은 이 CLI 가 읽어 인라인으로 싣는다(경로는 보내지 않는다 — 같은 uid 의 다른 프로세스가 바꿀 수 있고, 앱의 현재 폴더는
+    // 이 프로세스의 것과 다르다). UTF-8 글이면 `body`, 아니면 `body_base64`.
+    if (req == .network_mock and req.network_mock.body_file != null) {
+        var cmd = req.network_mock;
+        const path = cmd.body_file.?;
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(browser.max_mock_body_bytes + 1)) catch |e| {
+            try stderr.print("error: cannot read --body-file {s}: {s}\n", .{ path, if (e == error.StreamTooLong) "larger than 512 KiB" else @errorName(e) });
+            try stderr.flush();
+            return error.UnknownCommand;
+        };
+        defer allocator.free(bytes);
+        var b64: ?[]u8 = null;
+        defer if (b64) |b| allocator.free(b);
+        cmd.body_file = null;
+        if (std.unicode.utf8ValidateSlice(bytes)) cmd.body = bytes else {
+            const out = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(bytes.len));
+            b64 = out;
+            cmd.body_base64 = std.base64.standard.Encoder.encode(out, bytes);
+        }
+        return runPlainRequest(io, allocator, .{ .network_mock = cmd }, stdout, stderr);
+    }
     // W9d②: 본문 전부를 파일로 — 조각(64 KiB)을 이어 받아 다 모은 뒤 0600 으로 원자적으로 쓴다(바이너리 본문은 이 길로만).
     if (req == .network_request and req.network_request.out != null) return runNetworkBodyOut(io, allocator, req.network_request, stdout, stderr);
     return runPlainRequest(io, allocator, req, stdout, stderr);
@@ -192,7 +215,9 @@ fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.Netw
         if (result != .object) return bodyOutError(stderr, "the server returned a malformed answer");
         const o = result.object;
         const state = if (o.get("body_state")) |v| (if (v == .string) v.string else "") else "";
-        if (!std.mem.eql(u8, state, "captured")) {
+        // W9d④: 가짜의 본문(maru 의 원본 — 그 규칙을 둔 pane 에게만 크기가 온다)도 같은 조각으로 받는다.
+        const mocked_body = std.mem.eql(u8, state, "mocked") and o.get("body_size") != null;
+        if (!std.mem.eql(u8, state, "captured") and !mocked_body) {
             // 잡지 않았거나 보이지 않는다 — 자세히를 그대로 보여 까닭을 알린다(파일은 만들지 않는다).
             _ = browser.renderResponse(allocator, resp, .network_request, stderr) catch false;
             stderr.flush() catch {};

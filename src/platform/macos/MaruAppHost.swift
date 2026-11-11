@@ -14020,6 +14020,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 같은 메뉴 안에서 언어가 섞인다(다른 항목은 전부 영어다).
         // W9d①: 2 = browser_network(네트워크 기록 읽기 — 에이전트가 연 탭은 탭과 함께 생긴다). W9d②: 3 = browser_network_body(응답 본문 기록).
         // W9d③: 4 = browser_network_block(요청 막기 — 그 pane 이 둔 규칙 수와 엄격 모드. 철회하면 규칙·엄격이 함께 사라지고 탭의 ⊘ 도).
+        // W9d④: 5 = browser_network_mock(가짜 응답 — 그 pane 이 둔 규칙 수와 가짜 엄격 모드. 철회하면 규칙·본문·엄격이 함께 사라지고 탭의 ▣ 도).
         let scopeDesc: String
         switch scope {
         case 1: scopeDesc = "cookies & storage"
@@ -14030,6 +14031,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let rules = maru_macos_control_browser_block_summary(pane, target, &strict)
             let noun = rules == 1 ? "rule" : "rules"
             scopeDesc = strict != 0 ? "request blocking (\(rules) \(noun), strict)" : "request blocking (\(rules) \(noun))"
+        case 5:
+            var strict: UInt8 = 0
+            let rules = maru_macos_control_browser_mock_summary(pane, target, &strict)
+            let noun = rules == 1 ? "rule" : "rules"
+            scopeDesc = strict != 0 ? "response mocking (\(rules) \(noun), strict)" : "response mocking (\(rules) \(noun))"
         default: scopeDesc = "control"
         }
         return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"

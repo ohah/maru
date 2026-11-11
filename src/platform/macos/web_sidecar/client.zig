@@ -337,6 +337,7 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
     // 옛 출처가 남았다 — 그 출처의 서비스 워커 요청이 다른 사이트를 보이는 이 탭에 붙었다).
     network.mainFrameAddress(entry.id, url);
     blocking.addressChanged(browser, url); // W9d③: 맨 위 호스트(규칙의 사이트 묶기)·진행 중 주 프레임 이동의 끝
+    @import("mocking.zig").addressChanged(browser, url); // W9d④: 가짜 규칙의 사이트 묶기
     var buf: [protocol.wire.max_url_bytes]u8 = undefined;
     const text = library.readString(browsers.state.api, url, &buf);
     if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다 — maru 는 page_started 로 옛 주소임을 안다)
@@ -347,11 +348,11 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
 /// 가른다) 그대로 둔다(0 — 막지 않는다).
 /// W9d③: 주·하위 프레임 모두 — 진행 중 이동을 적고(서비스 워커 길·귀속), 사용자 이동 토큰을 묶고, 엄격 모드를 사이트에 묶는다(IO 의 처리기
 /// 고르기보다 늘 먼저 — 실측 J-B15·D3(i)).
-fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, req: [*c]c.cef_request_t, _: c_int, is_redirect: c_int) callconv(.c) c_int {
+fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, req: [*c]c.cef_request_t, user_gesture: c_int, is_redirect: c_int) callconv(.c) c_int {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
     defer object.releaseArg(req);
-    blocking.beforeBrowse(browser, frame, req, is_redirect);
+    blocking.beforeBrowse(browser, frame, req, is_redirect, user_gesture); // W9d④: 몸짓 — 사람의 링크·폼 이동(Q2)
     if (frame == null or frame.*.is_main.?(frame) == 0) return 0;
     const id = (entryOf(browser) orelse return 0).id;
     browsers.state.writer.send(.{ .main_frame_navigating = id }) catch {};
@@ -386,6 +387,7 @@ fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, 
 fn onLoadingStateChange(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, loading: c_int, can_go_back: c_int, can_go_forward: c_int) callconv(.c) void {
     defer object.releaseArg(browser);
     const entry = entryOf(browser) orelse return;
+    if (loading == 0) @import("network.zig").flushNow(); // W9d④: 주 프레임 문서의 끝(가짜 표시)이 불러오기 멈춤보다 먼저 maru 에
     browsers.state.writer.send(.{ .nav_state = .{
         .browser = entry.id,
         .can_go_back = can_go_back != 0,
@@ -399,6 +401,7 @@ fn onLoadEnd(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [
     defer object.releaseArg(frame);
     if (frame == null or frame.*.is_main.?(frame) == 0) return;
     const entry = entryOf(browser) orelse return;
+    @import("network.zig").flushNow(); // W9d④: 주 프레임 문서의 끝(가짜 표시 — navigate 결과의 `mocked`)이 `load_finished` 보다 먼저 maru 에
     browsers.state.writer.send(.{ .load_finished = .{ .browser = entry.id, .http_status = status } }) catch {};
 }
 
@@ -462,6 +465,7 @@ fn onBeforePopup(
 fn onBeforeClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t) callconv(.c) void {
     defer object.releaseArg(browser);
     if (browser == null) return;
+    @import("mocking.zig").browserClosed(browser.*.get_identifier.?(browser)); // W9d④: 가짜 규칙·붙잡은 처리기
     blocking.browserClosed(browser.*.get_identifier.?(browser)); // W9d③: 서비스 워커 길의 브라우저 목록·규칙·엄격
     browsers.onClosed(browser.*.get_identifier.?(browser));
 }

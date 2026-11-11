@@ -472,6 +472,8 @@ pub fn tickWebOsr(self: *AppSession) void {
                 if (web_osr.takeGpuNotice(sid)) self.showNoticeKey(.web_osr_gpu_unavailable);
                 // W9d③: 에이전트 규칙이 이 탭의 요청을 막는다(사용자가 몬 탭의 이동이 막혔다·규칙이 있는 탭을 처음 몰았다 — 세대마다 한 번).
                 if (web_osr.takeBlockNotice(sid)) self.showNoticeKey(.web_osr_block_notice);
+                // W9d④: 에이전트의 가짜 응답(▣)이 이 탭의 내용을 바꾼다(사용자가 몬 탭의 주 프레임 문서가 가짜였다·규칙이 있는 탭을 처음 몰았다).
+                if (web_osr.takeMockNotice(sid)) self.showNoticeKey(.web_osr_mock_notice);
                 // 엔진이 멈췄다 — 이 탭이 있는 창이 한 번 보인다(멈춘 뒤 새로 연 탭도).
                 if (web_osr.takeStoppedNotice(sid)) |notice| self.showNoticeKey(osrNoticeKey(notice));
                 // W3c: 새 웹 프레임이면 이 창을 다시 그린다 — 재투영 없이 세대만 올린다(커서 페이드와 같은 길).

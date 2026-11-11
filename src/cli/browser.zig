@@ -54,10 +54,11 @@ pub const browser_help =
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
-    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped)
+    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
     \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file, replacing it; a binary body needs --out; Chromium tabs)
     \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
     \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ⊘)
+    \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site; requests made by iframes or workers of a site your permission does not cover are never mocked); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; needs the network and control permissions first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ▣)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -130,6 +131,8 @@ pub const Request = union(enum) {
     network_record: struct { surface_id: u64, on: bool },
     /// `browser network-block`(W9d③ — Chromium). 응답 {rules:[…], other_rules, total, state, strict, …}.
     network_block: NetworkBlockCmd,
+    /// `browser network-mock`(W9d④ — Chromium). 응답 {rules:[…], other_rules, total, bytes, state, strict, …}.
+    network_mock: NetworkMockCmd,
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -152,6 +155,7 @@ pub const Request = union(enum) {
             .network_request => .network_request,
             .network_record => .network_record,
             .network_block => .network_block,
+            .network_mock => .network_mock,
         };
     }
 };
@@ -178,6 +182,35 @@ pub const NetworkBlockCmd = struct {
 
 /// W9d③: 한 번에 주는 패턴·규칙 수 상한(탭 하나의 규칙 상한과 같다 — 서버가 다시 본다).
 pub const max_block_patterns = 32;
+
+/// W9d④: `browser network-mock` — 사람의 꼴(`--add P`·`--remove P`·`--rule N`·`--clear`·`--list`·`--strict on|off`)과 MCP 의 꼴(`--action a`·
+/// `--pattern P`·`--on`·`--off`)을 함께 받는다. 응답은 `--status`·`--content-type`·`--header 'Name: value'`(여럿)·`--body`·`--body-file`
+/// (러너가 그 파일을 읽어 인라인으로 싣는다 — 경로는 보내지 않는다)·`--body-base64`. 검사(머리 허용 목록·상태·크기)는 서버가 한다.
+pub const NetworkMockCmd = struct {
+    surface_id: u64,
+    action: NetworkBlockCmd.Action = .list,
+    pattern: ?[]const u8 = null,
+    types: [max_network_types][]const u8 = undefined,
+    type_count: usize = 0,
+    methods: [max_mock_methods][]const u8 = undefined,
+    method_count: usize = 0,
+    rules: [max_block_patterns]u64 = undefined,
+    rule_count: usize = 0,
+    on: ?bool = null,
+    status: ?u16 = null,
+    content_type: ?[]const u8 = null,
+    headers: [max_mock_headers][]const u8 = undefined,
+    header_count: usize = 0,
+    body: ?[]const u8 = null,
+    body_base64: ?[]const u8 = null,
+    body_file: ?[]const u8 = null,
+};
+
+/// W9d④: 가짜 응답의 머리·메서드 수 상한(서버 `net_mock_rules` 와 같다 — 서버가 다시 본다).
+pub const max_mock_headers = 32;
+pub const max_mock_methods = 7;
+/// W9d④: 가짜 본문 상한(`--body-file` 을 읽는 크기 — 서버가 다시 본다).
+pub const max_mock_body_bytes = 512 * 1024;
 
 /// W9d①: `browser network` 의 거르기 종류 수 상한(서버 `control_browser.max_network_types` 와 같다).
 pub const max_network_types = 20;
@@ -217,6 +250,8 @@ pub const NetworkCmd = struct {
     clear: bool = false,
     /// W9d③: 막기 규칙이 막은 요청만.
     blocked: bool = false,
+    /// W9d④: 가짜 규칙이 응답(또는 리다이렉트 홉)을 준 요청만.
+    mocked: bool = false,
 
     pub fn typeNames(self: *const NetworkCmd) []const []const u8 {
         return self.types[0..self.type_count];
@@ -363,6 +398,8 @@ pub const ParseError = error{
     OutWithOffset, // `network-request --out` 은 본문 전부를 쓴다 — `--offset` 과 함께 쓰지 않는다(W9d② 적대 리뷰 3 회차)
     InvalidBlockAction, // `network-block` 에 동작이 없거나 둘 이상(W9d③)
     InvalidBlockArgs, // `network-block` 의 동작과 맞지 않는 옵션(패턴 없는 --add·--type 은 --add 와만·--on/--off 는 --strict 와만), 빈 패턴, 상한 넘음
+    InvalidMockAction, // `network-mock` 에 동작이 없거나 둘 이상(W9d④)
+    InvalidMockArgs, // `network-mock` 의 동작과 맞지 않는 옵션(응답 옵션은 --add 와만), 패턴 둘, 본문 둘, 잘못된 --header·--status, 상한 넘음
 };
 
 /// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
@@ -546,6 +583,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (eq(sub, "network-request")) return .{ .request = .{ .network_request = try parseNetworkRequestArgs(rest) } };
     if (eq(sub, "network-record")) return .{ .request = .{ .network_record = try parseNetworkRecordArgs(rest) } };
     if (eq(sub, "network-block")) return .{ .request = .{ .network_block = try parseNetworkBlockArgs(rest) } };
+    if (eq(sub, "network-mock")) return .{ .request = .{ .network_mock = try parseNetworkMockArgs(rest) } };
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -1119,6 +1157,9 @@ fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
         } else if (eq(a, "--blocked")) { // W9d③
             cmd.blocked = true;
             i += 1;
+        } else if (eq(a, "--mocked")) { // W9d④
+            cmd.mocked = true;
+            i += 1;
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption;
         } else return error.UnexpectedArgument;
@@ -1271,6 +1312,111 @@ fn parseNetworkBlockArgs(rest: []const []const u8) ParseError!NetworkBlockCmd {
     return cmd;
 }
 
+/// `network-mock --surface <id> (--add P [응답 옵션] | --remove P | --rule N... | --clear | --list | --strict on|off)`(W9d④) — MCP 꼴
+/// `--action a [--pattern P] [--rule N...] [--type t,..] [--method m,..] [--on|--off]` 도 받는다. 패턴·응답의 검사는 서버가 한다.
+fn parseNetworkMockArgs(rest: []const []const u8) ParseError!NetworkMockCmd {
+    var surface: ?u64 = null;
+    var cmd: NetworkMockCmd = .{ .surface_id = 0 };
+    var action: ?NetworkBlockCmd.Action = null;
+    var response_opts = false;
+    const setAction = struct {
+        fn f(cur: *?NetworkBlockCmd.Action, want: NetworkBlockCmd.Action) ParseError!void {
+            if (cur.*) |c| if (c != want) return error.InvalidMockAction;
+            cur.* = want;
+        }
+    }.f;
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (matchOpt(a, "--surface")) {
+            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+        } else if (matchOpt(a, "--add") or matchOpt(a, "--remove") or matchOpt(a, "--pattern")) {
+            const name: []const u8 = if (matchOpt(a, "--add")) "--add" else if (matchOpt(a, "--remove")) "--remove" else "--pattern";
+            const v = try optValue(rest, &i, name);
+            if (eq(name, "--add")) try setAction(&action, .add) else if (eq(name, "--remove")) try setAction(&action, .remove);
+            if (v.len == 0 or cmd.pattern != null) return error.InvalidMockArgs;
+            cmd.pattern = v;
+        } else if (matchOpt(a, "--rule")) {
+            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--rule"), 10) catch return error.InvalidMockArgs;
+            if (n == 0 or n > std.math.maxInt(u32) or cmd.rule_count == max_block_patterns) return error.InvalidMockArgs;
+            cmd.rules[cmd.rule_count] = n;
+            cmd.rule_count += 1;
+        } else if (matchOpt(a, "--type")) {
+            var it = std.mem.splitScalar(u8, try optValue(rest, &i, "--type"), ',');
+            while (it.next()) |t| {
+                if (t.len == 0) continue;
+                const known = for (network_type_names) |n| {
+                    if (eq(n, t)) break true;
+                } else false;
+                if (!known or cmd.type_count == max_network_types) return error.InvalidNetworkType;
+                cmd.types[cmd.type_count] = t;
+                cmd.type_count += 1;
+            }
+        } else if (matchOpt(a, "--method")) {
+            var it = std.mem.splitScalar(u8, try optValue(rest, &i, "--method"), ',');
+            while (it.next()) |m| {
+                if (m.len == 0) continue;
+                if (cmd.method_count == max_mock_methods) return error.InvalidMockArgs;
+                cmd.methods[cmd.method_count] = m;
+                cmd.method_count += 1;
+            }
+        } else if (matchOpt(a, "--status")) {
+            const v = std.fmt.parseInt(u16, try optValue(rest, &i, "--status"), 10) catch return error.InvalidMockArgs;
+            cmd.status = v;
+            response_opts = true;
+        } else if (matchOpt(a, "--content-type")) {
+            cmd.content_type = try optValue(rest, &i, "--content-type");
+            response_opts = true;
+        } else if (matchOpt(a, "--header")) {
+            const v = try optValue(rest, &i, "--header");
+            if (std.mem.indexOfScalar(u8, v, ':') == null or cmd.header_count == max_mock_headers) return error.InvalidMockArgs;
+            cmd.headers[cmd.header_count] = v;
+            cmd.header_count += 1;
+            response_opts = true;
+        } else if (matchOpt(a, "--body") or matchOpt(a, "--body-file") or matchOpt(a, "--body-base64")) {
+            const name: []const u8 = if (matchOpt(a, "--body-file")) "--body-file" else if (matchOpt(a, "--body-base64")) "--body-base64" else "--body";
+            const v = try optValue(rest, &i, name);
+            if (cmd.body != null or cmd.body_file != null or cmd.body_base64 != null) return error.InvalidMockArgs;
+            if (eq(name, "--body")) cmd.body = v else if (eq(name, "--body-file")) cmd.body_file = v else cmd.body_base64 = v;
+            response_opts = true;
+        } else if (matchOpt(a, "--strict")) {
+            const v = try optValue(rest, &i, "--strict");
+            try setAction(&action, .strict);
+            const on = if (eq(v, "on")) true else if (eq(v, "off")) false else return error.InvalidMockArgs;
+            if (cmd.on) |o| if (o != on) return error.InvalidMockArgs;
+            cmd.on = on;
+        } else if (eq(a, "--on") or eq(a, "--off")) {
+            const on = eq(a, "--on");
+            if (cmd.on) |o| if (o != on) return error.InvalidMockArgs;
+            cmd.on = on;
+            i += 1;
+        } else if (eq(a, "--clear")) {
+            try setAction(&action, .clear);
+            i += 1;
+        } else if (eq(a, "--list")) {
+            try setAction(&action, .list);
+            i += 1;
+        } else if (matchOpt(a, "--action")) {
+            const v = try optValue(rest, &i, "--action");
+            try setAction(&action, std.meta.stringToEnum(NetworkBlockCmd.Action, v) orelse return error.InvalidMockAction);
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else return error.UnexpectedArgument;
+    }
+    if (action == null and cmd.rule_count > 0) action = .remove;
+    cmd.action = action orelse return error.InvalidMockAction;
+    switch (cmd.action) {
+        .add => if (cmd.pattern == null or cmd.rule_count > 0) return error.InvalidMockArgs,
+        .remove => if (cmd.pattern == null and cmd.rule_count == 0) return error.InvalidMockArgs,
+        .clear, .list => if (cmd.pattern != null or cmd.rule_count > 0) return error.InvalidMockArgs,
+        .strict => if (cmd.on == null or cmd.pattern != null or cmd.rule_count > 0) return error.InvalidMockArgs,
+    }
+    if ((cmd.type_count > 0 or cmd.method_count > 0 or response_opts) and cmd.action != .add) return error.InvalidMockArgs;
+    if (cmd.on != null and cmd.action != .strict) return error.InvalidMockArgs;
+    cmd.surface_id = surface orelse return error.MissingSurface;
+    return cmd;
+}
+
 /// `upload --surface <id> <로케이터> [--] <file>...`(W9c③) — 로케이터 옵션은 click 과 같고, 위치 인자는 파일이다(`--` 뒤는 `-` 로 시작해도 파일).
 fn parseUploadArgs(rest: []const []const u8) ParseError!UploadCmd {
     var opts: [64][]const u8 = undefined;
@@ -1418,7 +1564,7 @@ fn hasHelpFlag(args: []const []const u8) bool {
 /// 다음 토큰을 값으로 받는 옵션인가(`--opt=값` 꼴과 값 없는 플래그는 아니다).
 fn takesValue(opt: []const u8) bool {
     if (!std.mem.startsWith(u8, opt, "--") or std.mem.indexOfScalar(u8, opt, '=') != null) return false;
-    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--accept", "--dismiss", "--list", "--blocked" }) |flag| if (eq(opt, flag)) return false;
+    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--accept", "--dismiss", "--list", "--blocked", "--mocked" }) |flag| if (eq(opt, flag)) return false;
     return true;
 }
 
@@ -1602,6 +1748,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             if (n.before_req) |b| try obj.put(gpa, "before_req", .{ .integer = @intCast(b) });
             if (n.clear) try obj.put(gpa, "clear", .{ .bool = true });
             if (n.blocked) try obj.put(gpa, "blocked", .{ .bool = true }); // W9d③
+            if (n.mocked) try obj.put(gpa, "mocked", .{ .bool = true }); // W9d④
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.network", .params = .{ .object = obj } } });
         },
         .network_request => |n| {
@@ -1648,6 +1795,53 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             }
             if (n.on) |on| try obj.put(gpa, "on", .{ .bool = on });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkBlock", .params = .{ .object = obj } } });
+        },
+        .network_mock => |n| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            var types = std.json.Array.init(gpa);
+            defer types.deinit();
+            var methods = std.json.Array.init(gpa);
+            defer methods.deinit();
+            var rules = std.json.Array.init(gpa);
+            defer rules.deinit();
+            var response: std.json.ObjectMap = .empty;
+            defer response.deinit(gpa);
+            var headers: std.json.ObjectMap = .empty;
+            defer headers.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(n.surface_id) });
+            try obj.put(gpa, "action", .{ .string = @tagName(n.action) });
+            if (n.pattern) |pt| try obj.put(gpa, "pattern", .{ .string = pt });
+            if (n.type_count > 0) {
+                for (n.types[0..n.type_count]) |t| try types.append(.{ .string = t });
+                try obj.put(gpa, "types", .{ .array = types });
+            }
+            if (n.method_count > 0) {
+                for (n.methods[0..n.method_count]) |m| try methods.append(.{ .string = m });
+                try obj.put(gpa, "methods", .{ .array = methods });
+            }
+            if (n.rule_count > 0) {
+                for (n.rules[0..n.rule_count]) |r| try rules.append(.{ .integer = @intCast(r) });
+                try obj.put(gpa, "rules", .{ .array = rules });
+            }
+            if (n.on) |on| try obj.put(gpa, "on", .{ .bool = on });
+            if (n.action == .add) {
+                if (n.status) |st| try response.put(gpa, "status", .{ .integer = st });
+                if (n.content_type) |ct| try response.put(gpa, "content_type", .{ .string = ct });
+                for (n.headers[0..n.header_count]) |h| {
+                    // `Name: value` — 이름은 콜론 앞(앞뒤 빈칸을 뗀다), 값은 콜론 뒤의 빈칸 하나를 뗀 나머지(서버가 글자를 본다).
+                    const colon = std.mem.indexOfScalar(u8, h, ':').?;
+                    const name = std.mem.trim(u8, h[0..colon], " \t");
+                    var value = h[colon + 1 ..];
+                    if (value.len > 0 and value[0] == ' ') value = value[1..];
+                    try headers.put(gpa, name, .{ .string = value });
+                }
+                if (n.header_count > 0) try response.put(gpa, "headers", .{ .object = headers });
+                if (n.body) |b| try response.put(gpa, "body", .{ .string = b });
+                if (n.body_base64) |b| try response.put(gpa, "body_base64", .{ .string = b });
+                try obj.put(gpa, "response", .{ .object = response });
+            }
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkMock", .params = .{ .object = obj } } });
         },
         .open => |o| {
             var obj: std.json.ObjectMap = .empty;
@@ -1792,7 +1986,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record, network_block };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -1913,6 +2107,11 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     const n = intField(b.object.get("rules")) orelse 0;
                     try w.print("  ⊘ blocking ({d} rule{s}{s})", .{ n, if (n == 1) "" else "s", if (boolField(b.object.get("strict"))) ", strict" else "" });
                 };
+                // W9d④: 가짜 응답 규칙·엄격(탭 제목의 ▣ 와 같은 신호).
+                if (o.get("mocking")) |m| if (m == .object) {
+                    const n = intField(m.object.get("rules")) orelse 0;
+                    try w.print("  ▣ mocking ({d} rule{s}{s})", .{ n, if (n == 1) "" else "s", if (boolField(m.object.get("strict"))) ", strict" else "" });
+                };
                 try w.writeAll("\n");
             }
         },
@@ -1926,6 +2125,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.print("blocked: request-blocking rule {d} stopped this navigation (the tab shows Chromium's ERR_BLOCKED_BY_CLIENT page) — see maru browser network-block --list\n", .{intField(result.get("block_rule")) orelse 0});
                 return true;
             }
+            // W9d④: 주 프레임 문서를 가짜 규칙이 줬다 — 주소창은 진짜 주소를 보인다(그 탭에 ▣).
+            if (boolField(result.get("mocked"))) try w.print("mocked: mock rule {d} answered this page (the address bar shows the real address) — see maru browser network-mock --list\n", .{intField(result.get("mock_rule")) orelse 0});
             // Chromium 탭은 첫 불러오기를 기다린다(W9a) — 불러온 문서가 없으면 경고 한 줄(이동 자체는 보냈다).
             if (result.get("loaded")) |l| if (l == .bool and !l.bool) try w.writeAll("warning: no page finished loading (an empty response, a download, a same-page link, or the time ran out) — check with get-url\n");
         },
@@ -2066,6 +2267,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
         .network => return renderNetwork(gpa, result, w),
         .network_block => return renderNetworkBlock(gpa, result, w),
+        .network_mock => return renderNetworkMock(gpa, result, w),
         .network_request => return renderNetworkRequest(gpa, result, w),
         .network_record => {
             // W9d②: 켬은 곧 답한다 — sidecar 가 켜졌다고 알리기 전이면 starting(`browser network` 의 recording 이 이어 알린다).
@@ -2238,6 +2440,95 @@ fn renderNetworkBlock(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *st
     return true;
 }
 
+/// W9d④: `browser.networkMock` 의 결과 — 제 규칙(번호·패턴·사이트·상태·종류·메서드·본문 크기·머리·수·잠듦), 다른 pane 의 규칙 수, 본문 바이트,
+/// 엄격 모드, sidecar 의 상태, 서비스 워커·경고. 패턴·사이트·머리 이름은 에이전트가 준 글이지만 표시 안전하게.
+fn renderNetworkMock(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
+    const rules = switch (result.get("rules") orelse std.json.Value{ .null = {} }) {
+        .array => |a| a,
+        else => {
+            try w.writeAll("error: malformed network-mock result\n");
+            return false;
+        },
+    };
+    const total = intField(result.get("total")) orelse 0;
+    const other = intField(result.get("other_rules")) orelse 0;
+    try w.print("{d} mock rule{s} on this tab (of 32", .{ total, if (total == 1) "" else "s" });
+    if (other > 0) try w.print("; {d} set by other panes", .{other});
+    try w.writeAll(") — state ");
+    try writePageText(gpa, w, strField(result.get("state")), false);
+    try w.writeAll("\n");
+    for (rules.items) |item| {
+        const o = switch (item) {
+            .object => |oo| oo,
+            else => continue,
+        };
+        try w.print("  rule {d} ", .{intField(o.get("id")) orelse 0});
+        try writePageText(gpa, w, strField(o.get("pattern")), false);
+        try w.writeAll(" on ");
+        try writePageText(gpa, w, strField(o.get("site")), false);
+        try w.print(" → {d} ", .{intField(o.get("status")) orelse 0});
+        try writePageText(gpa, w, strField(o.get("content_type")), false);
+        try w.print(" {d}B — hits {d}", .{ intField(o.get("body_bytes")) orelse 0, intField(o.get("hits")) orelse 0 });
+        if (intField(o.get("sw_not_mocked"))) |n| if (n > 0) try w.print(", service or shared worker not mocked {d}", .{n});
+        if (intField(o.get("frame_not_mocked"))) |n| if (n > 0) try w.print(", other-site frame not mocked {d}", .{n});
+        for ([_][]const u8{ "types", "methods", "headers" }) |key| if (o.get(key)) |t| if (t == .array and t.array.items.len > 0) {
+            try w.print(" [{s}", .{key});
+            for (t.array.items) |name| if (name == .string) {
+                try w.writeAll(" ");
+                try writePageText(gpa, w, name.string, false);
+            };
+            try w.writeAll("]");
+        };
+        if (boolField(o.get("dormant"))) try w.writeAll(" [dormant — another site]");
+        try w.writeAll("\n");
+    }
+    for ([_][]const u8{ "added", "replaced" }) |key| if (intField(result.get(key))) |n| try w.print("{s}: {d}\n", .{ key, n });
+    if (result.get("removed")) |v| if (v == .array and v.array.items.len > 0) {
+        try w.writeAll("removed:");
+        for (v.array.items) |n| if (n == .integer) try w.print(" {d}", .{n.integer});
+        try w.writeAll("\n");
+    };
+    if (result.get("bytes")) |b| if (b == .object) {
+        try w.print("bodies: {d} of {d} bytes on this tab, {d} of {d} in all tabs\n", .{ intField(b.object.get("tab")) orelse 0, intField(b.object.get("tab_max")) orelse 0, intField(b.object.get("app")) orelse 0, intField(b.object.get("app_max")) orelse 0 });
+    };
+    if (result.get("strict")) |st| if (st == .object) {
+        const so = st.object;
+        if (boolField(so.get("on"))) {
+            try w.writeAll("strict: on for ");
+            try writePageText(gpa, w, strField(so.get("site")), false);
+            try w.writeAll(" (");
+            try writePageText(gpa, w, strField(so.get("state")), false);
+            try w.writeAll(") — this tab bypasses that site's service worker so mocks apply (no offline pages or cached answers there; not shared workers; cross-site iframes are not covered)\n");
+        } else try w.writeAll("strict: off\n");
+    };
+    if (result.get("warnings")) |v| if (v == .array) for (v.array.items) |item| if (item == .string) {
+        const text: []const u8 = if (std.mem.eql(u8, item.string, "service_worker_not_mocked"))
+            "note: this site's service worker or shared worker made requests a rule matched (or a rule matched a shared worker's script, which loaded for real) — service workers and shared workers never see mocks; --strict on makes this tab bypass the service worker (not shared workers)"
+        else if (std.mem.eql(u8, item.string, "dormant_other_site"))
+            "note: some rules sleep — they work only on the site where you added them"
+        else if (std.mem.eql(u8, item.string, "cross_origin_without_acao"))
+            "note: a rule answers another origin without Access-Control-Allow-Origin — fetch and XHR from this page will fail CORS"
+        else if (std.mem.eql(u8, item.string, "frame_types_site_bound"))
+            "note: documents (pages, iframes) are mocked only on the site your permission covers"
+        else if (std.mem.eql(u8, item.string, "cross_site_frame_not_mocked"))
+            "note: an iframe or worker of a site your permission does not cover made requests a rule matched — they went to the real server (requests from other-site frames are never mocked)"
+        else if (std.mem.eql(u8, item.string, "text_without_charset"))
+            "note: a text body has no charset — pages may read it as windows-1252; add ; charset=utf-8"
+        else
+            continue;
+        try w.writeAll(text);
+        try w.writeAll("\n");
+    };
+    const unrecorded = intField(result.get("unrecorded")) orelse 0;
+    const busy = intField(result.get("busy")) orelse 0;
+    const skipped = intField(result.get("skipped_unknown_page")) orelse 0;
+    if (unrecorded > 0) try w.print("{d} mocked request{s} not in the network list (over the recording limit)\n", .{ unrecorded, if (unrecorded == 1) "" else "s" });
+    if (busy > 0) try w.print("{d} matched request{s} failed instead of being mocked (too many at once, or the body did not arrive in 10 s) — none went to the real server\n", .{ busy, if (busy == 1) "" else "s" });
+    if (skipped > 0) try w.print("{d} request{s} not mocked because the tab's page was unknown\n", .{ skipped, if (skipped == 1) "" else "s" });
+    try w.writeAll("hits count matches, not proof that the page used the mock; the tab title shows ▣ while it has rules\n");
+    return true;
+}
+
 fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
     const reqs = switch (result.get("requests") orelse std.json.Value{ .null = {} }) {
         .array => |a| a,
@@ -2283,6 +2574,16 @@ fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
         if (boolField(o.get("blocked")) or boolField(o.get("sw_not_applied"))) {
             try w.print(" [{s} rule {d}", .{ if (boolField(o.get("blocked"))) "blocked" else "sw not applied", intField(o.get("block_rule")) orelse 0 });
             const pat = strField(o.get("block_pattern"));
+            if (pat.len > 0) {
+                try w.writeAll(" ");
+                try writePageText(gpa, w, pat, false);
+            }
+            try w.writeAll("]");
+        }
+        // W9d④: 가짜 — 응답을 줬다·리다이렉트 홉을 줬다(패턴은 그 규칙을 둔 pane 에게만 온다).
+        if (boolField(o.get("mocked")) or boolField(o.get("mock_redirected"))) {
+            try w.print(" [{s} rule {d}", .{ if (boolField(o.get("mocked"))) "mocked" else "mock-redirected", intField(o.get("mock_rule")) orelse 0 });
+            const pat = strField(o.get("mock_pattern"));
             if (pat.len > 0) {
                 try w.writeAll(" ");
                 try writePageText(gpa, w, pat, false);
@@ -2424,6 +2725,12 @@ fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std
         "hidden — made before your permission to record bodies"
     else if (std.mem.eql(u8, body, "restarted"))
         "restarted — Chromium restarted this request before its body was kept; the retry is a newer req" // W9d① 적대 리뷰 후 × W9d②
+    else if (std.mem.eql(u8, body, "mocked") and strField(result.get("body_unavailable")).len > 0)
+        "mocked — that mock rule's response changed since (the body it gave then is gone)" // W9d④
+    else if (std.mem.eql(u8, body, "mocked") and result.get("body_size") == null)
+        "mocked — a mock rule of another pane answered (its body is shown to that pane only)" // W9d④
+    else if (std.mem.eql(u8, body, "mocked"))
+        "mocked — the body a mock rule gave (maru's copy)" // W9d④
     else
         null;
     if (hint) |h| try w.writeAll(h) else try writePageText(gpa, w, body, false);
@@ -3695,10 +4002,11 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
-        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped)
+        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
         \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file, replacing it; a binary body needs --out; Chromium tabs)
         \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
         \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ⊘)
+        \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site; requests made by iframes or workers of a site your permission does not cover are never mocked); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; needs the network and control permissions first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ▣)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -5283,4 +5591,91 @@ test "W9d③ 3 차 검증 N-B3-e: 「--strict on makes this tab bypass the servi
         try testing.expect(std.mem.indexOf(u8, t, "note: another tab without rules shows this site") != null);
         try testing.expectEqual(c.hint, std.mem.indexOf(u8, t, "--strict on makes this tab bypass the service worker (not shared workers)") != null);
     }
+}
+
+// ── W9d④: browser network-mock·network --mocked ──
+
+test "W9d④: network-mock 파서 — 사람의 꼴(--add·응답 옵션·--remove·--rule·--clear·--list·--strict)과 MCP 꼴(--action·--pattern·--on/--off), 응답 옵션은 --add 와만, 본문은 하나" {
+    const add = (try parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/api/*", "--status", "201", "--type", "xhr", "--method", "GET,POST", "--content-type", "application/json", "--header", "X-Mock: 1", "--header=Access-Control-Allow-Origin: *", "--body", "{}" })).request.network_mock;
+    try testing.expectEqual(NetworkBlockCmd.Action.add, add.action);
+    try testing.expectEqualStrings("https://a.test/api/*", add.pattern.?);
+    try testing.expectEqual(@as(?u16, 201), add.status);
+    try testing.expect(add.type_count == 1 and add.method_count == 2 and add.header_count == 2);
+    try testing.expectEqualStrings("{}", add.body.?);
+    const f = (try parse(&.{ "network-mock", "--surface=9", "--add=https://a.test/x", "--body-file", "./page.html" })).request.network_mock;
+    try testing.expectEqualStrings("./page.html", f.body_file.?);
+    const rm = (try parse(&.{ "network-mock", "--surface=9", "--rule", "3", "--rule=4" })).request.network_mock;
+    try testing.expect(rm.action == .remove and rm.rule_count == 2);
+    try testing.expect((try parse(&.{ "network-mock", "--surface", "9", "--remove", "https://a.test/" })).request.network_mock.action == .remove);
+    try testing.expect((try parse(&.{ "network-mock", "--surface", "9", "--clear" })).request.network_mock.action == .clear);
+    try testing.expect((try parse(&.{ "network-mock", "--surface", "9", "--list" })).request.network_mock.action == .list);
+    try testing.expect((try parse(&.{ "network-mock", "--surface", "9", "--strict", "on" })).request.network_mock.on.?);
+    const m = (try parse(&.{ "network-mock", "--surface=9", "--action=add", "--pattern=https://a.test/", "--body-base64=e30=" })).request.network_mock;
+    try testing.expect(m.action == .add and m.body_base64 != null);
+    try testing.expect(!(try parse(&.{ "network-mock", "--surface=9", "--action=strict", "--off" })).request.network_mock.on.?);
+    try testing.expectError(error.InvalidMockAction, parse(&.{ "network-mock", "--surface", "9" }));
+    try testing.expectError(error.InvalidMockAction, parse(&.{ "network-mock", "--surface", "9", "--clear", "--list" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--add", "https://b.test/" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--body", "a", "--body-file", "f" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--list", "--status", "200" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--header", "no colon" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--status", "x" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--clear", "--on" }));
+    try testing.expectError(error.MissingSurface, parse(&.{ "network-mock", "--list" }));
+    try testing.expect((try parse(&.{ "network", "--surface", "9", "--mocked" })).request.network.mocked);
+}
+
+test "W9d④: 요청 모양 — browser.networkMock {id, action, pattern?, types?, methods?, response?{status, content_type, headers{}, body|body_base64}, rules?, on?}, network 의 mocked" {
+    const a = try buildRequestBytes(testing.allocator, (try parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/x", "--status", "404", "--header", "X-A:  two", "--body", "hi" })).request, .{ .number = 1 });
+    defer testing.allocator.free(a);
+    try testing.expect(std.mem.indexOf(u8, a, "\"method\":\"browser.networkMock\"") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"pattern\":\"https://a.test/x\"") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"response\":{\"status\":404,\"headers\":{\"X-A\":\" two\"},\"body\":\"hi\"}") != null); // 콜론 뒤 빈칸 하나만 뗀다
+    const l = try buildRequestBytes(testing.allocator, (try parse(&.{ "network-mock", "--surface", "9", "--list" })).request, .{ .number = 1 });
+    defer testing.allocator.free(l);
+    try testing.expect(std.mem.indexOf(u8, l, "\"response\"") == null);
+    const n = try buildRequestBytes(testing.allocator, (try parse(&.{ "network", "--surface", "9", "--mocked" })).request, .{ .number = 1 });
+    defer testing.allocator.free(n);
+    try testing.expect(std.mem.indexOf(u8, n, "\"mocked\":true") != null);
+}
+
+test "W9d④: 결과 글 — 규칙(상태·종류·본문 크기·머리)·바이트·엄격·경고, 가짜 요청 줄 끝 [mocked rule N 패턴], 목록 줄 끝 ▣, navigate 의 mocked, 본문 mocked 의 안내" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[{\"id\":2,\"pattern\":\"https://a.test/api/*\",\"types\":[\"xhr\"],\"site\":\"a.test\",\"status\":200,\"content_type\":\"application/json\",\"body_bytes\":2,\"headers\":[\"X-Mock\"],\"hits\":3,\"sw_not_mocked\":1}],\"other_rules\":1,\"total\":2,\"max\":32,\"bytes\":{\"tab\":2,\"tab_max\":4194304,\"app\":2,\"app_max\":33554432},\"added\":2,\"state\":\"active\",\"strict\":{\"on\":false,\"state\":\"off\",\"covers_cross_site_iframes\":false},\"page_site\":\"a.test\",\"unrecorded\":0,\"busy\":1,\"skipped_unknown_page\":0,\"service_worker\":{\"page_controlled\":true,\"not_mocked_total\":1},\"warnings\":[\"service_worker_not_mocked\"]}}", .network_mock, &out.writer));
+    const text = out.written();
+    try testing.expect(std.mem.startsWith(u8, text, "2 mock rules on this tab (of 32; 1 set by other panes) — state active\n  rule 2 https://a.test/api/* on a.test → 200 application/json 2B — hits 3, service or shared worker not mocked 1 [types xhr] [headers X-Mock]\nadded: 2\nbodies: 2 of 4194304 bytes on this tab, 2 of 33554432 in all tabs\nstrict: off\nnote: this site's service worker"));
+    try testing.expect(std.mem.indexOf(u8, text, "1 matched request failed instead of being mocked") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":4,\"method\":\"GET\",\"url\":\"https://a.test/api/x\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"status\":200,\"mocked\":true,\"mock_rule\":2,\"mock_pattern\":\"https://a.test/api/*\",\"body_state\":\"mocked\",\"body_size\":2}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
+    try testing.expectEqualStrings("#4 GET 200 xhr https://a.test/api/x [mocked rule 2 https://a.test/api/*] [body mocked 2B]\n", out.written());
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"surface_id\":3,\"kind\":\"web\",\"title\":\"A\",\"url\":\"https://a.test/\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"mocking\":{\"rules\":1,\"strict\":false},\"methods\":[\"navigate\"]}]}}", .list, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "  ▣ mocking (1 rule)") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"loaded\":true,\"mocked\":true,\"mock_rule\":2}}", .navigate, &out.writer));
+    try testing.expect(std.mem.startsWith(u8, out.written(), "ok\nmocked: mock rule 2 answered this page"));
+    out.clearRetainingCapacity();
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":4,\"method\":\"GET\",\"url\":\"https://a.test/api/x\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"mocked\",\"body_size\":2,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":2,\"body\":\"{}\"}}", .network_request, &out.writer);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: mocked — the body a mock rule gave (maru's copy) · 2 bytes · utf-8\nbody text: {}\n") != null);
+}
+
+test "W9d④ 변이: network-mock 파서 — 본문은 어느 차례로 주어도 하나, 메서드 8 개는 거절(넘치지 않는다), --add·--strict 는 --rule·패턴과 함께 받지 않는다" {
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--body-file", "f", "--body", "a" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--body-base64", "YQ==", "--body-file", "f" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--method", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS,GET" }));
+    try testing.expectEqual(@as(usize, 7), (try parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--method", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS" })).request.network_mock.method_count);
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--add", "https://a.test/", "--rule", "1" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--strict", "on", "--rule", "1" }));
+    try testing.expectError(error.InvalidMockArgs, parse(&.{ "network-mock", "--surface", "9", "--strict", "on", "--pattern", "https://a.test/" }));
+}
+
+test "W9d④ v1 SEVERE-1: 결과 글 — 규칙의 허락 밖 프레임 수(other-site frame not mocked N)와 경고 cross_site_frame_not_mocked 의 한 줄" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[{\"id\":1,\"pattern\":\"https://a.test/m/*\",\"site\":\"a.test\",\"status\":200,\"content_type\":\"text/javascript\",\"body_bytes\":1,\"headers\":[],\"hits\":0,\"frame_not_mocked\":4}],\"other_rules\":0,\"total\":1,\"max\":32,\"state\":\"active\",\"strict\":{\"on\":false,\"state\":\"off\",\"covers_cross_site_iframes\":false},\"page_site\":\"a.test\",\"unrecorded\":0,\"busy\":0,\"skipped_unknown_page\":0,\"service_worker\":{\"page_controlled\":false},\"warnings\":[\"cross_site_frame_not_mocked\"]}}", .network_mock, &out.writer));
+    const text = out.written();
+    try testing.expect(std.mem.indexOf(u8, text, "hits 0, other-site frame not mocked 4\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "note: an iframe or worker of a site your permission does not cover made requests a rule matched — they went to the real server") != null);
 }

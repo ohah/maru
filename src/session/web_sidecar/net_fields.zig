@@ -13,6 +13,7 @@ const wire = @import("wire.zig");
 const message = @import("message.zig");
 const fields = @import("fields.zig");
 const net_block = @import("net_block.zig"); // W9d③: 막기 규칙의 패턴 — maru 와 sidecar 가 같은 함수로 본다
+const net_mock_rules = @import("net_mock_rules.zig"); // W9d④: 가짜 응답의 규칙 — maru 와 sidecar 가 같은 함수로 본다
 
 const Cursor = wire.Cursor;
 const ReadCursor = wire.ReadCursor;
@@ -223,6 +224,7 @@ pub fn checkBegin(v: message.NetBegin) Error!void {
     if (v.flags.service_worker and (v.flags.main_frame or v.flags.subframe)) return error.InvalidNetwork;
     if (v.resource_type > message.max_net_resource_type or v.resource_type == 18) return error.InvalidNetwork;
     if (v.flags2._reserved != 0) return error.InvalidNetwork; // W9d②: 둘째 표시의 쓰지 않는 비트
+    if (v.flags2.mocked and v.flags2.body_expected) return error.InvalidNetwork; // W9d④: 가짜로 고른 요청의 본문은 CDP 로 받지 않는다
     try checkMethod(v.method);
     if (v.url.len == 0) return error.InvalidNetwork;
     try checkLine(v.url, max_url_bytes);
@@ -384,10 +386,14 @@ pub fn checkEnd(v: message.NetEnd) Error!void {
     // CEF `received_content_length` 는 i64 — 음수는 sidecar 가 0 으로 보낸다.
     if (v.received > std.math.maxInt(i64)) return error.InvalidNetwork;
     // W9d③: 막힘·적용 안 됨은 하나만, 둘 중 하나일 때만 규칙 번호, 막힌 요청은 실패로 끝났다.
+    // W9d④: 가짜(`mocked`·`mock_redirected`)도 규칙 번호를 싣는다 — 막기 표시와 함께 오지 않는다(막기가 이긴다), 적용 안 됨과도.
     if (v.flags._reserved != 0) return error.InvalidNetwork;
-    if (v.flags.blocked and v.flags.sw_not_applied) return error.InvalidNetwork;
-    if ((v.flags.blocked or v.flags.sw_not_applied) != (v.rule_id != 0)) return error.InvalidNetwork;
+    const mock = v.flags.mocked or v.flags.mock_redirected;
+    if (@as(u2, @intFromBool(v.flags.blocked)) + @intFromBool(v.flags.sw_not_applied) + @intFromBool(mock) > 1) return error.InvalidNetwork;
+    if ((v.flags.blocked or v.flags.sw_not_applied or mock) != (v.rule_id != 0)) return error.InvalidNetwork;
     if (v.flags.blocked and v.outcome != .failed) return error.InvalidNetwork;
+    // 본문 번호는 가짜가 마지막 응답을 준 끝에만(가짜 리다이렉트만이면 본문은 진짜의 것이다).
+    if (!v.flags.mocked and v.mock_body_id != 0) return error.InvalidNetwork;
 }
 
 pub fn writeEnd(cursor: *Cursor, v: message.NetEnd) Error!void {
@@ -400,10 +406,11 @@ pub fn writeEnd(cursor: *Cursor, v: message.NetEnd) Error!void {
     try cursor.writeU64(v.time_ms);
     try cursor.writeByte(@bitCast(v.flags));
     try cursor.writeU32(v.rule_id);
+    if (v.flags.mocked) try cursor.writeU32(v.mock_body_id);
 }
 
 pub fn readEnd(cursor: *ReadCursor) Error!message.NetEnd {
-    const v: message.NetEnd = .{
+    var v: message.NetEnd = .{
         .browser = try fields.readBrowser(cursor),
         .request = try cursor.readU64(),
         .outcome = std.enums.fromInt(message.NetOutcome, try cursor.readByte()) orelse return error.InvalidNetwork,
@@ -413,6 +420,7 @@ pub fn readEnd(cursor: *ReadCursor) Error!message.NetEnd {
         .flags = @bitCast(try cursor.readByte()),
         .rule_id = try cursor.readU32(),
     };
+    if (v.flags.mocked) v.mock_body_id = try cursor.readU32();
     try checkEnd(v);
     return v;
 }
@@ -716,6 +724,252 @@ pub fn readErrorPage(cursor: *ReadCursor) Error!message.ErrorPage {
     const v: message.ErrorPage = .{ .browser = try fields.readBrowser(cursor), .error_code = @bitCast(try cursor.readU32()), .blocked_rule = try cursor.readU32() };
     try checkErrorPage(v);
     return v;
+}
+
+// ── 가짜 응답(W9d④) ───────────────────────────────────────────────────────────────────────────────────────
+
+/// 가짜 규칙의 머리 덩어리 상한(머리 32 개·8 KiB 에 머리마다 길이 칸 셋).
+pub const max_mock_header_block_bytes: usize = message.max_net_mock_headers_bytes + message.max_net_mock_headers * 3;
+
+/// 가짜 규칙 머리 덩어리 — 모양(`checkHeaders`)과 가짜 규칙(허용 목록·값 글자·32 개·8 KiB, `Location` 은 따로 칸 — 여기에는 없다).
+pub fn checkMockHeaders(block: message.NetHeaderBlock) Error!void {
+    if (block.count > message.max_net_mock_headers or block.bytes.len > max_mock_header_block_bytes) return error.InvalidNetwork;
+    try checkHeaders(block);
+    var list: [message.max_net_mock_headers]net_mock_rules.Header = undefined;
+    var n: usize = 0;
+    var it = HeaderIterator.init(block);
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "location")) return error.InvalidNetwork;
+        list[n] = .{ .name = h.name, .value = h.value };
+        n += 1;
+    }
+    if (net_mock_rules.checkHeaders(list[0..n], 200) != null) return error.InvalidNetwork;
+}
+
+/// `net_mock_rule` — 번호 0 아님·차례·종류(서비스 워커·preload 없음)·메서드·표시·사이트·실행 출처(표시와 짝)·정규형 패턴·상태·본문 번호와 길이
+/// (짝, 상한, 본문 금지 상태)·content_type 문법과 그려지는 종류(문서로 맞을 수 있는 규칙)·Location(3xx 만, 리다이렉트는 꼭)·머리.
+pub fn checkMockRule(v: message.NetMockRule) Error!void {
+    if (v.id == 0 or v.index >= message.max_net_mock_rules) return error.InvalidNetwork;
+    if (v.types & ~net_mock_rules.types_mask_valid != 0) return error.InvalidNetwork;
+    if (v.methods & ~net_mock_rules.methods_mask_valid != 0) return error.InvalidNetwork;
+    if (v.flags._reserved != 0) return error.InvalidNetwork;
+    try checkHost(v.site);
+    if (v.flags.exec_site_bound != (v.exec_site.len != 0)) return error.InvalidNetwork;
+    if (v.exec_site.len != 0) try checkHost(v.exec_site);
+    if (v.pattern.len == 0 or v.pattern.len > message.max_net_block_pattern_bytes) return error.InvalidNetwork;
+    switch (net_block.parse(v.pattern)) {
+        .ok => |p| if (!std.mem.eql(u8, p.norm(), v.pattern)) return error.InvalidNetwork,
+        .err => return error.InvalidNetwork,
+    }
+    if (net_mock_rules.checkStatus(v.status) != null) return error.InvalidNetwork;
+    if ((v.body_id == 0) != (v.body_len == 0)) return error.InvalidNetwork;
+    if (v.body_len > message.max_net_mock_body_bytes) return error.InvalidNetwork;
+    if (net_mock_rules.bodyForbidden(v.status) and v.body_len != 0) return error.InvalidNetwork;
+    const essence = net_mock_rules.parseContentType(v.content_type) orelse return error.InvalidNetwork;
+    if (net_mock_rules.documentCapable(v.types) and !net_mock_rules.renderable(v.content_type[0..essence])) return error.InvalidNetwork;
+    if (v.location.len != 0) {
+        if (v.status < 300 or v.status >= 400) return error.InvalidNetwork;
+        if (net_mock_rules.checkLocation(v.location) != null) return error.InvalidNetwork;
+    } else if (net_mock_rules.locationRequired(v.status)) return error.InvalidNetwork;
+    try checkMockHeaders(v.headers);
+}
+
+pub fn writeMockRule(cursor: *Cursor, v: message.NetMockRule) Error!void {
+    try checkMockRule(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.generation);
+    try cursor.writeByte(v.index);
+    try cursor.writeU32(v.id);
+    try cursor.writeU32(v.types);
+    try cursor.writeByte(v.methods);
+    try cursor.writeByte(@bitCast(v.flags));
+    try cursor.writeByte(@intCast(v.site.len));
+    try cursor.writeBytes(v.site);
+    try cursor.writeByte(@intCast(v.exec_site.len));
+    try cursor.writeBytes(v.exec_site);
+    try writeLine(cursor, v.pattern);
+    try cursor.writeU16(v.status);
+    try cursor.writeU32(v.body_id);
+    try cursor.writeU32(v.body_len);
+    try writeLine(cursor, v.content_type);
+    try writeLine(cursor, v.location);
+    try writeHeaders(cursor, v.headers);
+}
+
+pub fn readMockRule(cursor: *ReadCursor) Error!message.NetMockRule {
+    var v: message.NetMockRule = .{ .browser = try fields.readBrowser(cursor), .generation = try cursor.readU32() };
+    v.index = try cursor.readByte();
+    v.id = try cursor.readU32();
+    v.types = try cursor.readU32();
+    v.methods = try cursor.readByte();
+    v.flags = @bitCast(try cursor.readByte());
+    v.site = try cursor.readBytes(try cursor.readByte());
+    v.exec_site = try cursor.readBytes(try cursor.readByte());
+    v.pattern = try readLine(cursor, message.max_net_block_pattern_bytes);
+    v.status = try cursor.readU16();
+    v.body_id = try cursor.readU32();
+    v.body_len = try cursor.readU32();
+    v.content_type = try readLine(cursor, message.max_net_mock_content_type_bytes);
+    v.location = try readLine(cursor, message.max_net_mock_location_bytes);
+    v.headers = try readHeaders(cursor);
+    try checkMockRule(v);
+    return v;
+}
+
+/// `net_mock_body` — 번호 0 아님, 비지 않은 조각(16 KiB 안), `offset + len ≤ total ≤ 512 KiB`.
+pub fn checkMockBody(v: message.NetMockBody) Error!void {
+    if (v.body_id == 0 or v.total == 0 or v.total > message.max_net_mock_body_bytes) return error.InvalidNetwork;
+    if (v.bytes.len == 0 or v.bytes.len > message.net_mock_chunk_bytes) return error.InvalidNetwork;
+    if (@as(u64, v.offset) + v.bytes.len > v.total) return error.InvalidNetwork;
+}
+
+pub fn writeMockBody(cursor: *Cursor, v: message.NetMockBody) Error!void {
+    try checkMockBody(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.body_id);
+    try cursor.writeU32(v.offset);
+    try cursor.writeU32(v.total);
+    try writeLine(cursor, v.bytes);
+}
+
+pub fn readMockBody(cursor: *ReadCursor) Error!message.NetMockBody {
+    const v: message.NetMockBody = .{
+        .browser = try fields.readBrowser(cursor),
+        .body_id = try cursor.readU32(),
+        .offset = try cursor.readU32(),
+        .total = try cursor.readU32(),
+        .bytes = try readLine(cursor, message.net_mock_chunk_bytes),
+    };
+    try checkMockBody(v);
+    return v;
+}
+
+pub fn checkMockCommit(v: message.NetMockCommit) Error!void {
+    if (v.count > message.max_net_mock_rules) return error.InvalidNetwork;
+    if (v.strict_site.len != 0) try checkHost(v.strict_site);
+}
+
+pub fn writeMockCommit(cursor: *Cursor, v: message.NetMockCommit) Error!void {
+    try checkMockCommit(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.generation);
+    try cursor.writeByte(v.count);
+    try cursor.writeByte(@intCast(v.strict_site.len));
+    try cursor.writeBytes(v.strict_site);
+}
+
+pub fn readMockCommit(cursor: *ReadCursor) Error!message.NetMockCommit {
+    var v: message.NetMockCommit = .{ .browser = try fields.readBrowser(cursor), .generation = try cursor.readU32(), .count = try cursor.readByte() };
+    v.strict_site = try cursor.readBytes(try cursor.readByte());
+    try checkMockCommit(v);
+    return v;
+}
+
+pub fn checkMockState(v: message.NetMockState) Error!void {
+    if (!v.ok and v.strict != .off) return error.InvalidNetwork; // 적용하지 못한 세대에는 엄격 모드도 없다
+}
+
+pub fn writeMockState(cursor: *Cursor, v: message.NetMockState) Error!void {
+    try checkMockState(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.generation);
+    try cursor.writeByte(@intFromBool(v.ok));
+    try cursor.writeByte(@backingInt(v.strict));
+}
+
+pub fn readMockState(cursor: *ReadCursor) Error!message.NetMockState {
+    const v: message.NetMockState = .{
+        .browser = try fields.readBrowser(cursor),
+        .generation = try cursor.readU32(),
+        .ok = try fields.readBool(cursor),
+        .strict = std.enums.fromInt(message.NetStrictState, try cursor.readByte()) orelse return error.InvalidNetwork,
+    };
+    try checkMockState(v);
+    return v;
+}
+
+pub fn checkMockAck(v: message.NetMockAck) Error!void {
+    if (v.body_id == 0 or v.received == 0 or v.received > message.max_net_mock_body_bytes) return error.InvalidNetwork;
+}
+
+pub fn writeMockAck(cursor: *Cursor, v: message.NetMockAck) Error!void {
+    try checkMockAck(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.body_id);
+    try cursor.writeU32(v.received);
+}
+
+pub fn readMockAck(cursor: *ReadCursor) Error!message.NetMockAck {
+    const v: message.NetMockAck = .{ .browser = try fields.readBrowser(cursor), .body_id = try cursor.readU32(), .received = try cursor.readU32() };
+    try checkMockAck(v);
+    return v;
+}
+
+/// `net_mock_hits` — 항목 수 상한, 번호 0·중복 없음, 빈 항목·빈 차이는 보내지 않는다.
+pub fn checkMockHits(v: message.NetMockHits) Error!void {
+    if (v.count > message.max_net_mock_rules) return error.InvalidNetwork;
+    for (v.entries[0..v.count], 0..) |e, i| {
+        if (e.rule_id == 0) return error.InvalidNetwork;
+        for (v.entries[0..i]) |q| if (q.rule_id == e.rule_id) return error.InvalidNetwork;
+        if (e.hits == 0 and e.sw_not_mocked == 0 and e.frame_not_mocked == 0) return error.InvalidNetwork;
+    }
+    if (v.count == 0 and v.unrecorded == 0 and v.busy == 0 and v.skipped_unknown_page == 0 and !v.page_controlled) return error.InvalidNetwork;
+}
+
+pub fn writeMockHits(cursor: *Cursor, v: message.NetMockHits) Error!void {
+    try checkMockHits(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.unrecorded);
+    try cursor.writeU32(v.busy);
+    try cursor.writeU32(v.skipped_unknown_page);
+    try cursor.writeByte(@intFromBool(v.page_controlled));
+    try cursor.writeByte(v.count);
+    for (v.entries[0..v.count]) |e| {
+        try cursor.writeU32(e.rule_id);
+        try cursor.writeU32(e.hits);
+        try cursor.writeU32(e.sw_not_mocked);
+        try cursor.writeU32(e.frame_not_mocked);
+    }
+}
+
+pub fn readMockHits(cursor: *ReadCursor) Error!message.NetMockHits {
+    var v: message.NetMockHits = .{
+        .browser = try fields.readBrowser(cursor),
+        .unrecorded = try cursor.readU32(),
+        .busy = try cursor.readU32(),
+        .skipped_unknown_page = try cursor.readU32(),
+        .page_controlled = try fields.readBool(cursor),
+        .count = try cursor.readByte(),
+    };
+    if (v.count > message.max_net_mock_rules) return error.InvalidNetwork;
+    for (v.entries[0..v.count]) |*e| e.* = .{ .rule_id = try cursor.readU32(), .hits = try cursor.readU32(), .sw_not_mocked = try cursor.readU32(), .frame_not_mocked = try cursor.readU32() };
+    try checkMockHits(v);
+    return v;
+}
+
+// 가장 큰 가짜 규칙 frame(사이트·실행 사이트·패턴·content_type·Location·머리 덩어리 상한)이 frame 상한 안에 든다(계획 §9 — 약 11 KiB).
+// 가짜 본문 창(256 KiB)과 DevTools 인자의 최악(호출 8 개 × 64 KiB — 조각 머리까지 넉넉히 640 KiB)과 작은 frame 여유가 sidecar 의 명령 상자
+// (1 MiB) 안에 든다(실측 M28 — 넘치면 관이 닫힌다).
+comptime {
+    const rule = wire.prefix_len + wire.common_len + 8 + 4 + 1 + 4 + 4 + 1 + 1 + 2 * (1 + max_host_bytes) + (2 + message.max_net_block_pattern_bytes) + 2 + 4 + 4 +
+        (2 + message.max_net_mock_content_type_bytes) + (2 + message.max_net_mock_location_bytes) + 3 + max_mock_header_block_bytes;
+    std.debug.assert(rule <= wire.max_frame_bytes);
+    const body = wire.prefix_len + wire.common_len + 8 + 4 + 4 + 4 + 2 + message.net_mock_chunk_bytes;
+    std.debug.assert(body <= wire.max_frame_bytes);
+    std.debug.assert(message.net_mock_chunk_bytes <= std.math.maxInt(u16));
+    std.debug.assert(max_mock_header_block_bytes <= std.math.maxInt(u16));
+    std.debug.assert(message.max_net_mock_rules == net_mock_rules.max_rules);
+    std.debug.assert(message.max_net_mock_body_bytes == net_mock_rules.max_body_bytes);
+    std.debug.assert(message.net_mock_chunk_bytes == net_mock_rules.body_chunk_bytes);
+    std.debug.assert(message.max_net_mock_headers == net_mock_rules.max_headers);
+    std.debug.assert(message.max_net_mock_headers_bytes == net_mock_rules.max_headers_bytes);
+    std.debug.assert(message.max_net_mock_location_bytes == net_mock_rules.max_location_bytes);
+    std.debug.assert(message.max_net_mock_content_type_bytes == net_mock_rules.max_content_type_bytes);
+    // 창의 조각마다 frame 머리가 붙는다 — 창(본문 바이트) + 조각 수 × 머리.
+    const window_frames = net_mock_rules.window_bytes + (net_mock_rules.window_bytes / message.net_mock_chunk_bytes + 1) * (body - message.net_mock_chunk_bytes);
+    const devtools_worst = 640 * 1024;
+    std.debug.assert(message.max_devtools_calls * message.max_devtools_params_bytes <= devtools_worst);
+    std.debug.assert(devtools_worst + window_frames + 64 * 1024 <= message.sidecar_inbox_bytes);
 }
 
 // 가장 큰 막기 frame(규칙 32 개 — 사이트·패턴 상한)이 frame 상한 안에 든다(계획 §8 — 약 25.2 KiB).

@@ -116,15 +116,17 @@ pub fn targetParamsAllowed(method: []const u8, params: []const u8) bool {
 /// 인자 없는 `getTargetInfo` 의 인자 글이 가질 수 있는 크기의 위 끝(공백을 넉넉히) — 넘으면 `begin` 에서 곧 막는다.
 const target_params_max: u32 = 64;
 
-/// 에이전트의 이 DevTools 호출이 주 프레임 이동을 시작할 수 있는가(W9d③ 2 차 검증 LOW-A2-3) — 그러면 sidecar 가 그 탭의 사용자 D2 토큰을 먼저
-/// 거둔다(에이전트의 뒤로·앞으로·새로 고침은 wire `nav_action` 이 아니라 CDP `Page.navigateToHistoryEntry`·`Page.reload` 다 — 실측: 사용자의 iframe
-/// 만 옮긴 뒤로·조각만 다른 친 주소가 남긴 토큰을 그것이 가져갔다). 누르기·키·스크립트도 링크·폼·`location` 으로 이동을 시작할 수 있고, 페이지의
+/// 에이전트의 이 DevTools 호출이 주 프레임 이동을 시작할 수 있는가(W9d③ 2 차 검증 LOW-A2-3) — 그러면 sidecar 가 그 탭의 산 사용자 D2 토큰을
+/// **다툼**으로 둔다(W9d④ v1 검증 SEVERE-2 부터 — 전에는 거뒀고, 그러면 겹친 `Runtime.evaluate` 하나로 사용자가 친 주소·새로 고침이 막힘·가짜가
+/// 됐다: `net_block_table.agentDevtoolsCall`). 에이전트의 뒤로·앞으로·새로 고침은 wire `nav_action` 이 아니라 CDP `Page.navigateToHistoryEntry`·
+/// `Page.reload` 다 — 실측: 사용자의 iframe 만 옮긴 뒤로·조각만 다른 친 주소가 남긴 토큰을 그것이 가져갔다(그 둘은 따로 거둔다 — 기록 토큰 정리·
+/// 같은 문서 확정). 누르기·키·스크립트도 링크·폼·`location` 으로 이동을 시작할 수 있고, 페이지의
 /// 처리기를 부르는 호출(3 차 검증 N-A3-3 — scroll·focus·input·DOM 바꾸기·`Emulation.*` 등)도 같다.
 /// **허용 목록을 뒤집었다**(4 차 검증 A-LOW: 「거두는 목록」 에 `Page.handleJavaScriptDialog`(멈춘 스크립트를 잇는다)·`Page.setWebLifecycleState`
 /// (freeze·resume 처리기)·`CSS.setStyleTexts`(transitionend·관찰자 처리기)·`Animation.seekAnimations`·`DOMStorage.setDOMStorageItem`(다른 문서의
 /// storage 처리기)·`ServiceWorker.dispatchSyncEvent`·`skipWaiting`(controllerchange — 흔히 `location.reload()`)이 빠져 있었다 — 새 메서드가 생겨도
-/// 빠진다): 아래 **읽기**(처리기를 부르지도 스크립트를 잇지도 않는다)만 토큰을 남기고 나머지는 모두 거둔다. 대가: 에이전트의 읽기 아닌 호출 뒤에는
-/// 사용자 토큰이 더 자주 거둬진다 — 그 사이 사용자가 몬 이동은 규칙대로 막힌다(다시 하면 지나간다).
+/// 빠진다): 아래 **읽기**(처리기를 부르지도 스크립트를 잇지도 않는다)만 다툼 없이 두고 나머지는 모두 다툼으로 둔다. 대가(v1 SEVERE-2 뒤): 다툼의
+/// 창 안에서 에이전트가 같은 주소·같은 갈래로 몬 이동도 사용자 것으로 지나간다(막힘·가짜 없이 — 사용자 쪽 fail-safe).
 pub fn startsNavigation(method: []const u8) bool {
     for (read_only_methods) |m| {
         if (std.mem.eql(u8, method, m)) return false;

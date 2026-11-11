@@ -146,6 +146,8 @@ pub const web_osr_dialog_cause = @import("session/web_osr_dialog_cause.zig"); //
 pub const web_upload_display = @import("session/web_upload_display.zig"); // W9c③: 업로드 확인 모달의 파일 줄(보이지 않는 글자는 코드로·~·표지·엿보기) — L2 순수
 pub const web_osr_network = @import("session/web_osr_network.zig"); // W9d①: Chromium 탭 네트워크 기록의 maru 쪽 보관(읽는 쪽마다 시작점·설정이 꺼지면 투영) — L2 순수
 pub const web_osr_block = @import("session/web_osr_block.zig"); // W9d③: Chromium 탭의 요청 막기 규칙·엄격 모드(주인 pane·사이트·세대·수) — L2 순수
+pub const web_osr_mock = @import("session/web_osr_mock.zig"); // W9d④: Chromium 탭의 가짜 응답 규칙·본문·엄격 모드(주인 pane·사이트·실행 사이트·세대·수) — L2 순수
+pub const web_osr_mock_pump = @import("session/web_osr_mock_pump.zig"); // W9d④: 가짜 본문을 sidecar 로 보내는 창(256 KiB·확인) — L2 순수
 pub const web_osr_console = @import("session/web_osr_console.zig"); // W9c①: Chromium 탭 콘솔의 maru 쪽 보관(읽는 쪽이 바뀌면 지금 문서만) — L2 순수
 pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일 트리 snapshot·접힘·멀티루트·최근 파일 모델
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책
@@ -353,6 +355,8 @@ test {
     @import("std").testing.refAllDecls(web_osr_console);
     @import("std").testing.refAllDecls(web_osr_network);
     @import("std").testing.refAllDecls(web_osr_block);
+    @import("std").testing.refAllDecls(web_osr_mock);
+    @import("std").testing.refAllDecls(web_osr_mock_pump);
     @import("std").testing.refAllDecls(web_upload_display);
     @import("std").testing.refAllDecls(editor.lsp);
     @import("std").testing.refAllDecls(editor.syntax_stamp);

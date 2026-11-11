@@ -31,11 +31,9 @@ class Notification:
 
     def close(self):
         if self.token.value>=0:
-            self.lib.notify_cancel(self.token.value);self.token.value=-1
-        if self.fd.value>=0:
-            try:os.close(self.fd.value)
-            except OSError:pass
-            self.fd.value=-1
+            # notify_cancel이 소유 FD도 닫는다. 재사용된 번호를 다시 닫지 않는다.
+            verify.require(self.lib.notify_cancel(self.token.value)==0,'trace notification cancellation failed')
+            self.token.value=-1;self.fd.value=-1
 
 
 class Marker(submit_display_study.Marker):

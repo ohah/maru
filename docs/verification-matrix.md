@@ -1,6 +1,6 @@
 # 검증 매트릭스
 
-표시 외부 추적은 **부분 구현**: 진단 앱 빌드·검사 154개·독립 GPU label 추적·Darwin 시작 알림을 검증했다. 실제 편집기 예비 수집과 surface/compositor 연결은 미검증이다. [계약과 진행](plans/editor-external-display-trace.md).
+표시 외부 추적은 **부분 구현**: 진단 앱 빌드·검사 156개·독립 GPU label 추적·Darwin 시작 알림을 검증했다. 실제 편집기 예비 수집과 surface/compositor 연결은 미검증이다. [계약과 진행](plans/editor-external-display-trace.md).
 
 표시 timing 진단은 **구현**: 레이어 runtime 설정·같은 NSScreen의 CADisplayLink 시각을 실제 12프로세스/360입력으로 수집했다. 합성 검사 포함 147개·진단 빌드·독립 재계산·실제 자료 손상 24개 대조를 통과했다. off/on 지연 분포가 달라 무관측 제품의 원인 판정은 보류한다. [계약과 진행](plans/editor-display-timing.md).
 

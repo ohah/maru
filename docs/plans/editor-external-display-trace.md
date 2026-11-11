@@ -1,6 +1,6 @@
 # GPU 완료 이후 표시의 외부 추적
 
-상태: 진단 앱 빌드·검사 154개·독립 Metal label 추적·실제 Darwin 시작 알림 전달 검증 완료. 실제 편집기 예비 수집·surface 연결·전체 cohort 비교는 미착수다.
+상태: 진단 앱 빌드·검사 156개·독립 Metal label 추적·실제 Darwin 시작 알림 전달 검증 완료. 실제 편집기 예비 수집·surface 연결·전체 cohort 비교는 미착수다.
 
 ## 목적과 범위
 
@@ -35,3 +35,7 @@ python3 -m unittest discover -s tools/editor-input-stream -p 'test_*.py'
 ```
 
 고정 앱: `~/.cache/maru-agent-artifacts/external-display-build-1`. 제품 HEAD `adf9937b3e80f8f72086500146c835a80c227c53`, 앱 SHA-256 `46b1acd7a5a6a10e2e68e097221c1efd3ef4086951a01e496d1daaadcc7e261b`. 계측 소스·실행 파일 해시를 source.json에 대조했다.
+
+## 머지 전 소유권 검증
+
+Darwin SDK `notify.h`의 `notify_cancel` 계약은 마지막 token 취소 시 연결 FD도 닫는 것이다. 기존 `Notification.close`가 추가 `os.close`를 호출해, 취소 직후 같은 번호로 열린 다른 파일을 닫는 결함을 실제 재사용 회귀 검사로 재현했다. 중복 close를 제거하고 취소 결과를 확인하도록 고쳤다. 실제 알림 전달·반복 취소와 취소 뒤 FD 재사용 보존을 검증했다. 이 수정은 외부 Python 추적기의 정리 경로이며 진단 앱 binary와 product source는 바꾸지 않는다. 실제 편집기 예비 측정·surface 연결은 여전히 미검증이다.

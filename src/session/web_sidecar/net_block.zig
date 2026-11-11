@@ -769,7 +769,7 @@ test "W9d③: 0x7F 위의 단위는 패턴 바이트와 같지 않다 — `/é` 
     try testing.expect(!matchUrl(u16, &q, &url3));
 }
 
-test "W9d③: 2 MiB 주소의 규칙 32개 반복 판정은 스레드 CPU 예산 안이다" {
+test "W9d③: 2 MiB 요청은 한 번 분해하고 32규칙의 KMP 예산을 공유한다" {
     const gpa = testing.allocator;
     const len = 2 * 1024 * 1024;
     const url = try gpa.alloc(u16, len);
@@ -786,17 +786,31 @@ test "W9d③: 2 MiB 주소의 규칙 32개 반복 판정은 스레드 CPU 예산
     if (resolution.nanoseconds <= 0) return error.SkipZigTest;
     const t0 = std.Io.Clock.awake.now(testing.io).nanoseconds;
     const c0 = std.Io.Clock.cpu_thread.now(testing.io).nanoseconds;
+    // 끝 조각이 다르면 가운데 훑기 없이 거절한다(음성 대조).
+    var parts = splitUrl(u16, url) orelse return error.TestUnexpectedResult;
+    var budget: Budget = .{};
+    for (&rules) |*r| try testing.expect(!matchPartsBudget(u16, r, parts, &budget));
+    try testing.expectEqual(request_scan_budget, budget.left);
+
+    // 제품 decideTabBudget처럼 URL은 요청당 한 번만 분해하고 규칙이 예산을 공유한다.
+    // 끝 조각을 맞춰 실제 KMP가 가운데의 a...b를 찾다 예산을 소모하게 한다.
+    url[url.len - 1] = 'c';
+    parts = splitUrl(u16, url) orelse return error.TestUnexpectedResult;
+    budget = .{};
     var hits: usize = 0;
-    for (&rules) |*r| {
-        if (matchUrl(u16, r, url)) hits += 1;
+    for (&rules, 0..) |*r, i| {
+        if (matchPartsBudget(u16, r, parts, &budget)) hits += 1;
+        if (i == 0) {
+            try testing.expectEqual(@as(usize, 1), budget.left);
+            try testing.expectEqual(@as(usize, 0), hits);
+        } else try testing.expectEqual(@as(usize, 0), budget.left);
     }
+    // 첫 규칙은 범위 전체를 보고 불일치, 나머지는 요청 예산이 모자라 문서화된 막는 판정이다.
+    try testing.expectEqual(max_rules - 1, hits);
     const cpu_ns = std.Io.Clock.cpu_thread.now(testing.io).nanoseconds - c0;
     const wall_ns = std.Io.Clock.awake.now(testing.io).nanoseconds - t0;
-    std.debug.print("net_block repeated URL checks: wall_ns={d} cpu_ns={d}\n", .{ wall_ns, cpu_ns });
-    try testing.expectEqual(@as(usize, 0), hits);
-    // 단일 스레드 계산이므로 CPU 대기를 예산에 넣지 않는다. Linux 제어 재현에서 단독
-    // wall/CPU 162/162ms, 한 코어 8중 경쟁은 1240/157ms였다. 예산 500ms는 그대로다.
-    // 이 fixture는 끝 조각 c가 맞지 않아 URL 분해를 32번 재며, KMP 최악 경로는 아니다.
+    std.debug.print("net_block shared request budget: wall_ns={d} cpu_ns={d}\n", .{ wall_ns, cpu_ns });
+    // CPU 선은 재앙 감지용으로 유지한다. 규칙별 예산 초기화·끝 검사 누락은 위 결정적 단언이 잡는다.
     try testing.expect(cpu_ns > 0 and cpu_ns < 500 * std.time.ns_per_ms);
 }
 

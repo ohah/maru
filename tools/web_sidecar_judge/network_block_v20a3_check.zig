@@ -2403,7 +2403,8 @@ fn a5ro(report: Report, host_path: [:0]const u8, root: []const u8) !void {
 
 /// 5 차 고침(LOW-2): 사용자의 새로 고침 토큰이 살아 있는 동안(600 ms beforeunload — 그 이동이 아직 시작되지 않았다) 에이전트의 DevTools 화면 찍기가
 /// 토큰을 남기는가 — 읽기(`{}`·kick 꼴)는 남기고(새로 고침은 예외로 지나간다), 화면 밖까지 찍기(`captureBeyondViewport` — resize 처리기를 돌린다)는
-/// 거둔다(그 새로 고침은 규칙대로 막힌다).
+/// 거뒀다(그 새로 고침은 규칙대로 막혔다). W9d④ v1 검증 SEVERE-2(사용자 결정 2026-11-11 「고침」)부터 읽기 목록 밖 호출은 거두지 않고 다툼으로 둔다 —
+/// 어느 갈래든 사용자의 새로 고침은 지나간다(목록·인자 판정 자체는 순수 시험 `devtools_table`·`A6-ro` 가 본다).
 fn a5tok(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     var host = try spawn(host_path, root, "a5_tok", &.{});
     defer stop(&host);
@@ -2440,8 +2441,9 @@ fn a5tok(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         r.pump(2500);
         const e = errOf(r, v.tab, e0);
         const reached = seen(path) - c0;
-        const pass = if (v.exempt) reached >= 1 and e == null else reached == 0 and e != null;
-        report(pass, "A5-R10-screenshot-token", std.fmt.bufPrint(&d, "{s}: ruled {} (rule 1 /a5/bu600*) · user reload + call {s} → server +{d} · error page {?d} rule {?d} (want {s})", .{ v.label, ok, st_name, reached, if (e) |q| q.code else null, if (e) |q| q.rule else null, if (v.exempt) "exempt — the token stays" else "blocked — the call takes the token" }) catch "");
+        // W9d④ v1 SEVERE-2(사용자 결정 2026-11-11 「고침」): 읽기 목록 밖 호출도 토큰을 거두지 않는다(다툼) — 사용자의 새로 고침은 어느 갈래든 지나간다.
+        const pass = reached >= 1 and e == null;
+        report(pass, "A5-R10-screenshot-token", std.fmt.bufPrint(&d, "{s}: ruled {} (rule 1 /a5/bu600*) · user reload + call {s} → server +{d} · error page {?d} rule {?d} (want {s})", .{ v.label, ok, st_name, reached, if (e) |q| q.code else null, if (e) |q| q.rule else null, if (v.exempt) "exempt — the token stays" else "exempt — the call contests the token, it does not take it (W9d④ v1 SEVERE-2, user decision 2026-11-11)" }) catch "");
         r.host.send(.{ .destroy_browser = v.tab }) catch {};
         r.pump(300);
     }
@@ -2773,7 +2775,8 @@ fn a6ro(report: Report, host_path: [:0]const u8, root: []const u8) !void {
 }
 
 /// A6-tok(6 차 고침): 사용자의 새로 고침 토큰이 살아 있는 동안(600 ms beforeunload) 에이전트의 `Runtime.getProperties` 가 토큰을 거두는가 — 읽기 목록
-/// 밖이라 거둔다(그 새로 고침은 규칙대로 막힌다). 대조: 호출 없음·읽기(`DOM.resolveNode`)는 남긴다(새로 고침은 예외로 지나간다).
+/// 밖이라 거뒀다(그 새로 고침은 규칙대로 막혔다). 대조: 호출 없음·읽기(`DOM.resolveNode`)는 남긴다. W9d④ v1 SEVERE-2 부터는 거두지 않는다(다툼) —
+/// 어느 갈래든 사용자의 새로 고침은 지나간다.
 fn a6tok(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     var host = try spawn(host_path, root, "a6_tok", &.{});
     defer stop(&host);
@@ -2842,8 +2845,9 @@ fn a6tok(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         const e = errOf(r, v.tab, e0);
         const reached = seen(path) - c0;
         // 남기는 대조(읽기)는 호출이 실제로 답해야 한다 — 답하지 않은 호출이 「남겼다」 로 지나가지 않게.
-        const pass = if (v.exempt) reached >= 1 and e == null and answered else reached == 0 and e != null;
-        report(pass, "A6-R10-getproperties-token", std.fmt.bufPrint(&d, "{s}: ruled {} (rule 1 /a6/errbu*) · user reload + call {s} → server +{d} · error page {?d} rule {?d} (want {s})", .{ v.label, ok, st_name, reached, if (e) |q| q.code else null, if (e) |q| q.rule else null, if (v.exempt) "exempt — the token stays" else "blocked — the call takes the token" }) catch "");
+        // W9d④ v1 SEVERE-2: 읽기 목록 밖 호출도 거두지 않는다 — 사용자의 새로 고침은 어느 갈래든 지나간다.
+        const pass = reached >= 1 and e == null and (answered or !v.exempt);
+        report(pass, "A6-R10-getproperties-token", std.fmt.bufPrint(&d, "{s}: ruled {} (rule 1 /a6/errbu*) · user reload + call {s} → server +{d} · error page {?d} rule {?d} (want {s})", .{ v.label, ok, st_name, reached, if (e) |q| q.code else null, if (e) |q| q.rule else null, if (v.exempt) "exempt — the token stays" else "exempt — the call contests the token, it does not take it (W9d④ v1 SEVERE-2, user decision 2026-11-11)" }) catch "");
         r.host.send(.{ .destroy_browser = v.tab }) catch {};
         r.pump(300);
     }
@@ -3672,8 +3676,8 @@ fn a7sub(report: Report, host_path: [:0]const u8, root: []const u8) !void {
 }
 
 /// A7-tok(7 차 고침): 사용자의 새로 고침 토큰이 살아 있는 동안(600 ms beforeunload) 에이전트의 `DOM.getBoxModel`·`CSS.getComputedStyleForNode`
-/// (건너뛴 하위 트리를 강제한다 — 읽기 목록 밖)가 토큰을 거두는가 — 거둔다(그 새로 고침은 규칙대로 막힌다). 대조: 호출 없음·같은 노드의
-/// `DOM.getContentQuads`(읽기 — maru 의 흐름)는 남긴다(새로 고침은 예외로 지나간다).
+/// (건너뛴 하위 트리를 강제한다 — 읽기 목록 밖)가 토큰을 거두는가 — 거뒀다(그 새로 고침은 규칙대로 막혔다). 대조: 호출 없음·같은 노드의
+/// `DOM.getContentQuads`(읽기 — maru 의 흐름)는 남긴다. W9d④ v1 SEVERE-2 부터는 거두지 않는다(다툼) — 어느 갈래든 사용자의 새로 고침은 지나간다.
 fn a7tok(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     var host = try spawn(host_path, root, "a7_tok", &.{});
     defer stop(&host);
@@ -3728,8 +3732,9 @@ fn a7tok(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         const e = errOf(r, v.tab, e0);
         const reached = seen(path) - c0;
         // 남기는 대조(읽기)는 호출이 실제로 답해야 한다 — 답하지 않은 호출이 「남겼다」 로 지나가지 않게.
-        const pass = ok and if (v.exempt) reached >= 1 and e == null and answered else reached == 0 and e != null;
-        report(pass, "A7-R1-read-list-token", std.fmt.bufPrint(&d, "{s}: ruled {} (rule 1 /a6/errbu*) · user reload + call {s} → server +{d} · error page {?d} rule {?d} (want {s})", .{ v.label, ok, st_name, reached, if (e) |q| q.code else null, if (e) |q| q.rule else null, if (v.exempt) "exempt — the token stays" else "blocked — the call takes the token" }) catch "");
+        // W9d④ v1 SEVERE-2: 읽기 목록 밖 호출도 거두지 않는다 — 사용자의 새로 고침은 어느 갈래든 지나간다.
+        const pass = ok and reached >= 1 and e == null and (answered or !v.exempt);
+        report(pass, "A7-R1-read-list-token", std.fmt.bufPrint(&d, "{s}: ruled {} (rule 1 /a6/errbu*) · user reload + call {s} → server +{d} · error page {?d} rule {?d} (want {s})", .{ v.label, ok, st_name, reached, if (e) |q| q.code else null, if (e) |q| q.rule else null, if (v.exempt) "exempt — the token stays" else "exempt — the call contests the token, it does not take it (W9d④ v1 SEVERE-2, user decision 2026-11-11)" }) catch "");
         r.host.send(.{ .destroy_browser = v.tab }) catch {};
         r.pump(300);
     }

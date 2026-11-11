@@ -1809,13 +1809,23 @@ pub const blocking_mark_utf8 = "\u{2298}";
 /// 막기 표식의 호박색(경고 — 테마와 무관하게 고정, 기록의 빨강처럼).
 pub const blocking_mark_color: maru.color.Rgb = .{ .r = 0xE8, .g = 0xA3, .b = 0x17 };
 
-/// 이 탭 제목이 셀로 그리는 마커(running `●`, 기록 `◉`, 막기 `⊘`, 둘 다 `◉⊘`)로 시작하면 그 마커(UTF-8 — 한두 글자).
+/// W9d④: 가짜 응답 규칙·엄격 모드가 있는 Chromium 탭의 표식 ▣(U+25A3) — 규칙이 하나라도 있으면(잠든 규칙만 있어도, sidecar 확인 전에도 —
+/// 「이 탭에 가짜 규칙이 있다」). 기록 ◉·막기 ⊘ 와 함께면 `◉⊘▣` 의 차례. 셀로 그려 **그 칸만** 보라로 칠한다(`recolorMockMarkCells`). 가짜
+/// 문서는 주소창에 진짜 주소를 보인다(실측 M10) — 이 표식과 알림·Browser Grants 줄이 사용자의 신호다.
+pub const mock_mark: u21 = 0x25A3;
+pub const mock_mark_utf8 = "\u{25A3}";
+/// 가짜 표식의 보라(기록의 빨강·막기의 호박색과 다른 고정 색 — 테마와 무관하게).
+pub const mock_mark_color: maru.color.Rgb = .{ .r = 0x8E, .g = 0x6C, .b = 0xEF };
+
+/// 이 탭 제목이 셀로 그리는 마커(running `●`, 또는 기록 `◉`·막기 `⊘`·가짜 `▣` 의 그 차례의 1–3 글자 — `◉⊘▣`·`◉▣`·`⊘▣` …)로 시작하면 그
+/// 마커(UTF-8).
 pub fn tabTitleMarker(title: []const u8) ?[]const u8 {
     if (tabTitleRunningMarker(title)) return agentFlagUtf8();
-    if (std.mem.startsWith(u8, title, recording_mark_utf8 ++ blocking_mark_utf8)) return recording_mark_utf8 ++ blocking_mark_utf8;
-    if (std.mem.startsWith(u8, title, recording_mark_utf8)) return recording_mark_utf8;
-    if (std.mem.startsWith(u8, title, blocking_mark_utf8)) return blocking_mark_utf8;
-    return null;
+    var n: usize = 0;
+    for ([_][]const u8{ recording_mark_utf8, blocking_mark_utf8, mock_mark_utf8 }) |m| {
+        if (std.mem.startsWith(u8, title[n..], m)) n += m.len;
+    }
+    return if (n == 0) null else title[0..n];
 }
 
 /// 마커가 차지하는 칸 수(글자마다 한 칸 — `pane.appendPaneTabTitles` 가 본문의 자리를 정한다).
@@ -1831,7 +1841,7 @@ pub const title_mark_escape = "\u{2060}";
 
 /// 고른 제목을 탭 제목으로 쓸 때 기록 표식으로 읽히지 않게 할 것인가(`title_mark_escape` 를 앞에 붙인다).
 pub fn titleNeedsMarkEscape(title: []const u8) bool {
-    return std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8); // W9d③: ⊘ 도
+    return std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8) or std.mem.startsWith(u8, title, mock_mark_utf8); // W9d③: ⊘ 도, W9d④: ▣ 도
 }
 
 /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
@@ -1845,6 +1855,13 @@ pub fn tabTitleBody(title: []const u8) []const u8 {
 pub fn recolorRecordingMarkCells(cells: anytype) void {
     for (cells) |*c| if (c.codepoint == recording_mark) {
         c.style.foreground = .{ .rgb = recording_mark_color };
+    };
+}
+
+/// W9d④: 셀에 그린 가짜 표식(▣)만 보라로(제목 안의 ▣ 는 칠하지 않는다 — 제목 글은 measured 라 셀에 없다).
+pub fn recolorMockMarkCells(cells: anytype) void {
+    for (cells) |*c| if (c.codepoint == mock_mark) {
+        c.style.foreground = .{ .rgb = mock_mark_color };
     };
 }
 

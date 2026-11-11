@@ -8,14 +8,18 @@
 //!   sidecar 가 다시 뜨면 0 부터라도 차이라 맞다).
 //! - **D2 토큰**(사용자 결정 D2 「항상 통과」): maru 의 `navigate{user}` 는 그 주소(정규 꼴의 해시)에, `nav_action{user}` 는 「다음 주 프레임
 //!   이동 하나 — **그 몸짓의 이동**」(1 초 — 뒤로·앞으로는 기록 이동, 새로 고침은 새로 고침 이동만 가져간다; 20 회 검증 A LOW-3: 아무 일도
-//!   하지 않은 뒤로 뒤 1 초 안의 에이전트 이동이 토큰을 가져갔다)에 토큰을 건다. 에이전트·복원의 `navigate`·`nav_action`, 이동을 시작할 수 있는
-//!   에이전트의 DevTools 호출(2 차 검증 LOW-A2-3 — 뒤로·앞으로·새로 고침·누르기는 CDP 다), 주 프레임 주소 확정(bfcache·같은 문서 이동 —
-//!   `on_before_browse` 가 없다; 친 주소와 같은 주소의 확정은 주소 토큰도), iframe 의 기록 이동(사용자의 뒤로가 iframe 만 옮겼다)이 남은 토큰을
-//!   거둔다. 떠나기 확인이 떠 있는 동안은 토큰의 시계를 멈춘다(`holdTokens` — LOW-A2-4). 토큰의 시계는 몸짓 뒤 다른 주 프레임 이동이 시작될 때
+//!   하지 않은 뒤로 뒤 1 초 안의 에이전트 이동이 토큰을 가져갔다)에 토큰을 건다. 에이전트·복원의 **다른 곳으로 가는** `navigate`·`nav_action`(멈춤
+//!   포함), 주 프레임 주소 확정(bfcache·같은 문서 이동 — `on_before_browse` 가 없다; 친 주소와 같은 주소의 확정은 주소 토큰도), iframe 의 기록
+//!   이동(사용자의 뒤로가 iframe 만 옮겼다)이 남은 토큰을 거둔다. 이동을 시작할 수 있는 에이전트의 DevTools 호출과 같은 곳(친 주소와 같은 주소·
+//!   새로 고침)으로 가는 에이전트 이동은 거두지 않고 **다툼**(`contested`)으로 둔다 — 그 토큰의 창 안의 맞는 이동은 모두 사용자 것(진짜; W9d④ v1
+//!   검증 SEVERE-2, 사용자 결정 2026-11-11 「고침」 — 2 차 검증 LOW-A2-3 의 거두기는 겹친 `Runtime.evaluate` 하나로 사용자의 이동을 막힘·가짜로
+//!   만들었다). 떠나기 확인이 떠 있는 동안은 토큰의 시계를 멈춘다(`holdTokens` — LOW-A2-4). 토큰의 시계는 몸짓 뒤 다른 주 프레임 이동이 시작될 때
 //!   돌기 시작한다 — 그 전에는 옛 문서의 beforeunload 처리기를 기다린다(`start_cap_ms` — 3 차 검증 LOW-A3-3). 수(규칙·탭 몫)는 센 때의 세대로
 //!   보낸다(3 차 검증 NEW-B3-1 — `TabCounts`·`stale`). UI 스레드의 `on_before_browse`(주 프레임 — 늘 IO 의 처리기 고르기보다 먼저, 실측 J-B15 0.3 ms)가 토큰을 그
 //!   이동의 주소에 묶고, IO 의 고르기가 그 이동의 첫 홉에서 소비해 **요청 번호**를 예외로 둔다 — 리다이렉트의 다음 홉(같은 번호 — J-B2)도 막지
-//!   않는다. 하위 자원은 그대로 막는다.
+//!   않는다. 하위 자원은 그대로 막는다. W9d④(가짜 응답)도 같은 답을 쓴다: 소비는 규칙과 무관하다(`consumeExempt` — 막기 규칙이 없는 탭에서도
+//!   소비해야 가짜만 있는 탭에서 D2 가 듣는다, W9d④ §13 P2-1). 처리기 고르기가 요청마다 한 번 묻고 막기(`acquire` — 같은 번호면 같은 답)·가짜가
+//!   그 답을 함께 본다. Q2 의 사람 입력 창은 `nav_exempt.zig`(가짜만).
 //! - **진행 중 이동**(서비스 워커 길·§6.3): `on_before_browse`(주·하위 프레임)가 적고(탭마다 8 — 넘치면 그 탭은 「모름」), 확정·문서 시작·오류·
 //!   끊김(하위 프레임의 오류·끊김·떨어져 나감도 — 3 차 검증 MED-A3-1)이 지우고, 30 초는 재지 못한 끝의 받침이다. 서비스 워커가 대신 받아 오는 이동은 그 이동의 `on_before_browse` 뒤에 온다(실측 D3(i) — 0.4–0.9 ms 먼저).
 //! - **막힌 주 프레임 이동의 귀속**(§6.3): 막은 주 프레임 주소의 해시와 규칙을 적어 두면 `on_load_error` 가 실패 주소의 해시로 짝짓는다(오류
@@ -313,6 +317,9 @@ pub const Tab = struct {
     /// 엄격 모드가 묶인 사이트(빈 = 끔).
     strict_site_buf: [msg.max_net_host_bytes]u8 = undefined,
     strict_site_len: u8 = 0,
+    /// W9d④: 가짜의 엄격 모드가 묶인 사이트(빈 = 끔) — 엄격의 CDP(Network 도메인)는 하나라 막기의 것과 함께 본다(`strictCovers`).
+    mock_strict_buf: [msg.max_net_host_bytes]u8 = undefined,
+    mock_strict_len: u8 = 0,
     /// 확정된 맨 위 문서 호스트(`on_address_change` — 막힌 주 프레임 이동은 주소를 바꾸지 않는다, 실측 J-B4). 비면 모른다.
     top_buf: [msg.max_net_host_bytes]u8 = undefined,
     top_len: u8 = 0,
@@ -335,6 +342,17 @@ pub const Tab = struct {
     nav_token_started: bool = false,
     /// `nav_action` 토큰이 기다리는 이동의 갈래(뒤로·앞으로 = `history`, 새로 고침 = `reload`).
     nav_token_kind: NavKind = .other,
+    /// 다툼(W9d④ v1 검증 SEVERE-2 — 사용자 결정 2026-11-11 「고침」): 사용자 토큰이 산 동안 에이전트가 이동을 시작할 수 있는 DevTools 호출을 했거나
+    /// 같은 곳(친 주소와 같은 주소·새로 고침)으로 몰았다 — 다음 주 프레임 이동이 누구의 것인지 가를 수 없다. 거두지 않고(거두면 사용자가 친 주소·
+    /// 새로 고침이 에이전트의 `Runtime.evaluate` 하나로 가짜·막힘이 됐다) 그 토큰의 창 안에서 맞는 이동을 **모두** 사용자 것으로 본다(진짜 —
+    /// fail-safe; 에이전트의 그 이동도 진짜가 될 수 있다). 토큰이 끝나면(새 문서·시한·거둠) 풀린다.
+    contested: bool = false,
+    /// 가는 중인 사용자의 주 프레임 이동(토큰을 쓴 이동 — 주소 해시·시한·새로 고침인가). 그 문서가 서거나 끊기거나 다른 곳으로 가는 이동이 대신하면
+    /// 지운다. 다툼의 판정만 쓴다(토큰을 다 쓴 뒤 — 묶음도 첫 홉이 썼다 — 겹친 같은 주소의 에이전트 이동도 사용자 것으로 보려고, v1 SEVERE-2 실측:
+    /// 느린 서버로 가는 사용자 이동 중 에이전트 eval 의 `location.href` 같은 주소가 가짜였다).
+    user_nav_url: u64 = 0,
+    user_nav_until: i64 = 0,
+    user_nav_reload: bool = false,
     /// 떠나기 확인이 떠 있다 — 그 시각과 대화상자 번호(`holdTokens` — 토큰의 시계가 멈춘다).
     hold_at: ?i64 = null,
     hold_request: u32 = 0,
@@ -369,6 +387,28 @@ pub const Tab = struct {
 
     pub fn strictSite(self: *const Tab) []const u8 {
         return self.strict_site_buf[0..self.strict_site_len];
+    }
+
+    pub fn mockStrictSite(self: *const Tab) []const u8 {
+        return self.mock_strict_buf[0..self.mock_strict_len];
+    }
+
+    /// W9d④: 막기나 가짜의 엄격이 켜져 있다.
+    pub fn anyStrict(self: *const Tab) bool {
+        return self.strict_site_len != 0 or self.mock_strict_len != 0;
+    }
+
+    /// W9d④: 그 호스트를 막기 엄격 사이트나 가짜 엄격 사이트가 덮는다(엄격의 원하는 값 — W9d④ 계획 §8).
+    pub fn strictCovers(self: *const Tab, host: []const u8) bool {
+        if (host.len == 0) return false;
+        if (self.strict_site_len != 0 and net_policy.hostCovers(self.strictSite(), host)) return true;
+        return self.mock_strict_len != 0 and net_policy.hostCovers(self.mockStrictSite(), host);
+    }
+
+    pub fn setMockStrict(self: *Tab, site: []const u8) void {
+        const n = @min(site.len, self.mock_strict_buf.len);
+        @memcpy(self.mock_strict_buf[0..n], site[0..n]);
+        self.mock_strict_len = @intCast(n);
     }
 
     pub fn topHost(self: *const Tab) []const u8 {
@@ -514,12 +554,24 @@ pub const Tab = struct {
         self.stale_len = 0;
     }
 
-    /// 사용자 토큰을 모두 거둔다(에이전트의 이동·멈춤 — 그 몸짓의 이동은 오지 않는다).
+    /// 사용자 토큰을 모두 거둔다(에이전트의 다른 곳으로 가는 이동·멈춤 — 그 몸짓의 이동은 오지 않는다).
     fn dropTokens(self: *Tab) void {
         self.url_token = 0;
         self.nav_token_until = 0;
         self.bound_url = 0;
         self.hold_at = null;
+        self.contested = false;
+        self.user_nav_url = 0;
+    }
+
+    /// 산 사용자 토큰이 있다(주소·다음 이동 — 묶인 이동·가는 중인 사용자 이동 포함).
+    fn tokensAlive(self: *const Tab, now_ms: i64) bool {
+        return (self.url_token != 0 and now_ms < self.url_token_until) or now_ms < self.nav_token_until or (self.bound_url != 0 and now_ms < self.bound_until) or self.userNavLive(now_ms);
+    }
+
+    /// 사용자의 주 프레임 이동이 가는 중이다(문서가 아직 서지 않았다).
+    fn userNavLive(self: *const Tab, now_ms: i64) bool {
+        return self.user_nav_url != 0 and now_ms < self.user_nav_until;
     }
 
     /// 몸짓의 것이 아닌 주 프레임 이동이 시작됐다 — 아직 시계가 돌지 않은 토큰은 지금부터 잰다(LOW-A3-3: 그 몸짓의 이동이 처리기에 붙잡혀
@@ -662,24 +714,31 @@ pub const Table = struct {
     pub fn acquire(self: *Table, cef_id: c_int, request: u64, main_nav: bool, url_canon: u64, now_ms: i64) ?Acquired {
         const t = self.findCef(cef_id) orelse return null;
         const set = t.set orelse return null;
-        var exempt = false;
-        // 번호 0(speculation prefetch·prerender — 실측 J-B11)은 토큰을 쓰지도 예외를 받지도 않는다(20 회 검증 A N6: 사용자가 친 주소의 미리
-        // 불러오기가 토큰을 먼저 가져가 진짜 이동이 막혔다 — 그 요청은 규칙대로 막히고 진짜 이동이 토큰을 쓴다).
-        if (main_nav and request != 0) {
-            if (request == t.exempt_request) {
-                exempt = true;
-            } else if (t.bound_url != 0 and t.bound_url == url_canon and now_ms < t.bound_until) {
-                exempt = true;
-                t.exempt_request = request;
-                t.bound_url = 0;
-            }
-        }
+        const exempt = self.consumeExempt(cef_id, request, main_nav, url_canon, now_ms);
         set.readers += 1;
         var a: Acquired = .{ .set = set, .user_exempt = exempt };
         const n = t.top_len;
         @memcpy(a.top_buf[0..n], t.top_buf[0..n]);
         a.top_len = n;
         return a;
+    }
+
+    /// D2 의 소비(잠금 아래 — 규칙 묶음과 무관하다, W9d④ §13 P2-1): 이 주 프레임 이동 요청이 토큰을 묶은 주소의 첫 홉이면 요청 번호를 예외로
+    /// 두고 참, 이미 예외인 번호면 참. 같은 번호로 몇 번 물어도 같은 답이다(처리기 고르기가 먼저 묻고 `acquire` 가 다시 묻는다).
+    /// 번호 0(speculation prefetch·prerender — 실측 J-B11)은 토큰을 쓰지도 예외를 받지도 않는다(20 회 검증 A N6: 사용자가 친 주소의 미리
+    /// 불러오기가 토큰을 먼저 가져가 진짜 이동이 막혔다 — 그 요청은 규칙대로 막히고 진짜 이동이 토큰을 쓴다).
+    pub fn consumeExempt(self: *Table, cef_id: c_int, request: u64, main_nav: bool, url_canon: u64, now_ms: i64) bool {
+        if (!main_nav or request == 0) return false;
+        const t = self.findCef(cef_id) orelse return false;
+        if (request == t.exempt_request) return true;
+        if (t.bound_url != 0 and t.bound_url == url_canon and now_ms < t.bound_until) {
+            t.exempt_request = request;
+            // 다툼이면 묶음을 남긴다 — 같은 주소로 겹친 둘째 이동(에이전트 것이 먼저 첫 홉에 닿았을 수 있다)의 첫 홉도 예외(v1 SEVERE-2). 새 문서·끊김·
+            // 다른 이동·시한이 거둔다.
+            if (!t.contested) t.bound_url = 0;
+            return true;
+        }
+        return false;
     }
 
     /// 잡은 묶음을 놓고 답을 적는다(잠금 아래) — 막았으면 그 규칙의 수, 모르는 페이지면 그 수, 주 프레임 이동을 막았으면 귀속.
@@ -735,6 +794,13 @@ pub const Table = struct {
         // 이동을 거두지 않게 주소 확정이 아니라 여기서; 2 차 검증 LOW-A2-3). 옛 문서의 하위 프레임은 사라졌다 — 그 오류 페이지 표시도.
         if (main) {
             t.bound_url = 0;
+            // 다툼의 창은 새 문서가 서면 끝난다(그 뒤의 이동은 에이전트가 따로 몬 것이다).
+            t.user_nav_url = 0;
+            if (t.contested) {
+                t.url_token = 0;
+                t.nav_token_until = 0;
+                t.contested = false;
+            }
             t.err_frames = @splat(0);
             t.err_unsure = false;
             t.blocked_sub = @splat(.{});
@@ -759,7 +825,9 @@ pub const Table = struct {
         const t = self.findCef(cef_id) orelse return;
         // 묶인 사용자 토큰의 이동이 끝났다(204·다운로드 — 문서가 서지 않는다, 3 차 검증 N-A3-1: 규칙이 없어 IO 가 쓰지 않은 묶음이 5 초 남아
         // 그 뒤 더한 규칙 아래 페이지의 같은 주소 이동이 가져갔다).
-        if (t.bound_url == url_canon) t.bound_url = 0;
+        // 다툼이면 남긴다 — 같은 주소로 겹친 두 이동 중 밀려 끊긴 쪽의 끊김이 남은 쪽의 묶음을 지우지 않게(v1 SEVERE-2; 시한·새 문서가 거둔다).
+        if (t.bound_url == url_canon and !t.contested) t.bound_url = 0;
+        if (t.user_nav_url == url_canon and !t.contested) t.user_nav_url = 0;
         const p = t.pendingMain() orelse return;
         if (p.url == url_canon) clearPending(t, true, 0);
     }
@@ -801,6 +869,7 @@ pub const Table = struct {
     /// `navigate{user}` — 그 주소(정규 꼴 해시)에 토큰.
     pub fn userNavigate(self: *Table, browser: BrowserId, cef_id: c_int, url_canon: u64, now_ms: i64) void {
         const t = self.ensure(browser, cef_id) orelse return;
+        t.contested = false; // 새 몸짓 — 다툼은 이 토큰이 산 동안의 에이전트 호출로만
         t.url_token = url_canon;
         t.url_token_until = now_ms + start_cap_ms;
         t.url_token_started = false;
@@ -809,16 +878,57 @@ pub const Table = struct {
     /// `nav_action{user}` — 다음 주 프레임 이동 하나(그 갈래 — `kind`)에 토큰(1 초). 기록 이동이 갈 곳이 없으면 부르지 않는다(`browsers.zig`).
     pub fn userNavAction(self: *Table, browser: BrowserId, cef_id: c_int, kind: NavKind, now_ms: i64) void {
         const t = self.ensure(browser, cef_id) orelse return;
+        t.contested = false;
         t.nav_token_until = now_ms + start_cap_ms;
         t.nav_token_started = false;
         t.nav_token_kind = kind;
     }
 
-    /// 사용자 것이 아닌 이동(에이전트·복원·재생의 `navigate`·`nav_action`, 이동을 시작할 수 있는 에이전트의 DevTools 호출 — 2 차 검증 LOW-A2-3)이
-    /// 곧 시작한다 — 남은 사용자 토큰을 모두 거둔다(그 이동이 가져가지 않게).
+    /// 사용자 것이 아닌 이동이 **다른 곳으로** 곧 시작한다(에이전트·복원·재생의 다른 주소 `navigate`, 뒤로·앞으로, 누구든 멈춤 — 20 회 검증 A LOW-3)
+    /// — 남은 사용자 토큰을 모두 거둔다(그 이동이 가져가지 않게). 이 이동은 진행 중인 사용자 이동을 대신한다(같은 프레임의 새 이동).
     pub fn agentNavigate(self: *Table, cef_id: c_int) void {
         const t = self.findCef(cef_id) orelse return;
         t.dropTokens();
+    }
+
+    /// 에이전트·복원의 `navigate`(그 주소의 정규 꼴 해시) — 산 주소 토큰과 **같은 주소**면 거두지 않고 다툼으로 둔다(v1 SEVERE-2: 사용자가 친 주소
+    /// 바로 뒤 에이전트가 같은 주소로 몰면 그 이동이 사용자의 것을 대신해 사용자가 친 주소에서 에이전트의 가짜를 봤다 — 같은 곳이면 둘 다 진짜).
+    /// 다른 주소면 `agentNavigate` 와 같다.
+    pub fn agentNavigateTo(self: *Table, cef_id: c_int, url_canon: u64, now_ms: i64) void {
+        const t = self.findCef(cef_id) orelse return;
+        const url_live = t.url_token != 0 and t.url_token == url_canon and now_ms < t.url_token_until;
+        // 사용자 이동이 이미 `on_before_browse` 에서 토큰을 썼다(가는 중) — 같은 주소면 그것도 같은 곳이다.
+        const going = t.user_nav_url == url_canon and t.userNavLive(now_ms);
+        if (url_live or going) {
+            t.nav_token_until = 0; // 기록·새로 고침 토큰은 이 이동의 것이 아니다
+            t.contested = true;
+            return;
+        }
+        t.dropTokens();
+    }
+
+    /// 에이전트·복원의 새로 고침 — 산 새로 고침 토큰이 있으면 같은 곳(지금 문서)이라 거두지 않고 다툼으로(v1 SEVERE-2), 아니면 `agentNavigate`.
+    pub fn agentReload(self: *Table, cef_id: c_int, now_ms: i64) void {
+        const t = self.findCef(cef_id) orelse return;
+        const reload_live = now_ms < t.nav_token_until and t.nav_token_kind == .reload;
+        // 사용자의 새로 고침이 이미 토큰을 썼다(가는 중 — 같은 문서로).
+        const going = t.user_nav_reload and t.userNavLive(now_ms);
+        if (reload_live or going) {
+            t.url_token = 0; // 새로 고침은 친 주소로 가지 않는다
+            if (!reload_live) t.nav_token_until = 0;
+            t.contested = true;
+            return;
+        }
+        t.dropTokens();
+    }
+
+    /// 이동을 시작할 수 있는 에이전트의 DevTools 호출(`devtools_table.startsNavigationCall` — 읽기 목록 밖: 스크립트·누르기·`Page.reload`·기록 이동…)
+    /// — 어디로 갈지(가기나 할지) 모른다. 산 토큰이 있으면 **거두지 않고** 다툼으로 둔다(W9d④ v1 검증 SEVERE-2 — 사용자 결정 2026-11-11 「고침」:
+    /// 전에는 거둬(W9d③ 2 차 검증 LOW-A2-3) 사용자가 친 주소·새로 고침의 주 문서가 겹친 `Runtime.evaluate "1"` 하나로 가짜·막힘이 됐다 — 5/5·3/3,
+    /// 옛 문서의 beforeunload 동안은 그 길이 전체가 창). 대가(fail-safe): 그 창 안에 에이전트가 같은 주소·같은 갈래로 몬 이동도 진짜로 지나간다.
+    pub fn agentDevtoolsCall(self: *Table, cef_id: c_int, now_ms: i64) void {
+        const t = self.findCef(cef_id) orelse return;
+        if (t.tokensAlive(now_ms)) t.contested = true;
     }
 
     /// 사용자의 뒤로·앞으로가 주 프레임 문서를 옮기지 않는다(`historyTokenStays` 거짓) — 그 몸짓에 건 기록 토큰을 거둔다(벌써 쓴 토큰은 이미 0).
@@ -849,6 +959,8 @@ pub const Table = struct {
         if (!leave or held > hold_max_ms) {
             t.url_token = 0;
             t.nav_token_until = 0;
+            t.contested = false;
+            t.user_nav_url = 0;
             return;
         }
         t.url_token_until +|= held;
@@ -872,10 +984,25 @@ pub const Table = struct {
                 t.last_main_block_rule = 0;
                 if (t.url_token != 0 and now_ms < t.url_token_until and t.url_token == url_canon) {
                     user = true;
-                    t.url_token = 0;
+                    // 다툼이면 쓰지 않는다 — 같은 주소의 다른 이동(사용자의 것일 수 있다)도 그 창 안이면 진짜(v1 SEVERE-2). 시계는 지금부터.
+                    if (t.contested) {
+                        if (!t.url_token_started) {
+                            t.url_token_started = true;
+                            t.url_token_until = @min(t.url_token_until, now_ms + url_token_ms);
+                        }
+                    } else t.url_token = 0;
                 } else if (now_ms < t.nav_token_until and nav != .other and nav == t.nav_token_kind) {
                     user = true;
-                    t.nav_token_until = 0;
+                    if (t.contested) {
+                        if (!t.nav_token_started) {
+                            t.nav_token_started = true;
+                            t.nav_token_until = @min(t.nav_token_until, now_ms + nav_token_ms);
+                        }
+                    } else t.nav_token_until = 0;
+                } else if (t.contested and t.user_nav_url == url_canon and t.userNavLive(now_ms)) {
+                    // 다툼 중 이미 묶인(토큰을 쓴) 사용자 이동과 같은 주소로 겹친 이동 — 그것이 사용자 이동을 대신하므로 그것도 사용자 것(v1 SEVERE-2:
+                    // 사용자 이동의 `on_before_browse` 가 에이전트의 eval·navigate 보다 먼저 와 토큰을 썼다 — 그 뒤 같은 주소의 에이전트 이동이 가짜였다).
+                    user = true;
                 } else t.startClocks(now_ms);
                 // 새 주 프레임 이동은 앞에 묶인 이동을 대신한다(N-A3-1 — 그 이동은 끝났다).
                 t.bound_url = 0;
@@ -883,6 +1010,11 @@ pub const Table = struct {
             if (user and !is_redirect) {
                 t.bound_url = url_canon;
                 t.bound_until = now_ms + url_token_ms;
+                t.user_nav_url = url_canon;
+                t.user_nav_until = now_ms + start_cap_ms;
+                t.user_nav_reload = nav == .reload;
+            } else if (!user and !is_redirect and t.user_nav_url != url_canon) {
+                t.user_nav_url = 0; // 다른 곳으로 가는 이동이 사용자 이동을 대신한다
             }
         } else {
             // 하위 프레임의 새 이동 — 그 프레임의 막은 표시는 끝났다(이 이동은 다시 판정되고, 또 막히면 다시 적힌다 — 4 차 검증 A-MED). 같은 주소로
@@ -1575,4 +1707,166 @@ test "W9d③ 3 차 검증 N-A3-2: 서비스 워커 요청의 「적용 안 됨�
     try testing.expect(t.firstNotApplied(0) and t.firstNotApplied(0));
     for (0..counted_requests) |i| _ = t.firstNotApplied(1000 + i); // 오래된 번호는 밀려난다
     try testing.expect(t.firstNotApplied(41));
+}
+
+test "W9d④ §13 P2-1: D2 의 소비는 규칙과 무관하다 — 막기 규칙이 없는 탭(가짜만·둘 다 없음)에서도 첫 홉이 예외가 되고, 같은 번호는 몇 번 물어도 같은 답, 번호 0 은 쓰지 않는다" {
+    var t: Table = .{};
+    defer t.deinit(testing.allocator);
+    // 규칙 묶음이 없다 — `acquire` 는 null 이지만 공용 답(`consumeExempt`)은 선다(W9d③ 은 묶음이 없으면 토큰을 보기 전에 돌아갔다).
+    t.userNavigate(7, 70, 111, 1000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 111, 0, "a.test", 1001));
+    try testing.expect(t.acquire(70, 55, true, 111, 1002) == null);
+    try testing.expect(!t.consumeExempt(70, 0, true, 111, 1002)); // speculation(번호 0)은 쓰지 않는다 — 묶음은 남는다(20 회 검증 A N6)
+    try testing.expect(t.consumeExempt(70, 55, true, 111, 1002));
+    try testing.expect(t.consumeExempt(70, 55, true, 222, 1003)); // 같은 번호의 다음 홉 — 주소가 달라도
+    try testing.expect(!t.consumeExempt(70, 55, false, 111, 1003)); // 하위 자원은 예외가 아니다
+    try testing.expect(!t.consumeExempt(70, 56, true, 111, 1004)); // 묶음은 첫 홉 하나
+    // 처리기 고르기가 먼저 묻고 막기의 `acquire` 가 다시 물어도 같은 답(막기·가짜 둘 다 있는 탭 — 막기가 토큰을 먹어 가짜가 모르던 꼴의 회귀).
+    try install(&t, 7, 70, &.{.{ .id = 1, .site = "a.test", .pattern = "https://a.test/*" }});
+    t.userNavigate(7, 70, 333, 2000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 333, 0, "a.test", 2001));
+    try testing.expect(t.consumeExempt(70, 77, true, 333, 2002));
+    var a = t.acquire(70, 77, true, 333, 2002).?;
+    try testing.expect(a.user_exempt);
+    t.release(70, &a, .user_exempt, true, 333);
+}
+
+test "W9d④: 엄격의 원하는 값 — 막기·가짜의 엄격 사이트 어느 쪽이든 덮으면, 둘 다 비면 꺼짐" {
+    var tab: Tab = .{};
+    try testing.expect(!tab.anyStrict() and !tab.strictCovers("a.test"));
+    tab.setMockStrict("a.test");
+    try testing.expect(tab.anyStrict() and tab.strictCovers("x.a.test") and !tab.strictCovers("b.test") and !tab.strictCovers(""));
+    @memcpy(tab.strict_site_buf[0..6], "b.test");
+    tab.strict_site_len = 6;
+    try testing.expect(tab.strictCovers("b.test") and tab.strictCovers("a.test"));
+    tab.setMockStrict("");
+    try testing.expect(tab.anyStrict() and !tab.strictCovers("a.test") and tab.strictCovers("b.test"));
+}
+
+test "W9d④ v1 SEVERE-2(사용자 결정 2026-11-11 「고침」): 에이전트의 DevTools 호출은 사용자의 토큰(친 주소·새로 고침·뒤로)을 거두지 않는다 — 다툼으로 두고 그 창 안의 맞는 이동은 모두 사용자 것(같은 주소로 겹친 에이전트 이동도 진짜), 새 문서가 서면 끝, 다툼이 없으면 한 번만, 다른 곳으로 가는 에이전트 이동은 그대로 거둔다" {
+    var t: Table = .{};
+    defer t.deinit(testing.allocator);
+    // 친 주소 + 곧 에이전트의 `Runtime.evaluate`(읽기 목록 밖) — 거두지 않는다.
+    t.userNavigate(7, 70, 111, 1000);
+    t.agentDevtoolsCall(70, 1001);
+    try testing.expect(t.find(7).?.contested and t.find(7).?.url_token == 111);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 111, 0, "a.test", 1002));
+    try testing.expect(t.consumeExempt(70, 41, true, 111, 1003));
+    // 같은 주소로 겹친 둘째 이동(누구 것인지 모른다) — 그 창 안이면 그것도 사용자 것, 첫 홉도 예외(묶음을 남겼다).
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 111, 0, "a.test", 1004));
+    try testing.expect(t.consumeExempt(70, 42, true, 111, 1005));
+    // 밀려 끊긴 쪽의 끊김이 남은 쪽의 묶음을 지우지 않는다.
+    t.mainAborted(70, 111);
+    try testing.expect(t.consumeExempt(70, 43, true, 111, 1006));
+    // 다른 주소의 이동은 토큰을 가져가지 못한다(주소에 묶임).
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 999, 0, "a.test", 1007));
+    // 새 문서가 섰다 — 다툼의 창이 끝난다.
+    t.frameSettled(70, true, 0);
+    try testing.expect(!t.find(7).?.contested);
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 111, 0, "a.test", 1008));
+    // 다툼 없이(에이전트 호출 없음)는 전처럼 한 번만.
+    t.userNavigate(7, 70, 222, 2000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 222, 0, "a.test", 2001));
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 222, 0, "a.test", 2002));
+    // 새로 고침 + 에이전트 호출 — 새로 고침 이동은 사용자 것.
+    t.userNavAction(7, 70, .reload, 3000);
+    t.agentDevtoolsCall(70, 3001);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .reload, 0, 333, 0, "a.test", 3002));
+    t.frameSettled(70, true, 0);
+    // 떠나기 확인이 길게 도는 옛 문서(이동이 아직 시작되지 않았다) — 그 사이의 에이전트 호출도 거두지 않는다.
+    t.userNavigate(7, 70, 444, 4000);
+    t.agentDevtoolsCall(70, 4100);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 444, 0, "a.test", 4500));
+    t.frameSettled(70, true, 0);
+    // 산 토큰이 없으면 다툼도 없다.
+    t.agentDevtoolsCall(70, 5000);
+    try testing.expect(!t.find(7).?.contested);
+    // 에이전트·복원의 navigate — 친 주소와 같은 주소면 다툼(둘 다 진짜), 다른 주소면 거둔다.
+    t.userNavigate(7, 70, 555, 6000);
+    t.agentNavigateTo(70, 555, 6001);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 555, 0, "a.test", 6002));
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 555, 0, "a.test", 6003));
+    t.frameSettled(70, true, 0);
+    t.userNavigate(7, 70, 666, 7000);
+    t.agentNavigateTo(70, 667, 7001);
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 666, 0, "a.test", 7002));
+    // 에이전트의 새로 고침 — 산 새로 고침 토큰이면 다툼, 뒤로(다른 곳)·멈춤은 거둔다.
+    t.userNavAction(7, 70, .reload, 8000);
+    t.agentReload(70, 8001);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .reload, 0, 333, 0, "a.test", 8002));
+    t.frameSettled(70, true, 0);
+    t.userNavAction(7, 70, .history, 9000);
+    t.agentReload(70, 9001); // 기록 토큰은 새로 고침의 것이 아니다 — 거둔다
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .history, 0, 333, 0, "a.test", 9002));
+    t.userNavAction(7, 70, .reload, 10_000);
+    t.agentNavigate(70);
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .reload, 0, 333, 0, "a.test", 10_001));
+    // 다툼의 창도 시계가 있다 — 사용자 이동의 문서가 서지 않아도 그 이동을 「가는 중」 으로 보는 것은 30 초(`start_cap_ms`)까지.
+    t.userNavigate(7, 70, 777, 11_000);
+    t.agentDevtoolsCall(70, 11_001);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 777, 0, "a.test", 11_002));
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 777, 0, "a.test", 11_002 + url_token_ms + 1));
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 777, 0, "a.test", 11_002 + url_token_ms + 1 + start_cap_ms + 1));
+}
+
+test "W9d④ v1 SEVERE-2 실측 뒤: 사용자 이동이 먼저 `on_before_browse` 에서 토큰을 써 묶인 뒤(가는 중)의 에이전트 호출·같은 주소 이동 — 다툼이면 묶인 사용자 이동과 같은 주소의 이동도 사용자 것, 다른 주소는 아니다, 새 문서가 서면 끝" {
+    var t: Table = .{};
+    defer t.deinit(testing.allocator);
+    // 친 주소 → 곧 `on_before_browse`(토큰을 쓴다) → 에이전트 eval(`location.href` 같은 주소) → 그 이동의 `on_before_browse`.
+    t.userNavigate(7, 70, 111, 1000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 111, 0, "a.test", 1001));
+    t.agentDevtoolsCall(70, 1002);
+    try testing.expect(t.find(7).?.contested); // 묶인 이동이 살아 있다
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 111, 0, "a.test", 1003));
+    try testing.expect(t.consumeExempt(70, 51, true, 111, 1004));
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 222, 0, "a.test", 1005)); // 다른 주소는 아니다(묶음도 대신한다)
+    t.frameSettled(70, true, 0);
+    // wire 의 에이전트 navigate 가 사용자 이동의 `on_before_browse` 뒤에 왔다(같은 주소).
+    t.userNavigate(7, 70, 333, 2000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 333, 0, "a.test", 2001));
+    t.agentNavigateTo(70, 333, 2002);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 333, 0, "a.test", 2003));
+    t.frameSettled(70, true, 0);
+    // 같은 갈래(묶인 뒤)의 에이전트 새로 고침 — 지금 문서로 겹친다.
+    t.userNavAction(7, 70, .reload, 3000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .reload, 0, 444, 0, "a.test", 3001));
+    t.agentReload(70, 3002);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .reload, 0, 444, 0, "a.test", 3003));
+    t.frameSettled(70, true, 0);
+    // 다툼 없이(에이전트 호출 없음) 묶인 뒤의 같은 주소 이동은 사용자 것이 아니다(전과 같다).
+    t.userNavigate(7, 70, 555, 4000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 555, 0, "a.test", 4001));
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 555, 0, "a.test", 4002));
+}
+
+test "W9d④ v1 SEVERE-2 실측 뒤 2: 사용자 이동이 토큰·묶음을 다 쓰고(첫 홉까지) 느린 서버로 가는 중의 에이전트 eval — 같은 주소의 그 이동도 사용자 것, 다른 곳으로 가는 이동이 대신하면·문서가 서면·끊기면 끝" {
+    var t: Table = .{};
+    defer t.deinit(testing.allocator);
+    t.userNavigate(7, 70, 111, 1000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 111, 0, "a.test", 1001));
+    try testing.expect(t.consumeExempt(70, 61, true, 111, 1002)); // 첫 홉 — 토큰·묶음을 다 썼다
+    t.agentDevtoolsCall(70, 1100); // 서버가 느리다 — 옛 문서에서 에이전트 eval
+    try testing.expect(t.find(7).?.contested);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 111, 0, "a.test", 1101)); // `location.href` 같은 주소
+    try testing.expect(t.consumeExempt(70, 62, true, 111, 1102));
+    t.frameSettled(70, true, 0);
+    try testing.expect(!t.find(7).?.contested and t.find(7).?.user_nav_url == 0);
+    // 다른 곳으로 가는 이동이 사용자 이동을 대신했다 — 그 뒤 같은 주소의 이동은 사용자 것이 아니다.
+    t.userNavigate(7, 70, 222, 2000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 222, 0, "a.test", 2001));
+    t.agentDevtoolsCall(70, 2002);
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 999, 0, "a.test", 2003));
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 222, 0, "a.test", 2004));
+    t.frameSettled(70, true, 0);
+    // 다툼 없이는 가는 중인 사용자 이동도 다툼을 만들지 않는다(에이전트 호출이 없으면 같은 주소 둘째 이동은 그대로).
+    t.userNavigate(7, 70, 333, 3000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 333, 0, "a.test", 3001));
+    try testing.expect(!t.beforeBrowse(7, 70, true, false, .other, 0, 333, 0, "a.test", 3002));
+    // 끊긴 사용자 이동(204·다운로드)은 가는 중이 아니다 — 그 뒤 에이전트 호출은 다툼을 만들지 않는다.
+    t.userNavigate(7, 70, 444, 4000);
+    try testing.expect(t.beforeBrowse(7, 70, true, false, .other, 0, 444, 0, "a.test", 4001));
+    try testing.expect(t.consumeExempt(70, 63, true, 444, 4002));
+    t.mainAborted(70, 444);
+    t.agentDevtoolsCall(70, 4003);
+    try testing.expect(!t.find(7).?.contested);
 }

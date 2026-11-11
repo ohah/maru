@@ -36,6 +36,7 @@ const gate = @import("net_gate.zig");
 const net_body = @import("net_body.zig"); // W9d②: 기록하는 탭의 본문(맞추기 열쇠·끝)
 const body_table = @import("net_body_table.zig");
 const blocking = @import("blocking.zig"); // W9d③: 요청 막기 — 처리기 고르기에서 맞춘다
+const mocking = @import("mocking.zig"); // W9d④: 가짜 응답 — 막기 다음에 맞춘다(막기가 이긴다)
 
 const msg = protocol.message;
 const net_fields = protocol.net_fields;
@@ -97,12 +98,36 @@ pub fn init() void {
     blocking.init();
     rrh_block = rrh;
     rrh_block.get_resource_handler = &blocking.getBlockHandler;
+    mocking.init();
     ctx_handler = object.zeroed(c.cef_request_context_handler_t);
     object.staticRefCounted(&ctx_handler.base);
     ctx_handler.get_resource_request_handler = &contextResourceRequestHandler;
     flush_task = object.zeroed(c.cef_task_t);
     object.staticRefCounted(&flush_task.base);
     flush_task.execute = &flush;
+}
+
+/// W9d④: 요청마다의 가짜 처리기에 W9d① 기록 콜백을 단다(문을 지난 요청 — 가짜도 시작·응답·끝으로 적힌다, 실측 M13).
+pub fn setRecording(r: *c.cef_resource_request_handler_t) void {
+    r.on_before_resource_load = &onBeforeResourceLoad;
+    r.on_resource_redirect = &onResourceRedirect;
+    r.on_resource_response = &onResourceResponse;
+    r.on_resource_load_complete = &onResourceLoadComplete;
+}
+
+/// W9d④: 보내는 task 를 깨운다(가짜의 붙잡기 시한 — UI 스레드).
+pub fn postFlushPublic() void {
+    postFlush();
+}
+
+/// W9d④: 모아 둔 기록을 지금 보낸다(UI 스레드 — 주 프레임 불러오기의 끝·멈춤 앞). 주 프레임 문서의 끝(IO 의 `on_resource_load_complete`)은
+/// 불러오기의 끝보다 인과적으로 먼저지만 보내는 task 는 10 ms 뒤라, 작은 가짜 문서면 `load_finished` 가 먼저 maru 에 닿아 navigate 의 결과가
+/// 「가짜였다」 를 몰랐다. 보낼 것이 없으면 아무것도 하지 않는다.
+pub fn flushNow() void {
+    doLock();
+    const pending = queue.items.len > 0;
+    doUnlock();
+    if (pending) flush(&flush_task);
 }
 
 /// 서비스 워커 요청을 보는 context 하나를 만든다(UI 스레드 — `cef_initialize`·환경설정 뒤, 첫 브라우저 전). 전역 context 와 저장소를 나눈다.
@@ -141,7 +166,11 @@ pub fn watch(v: msg.NetWatch) void {
     // W9d③: 막기는 지켜보기 위에 선다 — 끄면 그 탭의 규칙을 버리고 엄격 모드를 끈다(계획 §2). 설정 `agent-network-full` 은 막기의 수에도
     // 듣는다(3 차 검증 N-B3-d — 꺼진 동안의 서비스 워커 수는 세지 않는다).
     blocking.setFull(v.browser, entry.cef_id, v.on and v.full);
-    if (!v.on) blocking.watchOff(v.browser);
+    // W9d④: 가짜도 지켜보기 위에 선다 — 가짜의 규칙을 먼저 버리고(붙잡은 처리기는 `-12`), 막기가 두 엄격 사이트를 지우고 엄격을 끈다.
+    if (!v.on) {
+        mocking.watchOff(v.browser);
+        blocking.watchOff(v.browser);
+    }
 }
 
 /// W9d③: 그 탭을 지켜보는가(UI 스레드 — `blocking.apply` 가 규칙을 받을지 정한다).
@@ -250,10 +279,18 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
     defer object.releaseArg(frame);
     defer object.releaseArg(request);
     if (browser == null or request == null or is_download != 0) return null;
+    // W9d④: 사용자 이동의 예외(D2·Q2) — 주 프레임 이동의 요청이면 규칙과 무관하게 공용 표가 소비한다(§13 P2-1). 막기·가짜가 같은 답을 본다.
+    const exempt = blocking.navExempt(browser, frame, request, is_navigation);
     // W9d③: 막기 — 요청 번호·지켜보기·문보다 **먼저**(speculation prefetch·prerender 는 번호 0 으로 온다 — 실측 J-B11; 번호를 먼저 보면 막을
     // 주소가 서버에 간다). 규칙이 없으면 원자 하나만 본다.
     const block = blocking.tabSelect(browser, frame, request, is_navigation);
     if (block.rule != 0) return blockedTab(browser, request, is_navigation, initiator, block);
+    // W9d④: 가짜 — 막기가 맞지 않은 요청만(막기가 이긴다). 같은 꼴(번호 전에 맞춘다·규칙이 없으면 원자 하나).
+    switch (mocking.tabSelect(browser, frame, request, is_navigation, initiator, exempt)) {
+        .none => {},
+        .slot => |slot| return mockedTab(browser, request, is_navigation, initiator, slot),
+        .busy => return busyTab(browser, request),
+    }
     doLock();
     if (state.watching == 0) {
         doUnlock();
@@ -268,7 +305,8 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
         doUnlock();
         return null;
     }
-    if (state.find(id) != null) { // 리다이렉트의 다음 홉 — 문을 다시 지나지 않는다
+    if (state.find(id)) |t| { // 리다이렉트의 다음 홉 — 문을 다시 지나지 않는다
+        mockHop(t, 0, 0); // W9d④: 앞 홉이 가짜였으면 그 가짜가 리다이렉트를 줬다(이 홉은 진짜)
         doUnlock();
         return &rrh;
     }
@@ -346,6 +384,84 @@ fn blockedTab(browser: [*c]c.cef_browser_t, request: [*c]c.cef_request_t, is_nav
     return &rrh_block;
 }
 
+/// W9d④: 홉 하나의 가짜 표시(잠금 아래) — 앞 홉이 가짜였으면(다음 홉이 왔으니 리다이렉트였다) 그 규칙을 `mock_redirect_rule` 로, 이 홉의 규칙
+/// (0 = 진짜 홉)을 `mock_rule` 로.
+fn mockHop(t: *gate.Track, rule: u32, body_id: u32) void {
+    if (t.mock_rule != 0) t.mock_redirect_rule = t.mock_rule;
+    t.mock_rule = rule;
+    t.mock_body_id = body_id;
+}
+
+/// W9d④: 탭 길에서 가짜를 주는 요청 — 막기의 `blockedTab` 과 같은 꼴: 이미 적는 요청(리다이렉트의 다음 홉)이면 그 기록에 가짜를 세우고, 아니면 문을
+/// 지나 적는다(가짜도 목록에 보이게 — 실측 M13). 문을 지나지 못했거나 번호가 0 이거나 지켜보지 않는 탭이면 기록 없이 가짜를 주고 그 수를
+/// 센다(fail closed — 문이 가짜를 끄지 않는다). 어느 쪽이든 그 처리기 고르기는 쿠키 필터를 단다(`mocking.Slot`).
+fn mockedTab(browser: [*c]c.cef_browser_t, request: [*c]c.cef_request_t, is_navigation: c_int, initiator: [*c]const c.cef_string_t, slot: *mocking.Slot) [*c]c.cef_resource_request_handler_t {
+    const cef_id = browser.*.get_identifier.?(browser);
+    const id = request.*.get_identifier.?(request);
+    postFlush(); // 맞음의 수를 보낸다
+    if (id == 0) {
+        mocking.noteUnrecorded(cef_id);
+        return slot.handlerFor(false);
+    }
+    doLock();
+    if (state.find(id)) |t| {
+        mockHop(t, slot.ruleId(), slot.bodyId());
+        doUnlock();
+        return slot.handlerFor(true);
+    }
+    const w = state.watchByCef(cef_id) orelse {
+        doUnlock();
+        mocking.noteUnrecorded(cef_id);
+        return slot.handlerFor(false);
+    };
+    const watched_browser = w.browser;
+    const t = state.startTab(w, id, nowUs()) orelse {
+        doUnlock();
+        if (net_body.any_recording.load(.acquire)) markDrop(&.{watched_browser}, request);
+        mocking.noteUnrecorded(cef_id);
+        return slot.handlerFor(false);
+    };
+    t.navigation = is_navigation != 0;
+    t.mock_rule = slot.ruleId();
+    t.mock_body_id = slot.bodyId();
+    t.mock_first = !slot.redirects(); // 시작의 `flags2.mocked` — 리다이렉트 가짜면 다음 홉(진짜일 수 있다)의 본문을 W9d② 가 받는다
+    doUnlock();
+    // W9d② 와의 맞물림(main 위로 옮김 — 판정 `mock-record-body-mixed`): 본문 후보로 적지 않는 가짜 요청도 CDP 에는 보인다(가짜 본문을 싣고). 같은
+    // 주소의 진짜 요청(다른 종류 — 같은 열쇠)이 곁에 있으면 그 진짜 기록이 가짜의 CDP 기록과 짝지어 **가짜 본문을 진짜의 것으로** 받았다(실측 19/20).
+    // 문이 넘긴 요청처럼 표지를 남겨 그 창의 같은 주소 짝을 모호하게 친다(잃는 쪽). 탭 길의 요청이라 서비스 워커 갈래를 어둠으로 치지는 않는다 —
+    // 몫이 차서 넘긴 서비스 워커 요청의 표지와 같은 「어둠 없음」 꼴(`sw_cap`)을 빌린다(그 표지는 짝만 모호하게 하고 수는 세지 않는다).
+    if (mockSkipsBody(slot) and net_body.any_recording.load(.acquire)) markDropKind(&.{watched_browser}, request, true);
+    var ib: [gate.max_origin_bytes]u8 = undefined;
+    const init_read = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib);
+    const init_text = if (init_read.truncated) ib[0..0] else init_read.text;
+    doLock();
+    if (state.find(id)) |tt| {
+        @memcpy(tt.initiator[0..init_text.len], init_text);
+        tt.initiator_len = init_text.len;
+    }
+    doUnlock();
+    return slot.handlerFor(true);
+}
+
+/// 가짜가 시작에서 본문 후보를 건너뛰는가(`Track.mock_first` 와 같은 값 — 리다이렉트가 아닌 가짜).
+fn mockSkipsBody(slot: *const mocking.Slot) bool {
+    return !slot.redirects();
+}
+
+/// W9d④: 맞았지만 가짜를 줄 수 없다(풀이 참) — `-12` 로 끝낸다(진짜로 보내지 않는다 — M17). 이미 적는 요청이면 기록 콜백이 있는 꼴로(끝이 적힌다).
+fn busyTab(browser: [*c]c.cef_browser_t, request: [*c]c.cef_request_t) [*c]c.cef_resource_request_handler_t {
+    _ = browser;
+    const id = request.*.get_identifier.?(request);
+    postFlush();
+    doLock();
+    defer doUnlock();
+    if (state.find(id)) |t| {
+        mockHop(t, 0, 0);
+        return &mocking.rrh_busy_recorded;
+    }
+    return &mocking.rrh_busy;
+}
+
 /// 공유 context 의 처리기 고르기 — 브라우저가 없는 요청(서비스·공유 워커가 대신 보냈다)만.
 fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_navigation: c_int, is_download: c_int, initiator: [*c]const c.cef_string_t, _: [*c]c_int) callconv(.c) [*c]c.cef_resource_request_handler_t {
     defer object.releaseArg(browser);
@@ -363,6 +479,15 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
         if (!r.truncated) init_text = r.text;
         if (init_text.len != 0) sw = blocking.serviceWorkerSelect(request, init_text);
         if (sw.outcome == .block or sw.outcome == .not_applied) postFlush();
+    }
+    // W9d④: 서비스 워커는 가짜를 어떤 길로도 보지 않는다(사용자 결정 Q1) — 맞는 규칙을 쥔 탭에 수만 센다(엄격을 쓰라). 막힌 요청은 세지 않는다.
+    if (sw.outcome != .block and mocking.anyRules()) {
+        if (!init_ok) {
+            const r = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib);
+            init_ok = true;
+            if (!r.truncated) init_text = r.text;
+        }
+        if (init_text.len != 0 and mocking.serviceWorker(request, init_text)) postFlush();
     }
     const blocked = sw.outcome == .block;
     doLock();
@@ -472,6 +597,11 @@ const Event = struct {
     /// W9d③(end): 막기의 표시와 대상마다 규칙(`Track.block_kind`·`block_rules`).
     block_kind: gate.BlockKind = .none,
     block_rules: [gate.max_targets]u32 = @splat(0),
+    /// W9d④(begin): 첫 홉을 리다이렉트가 아닌 가짜로 골랐다(`flags2.mocked`). (end): 마지막 홉의 가짜 규칙·리다이렉트를 준 가짜 규칙.
+    mock_first: bool = false,
+    mock_rule: u32 = 0,
+    mock_redirect_rule: u32 = 0,
+    mock_body_id: u32 = 0,
     /// 덮이는지 가를 호스트(begin — 요청 주소, redirect — 옮기기 전 주소, response — 지금 주소) — 온 주소에서 읽었다(3 회차 T1).
     host: []const u8 = "",
     /// 싣는 주소의 호스트(begin — 요청 주소, redirect — 옮겨 갈 주소 — wire 의 `host` 칸).
@@ -652,6 +782,7 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
         e.target_count = t.target_count;
         e.flags.service_worker = t.service_worker;
         e.flags.navigation = t.navigation;
+        e.mock_first = t.mock_first; // W9d④
         initiator_len = t.initiator_len;
         @memcpy(initiator_buf[0..initiator_len], t.initiator[0..initiator_len]);
     }
@@ -795,6 +926,9 @@ fn onResourceLoadComplete(_: [*c]c.cef_resource_request_handler_t, browser: [*c]
         e.target_count = t.target_count;
         e.block_kind = t.block_kind;
         e.block_rules = t.block_rules;
+        e.mock_rule = t.mock_rule; // W9d④
+        e.mock_redirect_rule = t.mock_redirect_rule;
+        e.mock_body_id = t.mock_body_id;
         state.untrack(t);
     }
     if (!begun) return;
@@ -860,6 +994,7 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     // W9d② 적대 리뷰 3 회차 P1: 꺼낸 때까지의 CEF 기록이 모두 표에 닿았다 — 제 기록을 기다리던 CDP 끝을 곧 정한다.
     net_body.cefFlushed(swapped_us - 1);
     blocking.flushHits(); // W9d③: 막기의 수(차이)
+    mocking.flushHits(); // W9d④: 가짜의 수(차이)
 
 }
 
@@ -921,8 +1056,9 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
                 return;
             }
             // W9d②: 기록하는 탭이면 본문 후보로 적는다 — 적었으면 이 요청의 본문 끝이 꼭 하나 온다(`body_expected`).
-            var flags2: msg.NetFlags2 = .{};
-            if (e.url_hash != 0 and net_body.recording(browser)) {
+            // W9d④: 가짜로 고른 요청은 CDP 로 본문을 받으러 가지 않는다(`mocked` — maru 가 제 원본을 보인다).
+            var flags2: msg.NetFlags2 = .{ .mocked = e.mock_first };
+            if (!e.mock_first and e.url_hash != 0 and net_body.recording(browser)) {
                 flags2.body_expected = net_body.cefBegin(browser, .{
                     .request = e.request,
                     .key = .{ .url = e.url_hash, .method = body_table.hashMethod(e.method), .sw = flags.service_worker },
@@ -962,7 +1098,16 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
                 .sw_not_applied => flags.sw_not_applied = true,
                 .none => {},
             };
-            break :blk .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms, .flags = flags, .rule_id = if (flags.blocked or flags.sw_not_applied) rule else 0 } };
+            var rule_id: u32 = if (flags.blocked or flags.sw_not_applied) rule else 0;
+            var mock_body_id: u32 = 0;
+            // W9d④: 가짜의 표시 — 막기가 이긴다(막힌 홉이 있었으면 가짜 표시는 싣지 않는다). 가짜는 탭 길(대상 하나)에만.
+            if (e.block_kind == .none and index == 0) {
+                flags.mocked = e.mock_rule != 0;
+                flags.mock_redirected = e.mock_redirect_rule != 0;
+                if (flags.mocked) rule_id = e.mock_rule else if (flags.mock_redirected) rule_id = e.mock_redirect_rule;
+                if (flags.mocked) mock_body_id = e.mock_body_id;
+            }
+            break :blk .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms, .flags = flags, .rule_id = rule_id, .mock_body_id = mock_body_id } };
         },
     };
     browsers.state.writer.send(message) catch {};

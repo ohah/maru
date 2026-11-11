@@ -33,6 +33,8 @@ const dialog_cause = maru.session.web_osr_dialog_cause;
 const console_ring = maru.session.web_osr_console;
 const net_ring = maru.session.web_osr_network;
 const block_mod = maru.session.web_osr_block; // W9d③: 요청 막기 규칙·엄격 모드
+const mock_mod = maru.session.web_osr_mock; // W9d④: 가짜 응답 규칙·본문·엄격 모드
+const mock_pump_mod = maru.session.web_osr_mock_pump; // W9d④: 본문을 sidecar 로 보내는 창
 
 /// 링 하나(W3c): 받은 IOSurface 셋·제어 페이지와, View 가 보는 세대·mailbox 워드.
 pub const AppRing = struct {
@@ -264,6 +266,10 @@ const Surface = struct {
     /// 사용자에게 알릴 것(사용자가 마지막으로 몬 탭의 주 프레임 이동이 막혔다·규칙이 있는 탭을 처음 몰았다)은 그 안에 걸린다(`wantsNotice`·
     /// `takeNotice` — 탭이 비면 거둔다, 3 차 검증 N-B3-c) — 창이 꺼내 간다.
     block: block_mod.Tab = .{},
+    /// W9d④: 가짜 응답 규칙·본문·엄격 모드(pane 마다 주인 — `web_osr_mock`). 세대가 바뀌면 sidecar 에 규칙을 하나씩 보내고 맺는다(`sendNetMock`).
+    mock: mock_mod.Tab = .{},
+    /// W9d④: 사용자에게 알릴 것이 있다(사용자가 마지막으로 몬 탭의 주 프레임 문서가 가짜였다·규칙이 있는 탭을 처음 몰았다).
+    mock_notice_pending: bool = false,
 };
 
 /// W9d①: 보낸 `net_watch` 의 값 — 켬·설정·어느 호스트든·grant 호스트(넷까지).
@@ -300,6 +306,8 @@ pub const AgentNav = struct {
     before_unload: bool = false,
     /// W9d③: 막기 규칙이 그 이동을 막았다(`error_page.blocked_rule` — 탭 길 -20·서비스 워커 길 -2 모두, 실패 주소의 해시로 sidecar 가 짝지었다).
     blocked_rule: u32 = 0,
+    /// W9d④: 그 이동의 주 프레임 문서를 가짜 규칙이 줬다(기록의 주 프레임 문서 끝 — `net_end.flags.mocked`).
+    mocked_rule: u32 = 0,
 };
 
 /// 페이지에 물은 닫기의 진행(W6j).
@@ -725,6 +733,10 @@ fn testTeardown(gpa: std.mem.Allocator) void {
     net_grant_count = 0; // W9d①
     body_grant_count = 0; // W9d②
     block_grant_count = 0; // W9d③
+    mock_grant_count = 0; // W9d④
+    browser_grant_count = 0;
+    mock_budget = .{};
+    mock_pump.deinit(gpa);
     net_full = true;
 }
 
@@ -1197,7 +1209,8 @@ test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every en
         @embedFile("web_sidecar/new_tab.zig"),
         @embedFile("web_sidecar/context_menu.zig"),
         @embedFile("web_sidecar/devtools.zig"),
-        @embedFile("web_sidecar/blocking.zig"), // W9d③ — `MARU_WEB_TEST_BLOCK_LOG`(판정자의 막기 사건 줄)
+        @embedFile("web_sidecar/blocking.zig"), // W9d③ — `MARU_WEB_TEST_BLOCK_LOG`(판정자의 막기 사건 줄), W9d④ — `MARU_WEB_TEST_MOCK_LOG`(몸짓·예외 줄)
+        @embedFile("web_sidecar/mocking.zig"), // W9d④ — `MARU_WEB_TEST_MOCK_LOG`·`MARU_WEB_TEST_MOCK_INJECT_SET_COOKIE`(판정자의 쿠키 필터 훅)
     };
     var names: usize = 0;
     for (sources) |src| {
@@ -1221,9 +1234,10 @@ test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every en
             }
         }
     }
-    // 오늘 이 여섯 파일이 `getenv` 로 읽는 자리는 열아홉이다(이름 열다섯 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳, W9d③ 의 `MARU_WEB_TEST_BLOCK_LOG` 가
-    // 네 곳; 제품 코드에서 `getenv` 를 부르는 sidecar 파일은 이 여섯뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈 손잡이). 줄면 훑기가 소스를 못 읽은 것이다.
-    try std.testing.expect(names >= 19);
+    // 오늘 이 일곱 파일이 `getenv` 로 읽는 자리는 스물둘이다(이름 열일곱 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳, W9d③ 의 `MARU_WEB_TEST_BLOCK_LOG` 가
+    // 네 곳, W9d④ 의 `MARU_WEB_TEST_MOCK_LOG` 가 두 곳(blocking·mocking)과 `MARU_WEB_TEST_MOCK_INJECT_SET_COOKIE` 한 곳; 제품 코드에서 `getenv` 를
+    // 부르는 sidecar 파일은 이 일곱뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈 손잡이). 줄면 훑기가 소스를 못 읽은 것이다.
+    try std.testing.expect(names >= 22);
 }
 
 test "a hardened (release) build ignores the development env overrides" {
@@ -1784,6 +1798,14 @@ pub fn testDialogToken(surface_id: u64) ?u64 {
     return s.dialogs.items[0].token;
 }
 
+/// 시험 전용(W9d④): 그 탭의 `index` 번째 가짜 규칙이 사람의 누름 예외(`human_nav_real` — 사용자 탭의 규칙)를 싣는가.
+pub fn testMockRuleHuman(surface_id: u64, index: usize) ?bool {
+    if (!builtin.is_test) @compileError("test only");
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (index >= s.mock.rules.items.len) return null;
+    return s.mock.rules.items[index].human_nav_real;
+}
+
 /// 시험 전용(W9c②): 그 탭의 마지막 에이전트 입력 시각.
 pub fn testAgentInputMs(surface_id: u64) i64 {
     if (!builtin.is_test) @compileError("test only");
@@ -1868,6 +1890,8 @@ pub fn testForget(gpa: std.mem.Allocator) void {
     state = .off;
     parked.deinit(gpa); // W10c: 받는 중인 탭을 닫으면 주차한다
     parked = .empty;
+    mock_pump.deinit(gpa); // W9d④: 보낼 본문의 줄·비행
+    mock_budget = .{};
     if (surfaces.count() == 0) {
         surfaces.deinit(gpa);
         surfaces = .empty;
@@ -2653,6 +2677,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
         return;
     };
     _ = lsp_process.flush(p, gpa) catch {};
+    pumpMockBodies(gpa); // W9d④: 가짜 본문 — 창(256 KiB) 안에서(handshake 뒤에만 — 시작 중의 줄은 한 번에 쏟아진다)
     // 밀린 쓰기가 상한(`lsp_process.max_pending_bytes`)을 넘었거나 메모리가 모자랐다 — 그 뒤 쓰기는 모두 거절된다(`stalled`). sidecar 가
     // 읽지 않는다는 뜻이라 죽은 것으로 다뤄 다시 띄운다(main 기준 rebase 적대 리뷰 — 그대로 두면 명령이 조용히 버려졌다).
     if (p.stalled) return crashed(gpa, now_ms);
@@ -2838,6 +2863,7 @@ pub fn shutdownForExit() void {
     inbox = .empty;
     outbox_pending.deinit(gpa);
     outbox_pending = .empty;
+    mock_pump.deinit(gpa); // W9d④
 }
 
 // ── 대화상자·파일 선택(W5a) ────────────────────────────────────────────────────────────────────────────
@@ -3133,6 +3159,7 @@ pub fn setNetworkFull(value: bool) void {
             // W9d③ 2 차 검증 NEW-2: 막기의 켬에만 보이는 수(서비스 워커 길·다른 사이트 리다이렉트)도 본문처럼 — 꺼지면 지우고, 꺼진 동안은 적지 않는다
             // (`onHits`). 숨기기만 하면 나중에 켤 때 꺼진 동안의 수가 보였다.
             e.value_ptr.block.forgetFullCounts();
+            e.value_ptr.mock.forgetFullCounts(); // W9d④: 가짜의 서비스 워커 수도(main 위로 옮기며 — NEW-2 와 같은 꼴)
         }
     }
     const gpa = gpa_ref orelse return; // 엔진이 돈 적 없다 — 지켜보는 탭이 없다
@@ -3166,6 +3193,9 @@ fn reconcileNetwork(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
         recordOff(gpa, id, s); // W9d②: 본문은 네트워크 기록 위에 선다
         // W9d③: 막기도 네트워크 지켜보기 위에 선다 — sidecar 는 지켜보기를 끄면 그 탭의 규칙을 버린다(보낼 것이 없다).
         if (s.block.clearAll()) s.block.sent_gen = s.block.gen;
+        // W9d④: 가짜도(본문도 지운다 — 앱 셈을 돌려준다).
+        if (s.mock.clearAll(gpa, &mock_budget)) s.mock.sent_gen = s.mock.gen;
+        mock_pump.dropTab(id);
     } else {
         s.network.syncReaders(desired[0..n]);
         s.net_on = true;
@@ -3295,6 +3325,8 @@ pub fn networkList(out: std.mem.Allocator, surface_id: u64, reader: NetReader, q
     var patterns: [block_mod.max_rules]net_ring.BlockPattern = undefined;
     var view = try netView(s, surface_id, reader, &lists, origin_buf, out);
     if (reader.pane) |pane| view.block_patterns = s.block.ownerPatterns(pane, &patterns); // W9d③: 패턴은 주인에게만
+    var mocks: [mock_mod.max_rules]net_ring.MockRule = undefined;
+    if (reader.pane) |pane| view.mock_rules = mockRulesOf(s, pane, &mocks); // W9d④: 패턴·본문은 주인에게만
     var json = try s.network.list(out, reader.who, view, q, reader.bodyQuery(false, 0, 0));
     // W9d②: 기록 상태를 덧붙인다(`recording` — 켜 두었는가·sidecar 가 알린 상태).
     if (s.rec_on and json.len > 1 and json[json.len - 1] == '}') {
@@ -3325,6 +3357,8 @@ pub fn networkDetail(out: std.mem.Allocator, surface_id: u64, reader: NetReader,
     var patterns: [block_mod.max_rules]net_ring.BlockPattern = undefined;
     var view = try netView(s, surface_id, reader, &lists, origin_buf, out);
     if (reader.pane) |pane| view.block_patterns = s.block.ownerPatterns(pane, &patterns); // W9d③
+    var mocks: [mock_mod.max_rules]net_ring.MockRule = undefined;
+    if (reader.pane) |pane| view.mock_rules = mockRulesOf(s, pane, &mocks); // W9d④
     return s.network.detail(out, reader.who, view, req, reader.bodyQuery(body.want, body.offset, body.max_bytes));
 }
 
@@ -3449,6 +3483,180 @@ pub fn takeBlockNotice(surface_id: u64) bool {
     // 2 차 검증 N-e: 걸린 뒤 규칙이 모두 사라졌으면(철회) 알릴 것이 없다 — ⊘ 도 관리할 규칙도 없는 탭에 띄우지 않는다. 3 차 검증 N-B3-c: 그 뒤 같은
     // 틱에 다른 pane 이 규칙을 넣어도 옛 알림은 거둔 채다(새 세대는 다음 몸짓이 한 번 알린다).
     return s.block.takeNotice();
+}
+
+// ── W9d④: 가짜 응답(`browser.networkMock`) ─────────────────────────────────────────────────────────────
+
+/// W9d④: app 이 마지막으로 알린 `browser_network_mock` grant 들과 `browser` grant 들(가짜는 그 탭의 eval 위에 선다 — §13 P1-4).
+var mock_grants: [maru.session.control_pane_grant.capacity]NetGrantCopy = undefined;
+var mock_grant_count: usize = 0;
+var browser_grants: [maru.session.control_pane_grant.capacity]NetGrantCopy = undefined;
+var browser_grant_count: usize = 0;
+/// W9d④: 앱 전체의 가짜 본문 셈(32 MiB)과 본문 번호.
+var mock_budget: mock_mod.Budget = .{};
+/// W9d④: 가짜 본문을 sidecar 로 보내는 창(256 KiB — 실측 M28).
+var mock_pump: mock_pump_mod.Pump = .{};
+
+/// W9d④: grant 가 바뀔 때마다 app 이 `browser_network_mock` grant 와 `browser` grant 전체 목록을 알린다(`networkSync` 뒤) — 주인이 grant 를 잃은
+/// 규칙·엄격을 버리고 sidecar 에 다시 보낸다(계획 §3·§10).
+pub fn networkMockSync(mocks: []const NetworkGrant, browser: []const NetworkGrant) void {
+    mock_grant_count = 0;
+    for (mocks) |g| {
+        if (mock_grant_count == mock_grants.len) break;
+        mock_grants[mock_grant_count] = .{ .tab = g.tab, .who = g.who, .host = if (g.any_host) .{} else .init(g.host), .birth = g.birth, .any_host = g.any_host, .pane = g.pane };
+        mock_grant_count += 1;
+    }
+    browser_grant_count = 0;
+    for (browser) |g| {
+        if (browser_grant_count == browser_grants.len) break;
+        browser_grants[browser_grant_count] = .{ .tab = g.tab, .who = g.who, .host = .{}, .birth = g.birth, .any_host = true, .pane = g.pane };
+        browser_grant_count += 1;
+    }
+    const gpa = gpa_ref orelse return;
+    var it = surfaces.iterator();
+    while (it.next()) |e| reconcileMock(gpa, e.key_ptr.*, e.value_ptr);
+}
+
+fn reconcileMock(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    if (!s.mock.active()) return;
+    var owners: [maru.session.control_pane_grant.capacity]mock_mod.OwnerGrant = undefined;
+    var no: usize = 0;
+    for (mock_grants[0..mock_grant_count]) |*g| if (g.tab == id) {
+        owners[no] = .{ .pane = g.pane, .any_host = g.any_host, .host = g.host.slice() };
+        no += 1;
+    };
+    var net_panes: [maru.session.control_pane_grant.capacity]u64 = undefined;
+    var nn: usize = 0;
+    for (net_grants[0..net_grant_count]) |g| if (g.tab == id) {
+        net_panes[nn] = g.pane;
+        nn += 1;
+    };
+    var br_panes: [maru.session.control_pane_grant.capacity]u64 = undefined;
+    var nbr: usize = 0;
+    for (browser_grants[0..browser_grant_count]) |g| if (g.tab == id) {
+        br_panes[nbr] = g.pane;
+        nbr += 1;
+    };
+    if (s.mock.sync(gpa, &mock_budget, owners[0..no], net_panes[0..nn], br_panes[0..nbr])) sendNetMock(gpa, id, s);
+}
+
+/// 지금의 규칙·엄격을 sidecar 에 알린다 — 규칙을 하나씩(`net_mock_rule`) 보내고 맺는다(`net_mock_commit`). 브라우저가 있고 지켜볼 때만(없으면
+/// `browser_created` 가 부른다). 새 본문은 보내기 줄에 넣고(창 — `pumpMockBodies`), 지운 규칙의 본문은 줄에서 뺀다.
+fn sendNetMock(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    if (!s.created or !s.net_on or s.mock.sent_gen == s.mock.gen) return;
+    for (0..s.mock.rules.items.len) |i| send(gpa, .{ .net_mock_rule = s.mock.ruleWire(id, i) });
+    send(gpa, .{ .net_mock_commit = s.mock.commitWire(id) });
+    s.mock.sent_gen = s.mock.gen;
+    // 줄에 남은 이 탭의 본문 중 지금 규칙에 없는 것은 뺀다(규칙을 지움·바꿈 — 보낸 만큼의 확인은 온다).
+    var qi: usize = 0;
+    while (qi < mock_pump.queue.items.len) {
+        const q = mock_pump.queue.items[qi];
+        const live = q.tab == id and for (s.mock.rules.items) |r| {
+            if (r.body_id == q.body_id) break true;
+        } else false;
+        if (q.tab == id and !live) _ = mock_pump.queue.orderedRemove(qi) else qi += 1;
+    }
+    for (s.mock.rules.items) |*r| if (r.body.len != 0 and !r.body_queued) {
+        mock_pump.enqueue(gpa, id, r.body_id, @intCast(r.body.len)) catch continue;
+        r.body_queued = true;
+    };
+    if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test net-mock {d} gen={d} rules={d} strict={}\n", .{ id, s.mock.gen, s.mock.rules.items.len, s.mock.strict_on });
+}
+
+/// W9d④: 가짜 본문을 창 안에서 보낸다(pump 마다 — handshake 뒤에만: 시작 중의 줄은 handshake 뒤 한꺼번에 쓰여 명령 상자를 넘길 수 있다).
+fn pumpMockBodies(gpa: std.mem.Allocator) void {
+    if (state != .running) return;
+    while (mock_pump.next(gpa) catch null) |c| {
+        const s = surfaces.getPtr(c.tab) orelse {
+            mock_pump.unsend(c);
+            continue;
+        };
+        const bytes = for (s.mock.rules.items) |r| {
+            if (r.body_id == c.body_id) break r.body;
+        } else {
+            mock_pump.unsend(c); // 그 사이 지웠다 — 보내지 않은 조각을 창에서 되돌린다(확인이 오지 않는다)
+            continue;
+        };
+        send(gpa, .{ .net_mock_body = .{ .browser = c.tab, .body_id = c.body_id, .offset = c.offset, .total = c.total, .bytes = bytes[c.offset..][0..c.len] } });
+    }
+}
+
+/// W9d④: `browser.networkMock` 한 번(인자는 L2 가 정규형으로 풀고 검사했다). `grant_host` 는 그 pane 의 mock grant 호스트(사용자 탭 — 규칙의
+/// 사이트·실행 사이트), `any_host` 면 지금 페이지의 호스트가 사이트다(에이전트 탭 — 실행 사이트는 묻지 않는다). `birth` — 그 grant 가 탭과 함께
+/// 생겼다(에이전트 탭 — 사람의 누름 예외를 걸지 않는다, UD2).
+pub const MockRequest = struct {
+    pane: u64,
+    any_host: bool,
+    grant_host: []const u8 = "",
+    birth: bool = false,
+    action: mock_mod.Action,
+    pattern: []const u8 = "",
+    types: u32 = 0,
+    methods: u8 = 0,
+    response: mock_mod.Response = .{},
+    rules: []const u32 = &.{},
+    on: ?bool = null,
+};
+
+pub const MockAnswer = union(enum) { ok: []u8, fail: mock_mod.Failure };
+
+pub fn networkMock(out: std.mem.Allocator, surface_id: u64, req: MockRequest) std.mem.Allocator.Error!MockAnswer {
+    const s = surfaces.getPtr(surface_id) orelse return .{ .fail = .{ .reason = "needs_network_permission", .message = "this tab is not watched — run maru browser network on this tab first" } };
+    const gpa = gpa_ref orelse return .{ .fail = .{ .reason = "needs_network_permission", .message = "the Chromium engine is not running" } };
+    if (!s.net_on) return .{ .fail = .{ .reason = "needs_network_permission", .message = "mocking responses needs this tab's network permission first — run maru browser network on this tab" } };
+    const page_site: []const u8 = if (netKnownUrl(s)) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else "";
+    const site: []const u8 = if (page_site.len == 0) "" else if (req.any_host) page_site else req.grant_host;
+    var why: mock_mod.Failure = undefined;
+    const outcome = s.mock.apply(gpa, &mock_budget, .{
+        .owner = req.pane,
+        .action = req.action,
+        .pattern = req.pattern,
+        .types = req.types,
+        .methods = req.methods,
+        .response = req.response,
+        .rules = req.rules,
+        .on = req.on,
+        .site = site,
+        .exec_site = if (req.any_host) "" else req.grant_host,
+        .human_nav_real = !req.birth,
+        .now_ms = monotonicNow(),
+    }, &why) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Rejected => return .{ .fail = why },
+    };
+    if (outcome.changed) sendNetMock(gpa, surface_id, s);
+    return .{ .ok = try s.mock.resultJson(out, req.pane, outcome, page_site, net_full, mock_budget.app_bytes) };
+}
+
+/// W9d④: 그 탭에 가짜 규칙·엄격이 있는가(탭 제목 앞 ▣·`browser.list` 의 `mocking` — 잠든 규칙만 있어도, sidecar 확인 전에도).
+pub fn networkMocking(surface_id: u64) ?struct { rules: usize, strict: bool } {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (!s.mock.active()) return null;
+    return .{ .rules = s.mock.rules.items.len, .strict = s.mock.strict_on };
+}
+
+/// W9d④: 그 pane 이 그 탭에 둔 가짜 규칙 수와 엄격 모드(Browser Grants 줄 「response mocking (N rules[, strict])」).
+pub fn mockSummary(surface_id: u64, pane: u64) struct { rules: u32, strict: bool } {
+    const s = surfaces.getPtr(surface_id) orelse return .{ .rules = 0, .strict = false };
+    return .{ .rules = @intCast(s.mock.ownerRules(pane)), .strict = s.mock.strict_on and s.mock.strict_owner == pane };
+}
+
+/// W9d④: 걸린 가짜 알림(한 번 — 그 탭이 있는 창이 꺼내 보인다).
+pub fn takeMockNotice(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    defer s.mock_notice_pending = false;
+    return s.mock_notice_pending;
+}
+
+/// W9d④: 그 pane 의 가짜 규칙(번호·패턴·지금 본문·번호) — 네트워크 기록의 `mock_pattern`·`body_state:"mocked"` 의 본문.
+fn mockRulesOf(s: *const Surface, pane: u64, out: []net_ring.MockRule) []net_ring.MockRule {
+    var n: usize = 0;
+    for (s.mock.rules.items) |*r| {
+        if (r.owner != pane or n == out.len) continue;
+        out[n] = .{ .id = r.id, .pattern = r.pattern(), .body = r.body, .body_id = r.body_id };
+        n += 1;
+    }
+    return out[0..n];
 }
 
 /// W9d②: grant 가 바뀔 때마다 app 이 `browser_network_body` grant 전체 목록을 알린다 — 탭마다 본문 읽는 쪽을 맞추고, 그 탭의 마지막 본문
@@ -3633,6 +3841,8 @@ fn networkUserDrove(id: u64, s: *Surface) void {
     s.network.userDrove();
     // W9d③: 규칙·엄격이 있는 탭을 사용자가 몬다 — 탭·규칙 세대마다 한 번 알린다(⊘ 의 뜻과 관리할 자리).
     _ = s.block.wantsNotice();
+    // W9d④: 가짜 규칙이 있는 탭도(▣ — 보이는 페이지가 진짜가 아닐 수 있다).
+    if (s.mock.wantsNotice()) s.mock_notice_pending = true;
     const any_host = for (net_grants[0..net_grant_count]) |g| {
         if (g.tab == id and g.any_host) break true;
     } else false;
@@ -4609,6 +4819,8 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     s.console.deinit(gpa);
     s.network.deinit(gpa, &net_budget);
     s.block.deinit(gpa); // W9d③
+    mock_pump.dropTab(s.record.surface_id); // W9d④: 남은 본문은 보내지 않는다(보낸 만큼의 확인은 온다)
+    s.mock.deinit(gpa, &mock_budget);
 }
 
 /// 답을 기다리던 요청을 모두 버린다 — 답을 보내지 않는다(sidecar 가 죽었거나 브라우저가 사라져 콜백이 없다). 떠 있던
@@ -5257,6 +5469,9 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         failFileFetch(s.record.surface_id); // 청한 파일 내용도 오지 않는다(W6d③)
         // W9d② 적대 리뷰 3 회차 B2: 받던 본문의 끝은 오지 않는다 — 곧 `detached` 로 끝내고 바이트를 놓는다(다시 뜨지 않아도).
         s.network.abandonBodies(gpa, &net_budget);
+        // W9d④: 새 sidecar 는 가짜 본문을 모른다 — 브라우저가 다시 만들어지면 새 번호로 처음부터 보낸다(창도 처음으로 — 아래 `mock_pump.reset`).
+        s.mock.sent_gen = 0;
+        s.mock.acked_gen = 0;
         // 물은 닫기(W6j) — 답할 곳이 없다. 사용자는 닫기를 골랐다(떠나기 확인도 함께 사라졌다) — 창이 닫는다. 에이전트가 물은 닫기는 아니다 —
         // 떠나기 확인은 사용자가 그 탭에서 정한다(결정 ③): 탭을 남기고 에이전트에게는 「kept open」(W9b③ 적대 리뷰 5 회차).
         if (s.close_ask == .asking or s.close_ask == .asked) {
@@ -5265,6 +5480,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         }
     }
     failDevtools(gpa, 0, .sidecar_gone, false); // W9-0b: 답은 오지 않는다 — 버린 자리도 푼다(알림은 pump 끝에)
+    mock_pump.reset(); // W9d④: 새 관 — 옛 상자의 바이트는 없다
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②) — 붙은 팝업은 새 sidecar 에서 보통 탭으로 되살아난다
     parked.clearRetainingCapacity(); // W10c: 주차한 브라우저도 sidecar 와 함께 사라졌다(다시 만들지 않는다 — 탭이 없다)
     web_downloads.sidecarLost(); // 받던 다운로드는 끝났다(W10a) — 임시 파일을 지우고 새 sidecar 의 번호와 섞이지 않게
@@ -5461,6 +5677,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // 누적했다(새 sidecar 는 0 부터 차이를 보낸다).
             s.block.resend();
             sendNetBlock(gpa, id, s);
+            // W9d④: 가짜 규칙도 재생 이동보다 **먼저**(§13 P2-5) — 본문은 새 번호로 뒤에(창 — 본문 전의 맞음은 sidecar 가 붙잡는다).
+            mock_pump.dropTab(id);
+            s.mock.resendAll(&mock_budget);
+            sendNetMock(gpa, id, s);
             if (s.last_url) |u| {
                 send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
                 s.nav_pending = true;
@@ -5546,6 +5766,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.url_stale = true; // 4 회차 C3: 이 문서의 주소가 오기 전까지(32 KiB 를 넘으면 오지 않는다)
             s.console.newDocument(); // W9c①: 묶이지 않은 쪽은 이 문서의 줄부터 본다
             s.block.newDocument(); // W9d③: 「적용 안 됨」 표시는 문서마다
+            s.mock.newDocument(); // W9d④: 서비스 워커 다스림 표시도
             s.nav_uncommitted = false;
             // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
             if (s.agent_nav.active and !s.agent_nav.done and !s.initial_load_pending) s.agent_nav.saw_started = true;
@@ -5638,6 +5859,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .error_page => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.console.newDocument();
             s.block.newDocument();
+            s.mock.newDocument();
             // W9d③: 막기 규칙이 이 이동을 막았다(실패 주소의 해시로 sidecar 가 짝지었다 — 탭 길 -20·서비스 워커 길 -2). 에이전트의 navigate 는 그
             // 규칙으로 끝나고, 사용자가 마지막으로 몬 탭이면 알린다 — Chromium 의 페이지는 「Chromium 이 막았다」 고 말하고 주소창은 옛 주소다(J-B4).
             if (v.blocked_rule != 0) {
@@ -5653,6 +5875,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         // W9d③: 막기의 답과 수.
         .net_block_state => |v| if (surfaces.getPtr(v.browser)) |s| s.block.onState(v),
         .net_block_hits => |v| if (surfaces.getPtr(v.browser)) |s| s.block.onHits(v, net_full),
+        // W9d④: 가짜의 답·수·본문 확인(확인은 탭과 무관하게 창을 연다 — 지운 탭의 본문도 보낸 만큼은 확인이 온다).
+        .net_mock_state => |v| if (surfaces.getPtr(v.browser)) |s| s.mock.onState(v),
+        .net_mock_hits => |v| if (surfaces.getPtr(v.browser)) |s| s.mock.onHits(v, net_full),
+        .net_mock_ack => |v| mock_pump.ack(v.body_id, v.received),
         // W9d①: 지켜보는 탭의 요청 기록 — 지켜보기를 끈 뒤에 늦게 온 것은 버린다(끌 때 지웠다).
         .net_begin => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) {
             var sw_tabs: [net_ring.max_sw_tabs + 1]u64 = undefined;
@@ -5660,7 +5886,20 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         .net_redirect => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.redirect(gpa, &net_budget, v) catch {},
         .net_response => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.response(gpa, &net_budget, v) catch {},
-        .net_end => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.end(v),
+        .net_end => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) {
+            // W9d④: 가짜였던 요청 — 끝날 때의 본문 번호를 적고(본문은 maru 의 원본에서), 주 프레임 문서면 에이전트 이동의 결과(`mocked`)와 사용자
+            // 알림(사용자가 마지막으로 몬 탭 — 주소창은 진짜 주소를 보인다, 실측 M10).
+            if (v.flags.mocked) {
+                // 본문 번호는 sidecar 가 실제로 준 것(v2 R11 곁 — maru 가 지금 쥔 번호를 찍으면 그 사이 바뀐 응답·맺지 못한 세대 뒤의 옛 본문 대신 새
+                // 본문이 기록에 붙었다). 지금 번호와 다르면 기록은 본문을 보이지 않는다(`rule_changed` — 잃는 쪽).
+                s.network.stampMockBody(v.request, v.mock_body_id);
+                if (s.network.isMainDocument(v.request)) {
+                    if (s.agent_nav.active) s.agent_nav.mocked_rule = v.rule_id;
+                    if (s.user_action_ms > s.agent_input_ms) s.mock_notice_pending = true;
+                }
+            }
+            s.network.end(v);
+        },
         .net_dropped => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.addDroppedKinds(gpa, &net_budget, v.count, v.sw_inflight_cap) catch {},
         // W9d②: 본문 — 이 탭에 매긴 세션의 것만(끈 뒤에 오는 옛 세션의 끝도 받는다 — 기다리던 기록의 상태를 정한다).
         // 지운 뒤(`rec_floor`)의 옛 세션 frame 은 받지 않는다(W9d② 적대 리뷰 1 회차 LOW-2). 앱 상한은 본문을 가장 많이 쥔 탭부터 낸다
@@ -5809,7 +6048,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 
@@ -10999,4 +11238,224 @@ test "W9d③ v20c R15: sidecar 재시작과 failed — 만들지 못한 탭은 �
     try std.testing.expect(s.block.strict_state == .sent);
     apply(gpa, .{ .net_block_state = .{ .browser = 125, .generation = g, .ok = true, .strict = .on } }, 0);
     try std.testing.expect(s.block.strict_state == .on);
+}
+
+// ── W9d④: 가짜 응답 — maru 쪽 배선 ──
+// 시험이 증명하는 것: 브라우저가 새로 만들어지면 지켜보기 → 본문 기록 → 막기 → 가짜(규칙 frame 들 → 맺음) → 재생 이동의 차례로 보내고 본문은 그
+// 뒤에 새 번호로 창 안에서(handshake 뒤에만), 확인이 창을 연다, 사용자 탭의 규칙은 grant 호스트(실행 사이트도)·사람의 누름 표시를 싣는다, 기록의
+// 주 프레임 문서 가짜가 에이전트 이동을 `mocked` 로 끝내고 사용자가 마지막으로 몬 탭이면 알린다, `browser` grant 철회·지켜보기 끝이 규칙과
+// 본문 셈을 거둔다(▣ 가 사라진다).
+
+fn mockFrames(out: []Message) []Message {
+    var all: [64]Message = undefined;
+    const n = sentFrames(&all);
+    var k: usize = 0;
+    for (all[0..n]) |m| switch (m) {
+        .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_commit, .net_mock_body, .navigate => {
+            if (k == out.len) break;
+            out[k] = m;
+            k += 1;
+        },
+        else => {},
+    };
+    return out[0..k];
+}
+
+test "W9d④: 보내기 차례 — browser_created 면 net_watch → net_record → net_block → net_mock_rule… → net_mock_commit → navigate, 본문은 그 뒤 새 번호로 창 안에서, 확인이 창을 연다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{191});
+    const s = surfaces.getPtr(191).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 191, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 191, .who = 7, .any_host = true, .pane = 5, .birth = true }});
+    networkBodySync(&.{.{ .tab = 191, .who = 17, .any_host = true, .pane = 5, .birth = true }});
+    networkBlockSync(&.{.{ .tab = 191, .who = 27, .any_host = true, .pane = 5, .birth = true }});
+    networkMockSync(&.{.{ .tab = 191, .who = 37, .any_host = true, .pane = 5, .birth = true }}, &.{.{ .tab = 191, .who = 0, .pane = 5 }});
+    try networkRecord(191, true);
+    switch (try networkBlock(gpa, 191, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"*://*.track.test/*"} })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    const body = try gpa.alloc(u8, 40 * 1024);
+    defer gpa.free(body);
+    @memset(body, 'b');
+    switch (try networkMock(gpa, 191, .{ .pane = 5, .any_host = true, .birth = true, .action = .add, .pattern = "https://agent.test/api/*", .types = 1 << 13, .response = .{ .content_type = "application/json", .body = body } })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    switch (try networkMock(gpa, 191, .{ .pane = 5, .any_host = true, .birth = true, .action = .add, .pattern = "https://agent.test/empty", .types = 1 << 13 })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(networkMocking(191) != null); // ▣ — sidecar 확인 전에도
+    try std.testing.expectEqualStrings("agent.test", s.mock.rules.items[0].site.slice()); // 에이전트 탭 — 지금 페이지의 사이트
+    try std.testing.expectEqual(@as(usize, 0), s.mock.rules.items[0].exec_site.slice().len); // 어느 호스트든 — 실행 사이트를 묻지 않는다
+    try std.testing.expect(!s.mock.rules.items[0].human_nav_real); // 에이전트 탭 — 사람의 누름 예외 없음(UD2)
+    try std.testing.expectEqual(@as(usize, 40 * 1024), mock_budget.app_bytes);
+    const old_body_id = s.mock.rules.items[0].body_id;
+    const last = try gpa.dupe(u8, "https://agent.test/page");
+    if (s.last_url) |u| gpa.free(u);
+    s.last_url = last;
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 191 }, 0);
+    var buf: [32]Message = undefined;
+    const got = mockFrames(&buf);
+    try std.testing.expect(got.len >= 7);
+    try std.testing.expect(got[0] == .net_watch and got[1] == .net_record and got[2] == .net_block);
+    try std.testing.expect(got[3] == .net_mock_rule and got[4] == .net_mock_rule and got[5] == .net_mock_commit and got[6] == .navigate);
+    try std.testing.expectEqual(@as(u8, 2), got[5].net_mock_commit.count);
+    const new_body_id = got[3].net_mock_rule.body_id;
+    try std.testing.expect(new_body_id != 0 and new_body_id != old_body_id); // 다시 보내면 새 번호
+    try std.testing.expectEqual(@as(u32, 0), got[4].net_mock_rule.body_id); // 빈 본문은 번호가 없다
+    // 본문 — 창 안에서(16 KiB 조각 셋), 확인이 창을 연다.
+    outbox_pending.clearRetainingCapacity();
+    pumpMockBodies(gpa);
+    const chunks = mockFrames(&buf);
+    try std.testing.expectEqual(@as(usize, 3), chunks.len);
+    for (chunks) |c| try std.testing.expect(c == .net_mock_body and c.net_mock_body.body_id == new_body_id and c.net_mock_body.total == 40 * 1024);
+    try std.testing.expectEqual(@as(usize, 40 * 1024), mock_pump.in_flight);
+    apply(gpa, .{ .net_mock_ack = .{ .browser = 191, .body_id = new_body_id, .received = 40 * 1024 } }, 0);
+    try std.testing.expectEqual(@as(usize, 0), mock_pump.in_flight);
+    // handshake 전에는 보내지 않는다(시작 중의 줄은 한 번에 쏟아진다).
+    s.mock.resendAll(&mock_budget);
+    s.mock.sent_gen = s.mock.gen; // 규칙은 보낸 것으로
+    for (s.mock.rules.items) |*r| if (r.body.len != 0) try mock_pump.enqueue(gpa, 191, r.body_id, @intCast(r.body.len));
+    state = .starting;
+    outbox_pending.clearRetainingCapacity();
+    pumpMockBodies(gpa);
+    try std.testing.expectEqual(@as(usize, 0), mockFrames(&buf).len);
+    state = .running;
+}
+
+test "W9d④: 주 프레임 문서 가짜가 에이전트 이동을 mocked 로 끝내고 사용자가 몬 탭이면 알린다, 사용자 탭 규칙은 grant 호스트·실행 사이트·사람 표시, browser grant 철회·지켜보기 끝이 규칙과 본문 셈을 거둔다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{192});
+    const s = surfaces.getPtr(192).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 192, .url = "https://app.example.test/x" } }, 0);
+    networkSync(&.{.{ .tab = 192, .who = 7, .host = "example.test", .pane = 6 }});
+    networkMockSync(&.{.{ .tab = 192, .who = 37, .host = "example.test", .pane = 6 }}, &.{.{ .tab = 192, .who = 0, .pane = 6 }});
+    switch (try networkMock(gpa, 192, .{ .pane = 6, .any_host = false, .grant_host = "example.test", .action = .add, .pattern = "https://app.example.test/doc", .response = .{ .content_type = "text/html; charset=utf-8", .body = "<p>m" } })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    const r = &s.mock.rules.items[0];
+    try std.testing.expectEqualStrings("example.test", r.site.slice()); // 사용자 탭 — grant 호스트
+    try std.testing.expectEqualStrings("example.test", r.exec_site.slice()); // 문서 가짜는 그 사이트 안에서만(M25)
+    try std.testing.expect(r.human_nav_real); // 사용자 결정 Q2
+    try std.testing.expectEqual(@as(u32, 1), mockSummary(192, 6).rules);
+    // 에이전트 이동 — 그 주 프레임 문서의 끝이 가짜였다.
+    try std.testing.expect(agentNavigate(gpa, 192, "https://app.example.test/doc"));
+    apply(gpa, .{ .net_begin = .{ .browser = 192, .request = 9, .flags = .{ .main_frame = true, .navigation = true }, .flags2 = .{ .mocked = true }, .resource_type = 0, .url = "https://app.example.test/doc", .host = "app.example.test" } }, 0);
+    apply(gpa, .{ .net_end = .{ .browser = 192, .request = 9, .received = 4, .flags = .{ .mocked = true }, .rule_id = r.id, .mock_body_id = r.body_id } }, 0);
+    try std.testing.expectEqual(r.id, agentNavState(192).?.mocked_rule);
+    try std.testing.expect(!takeMockNotice(192)); // 에이전트가 마지막으로 몰았다
+    endAgentNav(192);
+    s.user_action_ms = monotonicNow() + 1;
+    apply(gpa, .{ .net_begin = .{ .browser = 192, .request = 10, .flags = .{ .main_frame = true, .navigation = true }, .flags2 = .{ .mocked = true }, .resource_type = 0, .url = "https://app.example.test/doc", .host = "app.example.test" } }, 0);
+    apply(gpa, .{ .net_end = .{ .browser = 192, .request = 10, .received = 4, .flags = .{ .mocked = true }, .rule_id = r.id, .mock_body_id = r.body_id } }, 0);
+    try std.testing.expect(takeMockNotice(192));
+    try std.testing.expect(!takeMockNotice(192));
+    // 기록의 본문 — 그 pane 에게 maru 의 원본(본문 grant 없이).
+    {
+        const json = try networkDetail(gpa, 192, .{ .who = 7, .pane = 6, .grant_host = "example.test" }, 1, .{ .want = true });
+        defer gpa.free(json);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"body_state\":\"mocked\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"body\":\"<p>m\"") != null);
+    }
+    // browser grant 철회 — 가짜는 그 탭의 eval 위에 선다: 규칙·본문 셈이 사라진다(▣ 도).
+    try std.testing.expectEqual(@as(usize, 4), mock_budget.app_bytes);
+    networkMockSync(&.{.{ .tab = 192, .who = 37, .host = "example.test", .pane = 6 }}, &.{});
+    try std.testing.expect(networkMocking(192) == null);
+    try std.testing.expectEqual(@as(usize, 0), mock_budget.app_bytes);
+    // 다시 두고 — 지켜보기가 끝나면(마지막 네트워크 grant) 사라진다.
+    networkMockSync(&.{.{ .tab = 192, .who = 37, .host = "example.test", .pane = 6 }}, &.{.{ .tab = 192, .who = 0, .pane = 6 }});
+    switch (try networkMock(gpa, 192, .{ .pane = 6, .any_host = false, .grant_host = "example.test", .action = .add, .pattern = "https://app.example.test/doc", .response = .{ .content_type = "text/html; charset=utf-8", .body = "<p>m" } })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    networkSync(&.{});
+    try std.testing.expect(networkMocking(192) == null);
+    try std.testing.expectEqual(@as(usize, 0), mock_budget.app_bytes);
+    const c = try networkMock(gpa, 192, .{ .pane = 6, .any_host = false, .grant_host = "example.test", .action = .list });
+    try std.testing.expectEqualStrings("needs_network_permission", c.fail.reason);
+}
+
+test "W9d④ 변이: Grants 줄의 수·엄격은 그 pane 의 것만, 바꾼 본문의 옛 번호는 줄에서 빠지고 규칙 없는 본문은 창을 쓰지 않는다, 주 프레임의 하위 자원 가짜는 navigate 를 mocked 로 만들지 않는다, 다른 탭의 mock·browser grant 는 규칙을 지키지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{193});
+    apply(gpa, .{ .url_changed = .{ .browser = 193, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 193, .who = 7, .any_host = true, .pane = 5 }, .{ .tab = 193, .who = 8, .any_host = true, .pane = 6 } });
+    const mocks = [_]NetworkGrant{ .{ .tab = 193, .who = 37, .any_host = true, .pane = 5 }, .{ .tab = 193, .who = 38, .any_host = true, .pane = 6 } };
+    const browsers = [_]NetworkGrant{ .{ .tab = 193, .who = 0, .pane = 5 }, .{ .tab = 193, .who = 0, .pane = 6 } };
+    networkMockSync(&mocks, &browsers);
+    const add = struct {
+        fn f(pane: u64, pattern: []const u8, body: []const u8) !void {
+            switch (try networkMock(std.testing.allocator, 193, .{ .pane = pane, .any_host = true, .birth = true, .action = .add, .pattern = pattern, .types = 1 << 13, .response = .{ .content_type = "application/json", .body = body } })) {
+                .ok => |json| std.testing.allocator.free(json),
+                .fail => return error.TestUnexpectedResult,
+            }
+        }
+    }.f;
+    try add(5, "https://agent.test/a", "aaaa");
+    const s = surfaces.getPtr(193).?;
+    const old_id = s.mock.rules.items[0].body_id;
+    try add(5, "https://agent.test/a", "bbbb"); // 바꾸기 — 옛 번호의 본문은 보낼 줄에서 빠진다
+    for (mock_pump.queue.items) |q| try std.testing.expect(q.body_id != old_id);
+    try add(6, "https://agent.test/b", "");
+    switch (try networkMock(gpa, 193, .{ .pane = 5, .any_host = true, .birth = true, .action = .strict, .on = true })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(mockSummary(193, 5).rules == 1 and mockSummary(193, 5).strict);
+    try std.testing.expect(mockSummary(193, 6).rules == 1 and !mockSummary(193, 6).strict);
+    // 규칙이 없는 본문 번호가 줄에 있다 — 보내지 않고 창에서도 되돌린다.
+    pumpMockBodies(gpa);
+    const sent = mock_pump.in_flight;
+    try mock_pump.enqueue(gpa, 193, 9999, 100);
+    pumpMockBodies(gpa);
+    try std.testing.expectEqual(sent, mock_pump.in_flight);
+    try std.testing.expect(!mock_pump.pending());
+    // 에이전트 이동 중 주 프레임이 낸 fetch 가 가짜였다 — 이동 자체는 가짜가 아니다.
+    try std.testing.expect(agentNavigate(gpa, 193, "https://agent.test/page"));
+    apply(gpa, .{ .net_begin = .{ .browser = 193, .request = 20, .flags = .{ .main_frame = true }, .flags2 = .{ .mocked = true }, .resource_type = 13, .url = "https://agent.test/a", .host = "agent.test" } }, 0);
+    apply(gpa, .{ .net_end = .{ .browser = 193, .request = 20, .received = 4, .flags = .{ .mocked = true }, .rule_id = s.mock.rules.items[0].id, .mock_body_id = s.mock.rules.items[0].body_id } }, 0);
+    // v2 R11 곁: sidecar 가 옛 본문(바꾸기 전 번호)을 준 요청 — maru 의 지금 본문(「bbbb」)을 그 기록에 붙이지 않는다(rule_changed).
+    apply(gpa, .{ .net_begin = .{ .browser = 193, .request = 21, .flags = .{ .main_frame = true }, .flags2 = .{ .mocked = true }, .resource_type = 13, .url = "https://agent.test/a", .host = "agent.test" } }, 0);
+    apply(gpa, .{ .net_end = .{ .browser = 193, .request = 21, .received = 4, .flags = .{ .mocked = true }, .rule_id = s.mock.rules.items[0].id, .mock_body_id = old_id } }, 0);
+    {
+        const json = try networkDetail(gpa, 193, .{ .who = 7, .pane = 5 }, 2, .{ .want = true });
+        defer gpa.free(json);
+        std.testing.expect(std.mem.indexOf(u8, json, "\"body\":\"bbbb\"") == null and std.mem.indexOf(u8, json, "rule_changed") != null) catch |e| {
+            std.debug.print("stale mock body record: {s}\n", .{json[0..@min(json.len, 400)]});
+            return e;
+        };
+    }
+    try std.testing.expectEqual(@as(u32, 0), agentNavState(193).?.mocked_rule);
+    endAgentNav(193);
+    // 가짜의 패턴·본문은 그 규칙을 둔 pane 에게만 — 다른 pane 은 mocked 표시뿐.
+    for ([_]struct { who: u64, pane: u64, owner: bool }{ .{ .who = 7, .pane = 5, .owner = true }, .{ .who = 8, .pane = 6, .owner = false } }) |rd| {
+        const json = try networkDetail(gpa, 193, .{ .who = rd.who, .pane = rd.pane }, 1, .{ .want = true });
+        defer gpa.free(json);
+        try std.testing.expect(std.mem.indexOf(u8, json, "\"mocked\":true") != null);
+        try std.testing.expectEqual(rd.owner, std.mem.indexOf(u8, json, "\"mock_pattern\"") != null);
+        try std.testing.expectEqual(rd.owner, std.mem.indexOf(u8, json, "\"body\":\"bbbb\"") != null);
+    }
+    // 다른 탭의 mock grant 만 남았다 — 이 탭의 규칙은 버린다.
+    networkMockSync(&.{ .{ .tab = 999, .who = 37, .any_host = true, .pane = 5 }, .{ .tab = 999, .who = 38, .any_host = true, .pane = 6 } }, &browsers);
+    try std.testing.expect(networkMocking(193) == null);
+    // 다시 두고 — 다른 탭의 browser grant 만 남았다.
+    networkMockSync(&mocks, &browsers);
+    try add(5, "https://agent.test/a", "aaaa");
+    networkMockSync(&mocks, &.{ .{ .tab = 999, .who = 0, .pane = 5 }, .{ .tab = 999, .who = 0, .pane = 6 } });
+    try std.testing.expect(networkMocking(193) == null);
 }

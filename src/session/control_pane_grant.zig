@@ -59,13 +59,13 @@ pub const hostOfUrl = net_policy.hostOfUrl;
 /// 사이트에 묶이는 scope 인가 — 쿠키(`browser_storage`)와 네트워크 기록(`browser_network` — W9d①: 요청 헤더에 그 사이트의 로그인 쿠키가
 /// 들어 있다)는 모달이 보인 호스트와 그 하위 도메인에서만 인가한다. `browser` 는 호스트를 보지 않는다.
 pub fn hostBound(scope: capmod.ScopeClass) bool {
-    return scope == .browser_storage or scope == .browser_network or scope == .browser_network_body or scope == .browser_network_block;
+    return scope == .browser_storage or scope == .browser_network or scope == .browser_network_body or scope == .browser_network_block or scope == .browser_network_mock;
 }
 
 /// 다른 호스트로 다시 허용하면 새 동의(새 번호)인 scope — 네트워크 기록·본문·막기(W9d③ — 막기 규칙은 그 사이트에 묶여 있고, 읽는 쪽 시작점처럼
 /// 번호가 「그 동의」 를 가리킨다).
 fn newConsentScope(scope: capmod.ScopeClass) bool {
-    return scope == .browser_network or scope == .browser_network_body or scope == .browser_network_block;
+    return scope == .browser_network or scope == .browser_network_body or scope == .browser_network_block or scope == .browser_network_mock; // W9d④: 가짜도
 }
 
 /// 확인된 grant 한 건: pane P의 에이전트 → target web surface W, scope S.
@@ -100,9 +100,9 @@ pub const PaneGrant = struct {
 /// 초과=`error.Full`(호출자 방어 — 정상 사용선 도달 안 함). DoS-safe 고정 배열(allocator 불요). 에이전트 탭의 태어날 때 네트워크
 /// grant(`birth`)는 이 상한 밖에서 따로 센다 — 각각 그 탭의 제어 grant 와 짝이라 그 수도 `max_grants` 를 넘지 않는다.
 pub const max_grants: usize = 64;
-/// 태어날 때의 grant 수 상한 — 에이전트 탭 하나에 셋(네트워크 기록·본문 기록 — W9d② 사용자 결정 UB2, 요청 막기 — W9d③ 사용자 결정 D1)이라
-/// 상한 안 grant 의 세 배.
-pub const max_birth_grants: usize = 3 * max_grants;
+/// 태어날 때의 grant 수 상한 — 에이전트 탭 하나에 넷(네트워크 기록·본문 기록 — W9d② 사용자 결정 UB2, 요청 막기 — W9d③ 사용자 결정 D1, 가짜
+/// 응답 — W9d④ D1 그대로)이라 상한 안 grant 의 네 배.
+pub const max_birth_grants: usize = 4 * max_grants;
 /// 표의 실제 자리 수 — 상한 안의 grant 와 태어날 때의 grant 를 함께 담는다.
 pub const capacity: usize = max_grants + max_birth_grants;
 
@@ -433,12 +433,13 @@ test "W9d① 적대 리뷰 1 회차 재현 F1·F5: 네트워크 grant 를 다른
     try testing.expectEqualStrings("agent.test", store.hostOf(6, 12, .browser_network).?.slice());
 }
 
-test "W9d① 적대 리뷰 1 회차 재현 F6: 태어날 때 grant 는 64 자리 상한 밖에서 센다 — 보통 grant 64 개와 태어날 때 grant(탭마다 셋 — W9d② 본문 기록·W9d③ 막기) 192 개를 함께 담고, 그 넘어는 Full" {
+test "W9d① 적대 리뷰 1 회차 재현 F6: 태어날 때 grant 는 64 자리 상한 밖에서 센다 — 보통 grant 64 개와 태어날 때 grant(탭마다 넷 — W9d② 본문 기록·W9d③ 막기·W9d④ 가짜) 256 개를 함께 담고, 그 넘어는 Full" {
     var store: PaneGrantStore = .{};
     for (0..max_grants) |i| {
         try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network, .any_host = true, .birth = true });
         try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network_body, .any_host = true, .birth = true });
         try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network_block, .any_host = true, .birth = true });
+        try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network_mock, .any_host = true, .birth = true });
     }
     try testing.expect(store.room(false)); // 태어날 때 grant 가 다 차도 사용자의 모달은 저장된다
     try testing.expect(!store.room(true));
@@ -607,4 +608,22 @@ test "W9d③ v20b R11d: block grant 번호 — 같은 호스트 다시 허락은
     try store.grant(.{ .pane = 8, .target = 13, .scope = .browser_network_block, .host = GrantHost.init("") });
     try testing.expect(!store.authorizes(8, 13, .browser_network_block, "a.test"));
     try testing.expect(!store.authorizes(8, 13, .browser_network_block, ""));
+}
+
+test "W9d④: browser_network_mock grant 도 사이트에 묶인다 — 다른 호스트로 다시 허용하면 새 번호, 몰기의 좁히기는 네트워크와 함께, 넷을 위한 태어날 때 자리" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_mock, .host = GrantHost.init("app.test") });
+    try testing.expect(store.authorizes(5, 11, .browser_network_mock, "api.app.test"));
+    try testing.expect(!store.authorizes(5, 11, .browser_network_mock, "bank.test"));
+    try testing.expect(!store.authorizes(5, 11, .browser_network_block, "app.test")); // 따로 묻는다
+    const first = store.idOf(5, 11, .browser_network_mock).?;
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_mock, .host = GrantHost.init("bank.test") });
+    try testing.expect(store.idOf(5, 11, .browser_network_mock).? != first);
+    try store.grant(.{ .pane = 6, .target = 12, .scope = .browser_network_mock, .any_host = true, .birth = true });
+    try testing.expect(store.authorizes(6, 12, .browser_network_mock, "bank.test"));
+    try testing.expect(store.narrowAnyHost(12, GrantHost.init("agent.test")));
+    try testing.expect(!store.authorizes(6, 12, .browser_network_mock, "bank.test"));
+    try testing.expect(hostBound(.browser_network_mock));
+    const empty: PaneGrantStore = .{};
+    try testing.expect(empty.birthRoom(4));
 }

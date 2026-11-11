@@ -183,6 +183,17 @@ pub const Tag = enum(u8) {
     /// `strict_site` 가 비지 않으면 엄격 모드(그 사이트에 묶인 서비스 워커 우회 — sidecar 의 `net_domain` 이 그 탭에 CDP
     /// `Network.setBypassServiceWorker` 를 건다). 답은 `net_block_state`. sidecar 는 지켜보기(`net_watch`)가 꺼지면 그 탭의 규칙을 버린다.
     net_block = 136,
+    /// 그 탭의 가짜 응답 규칙 하나(W9d④ — maru 가 `browser.networkMock` 으로 바꿀 때마다·브라우저가 새로 만들어질 때 세대의 규칙을 **하나씩**
+    /// 보내고 `net_mock_commit` 으로 맺는다 — 규칙 하나가 머리 8 KiB 까지라 한 frame 에 모두 싣지 못한다). 규칙은 정규형 패턴·종류·메서드·추가한
+    /// 때의 사이트·실행 출처(문서 가짜의 사이트 묶기 — 계획 §5)와 응답(상태·content_type·Location·허용 목록 머리·본문 번호와 길이). 본문은
+    /// `net_mock_body` 로 따로 온다(규칙 frame 이 먼저 — 재생 이동 앞에 선다).
+    net_mock_rule = 137,
+    /// 가짜 응답 본문의 한 조각(W9d④ — 16 KiB). maru 는 앱 전체에서 확인받지 않은 본문을 256 KiB 안으로 둔다(실측 M28 — 1 MiB 명령 상자가
+    /// 넘치면 관이 닫힌다). sidecar 는 64 KiB 마다·본문을 다 받으면 `net_mock_ack` 으로 확인한다.
+    net_mock_body = 138,
+    /// 그 세대의 규칙을 맺는다(W9d④) — `count` 개가 모두 왔으면 sidecar 가 규칙 묶음을 바꾸고(아니면 `net_mock_state.ok` 거짓) 가짜 엄격
+    /// 모드(`strict_site`)를 맞춘다. 답은 `net_mock_state`.
+    net_mock_commit = 139,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
@@ -221,6 +232,14 @@ pub const Tag = enum(u8) {
     /// 기록 없이 막은 수, 페이지를 몰라 막지 않은 수, 이 문서에서 서비스 워커를 규칙 없는 탭과 나눴는가. maru 가 누적한다(sidecar 가 다시 뜨면
     /// 0 부터 — 차이라 맞다).
     net_block_hits = 78,
+    /// `net_mock_commit` 을 받았다(W9d④) — 그 세대를 적용했는가와 엄격 모드의 지금 상태(막기와 나누는 Network 도메인 — 가짜 엄격 사이트가
+    /// 있을 때만 그 상태를 싣는다). 엄격 상태가 바뀌면 같은 세대로 다시 온다.
+    net_mock_state = 79,
+    /// 가짜 응답 본문을 받은 만큼(W9d④ — 그 본문 번호의 누적 바이트). maru 는 그만큼 보내기 창을 연다.
+    net_mock_ack = 80,
+    /// 가짜의 수(W9d④ — 보내는 task 가 모아 **차이만**): 규칙마다 맞음·서비스 워커 길에서 맞았지만 가짜로 바꾸지 않은 수, 문을 지나지 못해 기록
+    /// 없이 가짜를 준 수, 가짜를 줄 수 없어(풀이 참·본문 시한) `-12` 로 끝낸 수, 페이지를 몰라 맞추지 않은 수, 서비스 워커가 다스리는 페이지였는가.
+    net_mock_hits = 81,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -1250,7 +1269,10 @@ pub const NetHeaderBlock = struct {
 /// `net_body_end` 를 꼭 하나 보낸다(본문을 잡지 못한 까닭이라도 — 맞는 CDP 요청이 없으면 `unmatched`).
 pub const NetFlags2 = packed struct(u8) {
     body_expected: bool = false,
-    _reserved: u7 = 0,
+    /// W9d④: 처리기 고르기에서 이미 가짜(리다이렉트가 아닌)로 골랐다 — sidecar 는 이 요청의 본문을 CDP 로 받으러 가지 않고(`body_expected`
+    /// 거짓), maru 는 제 원본을 본문으로 보인다(`body_state:"mocked"`).
+    mocked: bool = false,
+    _reserved: u6 = 0,
 };
 
 pub const NetBegin = struct {
@@ -1323,13 +1345,22 @@ pub const NetEnd = struct {
     /// 막았을 수 있다), 서비스 워커 길에서 맞는 규칙이 있었지만 규칙 없는 탭과 나눠 막지 않았다(`sw_not_applied`). 둘 중 하나면 `rule_id` 가 그 규칙.
     flags: NetEndFlags = .{},
     rule_id: u32 = 0,
+    /// W9d④: `flags.mocked` 일 때만 — 그 가짜가 실제로 준 본문의 번호(0 = 빈 본문). maru 는 기록의 `body_state:"mocked"` 본문을 이 번호로 짝짓는다
+    /// (v2 검증 R11 곁: 끝날 때 maru 가 쥔 **지금** 번호를 찍으면, 그 사이 바뀐 응답이나 맺지 못한 세대 뒤에 sidecar 가 계속 준 옛 본문 대신 새
+    /// 본문이 기록에 붙었다). wire 에는 `mocked` 일 때만 싣는다.
+    mock_body_id: u32 = 0,
 };
 
 /// 요청 끝의 표시(W9d③).
 pub const NetEndFlags = packed struct(u8) {
     blocked: bool = false,
     sw_not_applied: bool = false,
-    _reserved: u6 = 0,
+    /// W9d④: 마지막 응답을 가짜 규칙이 줬다(`rule_id` 가 그 규칙 — 상태·mime·받은 바이트가 가짜의 것이다). CORS 로 떨어진 가짜도(실패 -2).
+    mocked: bool = false,
+    /// W9d④: 가짜 규칙이 리다이렉트 홉을 줬다(마지막 응답은 진짜일 수 있다 — `mocked` 가 함께 없으면 진짜). `mocked` 가 없으면 `rule_id` 가 그
+    /// 리다이렉트 규칙.
+    mock_redirected: bool = false,
+    _reserved: u4 = 0,
 };
 
 pub const NetDropped = struct {
@@ -1536,6 +1567,122 @@ pub const ErrorPage = struct {
     blocked_rule: u32 = 0,
 };
 
+// ── 가짜 응답(W9d④) ───────────────────────────────────────────────────────────────────────────────────────
+
+/// 탭 하나(모든 pane 합)의 가짜 규칙 수 상한(`net_mock_rules.max_rules` 와 같다).
+pub const max_net_mock_rules: usize = 32;
+/// 본문 하나의 상한(`net_mock_rules.max_body_bytes` 와 같다).
+pub const max_net_mock_body_bytes: u32 = 512 * 1024;
+/// 본문 조각 상한(`net_mock_rules.body_chunk_bytes` 와 같다).
+pub const net_mock_chunk_bytes: usize = 16 * 1024;
+/// 응답 머리 수·바이트·`Location`·`content_type` 상한(`net_mock_rules` 와 같다).
+pub const max_net_mock_headers: usize = 32;
+pub const max_net_mock_headers_bytes: usize = 8 * 1024;
+pub const max_net_mock_location_bytes: usize = 2 * 1024;
+pub const max_net_mock_content_type_bytes: usize = 256;
+/// sidecar 의 명령 상자(`inbox.capacity` — sidecar 쪽 comptime 이 같은지 본다). 가짜 본문 창이 이 안에 든다(codec comptime).
+pub const sidecar_inbox_bytes: usize = 1024 * 1024;
+
+pub const NetMockRuleFlags = packed struct(u8) {
+    /// 문서 종류(주 프레임·하위 프레임·object)는 `exec_site` 가 요청 호스트를 덮어야 맞는다(사이트에 묶인 grant 의 규칙 — 계획 §5-2).
+    exec_site_bound: bool = false,
+    /// 사용자 탭의 규칙(주인의 mock grant 가 탭과 함께 생긴 것이 아니다) — 사람이 누른 링크·폼으로 시작한 이동의 **주 문서**에는 맞지 않는다
+    /// (사용자 결정 Q2 2026-10-21). 하위 자원은 그대로 맞는다.
+    human_nav_real: bool = false,
+    _reserved: u6 = 0,
+};
+
+pub const NetMockRule = struct {
+    browser: BrowserId,
+    /// 이 규칙이 속한 세대(`net_mock_commit` 이 맺는다).
+    generation: u32,
+    /// 세대 안의 차례(0..count-1 — 맞추기 차례: 앞 규칙이 이긴다).
+    index: u8 = 0,
+    /// maru 가 매기는 규칙 번호(0 아님 — 탭 안에서 다시 쓰지 않는다). 수와 끝 표시가 이 번호로 온다.
+    id: u32 = 0,
+    /// 종류 마스크(0 = 모든 종류, `net_mock_rules.types_mask_valid` 안 — 서비스 워커·공유 워커·preload 는 없다).
+    types: u32 = 0,
+    /// 메서드 마스크(0 = 모든 메서드 — `net_mock_rules.method_names` 의 비트).
+    methods: u8 = 0,
+    flags: NetMockRuleFlags = .{},
+    /// 추가한 때의 페이지 호스트(사이트 — 그 사이트의 페이지에서만 일한다).
+    site: []const u8 = "",
+    /// 실행 출처의 사이트(`flags.exec_site_bound` 일 때만 — 그 grant 의 호스트).
+    exec_site: []const u8 = "",
+    /// 정규형 패턴(`net_block.parse(..).norm()`).
+    pattern: []const u8 = "",
+    status: u16 = 200,
+    /// 본문 번호(maru 가 앱 안에서 매긴다 — 0 이면 빈 본문)와 길이(디코드한 바이트).
+    body_id: u32 = 0,
+    body_len: u32 = 0,
+    /// `Content-Type` 머리로 싣는다(실측 M20 — 200 밖에서는 `set_mime_type` 이 버려졌다).
+    content_type: []const u8 = "",
+    /// 3xx 의 `Location`(빈 글 = 없음).
+    location: []const u8 = "",
+    /// 허용 목록 안의 머리(`Location` 은 위 칸으로 — 여기에는 없다). 32 개·8 KiB.
+    headers: NetHeaderBlock = .{},
+};
+
+pub const NetMockBody = struct {
+    browser: BrowserId,
+    body_id: u32,
+    /// 이 조각의 시작(앞 조각의 끝과 같다).
+    offset: u32,
+    /// 본문 전체 길이(규칙의 `body_len` 과 같다).
+    total: u32,
+    /// 비지 않고 `net_mock_chunk_bytes` 안.
+    bytes: []const u8,
+};
+
+pub const NetMockCommit = struct {
+    browser: BrowserId,
+    generation: u32,
+    /// 이 세대의 규칙 수(0 = 모두 지움).
+    count: u8 = 0,
+    /// 가짜 엄격 모드가 묶인 사이트(빈 글 = 끔).
+    strict_site: []const u8 = "",
+};
+
+pub const NetMockState = struct {
+    browser: BrowserId,
+    generation: u32,
+    /// 그 세대를 적용했다(거짓 — 브라우저를 모른다·지켜보는 탭이 아니다·규칙이 다 오지 않았다).
+    ok: bool,
+    strict: NetStrictState = .off,
+};
+
+pub const NetMockAck = struct {
+    browser: BrowserId,
+    body_id: u32,
+    /// 그 본문을 받은 누적 바이트(0 아님 — 본문 상한 안).
+    received: u32,
+};
+
+pub const NetMockHit = struct {
+    rule_id: u32 = 0,
+    /// 탭 길에서 맞아 가짜를 준 수(맞음 — 페이지가 그 가짜를 썼다는 뜻은 아니다: CORS 로 떨어진 것도 센다, M6).
+    hits: u32 = 0,
+    /// 서비스 워커 길에서 맞았지만 가짜로 바꾸지 않은 수(서비스 워커는 가짜를 어떤 길로도 보지 않는다 — 사용자 결정 Q1).
+    sw_not_mocked: u32 = 0,
+    /// 패턴·종류·사이트는 맞았지만 그 가짜가 돌 출처(문서는 주소, 그 밖은 요청을 낸 프레임·워커)를 규칙의 grant 가 덮지 않아 진짜로 보낸 수
+    /// (W9d④ v1 검증 SEVERE-1 — 사용자 결정 2026-11-11 「허락 밖 iframe 요청은 모두 진짜」, `net_mock_rules.execSiteAllows`).
+    frame_not_mocked: u32 = 0,
+};
+
+pub const NetMockHits = struct {
+    browser: BrowserId,
+    /// 문(양동이·동시 요청)을 지나지 못해 기록 없이 가짜를 준 수(fail closed — 문이 가짜를 끄지 않는다).
+    unrecorded: u32 = 0,
+    /// 가짜를 줄 수 없어(처리기 풀이 참·본문이 시한 안에 오지 않음) `-12` 로 끝낸 수 — 진짜로 보내지 않았다.
+    busy: u32 = 0,
+    /// 탭의 맨 위 문서를 몰라 맞추지 않은 수(요청은 진짜로 갔다 — 덮지 않는 사이트를 지킨다).
+    skipped_unknown_page: u32 = 0,
+    /// 이 차이 안에 서비스 워커 길의 맞음이 있었다(그 페이지는 서비스 워커가 다스린다 — 엄격 모드를 쓰라).
+    page_controlled: bool = false,
+    count: u8 = 0,
+    entries: [max_net_mock_rules]NetMockHit = @splat(.{}),
+};
+
 pub const DownloadAction = enum(u8) {
     cancel = 0,
     resume_download = 1,
@@ -1630,6 +1777,9 @@ pub const Message = union(Tag) {
     net_watch: NetWatch,
     net_record: NetRecord,
     net_block: NetBlock,
+    net_mock_rule: NetMockRule,
+    net_mock_body: NetMockBody,
+    net_mock_commit: NetMockCommit,
     main_frame_navigating: BrowserId,
     console_message: ConsoleMessage,
     error_page: ErrorPage,
@@ -1643,6 +1793,9 @@ pub const Message = union(Tag) {
     net_record_state: NetRecordState,
     net_block_state: NetBlockState,
     net_block_hits: NetBlockHits,
+    net_mock_state: NetMockState,
+    net_mock_ack: NetMockAck,
+    net_mock_hits: NetMockHits,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

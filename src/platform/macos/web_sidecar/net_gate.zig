@@ -210,6 +210,14 @@ pub const Track = struct {
     /// 워커 길은 맞는 규칙을 쥔 탭마다 제 규칙.
     block_kind: BlockKind = .none,
     block_rules: [max_targets]u32 = @splat(0),
+    /// W9d④: 가짜의 표시(탭 길 — 대상 하나). 홉마다 고르기가 적는다: 지금 홉을 가짜가 주는가(`mock_rule` — 0 이면 진짜 홉), 앞 홉의 가짜가
+    /// 리다이렉트를 줬는가(`mock_redirect_rule`), 첫 홉을 리다이렉트가 아닌 가짜로 골랐는가(`mock_first` — 시작의 `flags2.mocked`: W9d② 가
+    /// CDP 본문을 받으러 가지 않는다). 막기가 이긴다 — 막힌 홉이 오면 가짜 표시는 끝에 싣지 않는다.
+    mock_rule: u32 = 0,
+    mock_redirect_rule: u32 = 0,
+    mock_first: bool = false,
+    /// 지금 홉의 가짜가 준 본문 번호(`mock_rule` 이 0 이 아닐 때 — 0 은 빈 본문). 끝의 `net_end.mock_body_id`(v2 R11 곁 — maru 가 지금 번호를 찍지 않게).
+    mock_body_id: u32 = 0,
 
     pub fn initiatorSlice(self: *const Track) []const u8 {
         return self.initiator[0..self.initiator_len];

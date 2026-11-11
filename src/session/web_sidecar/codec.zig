@@ -101,6 +101,12 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .net_block => |value| try net_fields.writeBlock(&cursor, value),
         .net_block_state => |value| try net_fields.writeBlockState(&cursor, value),
         .net_block_hits => |value| try net_fields.writeBlockHits(&cursor, value),
+        .net_mock_rule => |value| try net_fields.writeMockRule(&cursor, value), // W9d④
+        .net_mock_body => |value| try net_fields.writeMockBody(&cursor, value),
+        .net_mock_commit => |value| try net_fields.writeMockCommit(&cursor, value),
+        .net_mock_state => |value| try net_fields.writeMockState(&cursor, value),
+        .net_mock_ack => |value| try net_fields.writeMockAck(&cursor, value),
+        .net_mock_hits => |value| try net_fields.writeMockHits(&cursor, value),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -481,6 +487,12 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .net_block => .{ .net_block = try net_fields.readBlock(&cursor) },
         .net_block_state => .{ .net_block_state = try net_fields.readBlockState(&cursor) },
         .net_block_hits => .{ .net_block_hits = try net_fields.readBlockHits(&cursor) },
+        .net_mock_rule => .{ .net_mock_rule = try net_fields.readMockRule(&cursor) }, // W9d④
+        .net_mock_body => .{ .net_mock_body = try net_fields.readMockBody(&cursor) },
+        .net_mock_commit => .{ .net_mock_commit = try net_fields.readMockCommit(&cursor) },
+        .net_mock_state => .{ .net_mock_state = try net_fields.readMockState(&cursor) },
+        .net_mock_ack => .{ .net_mock_ack = try net_fields.readMockAck(&cursor) },
+        .net_mock_hits => .{ .net_mock_hits = try net_fields.readMockHits(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
         .set_hidden => .{ .set_hidden = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
@@ -908,7 +920,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  23, 0, // v23, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  24, 0, // v24, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -994,9 +1006,9 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 79; // 정의되지 않은 tag(sidecar → maru 는 W9d③ 의 `net_block_hits` 78 까지)
+    bad[10] = 82; // 정의되지 않은 tag(sidecar → maru 는 W9d④ 의 `net_mock_hits` 81 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
-    bad[10] = 137; // 둘째 구간(maru → sidecar)도 W9d③ 의 `net_block` 136 뒤는 비었다
+    bad[10] = 140; // 둘째 구간(maru → sidecar)도 W9d④ 의 `net_mock_commit` 139 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
@@ -2255,7 +2267,10 @@ test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청
     bad[body + 18] = 18; // 비은 자원 종류(W9d②: 둘째 표시 다음 칸)
     try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
     bad = buf;
-    bad[body + 17] = 0x02; // W9d②: 둘째 표시의 쓰지 않는 비트
+    bad[body + 17] = 0x04; // W9d②: 둘째 표시의 쓰지 않는 비트(W9d④ 가 0x02 를 `mocked` 로 썼다)
+    try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[body + 17] = 0x03; // W9d④: 가짜로 고른 요청은 본문을 CDP 로 받지 않는다(둘이 함께 오지 않는다)
     try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
     bad = buf;
     bad[body + 17] = 0x01; // body_expected 만은 받는다
@@ -2366,13 +2381,13 @@ test "W9d②: 본문 기록 넷이 왕복하고 방향이 맞다 — net_begin �
     inline for (.{ Tag.net_body_data, Tag.net_body_end, Tag.net_record_state }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d②: 본문 frame 의 바이트 배치 골든(버전 23 — W9d③ 이 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
+test "W9d②: 본문 frame 의 바이트 배치 골든(버전 24 — W9d④ 가 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
     var buf: [128]u8 = undefined;
     var len = try encode(.{ .net_record = .{ .browser = 0x0102, .on = true, .session = 0x0a0b0c0d } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 23, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 24, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
     len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 2, .request = 3, .state = .captured, .flags = .{ .redecoded = true, .credentialed = true }, .size = 0x0100, .decoded = 0x0200 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 23, 75, // 머리
+        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 24, 75, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, // session
         0, 0, 0, 0, 0, 0, 0, 3, // request
@@ -2381,9 +2396,9 @@ test "W9d②: 본문 frame 의 바이트 배치 골든(버전 23 — W9d③ 이 
         0, 0, 0, 0, 0, 0, 2, 0, // decoded
     }, buf[0..len]);
     len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 2, .request = 3, .offset = 4, .bytes = "hi" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 23, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 24, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
     len = try encode(.{ .net_record_state = .{ .browser = 1, .session = 2, .status = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 23, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 24, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
 }
 
 test "W9d②: 본문의 닫힌 칸은 양쪽에서 거절한다 — 세션·요청 0, 빈·큰 조각, 본문 상한 넘는 끝, 잡지 않은 본문의 크기·글 표시, 켬과 세션 어긋남" {
@@ -2488,7 +2503,7 @@ test "W9d②: 본문 frame 을 무작위로 망가뜨려도 풀기는 무너지�
 
 // ── 요청 막기(W9d③) ─────────────────────────────────────────────────────────────────────────────────────
 // 시험이 증명하는 것: 막기 셋(`net_block`·`net_block_state`·`net_block_hits`)과 바뀐 칸(`net_end` 의 막기 표시·규칙 번호, `error_page` 의 오류 번호·
-// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 23), 닫힌 칸(규칙 수·번호 0·중복·종류
+// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 24 — 배치는 23 과 같다), 닫힌 칸(규칙 수·번호 0·중복·종류
 // 마스크·호스트·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 막기 frame(규칙 32 개·사이트·패턴 상한)이
 // frame 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 막기 규칙이 사용자 탭의 요청을 막는다
 // (maru 와 sidecar 가 같은 규칙을 봐야 하고, sidecar 가 보낸 수는 공격 입력으로 다룬다).
@@ -2532,13 +2547,13 @@ test "W9d③: 막기 셋과 바뀐 칸이 왕복하고 방향이 맞다 — 규�
     inline for (.{ Tag.net_block_state, Tag.net_block_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d③: 막기 frame 의 바이트 배치 골든(버전 23) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
+test "W9d③: 막기 frame 의 바이트 배치 골든(버전 24 — W9d④ 가 올렸다, 배치는 23 과 같다) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
     var buf: [256]u8 = undefined;
     var v: message_mod.NetBlock = .{ .browser = 1, .generation = 0x0102, .strict_site = "a.t", .count = 1 };
     v.rules[0] = .{ .id = 5, .types = 0x10, .site = "a.t", .pattern = "https://a.t/x" };
     var len = try encode(.{ .net_block = v }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 23, 136, // 머리
+        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 24, 136, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         3, 'a', '.', 't', // 엄격 사이트
@@ -2549,12 +2564,12 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 23) — net_block�
         0, 13, 'h', 't', 't', 'p', 's', ':', '/', '/', 'a', '.', 't', '/', 'x', // 패턴
     }, buf[0..len]);
     len = try encode(.{ .net_block_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 23, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 24, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
     var hits: message_mod.NetBlockHits = .{ .browser = 1, .generation = 9, .unrecorded = 2, .skipped_unknown_page = 3, .strict_redirect_missed = 4, .strict_redirect_bypassed = 5, .sw_shared_with_unruled_tab = true, .count = 1 };
     hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_hits = 7, .sw_not_applied = 8 };
     len = try encode(.{ .net_block_hits = hits }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 23, 78, // 머리
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 24, 78, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 9, // 세대
         0, 0, 0, 2, 0, 0, 0, 3, // 기록 없이 막음·페이지 모름
@@ -2564,7 +2579,7 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 23) — net_block�
     }, buf[0..len]);
     len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .received = 0, .time_ms = 3, .flags = .{ .blocked = true }, .rule_id = 5 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 23, 72, // 머리
+        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 24, 72, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 0, 0, 0, 0, 2, // request
         2, // failed
@@ -2575,11 +2590,11 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 23) — net_block�
         0, 0, 0, 5, // 규칙
     }, buf[0..len]);
     len = try encode(.{ .error_page = .{ .browser = 1, .error_code = -20, .blocked_rule = 5 } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 23, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 24, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5 }, buf[0..len]);
     len = try encode(.{ .navigate = .{ .browser = 1, .url = "a:", .user = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 23, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 24, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
     len = try encode(.{ .nav_action = .{ .browser = 1, .action = .reload, .user = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 23, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 24, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
 }
 
 test "W9d③: 막기의 닫힌 칸은 양쪽에서 거절한다 — 규칙 33 개·번호 0·중복·모르는 종류 비트·서비스 워커 종류·대문자 사이트·풀리지 않는 패턴·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝, 양수 오류" {
@@ -2692,6 +2707,296 @@ test "W9d③: 막기 frame 을 무작위로 망가뜨려도 풀기는 무너지�
             .net_block_hits => |v| try net_fields_mod.checkBlockHits(v),
             .net_end => |v| try net_fields_mod.checkEnd(v),
             .error_page => |v| try net_fields_mod.checkErrorPage(v),
+            else => {},
+        }
+    }
+    try std.testing.expect(ok > 0);
+}
+
+// ── 가짜 응답(W9d④) ─────────────────────────────────────────────────────────────────────────────────────
+// 시험이 증명하는 것: 가짜 여섯(`net_mock_rule`·`net_mock_body`·`net_mock_commit`·`net_mock_state`·`net_mock_ack`·`net_mock_hits`)과 바뀐 칸(`net_end`
+// 의 `mocked`·`mock_redirected`, `net_begin` 둘째 표시의 `mocked`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 24), 닫힌 칸(번호 0·
+// 차례·종류·메서드·표시와 실행 사이트의 짝·정규형 패턴·상태·본문 번호와 길이·본문 금지 상태·content_type·그려지는 종류·Location·허용 목록 밖
+// 머리·Location 머리, 조각 범위, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 규칙 frame(머리 32 개·8 KiB·Location 2 KiB·패턴 512)이 frame
+// 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 가짜 응답은 그 사이트로서 페이지에 들어간다
+// (maru 와 sidecar 가 같은 규칙을 봐야 하고 — 머리 허용 목록·다운로드 거절 — sidecar 가 보낸 수와 확인은 공격 입력으로 다룬다).
+
+fn testMockHeaders(b: *net_fields_mod.HeaderBuilder) message_mod.NetHeaderBlock {
+    _ = b.add("Access-Control-Allow-Origin", "*");
+    _ = b.add("X-Mock", "1");
+    return b.block();
+}
+
+fn testMockRule(hb: *net_fields_mod.HeaderBuilder) message_mod.NetMockRule {
+    return .{
+        .browser = 7,
+        .generation = 3,
+        .index = 1,
+        .id = 9,
+        .types = 1 << 13,
+        .methods = 1 | 4,
+        .flags = .{ .exec_site_bound = true, .human_nav_real = true },
+        .site = "a.test",
+        .exec_site = "a.test",
+        .pattern = "https://a.test/api/*",
+        .status = 200,
+        .body_id = 5,
+        .body_len = 15,
+        .content_type = "application/json",
+        .headers = testMockHeaders(hb),
+    };
+}
+
+test "W9d④: 가짜 여섯과 바뀐 칸이 왕복하고 방향이 맞다 — 규칙·본문 조각·맺음·상태·확인·수·끝의 가짜 표시·시작의 mocked" {
+    var hb: net_fields_mod.HeaderBuilder = .{};
+    const r = (try roundTrip(.{ .net_mock_rule = testMockRule(&hb) })).net_mock_rule;
+    try std.testing.expect(r.id == 9 and r.index == 1 and r.generation == 3 and r.methods == 5 and r.flags.exec_site_bound and r.flags.human_nav_real);
+    try std.testing.expectEqualStrings("application/json", r.content_type);
+    try std.testing.expectEqual(@as(u8, 2), r.headers.count);
+    const redirect = (try roundTrip(.{ .net_mock_rule = .{ .browser = 7, .generation = 1, .id = 2, .site = "a.test", .pattern = "https://a.test/r", .status = 302, .content_type = "text/plain; charset=utf-8", .location = "/next" } })).net_mock_rule;
+    try std.testing.expectEqualStrings("/next", redirect.location);
+    const body = (try roundTrip(.{ .net_mock_body = .{ .browser = 7, .body_id = 5, .offset = 3, .total = 15, .bytes = "hello" } })).net_mock_body;
+    try std.testing.expect(body.offset == 3 and body.total == 15);
+    try std.testing.expectEqualStrings("hello", body.bytes);
+    const commit = (try roundTrip(.{ .net_mock_commit = .{ .browser = 7, .generation = 3, .count = 2, .strict_site = "a.test" } })).net_mock_commit;
+    try std.testing.expect(commit.count == 2);
+    try std.testing.expectEqualStrings("a.test", commit.strict_site);
+    try std.testing.expect((try roundTrip(.{ .net_mock_commit = .{ .browser = 7, .generation = 4 } })).net_mock_commit.count == 0); // 모두 지움
+    inline for (@import("type_info_fields").fields(message_mod.NetStrictState)) |f| {
+        const st: message_mod.NetStrictState = @fromBackingInt(@intCast(f.value));
+        try std.testing.expectEqual(st, (try roundTrip(.{ .net_mock_state = .{ .browser = 7, .generation = 9, .ok = true, .strict = st } })).net_mock_state.strict);
+    }
+    try std.testing.expectEqual(@as(u32, 65536), (try roundTrip(.{ .net_mock_ack = .{ .browser = 7, .body_id = 5, .received = 65536 } })).net_mock_ack.received);
+    var hits: message_mod.NetMockHits = .{ .browser = 7, .unrecorded = 1, .busy = 88, .skipped_unknown_page = 2, .page_controlled = true, .count = 2 };
+    hits.entries[0] = .{ .rule_id = 1, .hits = 5 };
+    hits.entries[1] = .{ .rule_id = 9, .sw_not_mocked = std.math.maxInt(u32) };
+    hits.entries[2] = .{ .rule_id = 10, .frame_not_mocked = 3 }; // 허락 밖 프레임의 수만 있는 항목도 빈 항목이 아니다
+    hits.count = 3;
+    const h = (try roundTrip(.{ .net_mock_hits = hits })).net_mock_hits;
+    try std.testing.expect(h.page_controlled and h.busy == 88 and h.entries[1].sw_not_mocked == std.math.maxInt(u32) and h.entries[2].frame_not_mocked == 3);
+    const e = (try roundTrip(.{ .net_end = .{ .browser = 7, .request = 1, .outcome = .failed, .error_code = -2, .flags = .{ .mocked = true }, .rule_id = 4 } })).net_end;
+    try std.testing.expect(e.flags.mocked and !e.flags.blocked and e.rule_id == 4); // CORS 로 떨어진 가짜도 mocked
+    const both = (try roundTrip(.{ .net_end = .{ .browser = 7, .request = 1, .flags = .{ .mocked = true, .mock_redirected = true }, .rule_id = 4, .mock_body_id = 77 } })).net_end;
+    try std.testing.expect(both.flags.mocked and both.flags.mock_redirected and both.mock_body_id == 77);
+    const b = (try roundTrip(.{ .net_begin = .{ .browser = 7, .request = 1, .flags2 = .{ .mocked = true }, .url = "https://a.test/api/x" } })).net_begin;
+    try std.testing.expect(b.flags2.mocked and !b.flags2.body_expected);
+    inline for (.{ Tag.net_mock_rule, Tag.net_mock_body, Tag.net_mock_commit }) |t| try std.testing.expectEqual(message_mod.Direction.to_sidecar, t.direction());
+    inline for (.{ Tag.net_mock_state, Tag.net_mock_ack, Tag.net_mock_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
+}
+
+test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 24) — net_mock_rule·net_mock_body·net_mock_commit·net_mock_state·net_mock_ack·net_mock_hits·net_end" {
+    var buf: [256]u8 = undefined;
+    var len = try encode(.{ .net_mock_rule = .{ .browser = 1, .generation = 0x0102, .index = 0, .id = 5, .types = 0, .methods = 1, .flags = .{ .exec_site_bound = true }, .site = "a.t", .exec_site = "a.t", .pattern = "https://a.t/x", .status = 302, .body_id = 0, .body_len = 0, .content_type = "text/html", .location = "/y" } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 81, 'M', 'W', 'E', 'B', 0, 24, 137, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 1, 2, // generation
+        0, // index
+        0, 0, 0, 5, // id
+        0, 0, 0, 0, // 종류
+        1, // 메서드(GET)
+        1, // 표시(exec_site_bound)
+        3, 'a', '.', 't', // 사이트
+        3, 'a', '.', 't', // 실행 사이트
+        0, 13, 'h', 't', 't', 'p', 's', ':', '/', '/', 'a', '.', 't', '/', 'x', // 패턴
+        1, 0x2e, // 302
+        0, 0, 0, 0, 0, 0, 0, 0, // 본문 번호·길이
+        0, 9, 't', 'e', 'x', 't', '/', 'h', 't', 'm', 'l', // content_type
+        0, 2, '/', 'y', // Location
+        0, 0, 0, // 머리 없음
+    }, buf[0..len]);
+    len = try encode(.{ .net_mock_body = .{ .browser = 1, .body_id = 2, .offset = 3, .total = 9, .bytes = "ab" } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 24, 138, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 9, 0, 2, 'a', 'b' }, buf[0..len]);
+    len = try encode(.{ .net_mock_commit = .{ .browser = 1, .generation = 2, .count = 3, .strict_site = "a.t" } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 24, 'M', 'W', 'E', 'B', 0, 24, 139, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3, 3, 'a', '.', 't' }, buf[0..len]);
+    len = try encode(.{ .net_mock_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .on } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 24, 79, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 1 }, buf[0..len]);
+    len = try encode(.{ .net_mock_ack = .{ .browser = 1, .body_id = 2, .received = 0x010000 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 24, 80, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 0, 0 }, buf[0..len]);
+    var hits: message_mod.NetMockHits = .{ .browser = 1, .unrecorded = 2, .busy = 3, .skipped_unknown_page = 4, .page_controlled = true, .count = 1 };
+    hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_not_mocked = 7, .frame_not_mocked = 8 };
+    len = try encode(.{ .net_mock_hits = hits }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 45, 'M', 'W', 'E', 'B', 0, 24, 81, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 1, 1, // 기록 없이·줄 수 없음·페이지 모름·서비스 워커·항목 수
+        0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, // 규칙 5 의 수(맞음·서비스 워커·허락 밖 프레임 — v1 SEVERE-1)
+    }, buf[0..len]);
+    len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .success, .received = 0, .time_ms = 3, .flags = .{ .mocked = true, .mock_redirected = true }, .rule_id = 5, .mock_body_id = 0x0607 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 24, 72, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 0, 0, 0, 0, 0, 2, // request
+        0, // success
+        0, 0, 0, 0, // 오류 없음
+        0, 0, 0, 0, 0, 0, 0, 0, // received
+        0, 0, 0, 0, 0, 0, 0, 3, // time
+        0x0c, // 표시(mocked·mock_redirected)
+        0, 0, 0, 5, // 규칙
+        0, 0, 6, 7, // 가짜가 준 본문 번호(mocked 일 때만 — v2 R11 곁)
+    }, buf[0..len]);
+    // 가짜 리다이렉트만(mocked 없음)이면 본문 번호 칸이 없다 — 머리 길이 49(본문 번호 칸 4 바이트 적다).
+    len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .flags = .{ .mock_redirected = true }, .rule_id = 5 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 49 }, buf[0..4]);
+}
+
+test "W9d④: 가짜의 닫힌 칸은 양쪽에서 거절한다 — 규칙의 번호·차례·종류·메서드·표시 짝·패턴·상태·본문·content_type·Location·머리, 조각 범위, 빈 차이, 끝의 표시 짝" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    var hb: net_fields_mod.HeaderBuilder = .{};
+    const good = testMockRule(&hb);
+    _ = try encode(.{ .net_mock_rule = good }, &buf);
+    var bad_hb: net_fields_mod.HeaderBuilder = .{};
+    _ = bad_hb.add("Set-Cookie", "a=1");
+    var loc_hb: net_fields_mod.HeaderBuilder = .{};
+    _ = loc_hb.add("Location", "/x");
+    var bads: [22]message_mod.NetMockRule = @splat(good);
+    bads[0].id = 0;
+    bads[1].index = 32;
+    bads[2].types = 1 << 15; // service_worker
+    bads[3].types = 1 << 19; // preload
+    bads[4].methods = 1 << 7;
+    bads[5].flags = .{ .exec_site_bound = false }; // 실행 사이트가 있는데 표시가 없다
+    bads[6].exec_site = ""; // 표시가 있는데 실행 사이트가 없다
+    bads[7].pattern = "HTTPS://a.test/api/*"; // 정규형이 아니다
+    bads[8].status = 101;
+    bads[9].body_id = 0; // 길이가 있는데 번호가 없다
+    bads[10].body_len = message_mod.max_net_mock_body_bytes + 1;
+    bads[11].status = 204; // 본문이 있는 204
+    bads[12].content_type = "nope";
+    bads[13].types = 0; // 문서로 맞을 수 있는 규칙의 그려지지 않는 종류
+    bads[13].content_type = "application/octet-stream";
+    bads[14].status = 302; // Location 없는 리다이렉트
+    bads[15].location = "/x"; // 200 의 Location
+    bads[16].status = 302;
+    bads[16].location = "//evil.test/";
+    bads[17].headers = bad_hb.block(); // 허용 목록 밖 머리
+    bads[18].headers = loc_hb.block(); // Location 은 제 칸으로
+    bads[19].site = "A.test";
+    bads[20].flags._reserved = 1;
+    bads[21].body_len = 0; // 번호가 있는데 길이가 없다
+    for (bads, 0..) |b, i| {
+        if (!std.meta.isError(encode(.{ .net_mock_rule = b }, &buf))) {
+            std.debug.print("bad mock rule {d} encoded\n", .{i});
+            return error.TestUnexpectedResult;
+        }
+    }
+    const bad_bodies = [_]message_mod.NetMockBody{
+        .{ .browser = 1, .body_id = 0, .offset = 0, .total = 2, .bytes = "ab" },
+        .{ .browser = 1, .body_id = 1, .offset = 1, .total = 2, .bytes = "ab" }, // 끝을 넘는다
+        .{ .browser = 1, .body_id = 1, .offset = 0, .total = 2, .bytes = "" },
+        .{ .browser = 1, .body_id = 1, .offset = 0, .total = message_mod.max_net_mock_body_bytes + 1, .bytes = "ab" },
+        .{ .browser = 1, .body_id = 1, .offset = std.math.maxInt(u32), .total = 2, .bytes = "ab" },
+    };
+    for (bad_bodies) |b| try std.testing.expect(std.meta.isError(encode(.{ .net_mock_body = b }, &buf)));
+    try std.testing.expect(std.meta.isError(encode(.{ .net_mock_commit = .{ .browser = 1, .generation = 1, .count = 33 } }, &buf)));
+    try std.testing.expect(std.meta.isError(encode(.{ .net_mock_commit = .{ .browser = 1, .generation = 1, .strict_site = "a.test/x" } }, &buf)));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_mock_state = .{ .browser = 1, .generation = 1, .ok = false, .strict = .on } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_mock_ack = .{ .browser = 1, .body_id = 0, .received = 1 } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_mock_ack = .{ .browser = 1, .body_id = 1, .received = 0 } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_mock_ack = .{ .browser = 1, .body_id = 1, .received = message_mod.max_net_mock_body_bytes + 1 } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_mock_hits = .{ .browser = 1 } }, &buf)); // 빈 차이
+    var zero: message_mod.NetMockHits = .{ .browser = 1, .count = 1 };
+    zero.entries[0] = .{ .rule_id = 1 };
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_mock_hits = zero }, &buf));
+    var dup: message_mod.NetMockHits = .{ .browser = 1, .count = 2 };
+    dup.entries[0] = .{ .rule_id = 3, .hits = 1 };
+    dup.entries[1] = .{ .rule_id = 3, .hits = 1 };
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_mock_hits = dup }, &buf));
+    const bad_ends = [_]message_mod.NetEnd{
+        .{ .browser = 1, .request = 2, .flags = .{ .mocked = true } }, // 규칙 없음
+        .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .flags = .{ .blocked = true, .mocked = true }, .rule_id = 3 }, // 막기와 함께
+        .{ .browser = 1, .request = 2, .flags = .{ .sw_not_applied = true, .mock_redirected = true }, .rule_id = 3 },
+        .{ .browser = 1, .request = 2, .flags = .{ ._reserved = 1 } },
+        .{ .browser = 1, .request = 2, .flags = .{ .mock_redirected = true }, .rule_id = 3, .mock_body_id = 4 }, // 본문 번호는 mocked 일 때만
+        .{ .browser = 1, .request = 2, .mock_body_id = 4 },
+    };
+    for (bad_ends) |e| try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_end = e }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_begin = .{ .browser = 1, .request = 2, .flags2 = .{ .mocked = true, .body_expected = true }, .url = "https://a.test/" } }, &buf));
+    // decode 쪽: 모르는 엄격 상태, bool 아닌 ok·page_controlled.
+    const body = prefix_len + common_len;
+    var len = try encode(.{ .net_mock_state = .{ .browser = 1, .generation = 1, .ok = true } }, &buf);
+    var b = buf;
+    b[body + 13] = 3;
+    try std.testing.expectError(error.InvalidNetwork, decodeExact(b[0..len]));
+    b = buf;
+    b[body + 12] = 2;
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    var one: message_mod.NetMockHits = .{ .browser = 1, .busy = 1 };
+    len = try encode(.{ .net_mock_hits = one }, &buf);
+    b = buf;
+    b[body + 20] = 2; // page_controlled
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    one.busy = 0;
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_mock_hits = one }, &buf));
+}
+
+test "W9d④: 가장 큰 net_mock_rule(머리 32 개·8 KiB·Location 2 KiB·패턴 512·content_type 256·사이트 253)도 frame 상한 안에서 왕복한다" {
+    var hb: net_fields_mod.HeaderBuilder = .{};
+    const value = array_repeat.repeat("v", 250);
+    var names: [32][8]u8 = undefined;
+    for (0..32) |i| {
+        const name = std.fmt.bufPrint(&names[i], "X-H{d:0>2}", .{i}) catch unreachable;
+        try std.testing.expect(hb.add(name, value[0 .. 256 - name.len]));
+    }
+    try std.testing.expectEqual(@as(usize, 32 * 256), hb.payload);
+    const host = array_repeat.repeat("h", message_mod.max_net_host_bytes);
+    const location = "/" ++ array_repeat.repeat("l", message_mod.max_net_mock_location_bytes - 1);
+    const pattern = "https://a.test/" ++ array_repeat.repeat("p", message_mod.max_net_block_pattern_bytes - 15);
+    const ctype = "text/html; x=" ++ array_repeat.repeat("c", message_mod.max_net_mock_content_type_bytes - 13);
+    const v: message_mod.NetMockRule = .{ .browser = 1, .generation = std.math.maxInt(u32), .index = 31, .id = std.math.maxInt(u32), .types = @import("net_mock_rules.zig").types_mask_valid, .methods = @import("net_mock_rules.zig").methods_mask_valid, .flags = .{ .exec_site_bound = true, .human_nav_real = true }, .site = host, .exec_site = host, .pattern = pattern, .status = 308, .body_id = 1, .body_len = message_mod.max_net_mock_body_bytes, .content_type = ctype, .location = location, .headers = hb.block() };
+    const got = (try roundTrip(.{ .net_mock_rule = v })).net_mock_rule;
+    try std.testing.expectEqual(@as(u8, 32), got.headers.count);
+    try std.testing.expectEqual(message_mod.max_net_mock_location_bytes, got.location.len);
+    var buf: [max_frame_bytes]u8 = undefined;
+    const len = try encode(.{ .net_mock_rule = v }, &buf);
+    try std.testing.expect(len > 11 * 1024 and len <= max_frame_bytes); // 계획 §9 의 어림(약 11 KiB)
+}
+
+test "W9d④: 가짜 frame 을 무작위로 망가뜨려도 풀기는 무너지지 않고 풀린 값은 닫힌 칸 규칙을 지킨다" {
+    var prng = std.Random.DefaultPrng.init(0x9d4);
+    const r = prng.random();
+    var hb: net_fields_mod.HeaderBuilder = .{};
+    var hits: message_mod.NetMockHits = .{ .browser = 3, .busy = 1, .count = 1 };
+    hits.entries[0] = .{ .rule_id = 2, .hits = 3 };
+    const seeds = [_]Message{
+        .{ .net_mock_rule = testMockRule(&hb) },
+        .{ .net_mock_rule = .{ .browser = 3, .generation = 1, .id = 2, .site = "a.test", .pattern = "https://a.test/r", .status = 307, .content_type = "text/plain", .location = "https://b.test/x" } },
+        .{ .net_mock_body = .{ .browser = 3, .body_id = 4, .offset = 0, .total = 20, .bytes = "0123456789" } },
+        .{ .net_mock_commit = .{ .browser = 3, .generation = 2, .count = 2, .strict_site = "a.test" } },
+        .{ .net_mock_state = .{ .browser = 3, .generation = 2, .ok = true, .strict = .on } },
+        .{ .net_mock_ack = .{ .browser = 3, .body_id = 4, .received = 20 } },
+        .{ .net_mock_hits = hits },
+        .{ .net_end = .{ .browser = 3, .request = 9, .flags = .{ .mocked = true }, .rule_id = 2 } },
+    };
+    var buf: [max_frame_bytes]u8 = undefined;
+    var ok: usize = 0;
+    for (0..200_000) |i| {
+        const seed = seeds[i % seeds.len];
+        const len = try encode(seed, &buf);
+        var frame: [512]u8 = undefined;
+        @memcpy(frame[0..len], buf[0..len]);
+        var n = len;
+        for (0..r.intRangeAtMost(usize, 1, 6)) |_| {
+            switch (r.intRangeLessThan(u8, 0, 3)) {
+                0 => frame[r.intRangeLessThan(usize, 0, n)] = r.int(u8),
+                1 => n = r.intRangeAtMost(usize, 1, n),
+                else => if (n < frame.len) {
+                    frame[n] = r.int(u8);
+                    n += 1;
+                },
+            }
+        }
+        if (r.boolean() and n >= 4) std.mem.writeInt(u32, frame[0..4], @intCast(n - 4), .big);
+        const m = decodeExact(frame[0..n]) catch continue;
+        ok += 1;
+        switch (m) {
+            .net_mock_rule => |v| try net_fields_mod.checkMockRule(v),
+            .net_mock_body => |v| try net_fields_mod.checkMockBody(v),
+            .net_mock_commit => |v| try net_fields_mod.checkMockCommit(v),
+            .net_mock_state => |v| try net_fields_mod.checkMockState(v),
+            .net_mock_ack => |v| try net_fields_mod.checkMockAck(v),
+            .net_mock_hits => |v| try net_fields_mod.checkMockHits(v),
+            .net_end => |v| try net_fields_mod.checkEnd(v),
             else => {},
         }
     }

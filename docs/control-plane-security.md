@@ -98,8 +98,8 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   `browser.agent-network-full` 이 켜져 있으면(기본) 에이전트 탭의 어느 호스트든 막기 grant 는 사용자가 그 탭을 다른 사이트(예: 은행)로 몰아도 남는다(W9d①
   F5 「그대로 둠」과 D1) — 그래서 에이전트는 **그 사이트에서도 묻지 않고** 규칙을 더하고 엄격 모드를 켤 수 있다(규칙의 사이트는 그 사이트, ⊘ 와 Browser
   Grants 줄로 보인다 — 20 회 검증 B R13 관찰). 설정을 끄면 몰기 전 사이트로 좁혀져 그 사이트에서는 다시 묻는다. **사용자의 이동은 막지 않는다** — 사용자가 주소를 넣거나
-  뒤로·앞으로·새로 고침으로 시작한 이동은 한 번 지나간다(D2 — 사용자를 제 탭에서 가두지 못하게). 그 예외는 **그 몸짓의 이동**에만 묶인다: 에이전트의 이동(wire
-  navigate·nav_action, 그리고 **읽기 허용 목록 밖의 모든** DevTools 호출 — 이동을 시작하거나(`Page.navigate`·`Page.reload`·`Page.navigateToHistoryEntry`·`Input.*`·
+  뒤로·앞으로·새로 고침으로 시작한 이동은 한 번 지나간다(D2 — 사용자를 제 탭에서 가두지 못하게). 그 예외는 **그 몸짓의 이동**에만 묶인다. 에이전트의 **읽기 허용 목록 밖의 모든**
+  DevTools 호출(이동을 시작하거나(`Page.navigate`·`Page.reload`·`Page.navigateToHistoryEntry`·`Input.*`·
   `Runtime.evaluate`·`Runtime.callFunctionOn`) 페이지 처리기를 부르거나 멈춘 스크립트를 잇는 호출(`DOM.focus`·`DOM.set*`·`Emulation.*`·`Page.handleJavaScriptDialog`·
   `CSS.setStyleTexts`·`ServiceWorker.skipWaiting` 등). 4 차 검증 A-LOW: 「거두는 목록」 이 일곱을 놓쳐 — 새 메서드도 놓친다 — 처리기를 부르지 않는 읽기(DOM·
   Accessibility 의 get·찾기, 화면 찍기, 기록·프레임 트리, 쿠키 읽기 등)만 남기는 목록으로 뒤집었다, 단일 출처는 `devtools_table.read_only_methods` — 인자도 본다(5 차 검증 LOW: 화면 밖까지 찍기
@@ -110,8 +110,12 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   `getContentQuads`·`describeNode`·`Accessibility.*` 등은 +0). 목록에 남은 것의 **남는 틈** 둘 — 화면 찍기는 숨은 탭에서 렌더 차례를 한 번 돈다(7 차 LOW-2:
   rAF·ResizeObserver·IntersectionObserver 한 번씩 — maru 의 DevTools kick 은 숨은 탭의 rAF 를 돌리는 것이 목적이라 남는다), 놓기(`Runtime.releaseObject(Group)`)
   뒤에는 GC 가 페이지의 `FinalizationRegistry` 콜백을 돌릴 수 있다(7 차 LOW-3 — maru 의 정리라 남는다) — 둘 다 페이지 타이머와 같은 등급이다; 대가는
-  에이전트의 읽기 아닌 호출 뒤 사용자의 이동이 다시 해야 지나가는 것. 에이전트의 뒤로·앞으로·새로 고침·누르기·채우기·올리기는 CDP 다)은 보내기 전에 남은 사용자
-  토큰을 거두고, 이동을 시작하지 않은 몸짓(조각만 다른 친 주소 — 같은 문서 확정, 주 프레임 주소가 그대로인 뒤로 — iframe 만, 같은 문서 항목 포함(3 차 검증
+  에이전트의 읽기 아닌 호출이 그 예외를 「다툼」 으로 만드는 것. 에이전트의 뒤로·앞으로·새로 고침·누르기·채우기·올리기는 CDP 다)은 사용자 토큰을 **거두지 않고
+  다툼으로 둔다** — 그 토큰의 창 안에서 맞는 이동은 누구 것이든 사용자 것으로 지나간다(W9d④ v1 검증 SEVERE-2, 사용자 결정 2026-11-11 「고침」: 전에는 보내기 전에
+  거둬, 사용자가 친 주소·새로 고침의 주 문서가 겹친 에이전트의 `Runtime.evaluate` 하나로 막히고 가짜가 됐다 — 5/5·3/3, 옛 문서의 beforeunload 동안은 그 길이
+  전체가 창; 4 차 검증 A-LOW 의 「다시 하면 지나간다」 도 닫힌다. 대가: 그 창 — 사용자 문서가 서면 끝 — 안에 에이전트가 같은 주소·같은 갈래로 몬 이동도 막히지 않고
+  가짜가 되지 않는다. 사용자 쪽 fail-safe). 다른 곳으로 가는 에이전트의 wire 이동(다른 주소 navigate·뒤로·앞으로)과 멈춤은 남은 사용자 토큰을 거두고(친 주소와 같은
+  주소의 navigate·새로 고침은 다툼 — 같은 곳이라 둘 다 진짜), 이동을 시작하지 않은 몸짓(조각만 다른 친 주소 — 같은 문서 확정, 주 프레임 주소가 그대로인 뒤로 — iframe 만, 같은 문서 항목 포함(3 차 검증
   LOW-A3-4; 대상은 이동을 시작한 뒤 읽은 Chromium 의 실제 대상 — 몸짓 없이 생긴 항목을 건너뛴 다른 문서로 가는 뒤로는 예외다, 4 차 검증 A-LOW), 떠나기 확인에
   머무르기, 멈춤)은 토큰을 남기지 않는다(2 차 20 회 검증 LOW-A2-3: 에이전트의 CDP 뒤로·새로 고침이 1·5 초 안에 그
   토큰을 가져갔다). 토큰은 그 몸짓 뒤 첫 주 프레임 이동을 기다린다 — 옛 문서의 beforeunload 처리기가 대화상자 없이 도는 동안도 30 초까지(3 차 검증 LOW-A3-3:
@@ -136,6 +140,33 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   검증 NEW-1 실측: `sendMessageToTarget` 이 실은 `Network.setBlockedURLs` 가 fetch 를 막았다). 남긴 것과 까닭(`overrideNetworkState` 는 `navigator.onLine` 만 — 실측 fetch 그대로, `setCacheDisabled` — HTTP 캐시
   응답도 막기가 본다, 헤더·쿠키 바꾸기 — 패턴은 주소만 본다)은 `devtools_table.forbiddenMethod` 주석이 단일 출처다.
   상세는 [웹 OSR 계획 「W9d③ 결정·실측」](plans/web-osr-backend.md).
+- **`browser_network_mock`(W9d④ — `browser.networkMock`)은 `browser`·`browser_network`·`browser_network_body`·`browser_network_block` 과 따로 묻는 peer scope 다** —
+  가짜 응답은 **사용자의 페이지를 에이전트가 만든 것으로 바꾸는 쓰기**이고, 문서·스크립트를 바꾸면 에이전트가 **그 사이트로서 코드를 돌린다**(그 사이트의 로그인·저장소·
+  권한으로 — 주소창은 진짜 주소를 보인다). 상속 fd 로 발급하지 않고, 확인 grant 는 모달이 보인 호스트와 그 하위 도메인에 묶인다(모달 문구가 해를 말한다). 사용자 탭은
+  사이트마다 한 번 묻고, 에이전트가 연 탭은 묻지 않는다(그 탭의 birth grant — 그래서 에이전트 탭의 birth grant 자리는 넷이다; 그 탭에서 에이전트는 이미 어느 사이트로든
+  옮겨 eval 할 수 있다). **세 겹 위에 선다**: 그 탭의 `browser_network` grant 가 지금 문서를 덮어야 하고(`needs_network_permission`), 바꾸기를 더하는 꼴은 그 탭의
+  `browser` grant 도 있어야 한다(`needs_browser_permission` — 가짜의 힘을 그 탭의 `executeScript` 와 mock grant 의 사이트의 겹침 안에 둔다). 셋 중 하나라도 사라지면 그
+  pane 의 규칙·본문·가짜 엄격을 지운다. 가짜 엄격 모드도 켠 pane 의 것이다 — 다른 pane 은 끄지도 가져가지도 못하고(`other_pane`), 다른 pane 이 grant 를 잃어도
+  남는다(W9d④ v2 검증 R13 — 막기의 DEF-3 고침이 가짜에 없어 다른 pane 이 끄거나 가져간 뒤 그 pane 의 철회와 함께 사라졌다). **가짜가 돌 출처를 grant 가 덮을 때만**: 가짜 iframe·object 문서는 그 주소의 출처로 돌아 사용자의 그 사이트 쿠키로 읽었다
+  (실측 M25) — 사이트에 묶인 grant 의 규칙은 주 프레임·하위 프레임·object 문서 주소의 호스트를 grant 가 덮을 때만 맞는다. 문서가 아닌 가짜(스크립트·워커·이미지·
+  fetch 의 자료…)는 그것을 부른 iframe·워커의 출처로 쓰인다 — 다른 사이트 iframe 이 부른 가짜 스크립트·워커가 그 iframe 의 출처로 돌아 그 사이트 쿠키를 읽고
+  credentialed fetch 로 진짜 답을 읽었다(주소가 grant 사이트 안이어도 — W9d④ v1 검증 SEVERE-1). 그래서 **grant 가 덮지 않는 사이트의 iframe·워커가 낸 요청은 어떤
+  종류도 가짜가 되지 않는다**(사용자 결정 2026-11-11 「허락 밖 iframe 요청은 모두 진짜」 — 요청을 낸 문맥은 CEF 의 `request_initiator`, 모르면 진짜; 규칙의
+  `frame_not_mocked`·경고 `cross_site_frame_not_mocked` 로 보인다). 에이전트가 연 탭의 규칙은 문맥을 묻지 않는다 — 그 탭의 birth grant 는 어느 사이트든 덮는다(에이전트는
+  이미 그 탭을 어느 사이트로든 옮겨 스크립트를 돌린다). **응답 머리는 허용 목록**이다: 가짜의
+  `Set-Cookie` 는 HttpOnly 까지 저장됐고(M7) `Accept-CH` 는 출처에 남아 다음 진짜 요청에 실렸다(M24) — 브라우저 프로세스가 처리하는 머리는 모두 셀 수 없어 목록 밖은
+  거절한다(`header_forbidden`). 쿠키는 거절에 더해 가짜 요청의 모든 처리기에 쿠키 필터(`can_save_cookie` 0 — M22)를 단다(두 겹). **다운로드가 되는 가짜는 거절**한다
+  (`Content-Disposition` 은 목록 밖, 문서로 맞을 수 있는 규칙은 그려지는 `content_type` 만 — 첨부 머리 없이도 다운로드가 됐다, M11·M27). 늘 `Cache-Control: no-store`
+  (지운 뒤 뒤로 가기가 bfcache 의 가짜 문서를 되살렸다 — M18·M21). **서비스 워커는 가짜를 어떤 길로도 보지 않는다**(사용자 결정 Q1 2026-10-21): 서비스·공유 워커가 내는
+  요청(브라우저가 없는 요청 — CEF 가 둘을 가르지 않는다, 막기와 같은 길)·공유 워커의 주 스크립트·navigation preload 는 가짜로 바꾸지 않는다(엄격 모드도 공유 워커는 덮지 않는다; 주 스크립트는 만든 탭의 하위 자원으로 오지만 가짜 워커는 같은 출처의 다른 탭 — 규칙 없는 사용자 탭도 — 이 같은 주소로 붙으면 그 탭에도 쓰이고 만든 탭을 닫아도 살았다(옮긴 판 실측) — 사용자 결정 A 2026-11-11: 종류 `shared_worker` 규칙은 거절, 맞는 종류 없는 규칙은 진짜를 보내고 `sw_not_mocked` 로 센다) — 서비스 워커가 가짜를 Cache Storage 에 넣으면 규칙·탭·maru 재시작을 넘어 남았다(M12·M26). 가짜를 줄 수 없으면
+  (처리기 풀이 참·본문 시한) **진짜로 보내지 않고 실패**한다(CEF 는 처리기가 없으면 진짜 네트워크로 보냈다 — M17). **사용자의 이동**: 사용자가 친 주소·뒤로·앞으로·
+  새로 고침의 주 문서는 진짜(D2 — 막기와 같은 예외 표, 가짜만 있는 탭에서도; 겹친 에이전트의 DevTools 호출은 거두지 않고 다툼으로 둔다 — W9d④ v1 검증 SEVERE-2), 사용자 탭에서는 **사람이 누른 링크·폼으로 시작한 이동의 주 문서도 진짜**다(사용자 결정
+  Q2 2026-10-21 — 사람의 누름은 sidecar 가 maru 를 지난 마우스·키 입력의 시각으로 가른다: CDP 입력도 사용자 몸짓을 싣는다(실측), 가르지 못하면 사람 쪽 — 진짜). 사용자
+  에게 보이는 신호: 규칙·엄격이 있는 동안 탭 제목 앞의 보라 ▣(◉⊘▣), Browser Grants 의 「response mocking (N rules[, strict])」 줄(거기서 철회), 사용자가 그 탭을 몰거나
+  그 탭의 주 문서가 가짜였을 때 알림. 설정 `browser.agent-network-full` 이 꺼지면 서비스 워커 수(`sw_not_mocked`)를 숨긴다(오라클). maru 를 거친 에이전트의 `Fetch.*`·
+  `Network.setRequestInterception` 은 이미 보내지 않는다(scope·▣ 없는 가짜 길). **남는 흔적**: 가짜 문서·스크립트가 그 출처로 쓴 localStorage·IndexedDB·Cache Storage
+  (페이지 스크립트의 `caches.put`)·`document.cookie`(HttpOnly 아님)는 규칙을 지워도 남는다 — `browser`(eval)와 같은 힘의 흔적이고 사이트 데이터 지우기로 지운다. 상세는
+  [웹 OSR 계획 「W9d④ 결정·실측」](plans/web-osr-backend.md).
 - `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. `capture`가 처음 노출되는 Phase 1 안에서 capability fd 발급·auth·거부 테스트까지 함께 구현한다. "read-only라 토큰은 나중"으로 미루지 않는다.
 
 ### 8.4 self-origin metadata 증명(일반 login shell)

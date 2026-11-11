@@ -1039,7 +1039,7 @@ test "A2-R10 LOW-A2-3: 사용자의 뒤로가 iframe 만 옮겼으면 기록 토
     try testing.expect(t.beforeBrowse(7, 70, true, false, .history, 0, canon, 1, "a.test", 2010));
 }
 
-test "A2-R10 LOW-A2-3: 에이전트의 이동(DevTools 의 새로 고침·기록 이동·누르기 — sidecar 가 agentNavigate 로)은 주소·다음 이동·묶인 토큰 모두를 거둔다" {
+test "A2-R10 LOW-A2-3: 에이전트의 다른 곳으로 가는 이동(wire 의 다른 주소 navigate·뒤로·앞으로·멈춤 — sidecar 가 agentNavigate 로)은 주소·다음 이동·묶인 토큰 모두를 거둔다(DevTools 호출은 W9d④ v1 SEVERE-2 부터 거두지 않고 다툼 — net_block_table 끝 시험)" {
     const gpa = testing.allocator;
     var t: table_mod.Table = .{};
     defer t.deinit(gpa);

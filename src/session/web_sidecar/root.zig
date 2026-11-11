@@ -25,3 +25,6 @@ pub const net_policy = @import("net_policy.zig");
 pub const net_block = @import("net_block.zig");
 /// 주소의 Chromium 꼴 흉내(W9d③ 20 회 검증 — D2 토큰의 주소 비교, 패턴의 IP 호스트 꼴 검사).
 pub const url_canon = @import("url_canon.zig");
+/// 가짜 응답의 응답 규칙(W9d④ — 상태·Location·content_type·머리 허용 목록·본문 상한·메서드·실행 출처) — maru 는 인자 검사에, sidecar 는 규칙
+/// frame 의 닫힌 칸과 응답 만들기에.
+pub const net_mock_rules = @import("net_mock_rules.zig");

@@ -37,6 +37,9 @@ pub const ArgKind = enum {
     string_list,
     /// 정수 배열 — 원소마다 `--flag=<정수>`(W9d③ 막기의 규칙 번호). 스키마는 `minItems`·`maxItems`.
     int_list,
+    /// W9d④ 가짜 응답 객체 `{status?, content_type?, headers?:{이름:값}, body? | body_base64?}` — 칸마다 CLI `network-mock` 의 옵션으로(`--status=N`·
+    /// `--content-type=T`·머리마다 `--header=이름: 값`·`--body=…`·`--body-base64=…`). 모르는 칸·틀린 꼴은 WrongType.
+    mock_response,
 };
 
 pub const Arg = struct {
@@ -127,10 +130,19 @@ pub const tools = [_]Tool{
     .{ .name = "browser_network_record", .subcommand = "network-record", .description = "Turn recording of a Chromium tab's response bodies on or off. While on, the tab title shows a red ◉ and maru keeps the text bodies (JSON, HTML, scripts, …) of the requests the tab makes, up to 1 MiB each (counted both as received and as the text Chromium decoded), in memory only. Needs the tab's network permission first (browser_network_requests asks for it); on the user's tabs the user is asked once per site, tabs you opened need no permission. Turning it off stops recording and keeps the bodies already recorded; revoking the permission, closing the tab or the user turning browser.agent-network-full off drops them. Requests from cross-process iframes and workers have no body (unmatched, or ambiguous when a worker fetched the same URL as the page at about the same time); a service worker's fetch gets the body the page received from that worker when maru can prove the page received exactly that fetch's response (the fetch can have a different URL than the page asked for — the worker chose it), otherwise ambiguous, or unmatched when no page received it (the worker's own refresh or prefetch). maru proves it only when no other worker fetch of the same URL and method overlapped it in time (a fetch of the URL again within about 5 ms after the previous one's response counts as overlapping), maru saw the fetch start, the worker fetch was made with the same method and Range header as the page's request, and its response was not partial (a HEAD or partial (206) response shares its timing with the full response but not its bytes; a 206 response is never matched, even with the same Range header), so concurrent fetches of one URL, and fetches made while maru was still attaching to a service worker that was already running when the tab first met it while recording (and for about 300 ms after; also another worker than the one that answered, and the worker of an iframe from another origin) are ambiguous. Service workers and dedicated workers that start while recording (new, updated or restarted — also a service worker that is stopped and restarted after the tab came back to its origin) wait at start until maru has attached to them, so their fetches are not missed; they start slightly later (more when a page starts hundreds of workers at once). Still, a service worker's fetches that start within about 1.3 s after it stops or restarts are ambiguous. When a worker stops, maru detaches from it in every tab, except where it attached only for an iframe of another origin or beyond the worker limits below (maru lets go of those within 3 s): if the worker restarts within those 3 s it does not wait, and its fetches' bodies (and possibly the tab's later service-worker bodies, until recording is turned off and on) are lost — ambiguous, never another request's body. While a worker fetch of the tab is still waiting for its response (a long poll, a slow or cancelled request), the tab's later service-worker bodies are ambiguous. While recording, the service workers of every origin the tab has shown since recording started (the origins of its top-level page — not those of iframes from other origins) are kept running even when idle (maru's DevTools stays attached to them, so fetches of an origin the tab comes back to are not missed, except those started within about 5 ms of coming back; at most 16 workers per tab, counting each worker — beyond that the worker of the origin the tab left longest ago is released first, and when 64 are attached in all, the one left longest ago in any tab; coming back to a released origin is like a first meeting) and are released when recording stops; a fetch whose body the worker never reads therefore does not end while recording, and once the service workers hold too many of them (128 per origin, 512 in total), later service-worker requests are not recorded and their bodies are lost (dropped_sw_inflight_cap in browser_network_requests). maru follows at most 16 service workers per tab (64 in total); the bodies of a worker beyond that are lost.", .args = withSurface(&.{
         .{ .key = "on", .kind = .bool_choice, .flag = "--on", .flag_false = "--off", .description = "true to record, false to stop", .required = true },
     }) },
-    .{ .name = "browser_network_block", .subcommand = "network-block", .description = "Block a Chromium tab's requests (W9d③). action add puts patterns (scheme://host[:port]/path with * wildcards — no * means a prefix of the parsed address; ASCII only; no #fragment or user@) into the tab's rules, optionally only for some request types; remove takes patterns or rule numbers; clear removes your rules; list shows them; strict with on:true makes this tab bypass the site's service worker so the requests it would make can be blocked too (offline pages and cached answers stop working on that site in this tab; cross-site iframes and shared workers are not covered). A rule works only on the site of the page where you added it (it sleeps on other sites). Blocked requests fail like a network error (ERR_BLOCKED_BY_CLIENT); a blocked navigation shows Chromium's 'blocked' page and browser_navigate says blocked. Navigations the user typed or started with back, forward or reload pass once. Requests a service worker or shared worker makes are blocked only when every tab showing that site holds a matching type-less rule (typed rules never apply to them); otherwise they are counted as not applied. Needs the tab's network permission first (browser_network_requests asks for it); on the user's tabs the user is asked once per site, tabs you opened need no permission. The tab title shows ⊘ while it has rules; at most 32 rules per tab, 10 changes a second.", .args = withSurface(&.{
+    .{ .name = "browser_network_block", .subcommand = "network-block", .description = "Block a Chromium tab's requests (W9d③). action add puts patterns (scheme://host[:port]/path with * wildcards — no * means a prefix of the parsed address; ASCII only; no #fragment or user@) into the tab's rules, optionally only for some request types; remove takes patterns or rule numbers; clear removes your rules; list shows them; strict with on:true makes this tab bypass the site's service worker so the requests it would make can be blocked too (offline pages and cached answers stop working on that site in this tab; cross-site iframes and shared workers are not covered). A rule works only on the site of the page where you added it (it sleeps on other sites). Blocked requests fail like a network error (ERR_BLOCKED_BY_CLIENT); a blocked navigation shows Chromium's 'blocked' page and browser_navigate says blocked. Navigations the user typed or started with back, forward or reload pass, even when your DevTools calls overlap them (then your own navigation to the same address in that moment passes too). Requests a service worker or shared worker makes are blocked only when every tab showing that site holds a matching type-less rule (typed rules never apply to them); otherwise they are counted as not applied. Needs the tab's network permission first (browser_network_requests asks for it); on the user's tabs the user is asked once per site, tabs you opened need no permission. The tab title shows ⊘ while it has rules; at most 32 rules per tab, 10 changes a second.", .args = withSurface(&.{
         .{ .key = "action", .kind = .string, .flag = "--action", .description = "add, remove, clear, list or strict", .required = true },
         .{ .key = "patterns", .kind = .string_list, .flag = "--pattern", .description = "patterns to add or remove (1-32)", .max_items = browser.max_block_patterns },
         .{ .key = "types", .kind = .string_list, .flag = "--type", .description = "with add: only these request types (document, iframe, stylesheet, script, image, font, xhr, media, worker, ping, prefetch, preload, ...; not service_worker)", .max_items = browser.max_network_types },
+        .{ .key = "rules", .kind = .int_list, .flag = "--rule", .description = "with remove: rule numbers from list (1-32 of them)", .max_items = browser.max_block_patterns },
+        .{ .key = "on", .kind = .bool_choice, .flag = "--on", .flag_false = "--off", .description = "with strict: true to turn strict mode on for the site the tab shows, false to turn it off" },
+    }) },
+    .{ .name = "browser_network_mock", .subcommand = "network-mock", .description = "Answer a Chromium tab's requests with responses you make (W9d④). action add puts one pattern (same syntax as browser_network_block) with a response {status, content_type, headers, body or body_base64} into the tab's rules, optionally only for some request types and methods; adding the same pattern, types and methods again replaces the response; remove takes a pattern or rule numbers; clear removes your rules; list shows them; strict with on:true makes this tab bypass the site's service worker (strict belongs to the pane that turned it on — other panes get other_pane). Pages, iframes and scripts can be mocked too — they run as that site (its login, storage and permissions) and the address bar shows the real address, so this needs the tab's control permission as well as its network permission. A rule works only on the site of the page where you added it; documents of another site are mocked only where the permission covers that site, and requests made by iframes or workers of a site the permission does not cover are never mocked, whatever their type (they go to the real server and count in frame_not_mocked). Service workers and shared workers never see mocks: on pages a service worker controls, matching requests go to the real server (service_worker_not_mocked) unless strict is on; requests a shared worker makes are never mocked, strict or not, and neither is a shared worker's script (other tabs of the site, the user's too, attach to the same worker — a rule that matches it lets the real script load and counts it in sw_not_mocked; types cannot name shared_worker). Navigations the user typed or started with back, forward or reload are real, even when your DevTools calls overlap them (then your own navigation to the same address in that moment is real too); on the user's tabs pages the user opens with a link or form are real too (their requests can still be mocked). Response headers are an allowlist (no Set-Cookie, no browser-state headers, no downloads); every mock is Cache-Control: no-store. Bodies are at most 512 KiB each, 4 MiB per tab, 32 MiB in all. Blocking rules win over mocks. On the user's tabs the user is asked once per site, tabs you opened need no permission. The tab title shows ▣ while it has rules; at most 32 rules per tab, 10 changes a second.", .args = withSurface(&.{
+        .{ .key = "action", .kind = .string, .flag = "--action", .description = "add, remove, clear, list or strict", .required = true },
+        .{ .key = "pattern", .kind = .string, .flag = "--pattern", .description = "with add or remove: scheme://host[:port]/path with * wildcards (ASCII, no #fragment or user@)" },
+        .{ .key = "types", .kind = .string_list, .flag = "--type", .description = "with add: only these request types (document, iframe, stylesheet, script, image, font, xhr, media, worker, ping, prefetch, favicon, ...; not service_worker, shared_worker or preload)", .max_items = browser.max_network_types },
+        .{ .key = "methods", .kind = .string_list, .flag = "--method", .description = "with add: only these methods (GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS)", .max_items = browser.max_mock_methods },
+        .{ .key = "response", .kind = .mock_response, .description = "with add: the response — {status?, content_type?, headers?:{name:value}, body? or body_base64?}; HEAD gets no body" },
         .{ .key = "rules", .kind = .int_list, .flag = "--rule", .description = "with remove: rule numbers from list (1-32 of them)", .max_items = browser.max_block_patterns },
         .{ .key = "on", .kind = .bool_choice, .flag = "--on", .flag_false = "--off", .description = "with strict: true to turn strict mode on for the site the tab shows, false to turn it off" },
     }) },
@@ -291,6 +303,45 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                             .string => |str| try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, str })),
                             else => return error.WrongType,
                         };
+                    },
+                    else => return error.WrongType,
+                },
+                .mock_response => switch (v) {
+                    .object => |r| {
+                        var rit = r.iterator();
+                        while (rit.next()) |kv| {
+                            const k = kv.key_ptr.*;
+                            const fv = kv.value_ptr.*;
+                            if (std.mem.eql(u8, k, "status")) {
+                                const n: i64 = switch (fv) {
+                                    .integer => |n| n,
+                                    .float => |f| if (f == @trunc(f) and f >= 0 and f < 1000) @intFromFloat(f) else return error.WrongType,
+                                    else => return error.WrongType,
+                                };
+                                if (n < 0 or n > 999) return error.WrongType;
+                                try out.append(arena, try std.fmt.allocPrint(arena, "--status={d}", .{n}));
+                            } else if (std.mem.eql(u8, k, "headers")) {
+                                const hs = switch (fv) {
+                                    .object => |o2| o2,
+                                    else => return error.WrongType,
+                                };
+                                var hit = hs.iterator();
+                                while (hit.next()) |h| switch (h.value_ptr.*) {
+                                    .string => |hv| {
+                                        // 이름에 `:` 가 있으면 CLI 의 `이름: 값` 을 가를 수 없다(어차피 토큰이 아니다 — 서버가 거절할 꼴).
+                                        if (std.mem.indexOfScalar(u8, h.key_ptr.*, ':') != null) return error.WrongType;
+                                        try out.append(arena, try std.fmt.allocPrint(arena, "--header={s}: {s}", .{ h.key_ptr.*, hv }));
+                                    },
+                                    else => return error.WrongType,
+                                };
+                            } else {
+                                const flag: []const u8 = if (std.mem.eql(u8, k, "content_type")) "--content-type" else if (std.mem.eql(u8, k, "body")) "--body" else if (std.mem.eql(u8, k, "body_base64")) "--body-base64" else return error.WrongType;
+                                switch (fv) {
+                                    .string => |sv| try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ flag, sv })),
+                                    else => return error.WrongType,
+                                }
+                            }
+                        }
                     },
                     else => return error.WrongType,
                 },
@@ -469,7 +520,9 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "not on tabs you opened); read a body with browser_network_request body:true, 64 KiB per call (or out for the whole body). " ++
             "A body sent with another site's cookies or login also needs that site's cookie permission. " ++
             "browser_network_block blocks a tab's requests by pattern on the site where you add the rule (the tab title shows ⊘; asked once per site " ++
-            "on the user's tabs, not on tabs you opened; strict mode bypasses the site's service worker in that tab).") catch |e| break :blk e;
+            "on the user's tabs, not on tabs you opened; strict mode bypasses the site's service worker in that tab). " ++
+            "browser_network_mock answers a tab's requests with responses you give, on the site where you add the rule (the tab title shows ▣; needs " ++
+            "the tab's control and network permissions; service and shared workers never see mocks, nor a shared worker's script — use strict for pages a service worker controls).") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -492,7 +545,37 @@ fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
             .number => "number",
             .flag, .bool_choice => "boolean",
             .json_array, .path_list, .string_list, .int_list => "array",
+            .mock_response => "object",
         });
+        if (a.kind == .mock_response) {
+            // W9d④: 응답 객체의 칸(서버가 검사한다 — 머리 허용 목록·상태·크기).
+            try s.objectField("properties");
+            try s.beginObject();
+            inline for (.{ .{ "status", "integer", "HTTP status 200-599 (redirects need a Location header)" }, .{ "content_type", "string", "Content-Type (default text/plain; charset=utf-8 for body, application/octet-stream for body_base64)" }, .{ "body", "string", "UTF-8 text body (at most 512 KiB)" }, .{ "body_base64", "string", "binary body in standard base64 (at most 512 KiB decoded)" } }) |f| {
+                try s.objectField(f[0]);
+                try s.beginObject();
+                try s.objectField("type");
+                try s.write(f[1]);
+                try s.objectField("description");
+                try s.write(f[2]);
+                try s.endObject();
+            }
+            try s.objectField("headers");
+            try s.beginObject();
+            try s.objectField("type");
+            try s.write("object");
+            try s.objectField("additionalProperties");
+            try s.beginObject();
+            try s.objectField("type");
+            try s.write("string");
+            try s.endObject();
+            try s.objectField("description");
+            try s.write("response headers by name — only an allowlist (Location, Access-Control-*, Content-Language, Content-Security-Policy, X-*, Vary, ETag, Link, …); cookies and browser-state headers are refused");
+            try s.endObject();
+            try s.endObject();
+            try s.objectField("additionalProperties");
+            try s.write(false);
+        }
         if (a.kind == .path_list or a.kind == .string_list or a.kind == .int_list) {
             try s.objectField("items");
             try s.beginObject();
@@ -666,8 +749,8 @@ test "W9f: 도구 표의 모든 도구는 CLI 하위 명령이고, 필수 인자
             .int_list => try jsonOf(arena, "[1]"),
             else => .{ .bool = true },
         });
-        // W9d③: 막기의 필수 동작 — 그것만으로 받는 것(`list`).
-        if (std.mem.eql(u8, t.subcommand, "network-block")) try obj.put(arena, "action", .{ .string = "list" });
+        // W9d③·④: 막기·가짜의 필수 동작 — 그것만으로 받는 것(`list`).
+        if (std.mem.eql(u8, t.subcommand, "network-block") or std.mem.eql(u8, t.subcommand, "network-mock")) try obj.put(arena, "action", .{ .string = "list" });
         const extra: ?[]const u8 = if (std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "upload"))
             "selector"
         else if (std.mem.eql(u8, t.subcommand, "wait")) "selector" else null;
@@ -862,6 +945,12 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             try obj.put(arena, "action", .{ .string = action });
             if (std.mem.eql(u8, opt.key, "types")) try obj.put(arena, "patterns", try jsonOf(arena, "[\"https://a.test/\"]"));
         }
+        // W9d④: 가짜도 — 규칙은 remove, on 은 strict, 나머지(패턴·종류·메서드·응답)는 add(패턴과 함께).
+        if (std.mem.eql(u8, t.subcommand, "network-mock")) {
+            const action = if (std.mem.eql(u8, opt.key, "rules")) "remove" else if (std.mem.eql(u8, opt.key, "on")) "strict" else "add";
+            try obj.put(arena, "action", .{ .string = action });
+            if (!std.mem.eql(u8, opt.key, "rules") and !std.mem.eql(u8, opt.key, "on") and !std.mem.eql(u8, opt.key, "pattern")) try obj.put(arena, "pattern", .{ .string = "https://a.test/" });
+        }
         // 이 인자와 함께 써야 하는 짝(로케이터는 하나가 있어야, --name·--exact 는 role 과).
         const needs_locator = std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "wait") or std.mem.eql(u8, t.subcommand, "upload");
         const is_locator = std.mem.eql(u8, opt.key, "selector") or std.mem.eql(u8, opt.key, "ref") or std.mem.eql(u8, opt.key, "role") or std.mem.eql(u8, opt.key, "by_text") or std.mem.eql(u8, opt.key, "by_label");
@@ -877,9 +966,10 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             .number => .{ .float = 0.5 },
             .flag => .{ .bool = true },
             .json_array => try jsonOf(arena, "[1]"),
-            .string_list => try jsonOf(arena, if (std.mem.eql(u8, opt.key, "types")) "[\"image\"]" else "[\"https://a.test/x\"]"),
+            .string_list => try jsonOf(arena, if (std.mem.eql(u8, opt.key, "types")) "[\"image\"]" else if (std.mem.eql(u8, opt.key, "methods")) "[\"GET\"]" else "[\"https://a.test/x\"]"),
             .int_list => try jsonOf(arena, "[3]"),
             .bool_choice => .{ .bool = true },
+            .mock_response => try jsonOf(arena, "{\"status\":200,\"content_type\":\"text/plain\",\"headers\":{\"X-A\":\"1\"},\"body\":\"x\"}"),
             else => .{ .string = if (std.mem.eql(u8, opt.key, "rect")) "0,0,10,10" else if (std.mem.eql(u8, opt.key, "role")) "button" else if (std.mem.eql(u8, opt.key, "url")) "https://e.test/" else if (std.mem.eql(u8, opt.key, "types")) "xhr,image" else if (std.mem.eql(u8, opt.key, "status")) "4xx" else if (std.mem.eql(u8, opt.key, "out")) "/tmp/body" else "x" },
         });
         const a = try argv(arena, t, .{ .object = obj });
@@ -1317,3 +1407,56 @@ test "W9d③ v20b R17c: browser_network_block 의 인자 종류 — 정수 배�
 }
 
 const NB = browser.NetworkBlockCmd.Action;
+
+test "W9d④: browser_network_mock — 동작·패턴·종류·메서드·응답 객체·규칙·on 이 CLI 의 network-mock 옵션으로(응답 칸마다 옵션 하나), 응답의 틀린 꼴은 WrongType, 스키마는 객체, 안내는 서비스 워커·▣·제어 권한을 말한다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const mk = findTool("browser_network_mock").?;
+    const add = (try browser.parse(try argv(arena, mk, try jsonOf(arena, "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/api/*\",\"types\":[\"xhr\"],\"methods\":[\"GET\",\"POST\"],\"response\":{\"status\":201,\"content_type\":\"application/json\",\"headers\":{\"X-Mock\":\"1\",\"Access-Control-Allow-Origin\":\"*\"},\"body\":\"-{}\"}}")))).request.network_mock;
+    try testing.expect(add.action == .add and add.type_count == 1 and add.method_count == 2 and add.header_count == 2);
+    try testing.expectEqual(@as(?u16, 201), add.status);
+    try testing.expectEqualStrings("-{}", add.body.?); // `-` 로 시작해도 값이다
+    const bin = (try browser.parse(try argv(arena, mk, try jsonOf(arena, "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/x\",\"types\":[\"image\"],\"response\":{\"body_base64\":\"iVBORw0=\"}}")))).request.network_mock;
+    try testing.expectEqualStrings("iVBORw0=", bin.body_base64.?);
+    const rm = (try browser.parse(try argv(arena, mk, try jsonOf(arena, "{\"surface\":4,\"action\":\"remove\",\"rules\":[3,4]}")))).request.network_mock;
+    try testing.expect(rm.action == .remove and rm.rule_count == 2);
+    const st = (try browser.parse(try argv(arena, mk, try jsonOf(arena, "{\"surface\":4,\"action\":\"strict\",\"on\":true}")))).request.network_mock;
+    try testing.expect(st.action == .strict and st.on.?);
+    for ([_][]const u8{
+        "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"nope\":1}}",
+        "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":\"200\"}}",
+        "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"headers\":{\"X-A\":1}}}",
+        "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"headers\":{\"a:b\":\"1\"}}}",
+        "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":[1]}",
+    }) |bad| try testing.expectError(error.WrongType, argv(arena, mk, try jsonOf(arena, bad)));
+    try testing.expect(std.mem.indexOf(u8, mk.description, "▣") != null);
+    try testing.expect(std.mem.indexOf(u8, mk.description, "Service workers and shared workers never see mocks") != null);
+    try testing.expect(std.mem.indexOf(u8, mk.description, "neither is a shared worker's script") != null); // 결정 A 2026-11-11
+    try testing.expect(std.mem.indexOf(u8, mk.description, "control permission") != null);
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(r);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, r, .{});
+    defer parsed.deinit();
+    var found = false;
+    for (parsed.value.object.get("result").?.object.get("tools").?.array.items) |t| if (std.mem.eql(u8, t.object.get("name").?.string, "browser_network_mock")) {
+        const props = t.object.get("inputSchema").?.object.get("properties").?.object;
+        const resp = props.get("response").?.object;
+        try testing.expectEqualStrings("object", resp.get("type").?.string);
+        try testing.expect(resp.get("properties").?.object.get("headers") != null);
+        found = true;
+    };
+    try testing.expect(found);
+}
+
+test "W9d④ 변이: browser_network_mock 응답 객체 — 모르는 글 칸·범위 밖 상태는 WrongType(본문으로 바꿔 싣지 않는다)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const mk = findTool("browser_network_mock").?;
+    for ([_][]const u8{
+        "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"nope\":\"x\"}}",
+        "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":1000}}",
+        "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":-1}}",
+    }) |bad| try testing.expectError(error.WrongType, argv(arena, mk, try jsonOf(arena, bad)));
+}

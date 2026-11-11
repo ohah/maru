@@ -25,7 +25,8 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* v255: copied code action edit ranges retain their response encoding. */
 /* v256: LSP launches and lazy code action data carry connection identities. */
 /* v257: W9d③ browser request-blocking summary for the Browser Grants menu. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 257u
+/* v258: W9d④ browser response-mocking summary for the Browser Grants menu. */
+#define MARU_MACOS_APP_HOST_ABI_VERSION 258u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);
@@ -2553,12 +2554,14 @@ void maru_macos_control_push_browser_closed(uint64_t surface_id);
 uint32_t maru_macos_control_revoke_all_browser_grants(void);
 
 // grant UX(per-grant revoke, §9.2): "Browser Grants" 서브메뉴 동적 생성용. count로 항목 수를, grant_at으로 각 grant의
-// (pane, target, scope[wire u8: 0=browser·1=browser_storage·2=browser_network(W9d①)·3=browser_network_body(W9d②)·4=browser_network_block(W9d③)])를 읽고, revoke_browser_grant로 하나만 취소한다(값 기반·멱등).
+// (pane, target, scope[wire u8: 0=browser·1=browser_storage·2=browser_network(W9d①)·3=browser_network_body(W9d②)·4=browser_network_block(W9d③)·5=browser_network_mock(W9d④)])를 읽고, revoke_browser_grant로 하나만 취소한다(값 기반·멱등).
 uint32_t maru_macos_control_browser_grant_count(void);
 uint32_t maru_macos_control_browser_grant_at(uint32_t index, uint64_t *out_pane, uint64_t *out_target, uint8_t *out_scope);
 uint32_t maru_macos_control_revoke_browser_grant(uint64_t pane, uint64_t target, uint8_t scope);
 // W9d③: 그 pane 이 그 탭에 둔 요청 막기 규칙 수(반환)와 엄격 모드(out_strict 1/0) — "Browser Grants" 의 막기 줄 「request blocking (N rules[, strict])」.
 uint32_t maru_macos_control_browser_block_summary(uint64_t pane, uint64_t target, uint8_t *out_strict);
+// W9d④: 그 pane 이 그 탭에 둔 가짜 응답 규칙 수(반환)와 가짜 엄격 모드(out_strict 1/0) — "Browser Grants" 의 가짜 줄 「response mocking (N rules[, strict])」.
+uint32_t maru_macos_control_browser_mock_summary(uint64_t pane, uint64_t target, uint8_t *out_strict);
 
 /* Save As 요청/결과: 버퍼는 호출자가 소유하며 이 호출 동안만 빌린다. */
 size_t maru_macos_app_session_editor_save_as_take(MaruAppHostSession *session, uint64_t *token, uint8_t *path, size_t capacity);

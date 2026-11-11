@@ -47,6 +47,8 @@ pub const Api = struct {
     string_multimap_key: *const @TypeOf(c.cef_string_multimap_key),
     string_multimap_value: *const @TypeOf(c.cef_string_multimap_value),
     string_multimap_free: *const @TypeOf(c.cef_string_multimap_free),
+    /// W9d④: 가짜 응답의 머리를 한꺼번에(`cef_response_t.set_header_map` — 같은 이름 여럿도).
+    string_multimap_append: *const @TypeOf(c.cef_string_multimap_append),
     request_context_create_shared: *const @TypeOf(c.cef_request_context_cef_create_context_shared),
 };
 
@@ -89,6 +91,7 @@ pub fn load(framework_binary: [*:0]const u8) LoadError!Api {
         .string_multimap_key = try find(handle, "cef_string_multimap_key", @TypeOf(c.cef_string_multimap_key)),
         .string_multimap_value = try find(handle, "cef_string_multimap_value", @TypeOf(c.cef_string_multimap_value)),
         .string_multimap_free = try find(handle, "cef_string_multimap_free", @TypeOf(c.cef_string_multimap_free)),
+        .string_multimap_append = try find(handle, "cef_string_multimap_append", @TypeOf(c.cef_string_multimap_append)),
         .request_context_create_shared = try find(handle, "cef_request_context_cef_create_context_shared", @TypeOf(c.cef_request_context_cef_create_context_shared)),
     };
 }

@@ -190,6 +190,9 @@ pub const WebMeta = struct {
     /// W9d③: 이 탭에 요청 막기 규칙이 있다(탭 제목 앞의 ⊘ 와 같은 신호 — `web_osr.networkBlocking`; 잠든 규칙만 있어도) — 규칙 수(모든 pane)와
     /// 엄격 모드. 없으면 null.
     blocking: ?Blocking = null,
+    /// W9d④: 이 탭에 가짜 응답 규칙이 있다(탭 제목 앞의 ▣ 와 같은 신호 — `web_osr.networkMocking`; 잠든 규칙만 있어도) — 규칙 수(모든 pane)와
+    /// 엄격 모드. 없으면 null.
+    mocking: ?Blocking = null,
 
     pub const Blocking = struct { rules: u8 = 0, strict: bool = false };
 };

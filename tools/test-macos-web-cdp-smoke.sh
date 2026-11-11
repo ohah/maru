@@ -102,6 +102,13 @@
 #                   서비스 워커가 다스리는 페이지의 fetch 는 그 출처를 보이는 규칙 없는 탭이 있으면 막지 않고 「not applied」 로 세고(없으면 막는다),
 #                   `--strict on` 이면 그 탭이 서비스 워커를 건너뛰어 같은 fetch 가 막힌다(목록에 strict) · `--clear` 뒤 ⊘ 가 사라지고 fetch 가 서버에
 #                   닿는다 · 규칙을 다시 두고 모든 grant 를 철회하면(앱 대본 `revokegrants`) ⊘ 가 사라진다
+#   w9d-mock        (W9d④) 가짜 응답: 에이전트가 연 탭은 묻지 않고 규칙을 둔다(`network-mock --add`, 목록에 ▣ mocking) — 맞는 fetch 는 준 본문을
+#                   받고 서버에 닿지 않는다, `network --mocked` 는 `[mocked rule N 패턴]` 인 것만 · 주 프레임 문서의 가짜(`--body-file` 의 HTML)로
+#                   navigate 하면 `mocked:` 줄이고 페이지는 그 문서다(제목) · `--clear` 뒤 ▣ 가 사라지고 fetch 가 서버에 닿는다 · 둘째 pane(사용자의
+#                   탭과 같다)은 네트워크 권한 전에는 network permission, 그 뒤 제어 권한 전에는 `needs_browser_permission`(모달 없이), get-url 로
+#                   제어 권한을 받은 뒤(확인 모달, 자동 승인) 가짜 grant 를 물어(자동 승인) 규칙을 두고 그 fetch 가 가짜를 받는다 · 모든 grant 를
+#                   철회하면(앱 대본 `revokegrants`) ▣ 가 두 탭에서 사라진다. 서비스 워커·sidecar 재시작·본문 32 MiB·사람의 누름(Q2)은 판정자
+#                   (`--network-mock`)가 본다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -460,6 +467,14 @@ printf '<!doctype html><title>blkdoc</title>blkdoc' > "$root/www/blk/doc.html"
 printf '<!doctype html><title>bsw</title><script>navigator.serviceWorker.register("/bsw/sw.js",{scope:"/bsw/"}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300)}})</script>bsw' > "$root/www/bsw/page.html"
 printf 'self.addEventListener("install",function(e){self.skipWaiting()});self.addEventListener("activate",function(e){e.waitUntil(self.clients.claim())});self.addEventListener("fetch",function(e){e.respondWith(fetch(e.request))});' > "$root/www/bsw/sw.js"
 printf '{"bsw":1}' > "$root/www/bsw/data.json"
+# W9d④: 가짜 응답 — 진짜 파일(가짜가 사라지면 서버가 답한다)과 가짜 문서(`--body-file` 로 넘긴다 — www 밖).
+printf '<!doctype html><title>mkhome</title>mkhome' > "$root/www/mkhome.html"
+printf '<!doctype html><title>mkuser</title>mkuser' > "$root/www/mkuser.html"
+mkdir -p "$root/www/mk" "$root/www/mku"
+printf 'real-api' > "$root/www/mk/api.txt"
+printf '<!doctype html><title>realdoc</title>realdoc' > "$root/www/mk/doc.html"
+printf 'real-user' > "$root/www/mku/x.txt"
+printf '<!doctype html><title>mocked-doc</title>mocked document' > "$root/mockdoc.html"
 # W9d②: 응답 본문 — chunked JSON·2 MiB JSON·PNG·잘못된 UTF-8 JSON·다른 사이트(localhost)에서 쿠키가 실린 스크립트(서버가 만든다). fetch 는 본문을
 # 읽는다 — Chromium 은 페이지가 읽기 전에는 그 요청을 끝내지 않는다(판정자 실측 — 그러면 본문도 없다).
 printf '<!doctype html><title>body</title><img src="/bodypic.png"><script src="http://localhost:%s/bodycred.js"></script><script>function F(u){return fetch(u).then(function(r){return r.text()})}F("/bodyc.json");F("/bodybig.json");F("/bodybin.json")</script>body' "$port" > "$root/www/body.html"
@@ -549,6 +564,19 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     r2=\$(sed -n 's/^#\([0-9]*\) GET [0-9-]* xhr .*bodyc\.json?p2b.*/\1/p' "\$out/bd2-list2" | head -1)
     "\$cli" browser network-request --surface "\$bt" --req "\$r2" --body > "\$out/bd2-after" 2>&1; echo "rc=\$?" >> "\$out/bd2-after"
     touch "\$out/p2-body-done"
+    # W9d④: 둘째 pane — 첫 pane 이 연 탭(이 pane 에게는 사용자의 탭과 같다). 네트워크 권한 전에는 거절, 그 뒤 제어 권한 전에는 모달 없이
+    # needs_browser_permission, get-url 로 제어 권한을 받은 뒤 가짜 grant 를 물어(자동 승인) 규칙을 둔다.
+    n=0; while [ ! -f "\$out/p2-mock-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
+    [ -f "\$out/p2-mock-go" ] || exec sleep 600
+    mu=\$(cat "\$out/p2-mock-go")
+    madd() { "\$cli" browser network-mock --surface "\$mu" --add "http://127.0.0.1:$port/mku/*" --content-type 'text/plain; charset=utf-8' --body mocked-user; }
+    madd > "\$out/mku-add0" 2>&1; echo "rc=\$?" >> "\$out/mku-add0"
+    "\$cli" browser network --surface "\$mu" > "\$out/mku-net" 2>&1; echo "rc=\$?" >> "\$out/mku-net"
+    madd > "\$out/mku-add1" 2>&1; echo "rc=\$?" >> "\$out/mku-add1"
+    "\$cli" browser get-url --surface "\$mu" > "\$out/mku-url" 2>&1; echo "rc=\$?" >> "\$out/mku-url"
+    madd > "\$out/mku-add2" 2>&1; echo "rc=\$?" >> "\$out/mku-add2"
+    "\$cli" browser exec --surface "\$mu" 'fetch("/mku/x.txt?u1").then(function(r){return r.text().then(function(t){return r.status+" "+t})},function(e){return "reject "+e.name})' > "\$out/mku-fetch" 2>&1
+    touch "\$out/p2-mock-done"
     exec sleep 600
 fi
 # 주소가 \$1 로 끝날 때까지(최대 10 초) — 목록 줄의 주소 칸으로 본다.
@@ -1333,6 +1361,39 @@ sleep 1
 touch "\$out/block-revoke-now"
 sleep 1.5
 "\$cli" browser list > "\$out/bk-list5" 2>&1
+# ── W9d④: 가짜 응답 ──
+# 에이전트가 연 탭 — 묻지 않고 규칙을 둔다(가짜는 네트워크 기록 위에 선다 — 먼저 한 번 읽는다).
+fm() { printf 'fetch("%s").then(function(r){return r.text().then(function(t){return r.status+" "+t})},function(e){return "reject "+e.name})' "\$1"; }
+"\$cli" browser open --url "http://127.0.0.1:$port/mkhome.html" > "\$out/mk-open" 2>&1
+mt=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/mk-open")
+"\$cli" browser network --surface "\$mt" > "\$out/mk-net0" 2>&1; echo "rc=\$?" >> "\$out/mk-net0"
+"\$cli" browser network-mock --surface "\$mt" --add "http://127.0.0.1:$port/mk/api*" --content-type 'text/plain; charset=utf-8' --body mocked-api > "\$out/mk-add" 2>&1; echo "rc=\$?" >> "\$out/mk-add"
+"\$cli" browser exec --surface "\$mt" "\$(fm /mk/api.txt?t1)" > "\$out/mk-fetch" 2>&1
+"\$cli" browser exec --surface "\$mt" "\$(fm /mkhome.html?ok)" > "\$out/mk-fetch-ok" 2>&1
+sleep 0.5
+"\$cli" browser network --surface "\$mt" --mocked > "\$out/mk-mocked" 2>&1; echo "rc=\$?" >> "\$out/mk-mocked"
+"\$cli" browser list > "\$out/mk-list" 2>&1
+# 주 프레임 문서의 가짜 — HTML 을 파일로 넘긴다. navigate 는 가짜가 답했다고 말하고 페이지는 그 문서다.
+"\$cli" browser network-mock --surface "\$mt" --add "http://127.0.0.1:$port/mk/doc.html" --content-type 'text/html; charset=utf-8' --body-file "$root/mockdoc.html" > "\$out/mk-add-doc" 2>&1; echo "rc=\$?" >> "\$out/mk-add-doc"
+"\$cli" browser navigate --surface "\$mt" "http://127.0.0.1:$port/mk/doc.html" > "\$out/mk-nav" 2>&1; echo "rc=\$?" >> "\$out/mk-nav"
+"\$cli" browser exec --surface "\$mt" 'document.title' > "\$out/mk-title" 2>&1
+"\$cli" browser network-mock --surface "\$mt" --list > "\$out/mk-ls" 2>&1; echo "rc=\$?" >> "\$out/mk-ls"
+# 지우기 — ▣ 가 사라지고 fetch 가 서버에 닿는다.
+"\$cli" browser network-mock --surface "\$mt" --clear > "\$out/mk-clear" 2>&1; echo "rc=\$?" >> "\$out/mk-clear"
+"\$cli" browser navigate --surface "\$mt" "http://127.0.0.1:$port/mkhome.html?2" > "\$out/mk-nav2" 2>&1
+"\$cli" browser exec --surface "\$mt" "\$(fm /mk/api.txt?t3)" > "\$out/mk-fetch3" 2>&1
+"\$cli" browser list > "\$out/mk-list3" 2>&1
+# 규칙을 다시 둔다. 둘째 pane 에게 사용자의 탭과 같은 탭을 넘긴다 — 그 pane 은 권한을 차례로 받고 제 규칙을 둔다.
+"\$cli" browser network-mock --surface "\$mt" --add "http://127.0.0.1:$port/mk/api*" --body again > "\$out/mk-add2" 2>&1; echo "rc=\$?" >> "\$out/mk-add2"
+"\$cli" browser open --url "http://127.0.0.1:$port/mkuser.html" > "\$out/mku-open" 2>&1
+mu=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/mku-open")
+echo "\$mu" > "\$out/p2-mock-go.tmp" && mv "\$out/p2-mock-go.tmp" "\$out/p2-mock-go"
+n=0; while [ ! -f "\$out/p2-mock-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser list > "\$out/mk-list4" 2>&1
+# 모든 grant 를 철회한다(앱 대본 「revokegrants」) — 두 탭의 ▣ 가 사라진다.
+touch "\$out/mock-revoke-now"
+sleep 1.5
+"\$cli" browser list > "\$out/mk-list5" 2>&1
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -1346,7 +1407,7 @@ up_bid=$(grep -a -A1 '<key>CFBundleIdentifier</key>' "$app" | sed -n 's/.*<strin
 up_stale="$root/home/Library/Application Support/maru/web/${up_bid:-dev.maru.apphost}/profile/upload-staging/424242"
 (umask 077 && mkdir -p "$up_stale/1/0" && printf 'stale\n' > "$up_stale/1/0/old.txt")
 # 숨은 탭 경우(W9b②-3) — pane 대본이 hide-now 를 만들면 새 탭으로 Chromium 탭을 숨기고, show-now 면 돌아온다.
-printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" "$out/body-revoke-now" "$out/block-revoke-now" > "$root/hide.txt"
+printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" "$out/body-revoke-now" "$out/block-revoke-now" "$out/mock-revoke-now" > "$root/hide.txt"
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
@@ -1714,6 +1775,40 @@ grep -q '⊘' "$out/bk-list3" && kbad "the list still showed ⊘ after clear ($(
 grep -q '⊘ blocking (1 rule)' "$out/bk-list4" || kbad "the list did not show ⊘ for the re-added rule ($(kshow bk-list4))"
 grep -q '⊘' "$out/bk-list5" && kbad "the list still showed ⊘ after revoking all grants ($(kshow bk-list5))"
 [ -z "$block_bad" ] || fail "w9d-block:$block_bad"
+mock_bad=""
+mbad() { mock_bad="$mock_bad · $1"; }
+mshow() { tr '\n' ' ' < "$out/$1" 2>/dev/null | cut -c1-300; }
+mt_id=$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "$out/mk-open")
+mu_id=$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "$out/mku-open")
+grep -q '^rc=0$' "$out/mk-add" && grep -q '^added: [0-9]' "$out/mk-add" || mbad "adding a mock rule on the agent's tab failed or asked ($(mshow mk-add))"
+grep -q '200 mocked-api' "$out/mk-fetch" || mbad "the matching fetch did not get the mocked body ($(mshow mk-fetch))"
+grep -q '/mk/api.txt?t1' "$root/http.log" && mbad "the server saw the mocked fetch"
+grep -q '200 .*mkhome' "$out/mk-fetch-ok" || mbad "an unmatched fetch did not reach the server ($(mshow mk-fetch-ok))"
+grep -q 'mk/api.txt?t1.*\[mocked rule [0-9]* http://127.0.0.1:[0-9]*/mk/api\*\]' "$out/mk-mocked" || mbad "network --mocked did not show the mocked request with its rule ($(mshow mk-mocked))"
+grep -q 'mkhome.html?ok' "$out/mk-mocked" && mbad "network --mocked showed a request that was not mocked"
+grep -q "^surface $mt_id .*▣ mocking (1 rule)" "$out/mk-list" || mbad "the list did not show ▣ mocking on the agent's tab ($(mshow mk-list))"
+grep -q '^rc=0$' "$out/mk-add-doc" || mbad "adding a document mock from --body-file failed ($(mshow mk-add-doc))"
+grep -q '^mocked: mock rule [0-9]* answered this page' "$out/mk-nav" || mbad "navigating to a mocked document did not say mocked ($(mshow mk-nav))"
+grep -q 'mocked-doc' "$out/mk-title" || mbad "the mocked document was not the page ($(mshow mk-title))"
+grep -q '/mk/doc.html' "$root/http.log" && mbad "the server saw the mocked navigation"
+grep -q '^2 mock rules on this tab' "$out/mk-ls" && grep -q 'mk/doc.html on 127.0.0.1 → 200 text/html; charset=utf-8 [0-9]*B — hits' "$out/mk-ls" || mbad "the rule list did not show both rules ($(mshow mk-ls))"
+grep -q '^removed: [0-9]* [0-9]*$' "$out/mk-clear" || mbad "clear did not remove both rules ($(mshow mk-clear))"
+grep -q '200 real-api' "$out/mk-fetch3" || mbad "after clear the fetch did not reach the server ($(mshow mk-fetch3))"
+grep -q '/mk/api.txt?t3' "$root/http.log" || mbad "after clear the server did not see the fetch"
+grep -q "^surface $mt_id .*▣" "$out/mk-list3" && mbad "the list still showed ▣ after clear ($(mshow mk-list3))"
+grep -q '^rc=0$' "$out/mk-add2" || mbad "re-adding the rule failed ($(mshow mk-add2))"
+[ -f "$out/p2-mock-done" ] || mbad "the second pane did not finish its mock steps ($(ls "$out" | grep -E '^(mku-|p2-mock)' | tr '\n' ' '))"
+grep -q '^rc=1$' "$out/mku-add0" && grep -q "network permission first" "$out/mku-add0" || mbad "the second pane mocked a tab before its network permission ($(mshow mku-add0))"
+grep -q '^rc=0$' "$out/mku-net" || mbad "the second pane's network read was not allowed by the dialog ($(mshow mku-net))"
+grep -q '^rc=1$' "$out/mku-add1" && grep -q "control permission first" "$out/mku-add1" || mbad "the second pane mocked a tab before its control permission (needs_browser_permission) ($(mshow mku-add1))"
+grep -q '^rc=0$' "$out/mku-url" || mbad "get-url did not get the control permission ($(mshow mku-url))"
+grep -q '^rc=0$' "$out/mku-add2" && grep -q '^added: [0-9]' "$out/mku-add2" || mbad "after both permissions the mock dialog did not let the second pane add its rule ($(mshow mku-add2))"
+grep -q '200 mocked-user' "$out/mku-fetch" || mbad "the second pane's rule did not answer the fetch ($(mshow mku-fetch))"
+grep -q '/mku/x.txt?u1' "$root/http.log" && mbad "the server saw the fetch the second pane mocked"
+grep -q "^surface $mt_id .*▣ mocking (1 rule)" "$out/mk-list4" && grep -q "^surface $mu_id .*▣ mocking (1 rule)" "$out/mk-list4" || mbad "the list did not show ▣ on both tabs ($(mshow mk-list4))"
+grep -q '▣' "$out/mk-list5" && mbad "the list still showed ▣ after revoking all grants ($(mshow mk-list5))"
+[ -z "$mock_bad" ] || fail "w9d-mock:$mock_bad"
+echo "PASS w9d-mock: the agent's tab took a mock rule without asking (▣ mocking in the list), a matching fetch got the given body and the server never saw it, network --mocked listed it with its rule, a document mock from --body-file became the page and navigate said mocked, clear brought the server's answers back and removed ▣, a second pane needed the network then the control permission before its own mock rule (asked once, approved) answered a fetch, and revoking all grants removed ▣ from both tabs"
 echo "PASS w9d-block: the agent's tab took a rule without asking (⊘ blocking in the list), a blocked fetch was a TypeError the server never saw, network --blocked listed it with its rule and pattern and nothing else, a blocked navigation said blocked, a service-worker page's fetch was handled as the shared-worker rule says, strict on blocked the same fetch (strict in the list), clear brought the requests back and removed ⊘, and revoking all grants removed ⊘"
 echo "PASS w9d-body: the agent's tab recorded bodies without asking (◉ recording in the list), a chunked JSON body came back as sent, a 2 MiB JSON was over_cap, a PNG not_text, a binary JSON body was refused without --out and written with it, --out wrote a 0600 file, a script sent with another site's cookies stayed hidden until get-cookies allowed that site, a pane without the body permission saw needs_body_permission and after its own permission only later bodies, and revoking all grants cleared the mark and the bodies"
 echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization by name only until get-cookies allowed the site and then their values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back) nor a navigation that started on another site and was redirected back, and revoking all grants wiped the record"

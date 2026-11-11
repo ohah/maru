@@ -68,6 +68,7 @@ pub fn handler() dispatch.Handler {
 
 fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
     if (state.shutting_down) return;
+    noteHumanInput(message); // W9d④ Q2: maru 를 지난 입력은 사람의 것이다(에이전트의 DevTools 입력은 이 길이 아니다)
     if (input.handle(message)) return;
     if (dialogs.handle(message)) return;
     if (drag.handle(message)) return;
@@ -80,6 +81,9 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .net_watch => |value| @import("network.zig").watch(value), // W9d①
         .net_record => |value| @import("net_body.zig").record(value), // W9d②
         .net_block => |value| @import("blocking.zig").apply(value), // W9d③
+        .net_mock_rule => |value| @import("mocking.zig").applyRule(value), // W9d④
+        .net_mock_body => |value| @import("mocking.zig").applyBody(value),
+        .net_mock_commit => |value| @import("mocking.zig").applyCommit(value),
         .resize => |value| resize(value, writer),
         .set_hidden => |value| if (hostFor(value.browser, writer)) |host| {
             defer object.release(host);
@@ -99,6 +103,18 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .download_control => |value| @import("downloads.zig").control(value),
         else => {},
     }
+}
+
+/// W9d④ Q2(사용자 결정 2026-10-21 「사용자 탭은 진짜로」): maru 가 보낸 사람 입력 — 누름·뗌·키·IME 확정(옮김·휠·떠남은 몸짓을 만들지 않는다).
+/// 그 뒤 창 안에서 렌더러가 시작한 몸짓 이동은 사람의 링크·폼 이동으로 묶인다(`nav_exempt`).
+fn noteHumanInput(message: Message) void {
+    const browser: protocol.message.BrowserId = switch (message) {
+        .mouse => |v| if (v.kind == .down or v.kind == .up) v.browser else return,
+        .key => |v| if (v.kind != .up) v.browser else return,
+        .ime_commit_text => |v| v.browser,
+        else => return,
+    };
+    @import("blocking.zig").humanInput(browser);
 }
 
 fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
@@ -214,7 +230,8 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
     library.setString(state.api, &url, value.url);
     defer state.api.string_utf16_clear(&url);
     // W9d③ D2: 사용자가 친 이동 — 그 주소의 이동 한 번은 막기 규칙이 막지 않는다(토큰은 `on_before_browse` 가 그 이동에 묶는다).
-    if (value.user) @import("blocking.zig").userNavigate(value.browser, value.url) else @import("blocking.zig").agentNavigate(value.browser);
+    // 사용자 것이 아닌 이동은 남은 토큰을 거둔다 — 친 주소와 같은 주소면 다툼으로 남긴다(둘 다 진짜 — W9d④ v1 SEVERE-2).
+    if (value.user) @import("blocking.zig").userNavigate(value.browser, value.url) else @import("blocking.zig").agentNavigateTo(value.browser, value.url);
     frame.*.load_url.?(frame, &url);
 }
 
@@ -245,7 +262,9 @@ fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
         },
         .reload => blocking.userNavAction(value.browser, .reload),
         .stop => {},
-    } else blocking.agentNavigate(value.browser); // 사용자 것이 아닌 이동은 남은 토큰을 거둔다
+    } else if (value.action == .reload) {
+        blocking.agentReload(value.browser); // 같은 문서 — 산 새로 고침 토큰은 다툼으로 남긴다(W9d④ v1 SEVERE-2)
+    } else blocking.agentNavigate(value.browser); // 사용자 것이 아닌 다른 곳으로 가는 이동은 남은 토큰을 거둔다
     switch (value.action) {
         .back => browser.*.go_back.?(browser),
         .forward => browser.*.go_forward.?(browser),

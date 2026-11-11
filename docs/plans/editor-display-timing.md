@@ -71,3 +71,11 @@ native→첫 표시 분포(ms):
 | 공유 | 32.648 / 42.139 | 25.988 / 39.336 |
 
 프로세스별로는 공유 마지막 pair에서 off 32.314ms/on 34.755ms로 on 중앙값이 더 컸다. 일정한 개선이나 계측 비용을 주장하지 않는다. 새 display link를 등록한 조건의 분포가 달라졌으므로 약 한 주기 잔여 패턴을 무관측 제품의 원인으로 확정하거나 제품 예약 변경의 근거로 단독 사용하지 않는다. 다음 조사는 외부 추적 등 관측기 개입을 줄인 증거와 대조하는 것이다.
+
+## CI에서 확인한 CLI 파일 출력 오류
+
+진단 도구와 별개로 Linux `check`의 두 실행이 기존 `publishResult`의 긴 이름 검사에서 중단됐다. Zig 0.17 `Threaded.dirStatFileLinux`가 경로 전체 길이 검사는 하지만 300바이트 개별 조각의 `NAMETOOLONG`을 panic으로 처리하는 것을 실패 로그와 Linux 재현으로 확인했다.
+
+링크 여부만 필요한 `statFile`은 한 바이트 `readLink`로, 디렉터리 판정은 `openDir`로 바꿨다. 이 API들은 긴 조각과 중간 링크 확장의 `NameTooLong`을 반환한다. 기존 마지막 링크 거절·디렉터리 판정·0600 원자 교체 정책을 유지한다. 회귀 검사는 256/300바이트 이름·중간 링크의 긴 대상·긴 디렉터리 꼴 거절과 255바이트 정상 이름·링크 대상 보존을 확인한다.
+
+실패 baseline과 수정 binary는 `~/.cache/maru-agent-artifacts/ci-4713-linux`에 보존했다. Zig 0.17에서 cross compile한 x86_64-linux-musl binary를 Ubuntu 24.04 amd64 컨테이너에서 실행했다(호스트 arm64의 에뮬레이션; GitHub native GNU 환경과 구분). baseline은 동일 `NAMETOOLONG` panic, 수정 CLI 전체는 835개 통과·2개 건너뜀이었다. macOS 정식 `test-cli-failure-contract`는 836개 통과·1개 건너뜀이었다. 진단 실측 앱과 데이터는 이 CLI 수정 전 제품 HEAD의 고정 artifact이며 다시 덮어쓰지 않았다.

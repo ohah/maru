@@ -35,7 +35,7 @@
 //!
 //! 시험이 증명하는 것: 풀기의 거절마다(이유)·정규형(호스트 꼴·포트·이스케이프·512/513 바이트·`*` 8/9 개·스킴), 맞추기 표(앞부분 대 glob,
 //! 쿼리 포함, 조각·사용자 정보, `*.a.test` 대 `evila.test`, 끝 고정, 포트, IPv6), KMP 맞추기와 단순 참조의 무작위 대조 20 만 번(u8·u16),
-//! 2 MiB 주소의 시간 상한, 종류 이름 표.
+//! 2 MiB 주소의 반복 판정 CPU 상한, 종류 이름 표.
 
 const array_repeat = @import("array_repeat");
 
@@ -769,7 +769,7 @@ test "W9d③: 0x7F 위의 단위는 패턴 바이트와 같지 않다 — `/é` 
     try testing.expect(!matchUrl(u16, &q, &url3));
 }
 
-test "W9d③: 2 MiB 주소의 최악 맞추기(규칙 32 개 — 가운데 조각이 거의 맞다 빗나감)가 시간 상한 안이다" {
+test "W9d③: 2 MiB 주소의 규칙 32개 반복 판정은 스레드 CPU 예산 안이다" {
     const gpa = testing.allocator;
     const len = 2 * 1024 * 1024;
     const url = try gpa.alloc(u16, len);
@@ -779,15 +779,25 @@ test "W9d③: 2 MiB 주소의 최악 맞추기(규칙 32 개 — 가운데 조�
     for (url[head.len..]) |*u| u.* = 'a';
     var rules: [max_rules]Pattern = undefined;
     for (&rules) |*r| r.* = try okPattern("https://a.test/*" ++ array_repeat.repeat("a", 40) ++ "b*" ++ array_repeat.repeat("a", 30) ++ "c");
+    const resolution = std.Io.Clock.cpu_thread.resolution(testing.io) catch |err| switch (err) {
+        error.ClockUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    if (resolution.nanoseconds <= 0) return error.SkipZigTest;
     const t0 = std.Io.Clock.awake.now(testing.io).nanoseconds;
+    const c0 = std.Io.Clock.cpu_thread.now(testing.io).nanoseconds;
     var hits: usize = 0;
     for (&rules) |*r| {
         if (matchUrl(u16, r, url)) hits += 1;
     }
-    const ns = std.Io.Clock.awake.now(testing.io).nanoseconds - t0;
+    const cpu_ns = std.Io.Clock.cpu_thread.now(testing.io).nanoseconds - c0;
+    const wall_ns = std.Io.Clock.awake.now(testing.io).nanoseconds - t0;
+    std.debug.print("net_block repeated URL checks: wall_ns={d} cpu_ns={d}\n", .{ wall_ns, cpu_ns });
     try testing.expectEqual(@as(usize, 0), hits);
-    // 상한: 규칙마다 64 Ki 단위 한 번 훑기 — 디버그 빌드에서도 넉넉히 0.5 초. 넘으면 IO 스레드를 붙잡는다.
-    try testing.expect(ns < 500 * std.time.ns_per_ms);
+    // 단일 스레드 계산이므로 CPU 대기를 예산에 넣지 않는다. Linux 제어 재현에서 단독
+    // wall/CPU 162/162ms, 한 코어 8중 경쟁은 1240/157ms였다. 예산 500ms는 그대로다.
+    // 이 fixture는 끝 조각 c가 맞지 않아 URL 분해를 32번 재며, KMP 최악 경로는 아니다.
+    try testing.expect(cpu_ns > 0 and cpu_ns < 500 * std.time.ns_per_ms);
 }
 
 test "W9d③: 종류 이름 — 아는 이름의 비트, preload 는 둘(19·20), service_worker 와 모르는 이름은 거절, 마스크를 이름으로 되돌린다" {

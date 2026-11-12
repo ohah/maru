@@ -37,6 +37,7 @@ const net_body = @import("net_body.zig"); // W9d②: 기록하는 탭의 본문(
 const body_table = @import("net_body_table.zig");
 const blocking = @import("blocking.zig"); // W9d③: 요청 막기 — 처리기 고르기에서 맞춘다
 const mocking = @import("mocking.zig"); // W9d④: 가짜 응답 — 막기 다음에 맞춘다(막기가 이긴다)
+const emu_inject = @import("emu_inject.zig"); // W9e①: 밖→안 홉의 문서 요청 하나에 흉내 머리(사용자 결정 2026-11-12)
 
 const msg = protocol.message;
 const net_fields = protocol.net_fields;
@@ -99,6 +100,7 @@ pub fn init() void {
     rrh_block = rrh;
     rrh_block.get_resource_handler = &blocking.getBlockHandler;
     mocking.init();
+    emu_inject.init();
     ctx_handler = object.zeroed(c.cef_request_context_handler_t);
     object.staticRefCounted(&ctx_handler.base);
     ctx_handler.get_resource_request_handler = &contextResourceRequestHandler;
@@ -279,6 +281,15 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
     defer object.releaseArg(frame);
     defer object.releaseArg(request);
     if (browser == null or request == null or is_download != 0) return null;
+    const handler = selectTab(browser, frame, request, is_navigation, initiator);
+    // W9e①: 밖→안 홉을 기다리는 탭의 주 프레임 문서 요청 — 다른 처리기가 없어도 흉내 머리를 넣을 처리기를 준다(다른 처리기는 `onBeforeResourceLoad`
+    // 에서 넣는다). 기다리는 탭이 없으면 원자 하나만 본다.
+    if (handler == null and emu_inject.wants(browser, frame, request, is_navigation)) return &emu_inject.rrh;
+    return handler;
+}
+
+/// 탭 길의 처리기 — 막기·가짜·지켜보기(인자의 참조는 부른 쪽이 놓는다).
+fn selectTab(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_navigation: c_int, initiator: [*c]const c.cef_string_t) [*c]c.cef_resource_request_handler_t {
     // W9d④: 사용자 이동의 예외(D2·Q2) — 주 프레임 이동의 요청이면 규칙과 무관하게 공용 표가 소비한다(§13 P2-1). 막기·가짜가 같은 답을 본다.
     const exempt = blocking.navExempt(browser, frame, request, is_navigation);
     // W9d③: 막기 — 요청 번호·지켜보기·문보다 **먼저**(speculation prefetch·prerender 는 번호 0 으로 온다 — 실측 J-B11; 번호를 먼저 보면 막을
@@ -767,6 +778,8 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     defer object.releaseArg(frame);
     defer object.releaseArg(request);
     defer object.releaseArg(callback);
+    // W9e①: 먼저 흉내 머리를 넣는다(밖→안 홉을 기다리는 탭의 문서 요청만) — 아래 기록(W9d①)이 나가는 머리를 그대로 적게.
+    emu_inject.beforeLoad(browser, request);
     var e: Event = .{ .kind = .begin, .request = 0 };
     const id = if (request != null) request.*.get_identifier.?(request) else return c.RV_CONTINUE;
     var initiator_buf: [gate.max_origin_bytes]u8 = undefined;

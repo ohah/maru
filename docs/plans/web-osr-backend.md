@@ -4791,6 +4791,7 @@ UA·client hints 를 그대로 두고 `Accept-Language` 만 바꿨다(q 는 Chro
 - sidecar: `emu_plan.zig`(CEF 를 모름 — 탭마다 바라는 상태·건 것(명령 종류마다 인자 JSON 의 해시)·살아 있음·사이트 안·pane 크기로 **바뀐 것만** 명령 열, 지움 꼴,
   **렌더러가 없으면 빈 열**, 사이트 밖이면 모두 지움, fit 과 resize, 답의 마스크와 까닭), `emulation.zig`(한 주인 — 제 CDP 번호 대역 [1<<26, 1<<26 + 1<<20), 탭마다
   관찰자, `on_before_browse`(주 프레임 홉마다 사이트 안팎)·`on_load_start`(새 렌더러 — 쌓인 차이)·`renderer_gone`·`resize`·`on_before_close`, 상태는 바뀔 때만),
+  `emu_inject.zig`(밖→안 홉을 기다리는 동안 그 홉의 주 프레임 문서 요청 하나에 흉내 머리 — IO 스레드, 아래 「옮긴 판 20 회 검증」 셋째 항목),
   `geo_slot.zig`(W5b2 와 에이전트 위치의 한 칸 — 에이전트 칸이 있으면 maru 의 좌표·「없음」·새 문서 되돌림을 걸지 않는다, 대신 허용한 출처 표 — 기본이었을 때만
   적고 8 을 넘으면 가장 오래된 것부터 되돌린다), `permissions.zig`(그 탭의 위치**만** 묻는 프롬프트는 허용으로 답한다 — 다른 권한이 섞이면 그대로 maru 에; 흉내가
   끝나면·탭이 닫히면 `set_content_setting(DEFAULT)`), `devtools_table.forbiddenMethod` 에 `Emulation.*`·`Network.setUserAgentOverride`·
@@ -4933,7 +4934,8 @@ AppSession 이 있어야 해 단위 시험이 닿지 않는다 — 실제 앱 E2
 `--permissions` 27/0(W9e① 이 `permissions.zig` 를 바꿨다), `--input` 19/0, `--devtools` 19/0, `--upload` 9/0, `--dialogs` 12/0(끊김 갈래), `--popup` 8/0,
 `--contextmenu` 19/0, `--drag` 25/0, `--tooltip` 9/0. 돌리지 않음: 스모크 `w9e-emulate`(앱 GUI).
 
-**옮긴 판 20 회 검증(2026-11-12)**: 옮긴 판(65a51dd9f)을 두 검증자가 10 회씩 공격했다(저장소 밖 `$S/w9e1_v1`·`$S/w9e1_v2`). SEVERE 둘을 고쳤다:
+**옮긴 판 20 회 검증(2026-11-12)**: 옮긴 판(65a51dd9f)을 두 검증자가 10 회씩 공격했다(저장소 밖 `$S/w9e1_v1`·`$S/w9e1_v2`). SEVERE 둘을 고쳤고, 그 고친 판
+(03bcccc5a)의 집중 검증(`$S/w9e1_fix1v`)이 하나를 더 찾아 고쳤다(셋째 항목):
 
 - **bfcache 복원(두 검증자 모두)** — 사용자 탭(127.0.0.1 묶음)에서 밖(localhost)으로 갔다가 뒤로·앞으로 하면 bfcache 가 밖의 문서를 되살리는데, 그 복원은
   `on_before_browse` 를 지나지 않고 안전망 `on_load_start` 는 pageshow 뒤라, 복원된 밖의 문서가 pageshow 에서 흉내(UA·시간대·언어·화면)를 보고 그 안의 요청이
@@ -4953,6 +4955,35 @@ AppSession 이 있어야 해 단위 시험이 닿지 않는다 — 실제 앱 E2
   (`emu-site-bound`·`-aborted-hop`·`-bfcache`·`-slow-hop`). 재지 않은 변이: `emulation.apply` 가 진행 중 홉에서도 `navigate`(흉내가 이동 중에 오면 UA 가 한 요청
   늦는 쪽 — 판정이 그 순간을 만들지 않는다). 오류 페이지(ERR_ABORTED 밖)로 끝난 밖→안 이동은 다음 이동까지 요청 무리만 건다(오류 페이지는 그 사이트의 문서가 아니다 —
   재지 않았다).
+- **밖→안 홉의 기다림에 옛 문서가 만든 요청(고친 판의 집중 검증 1 회차, MED — 사용자 결정 2026-11-12 「그 한 요청만 머리를 직접 넣기」)** — 위 고침은 요청
+  무리(`.ua`)를 홉에서 걸었는데, 렌더러 쪽(navigator·옛 문서의 fetch)은 커밋까지 붙잡혀도 **브라우저 쪽에서 만드는 이동 요청** — 기다리는 동안 옛(밖의) 문서가
+  만든 같은 사이트 iframe·다른 사이트(b.localhost) iframe·iframe 을 대상으로 한 form 제출·dedicated Worker 스크립트 — 이 곧 `User-Agent: BoundUA/1`·
+  `Accept-Language: fr-FR` 를 싣고 허락하지 않은 사이트로 갔다(넷 모두, 65a51dd9f 에서도 — 동의 우회; 기다림의 길이는 밖의 페이지가 정한다). 고침: 기다리는 동안
+  **탭 전체에는 아무것도 걸지 않는다**(`emu_plan.heldUntilCommit` 이 모든 종류 — UA 호출도 커밋에서), 대신 그 홉의 **주 프레임 문서 요청 하나**에 흉내 머리를
+  직접 넣는다(`emu_plan.Tab.injection` → `emu_inject.zig` — UI 스레드가 `on_before_browse` 마다 그 홉 주소의 정규 해시와 넣을 값을 표에 적고, IO 스레드의
+  `on_before_resource_load` 가 그 탭·주 프레임 문서·같은 주소일 때만 머리 지도를 고친다; 지켜보기·막기·가짜의 처리기도 먼저 이것을 부르고, 그 셋이 처리기를 주지
+  않으면 넣기만 하는 처리기를 준다). 값은 커밋 뒤 Chromium 이 탭 전체로 낼 꼴: `User-Agent`, client hints 는 흉내에 metadata 가 있으면 요청에 있는 것만 그 값으로
+  (`Sec-CH-UA`·`-Mobile`·`-Platform`·`-Platform-Version`·`-Arch`·`-Model`·`-Bitness`·`-WoW64` `?0`·전체 목록을 준 흉내의 `-Full-Version-List` — 구조화 머리,
+  셀 수 없는 나머지 `sec-ch-ua*` 는 뺀다), metadata 없는 UA 면 모두 뺀다(그 흉내 아래 Chromium 도 보내지 않는다 — `emu-ua-none-safari`), 언어만이면 UA·client
+  hints 는 그대로. 리다이렉트: 안→안 홉은 새 주소로 다시 넣고, 안→밖 홉은 UI 스레드가 먼저 거둔다(주소도 다르다) — Chromium 이 홉마다 UA·client hints·
+  Accept-Language 를 다시 셈해 넣은 머리가 다음 홉에 남지 않았다(실측 — 되돌림 기록을 두지 않는다). 끝: 커밋·끊김·**오류 페이지**(`dialogs.onLoadError` →
+  `emulation.loadFailed` — 실패한 주소의 문서로 보고 기다림을 끝낸다: 옮긴 판 검증 L2, 고치기 전에는 오류 페이지 뒤 상태가 `pending`·UA 만으로 남았다)·지움·철회·다른
+  사이트로 바뀐 grant·탭 닫힘이 곧 거둔다. 기다리는 동안 보낸 것이 없어 상태는 `pending:false`·`active` 0 이다(L1 — 전에는 UA 의 답이 커밋 뒤에 와 내내 `pending`).
+  **`Accept-Language` 는 넣어도 그 요청이 진짜 값으로 나갔다**(실측 CEF 154 — 머리 지도에는 흉내 값이 있는데 서버는 `en-US,en;q=0.9` 를 받았다, `set_header_by_name`
+  도 같다; 커밋 뒤 요청부터 흉내 — 그 한 요청의 언어는 늦다, 문서화). 판정 `emu-site-bound-slow-hop` 을 넓혔다(기다리는 동안 옛 문서가 iframe 셋·Worker 를 만든다 —
+  그 문서 요청 넷과 안의 fetch 가 진짜; 새 문서 요청은 `BoundUA/1`·커밋 뒤 요청과 같은 client hints; 기다리는 동안 `pending:false`; 새 문서의 첫 스크립트가 모든
+  흉내), 새 판정 `emu-site-bound-hop-headers`(client hints 를 준 흉내 — 밖 → 안 302 → 밖의 안 홉은 흉내 UA·client hints 셋, 밖 홉은 진짜와 같고, 느린 홉의 문서
+  요청 머리가 커밋 뒤 요청과 같다)·`emu-site-bound-error-page`(닫힌 포트의 오류 페이지가 기다림을 끝낸다). 변이(되돌림 `cmp`, 실측 CEF — 판정 34 개):
+  03bcccc5a 의 코드 그대로 → 셋 FAIL(옛 문서가 만든 요청 4/4 가 흉내 머리, 기다리는 동안 `pending`; 302 뒤 밖 홉이 흉내 UA·언어 — E12; 오류 페이지 뒤
+  `pending`·active 0x2); UA 만 홉에서(`heldUntilCommit` 을 `kind != .ua` 로) → 둘 FAIL·순수 RED 1; 넣지 않음 → 셋 FAIL(`emu-site-bound` 의 돌아온 문서 요청도);
+  client hints 를 건드리지 않음 → 둘 FAIL·순수 RED 1; 오류 페이지가 기다림을 끝내지 않음 → 하나 FAIL; 홉이 넣기를 거두지 않음 하나만·주소 짝을 보지 않음 하나만 →
+  모두 PASS(두 겹 — 둘 다 빼면 302 뒤 밖 홉이 흉내 머리로 FAIL). 남은 것(관측 — 고치지 않음): 같은 탭에서 앞서 밖 → 안 302 → 밖을 한 번 지난 뒤의 밖→안 홉은
+  **새 문서의 첫 스크립트가 흉내를 하나도 보지 못했다**(5/5 — 시간대·화면·UA 모두, 그 스크립트의 요청도 진짜 머리; 그 302 없이는 10/10 모두 봤다) — 커밋
+  (`on_load_start`)에서 거는 명령이 그 문서의 첫 스크립트보다 늦다; 03bcccc5a 에서도 같았다(UA 를 홉에서 걸었어도 5/5) — 이 고침 탓이 아니고 새는 쪽도 아니다
+  (허락한 사이트가 진짜 값을 본다).
+  수(이 고침): 순수 sidecar **539**(emu_plan 13 — 기다림 시험 하나를 바꾸고 머리 넣기 둘), `zig build test-cli-failure-contract` 924 통과/1 건너뜀, 게이트 12 통과.
+  실제 CEF(한 번씩, 다시 돌린 것 없음, 부하 4–19): `--emulation` **34/0**, `--network-mock` 73/0, `--network-block` 60/0, `--network` 173/0, `--network-body` 92/0,
+  `--permissions` 27/0, `--devtools` 19/0.
 
 LOW(고치지 않음 — 사용자 결정 「심각한 것만」): 렌더러가 죽은 뒤 사이트 밖으로 가거나 죽은 동안 지우면 그 문서 요청 하나가 흉내 UA·언어를 싣는다(E12 꼴 — 죽은 동안
 UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulationEnabled`·`Page.setGeolocationOverride`·`Page.setDeviceOrientationOverride`·

@@ -3025,7 +3025,12 @@ fn renderEmulate(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
 pub fn renderTrace(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
     const state = strField(result.get("state"));
     if (eq(state, "recording") and result.get("summary") == null) {
-        try w.print("recording a performance trace — it stops by itself after {d:.1} s (or run `trace stop`)\n", .{@as(f64, @floatFromInt(intField(result.get("auto_stop_ms")) orelse 0)) / 1000});
+        const auto_s = @as(f64, @floatFromInt(intField(result.get("auto_stop_ms")) orelse 0)) / 1000;
+        // status 는 경과를 싣는다(start 는 싣지 않는다).
+        if (intField(result.get("elapsed_ms"))) |e|
+            try w.print("recording a performance trace — {d:.1} s of {d:.1} s; it stops by itself (or run `trace stop`)\n", .{ @as(f64, @floatFromInt(e)) / 1000, auto_s })
+        else
+            try w.print("recording a performance trace — it stops by itself after {d:.1} s (or run `trace stop`)\n", .{auto_s});
         if (boolField(result.get("focus_emulated"))) try w.writeAll("the tab is hidden: it is kept rendering while it records (focus emulation), but its renderer runs at background CPU priority — main-thread times read higher than on a shown tab\n");
         if (result.get("conditions")) |c| if (c == .object and c.object.count() > 0) {
             try w.writeAll("conditions in effect:");
@@ -3045,8 +3050,12 @@ pub fn renderTrace(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.I
         return true;
     }
     if (eq(state, "discarded") or eq(state, "failed")) {
-        try w.print("trace {s}: ", .{state});
-        try writePageText(gpa, w, strField(result.get("reason")), false);
+        try w.print("trace {s}", .{state});
+        const reason = strField(result.get("reason"));
+        if (reason.len > 0) {
+            try w.writeAll(": ");
+            try writePageText(gpa, w, reason, false);
+        }
         if (result.get("message")) |m| if (m == .string) {
             try w.writeAll(" — ");
             try writePageText(gpa, w, m.string, false);
@@ -3058,8 +3067,9 @@ pub fn renderTrace(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.I
         const sum = switch (result.get("summary") orelse std.json.Value{ .null = {} }) {
             .object => |o| o,
             else => {
-                try w.writeAll("error: malformed trace result\n");
-                return false;
+                // 요약 없는 done(옛 앱의 status — W9e② 실앱 스모크)은 망가진 답이 아니다: 끝났고, 요약은 stop 이 낸다.
+                try w.writeAll("trace done — run `maru browser trace stop` for the summary\n");
+                return true;
             },
         };
         try w.print("trace done — covered {d} ms, {d} events kept, {d} dropped", .{ intField(sum.get("covered_ms")) orelse 0, intField(sum.get("events_kept")) orelse 0, intField(sum.get("events_dropped")) orelse 0 });
@@ -3113,6 +3123,19 @@ pub fn renderTrace(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.I
     }
     if (eq(state, "aborted")) {
         try w.writeAll("trace aborted\n");
+        return true;
+    }
+    // status 의 나머지 상태 — 기록 전·받는 중·거르는 중의 경과는 길이를 넘어 자라므로 싣지 않는다.
+    if (eq(state, "idle")) {
+        try w.writeAll("no performance trace on this tab — start one with `maru browser trace start`\n");
+        return true;
+    }
+    if (eq(state, "starting")) {
+        try w.writeAll("trace starting — Chromium has not begun recording yet\n");
+        return true;
+    }
+    if (eq(state, "receiving") or eq(state, "filtering")) {
+        try w.writeAll("trace finishing — maru is receiving and filtering it; `maru browser trace stop` waits for the result\n");
         return true;
     }
     try w.writeAll("trace state ");
@@ -6550,6 +6573,40 @@ test "W9e②: trace 결과 렌더 — 기록 시작(숨은 탭 경고·조건), 
     const st = try renderOf(.trace, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"recording\",\"elapsed_ms\":1200,\"auto_stop_ms\":5000,\"summary\":null}}");
     defer testing.allocator.free(st);
     try testing.expect(std.mem.indexOf(u8, st, "1200 ms of 5000 ms") != null);
+}
+
+test "W9e② 실앱 스모크: trace status 렌더 — 기록 중은 경과, 요약 없는 done 은 malformed 가 아니다, 이유 없는 버림은 빈 콜론 없이, 기록 전·마무리·없음" {
+    const T = struct {
+        fn render(body: []const u8, want_ok: bool, want: []const []const u8, never: []const []const u8) !void {
+            var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer aw.deinit();
+            const ok = try renderResponse(testing.allocator, body, .trace, &aw.writer);
+            for (want) |n| if (std.mem.indexOf(u8, aw.written(), n) == null) {
+                std.debug.print("missing {s} in {s}\n", .{ n, aw.written() });
+                return error.TestUnexpectedResult;
+            };
+            for (never) |n| if (std.mem.indexOf(u8, aw.written(), n) != null) {
+                std.debug.print("unexpected {s} in {s}\n", .{ n, aw.written() });
+                return error.TestUnexpectedResult;
+            };
+            try testing.expectEqual(want_ok, ok);
+        }
+    };
+    // 앱의 기록 중 status(요약 칸 없음 — start 와 같은 갈래)는 경과를 보인다.
+    try T.render("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"recording\",\"elapsed_ms\":1200,\"auto_stop_ms\":5000,\"hidden\":false,\"focus_emulated\":false}}", true, &.{ "1.2 s of 5.0 s", "\u{25D4}" }, &.{"stops by itself after"});
+    // 요약 없는 done(옛 앱의 status) — 끝났다고, 종료 0.
+    try T.render("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"done\",\"elapsed_ms\":1001,\"auto_stop_ms\":1000}}", true, &.{"trace done — run `maru browser trace stop` for the summary"}, &.{"malformed"});
+    // 이유가 없는 버림·실패 — 빈 이유(「trace discarded: 」)를 찍지 않는다, 종료 1 은 그대로.
+    try T.render("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"discarded\"}}", false, &.{"trace discarded\n"}, &.{"trace discarded:"});
+    try T.render("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"failed\",\"reason\":\"tab_closed\",\"message\":\"the tab closed during the trace\"}}", false, &.{"trace failed: tab_closed — the tab closed during the trace"}, &.{});
+    // 기록 전·받는 중·거르는 중 — 길이를 넘어 자라는 경과(「4000 ms of 1000 ms」)를 싣지 않는다.
+    try T.render("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"starting\",\"elapsed_ms\":0,\"auto_stop_ms\":1000}}", true, &.{"trace starting"}, &.{" ms of "});
+    for ([_][]const u8{ "receiving", "filtering" }) |ph| {
+        const body = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"state\":\"{s}\",\"elapsed_ms\":4000,\"auto_stop_ms\":1000}}}}", .{ph});
+        defer testing.allocator.free(body);
+        try T.render(body, true, &.{"trace finishing"}, &.{" ms of "});
+    }
+    try T.render("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"idle\"}}", true, &.{"no performance trace on this tab"}, &.{"trace state"});
 }
 
 test "W9e②: emulate 의 CPU·네트워크 — --cpu·--network·--latency 묶음·--no-x·MCP 꼴, holder, 틀린 꼴" {

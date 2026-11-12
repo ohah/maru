@@ -5514,6 +5514,7 @@ boundary 시험 — 위 절의 「ABI 238」 은 옛 번호다), 순수 sidecar 
 - 실제 CEF(1 분 부하 0.6–2.7): `--w9e2a` 다섯 판 27/0 씩(`a2-bfcache-back` 5/5 PASS — 둘째 판의 원본에 TSIB 보다 758 ms 앞의 앞 문서 `DroppedFrame` 이 있었고
   남겼다), `--trace` 두 판 11/0, `--w9e2b` 26/0, `--w9e2c` 11/0, `--emulation` 46/0, 임시 탐침 「같은 사이트 이동 뒤 1.5 s trace」 50 번 모두 남김(임시 탐침은
   지우고 다시 지었다).
+- **그 뒤 고친 둘(실앱 스모크·7f49e6fd6 집중 검증)**: (S1) 끝난 trace 의 `trace status` 가 `error: malformed trace result`(종료 1)였다(stop 뒤·한 번에 trace 뒤·스스로 멈춘 뒤·그 stop 뒤 모두) — 앱이 다음 start 까지 남는 끝난 `trace_run` 의 단계 이름만(`{state:"done",elapsed_ms,…}`, 요약·이유 없음) 냈다. status 는 이제 끝나면 stop 이 답할 결과 칸 그대로(지우지 않는다, 칸이 없으면 `idle`), CLI 는 요약 없는 done 을 malformed 로 내지 않고 이유 없는 버림에 빈 콜론을 찍지 않으며 기록 중 경과·기록 전·마무리·없음을 따로 말한다. (LOW-2) 시작을 TSIB 로 둔 뒤 그 앞 시각의 FCP·LCP 표시(프레임이 자주 바뀌는 페이지에서 가족 iframe 의 앞 문서 — `navigationStart` 없음)가 음수 `fcp_ms` 를 냈다(저장된 실제 원본의 남김 240 개 중 35 개 — 모두 `a2c` 판, −1.1…−23.1 ms) — 그 표시는 세지 않는다(같은 원본에 다시 대어 0 개). 시험: 앱 하나·CLI 렌더 하나·거르기 하나, 변이(되돌림 `cmp`, 판정은 실패 수) 14 개 — 앱 5(끝난 단계도 단계 이름·옛 `ready`·status 가 칸을 지움·칸의 pane 확인 없음·거르는 중을 단계로 내지 않음)·CLI 6·거르기 3 — 모두 잡혔다, 산 것 없음.
 - **남은 틈(LOW — 고치지 않음)**: (R1) 부모 디렉터리가 없는 `trace --out` 은 멈추기 전 확인을 지나 기록·멈춤 뒤에 쓰기에서 실패한다(결과는 10 분 남아 `trace stop
   --out` 으로 다시 쓸 수 있다). (R2) 위에서 고침. (R3) 거르기의 `ProfileChunk` isolate 가름은 실제 CEF 의 `Profile` id 유일성과 워커 `frame` 칸에 기댄다 — 위장
   바이트로만 새고 웹은 그 값을 정하지 못한다(`c2-user-worker-leak` 가 실제 CEF 에서 안 샘을 본다). (v2 LOW 1) 렌더러가 죽은 동안 오프라인으로 다시 불러온 오류

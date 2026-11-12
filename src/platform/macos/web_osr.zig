@@ -4026,11 +4026,15 @@ fn conditionsJson(gpa: std.mem.Allocator, s: *const Surface) ![]u8 {
     return aw.toOwnedSlice();
 }
 
+/// 진행 중이면 그 단계·경과, 끝났으면 **stop 이 답할 결과 칸 그대로**(요약·파일 크기·sha256, 버림·실패면 이유 — 칸은 지우지 않는다), 칸이 없으면
+/// (10 분 지남·철회·탭 닫힘) stop 처럼 남은 것이 없다(`idle`). W9e② 실앱 스모크: 전에는 끝난 `trace_run`(다음 start 까지 남는다)의 단계 이름만
+/// `{state:"done",elapsed_ms,…}` 로 내 CLI 가 요약 없는 done 을 `malformed trace result`(종료 1)로 냈다.
 fn traceStatusJson(out: std.mem.Allocator, surface_id: u64, pane: u64, now: i64) ![]u8 {
-    if (trace_run) |r| if (r.surface == surface_id and r.pane == pane) {
-        return std.fmt.allocPrint(out, "{{\"state\":\"{s}\",\"elapsed_ms\":{d},\"auto_stop_ms\":{d},\"hidden\":{},\"focus_emulated\":{}}}", .{ @tagName(r.phase), traceElapsed(r, now), r.duration_ms, r.hidden, r.focus_emulated });
+    if (trace_run) |r| if (r.surface == surface_id and r.pane == pane) switch (r.phase) {
+        .starting, .recording, .receiving, .filtering => return std.fmt.allocPrint(out, "{{\"state\":\"{s}\",\"elapsed_ms\":{d},\"auto_stop_ms\":{d},\"hidden\":{},\"focus_emulated\":{}}}", .{ @tagName(r.phase), traceElapsed(r, now), r.duration_ms, r.hidden, r.focus_emulated }),
+        .done, .discarded, .failed => {},
     };
-    for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == pane) return std.fmt.allocPrint(out, "{{\"state\":\"ready\",\"kept_ms\":{d}}}", .{now - k.finished_ms});
+    for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == pane) return out.dupe(u8, k.json);
     return out.dupe(u8, "{\"state\":\"idle\"}");
 }
 
@@ -12912,6 +12916,106 @@ test "W9e②: trace 실패 갈래 — 남의 프레임이면 결과 없이 버�
         .fail => |f| try std.testing.expectEqualStrings("not_tracing", f.reason),
         else => return error.TestUnexpectedResult,
     }
+}
+
+fn traceTestStatus(gpa: std.mem.Allocator, surface: u64, pane: u64) ![]u8 {
+    const p = try traceParams("{\"action\":\"status\"}");
+    return switch (try browserTrace(gpa, surface, .{ .pane = pane, .params = &p, .async_id = 90 })) {
+        .ok => |json| json,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+test "W9e② 실앱 스모크: 끝난 trace 의 status 는 stop 이 답할 결과 그대로(요약·파일, 버림·실패면 이유) — 칸을 지우지 않는다, 진행 중이면 단계·경과, 칸이 없으면 idle, 다른 pane 은 못 본다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{405});
+    const start_p = try traceParams("{\"action\":\"start\",\"duration_ms\":1000}");
+    const stop_p = try traceParams("{\"action\":\"stop\"}");
+    // 스스로 멈춘 trace(stop 을 부르지 않음) — 기록 중·받는 중·거르는 중의 status 는 그 단계와 경과.
+    _ = try browserTrace(gpa, 405, .{ .pane = 5, .params = &start_p, .async_id = 81 });
+    const g1 = lastTraceFrame().?.generation;
+    const st0 = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(st0);
+    try std.testing.expect(std.mem.startsWith(u8, st0, "{\"state\":\"starting\",\"elapsed_ms\":0,\"auto_stop_ms\":1000"));
+    apply(gpa, .{ .trace_state = .{ .browser = 405, .generation = g1, .state = .recording } }, 0);
+    if (takeAnswerFor(81)) |a| gpa.free(a.json);
+    const st1 = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(st1);
+    try std.testing.expect(std.mem.startsWith(u8, st1, "{\"state\":\"recording\",\"elapsed_ms\":") and std.mem.indexOf(u8, st1, "\"summary\"") == null);
+    const gz = try traceTestGzip(gpa, false);
+    defer gpa.free(gz);
+    traceTestDeliver(gpa, 405, g1, gz);
+    const st2 = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(st2);
+    try std.testing.expect(std.mem.startsWith(u8, st2, "{\"state\":\"filtering\",\"elapsed_ms\":"));
+    traceTestPump(gpa);
+    try std.testing.expect(trace_run.?.phase == .done); // 끝난 자리는 다음 start 까지 남는다 — 이것이 status 를 망가뜨렸다
+    // 끝났다 — status 는 요약·파일 크기·sha256 이 든 done(전에는 `{state:"done",elapsed_ms,…}` 만이라 CLI 가 malformed).
+    const after_auto = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(after_auto);
+    try std.testing.expect(std.mem.startsWith(u8, after_auto, "{\"state\":\"done\""));
+    for ([_][]const u8{ "\"summary\":{", "\"file\":{\"gz_bytes\":", "\"sha256\":\"", "\"browser_and_gpu_threads\"" }) |n| try std.testing.expect(std.mem.indexOf(u8, after_auto, n) != null);
+    try std.testing.expect(std.mem.indexOf(u8, after_auto, "elapsed_ms") == null);
+    // 다시 물어도 같다 — 칸을 지우거나 옮기지 않는다, 그다음 stop 의 답이 status 와 바이트까지 같다, 파일도 그대로 읽힌다.
+    const again = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(again);
+    try std.testing.expectEqualStrings(after_auto, again);
+    try std.testing.expectEqual(@as(usize, 1), trace_kept.items.len);
+    const stopped = switch (try browserTrace(gpa, 405, .{ .pane = 5, .params = &stop_p, .async_id = 82 })) {
+        .ok => |json| json,
+        else => return error.TestUnexpectedResult,
+    };
+    defer gpa.free(stopped);
+    try std.testing.expectEqualStrings(stopped, after_auto);
+    const after_stop = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(after_stop);
+    try std.testing.expectEqualStrings(stopped, after_stop);
+    const read = try traceParams("{\"action\":\"read\",\"offset\":0}");
+    switch (try browserTrace(gpa, 405, .{ .pane = 5, .params = &read, .async_id = 83 })) {
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"eof\":true") != null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 다른 pane 은 그 결과를 status 로도 못 본다(stop 이 not_tracing 인 것과 같다).
+    const other = try traceTestStatus(gpa, 405, 6);
+    defer gpa.free(other);
+    try std.testing.expectEqualStrings("{\"state\":\"idle\"}", other);
+    // 버림 — status 는 stop 과 같은 이유·글(빈 이유가 아니다).
+    _ = try browserTrace(gpa, 405, .{ .pane = 5, .params = &start_p, .async_id = 84 });
+    const g2 = lastTraceFrame().?.generation;
+    apply(gpa, .{ .trace_state = .{ .browser = 405, .generation = g2, .state = .recording } }, 0);
+    if (takeAnswerFor(84)) |a| gpa.free(a.json);
+    apply(gpa, .{ .trace_state = .{ .browser = 405, .generation = g2, .state = .discarded, .reason = .human_input } }, 0);
+    const disc = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(disc);
+    try std.testing.expect(std.mem.startsWith(u8, disc, "{\"state\":\"discarded\",\"reason\":\"human_input\",\"message\":\"someone used this tab"));
+    const disc_stop = switch (try browserTrace(gpa, 405, .{ .pane = 5, .params = &stop_p, .async_id = 85 })) {
+        .ok => |json| json,
+        else => return error.TestUnexpectedResult,
+    };
+    defer gpa.free(disc_stop);
+    try std.testing.expectEqualStrings(disc_stop, disc);
+    // 실패 — 같은 꼴(이유·글).
+    _ = try browserTrace(gpa, 405, .{ .pane = 5, .params = &start_p, .async_id = 86 });
+    const g3 = lastTraceFrame().?.generation;
+    apply(gpa, .{ .trace_state = .{ .browser = 405, .generation = g3, .state = .recording } }, 0);
+    if (takeAnswerFor(86)) |a| gpa.free(a.json);
+    apply(gpa, .{ .trace_state = .{ .browser = 405, .generation = g3, .state = .failed, .reason = .cdp_error } }, 0);
+    const failed = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(failed);
+    try std.testing.expect(std.mem.startsWith(u8, failed, "{\"state\":\"failed\",\"reason\":\"cdp_error\",\"message\":\"Chromium refused the trace\""));
+    // 칸이 지워지면(grant 철회) 끝난 자리가 남아 있어도 status 는 idle — stop 이 not_tracing 인 것과 같다(끝난 단계 이름을 내지 않는다).
+    traceSync(&.{});
+    try std.testing.expect(trace_run != null and trace_run.?.phase == .failed);
+    const gone = try traceTestStatus(gpa, 405, 5);
+    defer gpa.free(gone);
+    try std.testing.expectEqualStrings("{\"state\":\"idle\"}", gone);
 }
 
 test "W9e② 20 회 검증 v1 R2: 망가진 sidecar 가 trace_frames 를 끝없이 보내도 maru 의 프레임 집합은 상한(65,536)에서 멈춘다 — 넘는 새 id 면 frames_overflow 로 버림, 이미 쥔 id 를 다시 보내는 것은 넘침이 아니다, 버린 뒤·거르기에 넘긴 뒤의 것은 더하지 않는다" {

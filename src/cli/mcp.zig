@@ -43,6 +43,8 @@ pub const ArgKind = enum {
     /// W9e① 흉내의 무리 값(객체·글·null — 지움) — 값 그대로 JSON 한 토큰 `--flag=<JSON>`(CLI 가 그대로 싣고 서버가 까닭과 함께 본다). 스키마의
     /// `type` 은 `json_types`.
     json_value,
+    /// W9e②: 절대 경로 하나(`--flag=<경로>`) — 이 서버의 현재 폴더는 에이전트가 모른다(upload 의 `path_list` 와 같은 까닭). trace 파일.
+    abs_path,
 };
 
 pub const Arg = struct {
@@ -69,6 +71,8 @@ pub const Tool = struct {
     name: []const u8,
     /// `maru browser` 하위 명령.
     subcommand: []const u8,
+    /// W9e②: 하위 명령 바로 뒤에 늘 붙는 낱말(`trace start` 의 `start`).
+    fixed: []const []const u8 = &.{},
     description: []const u8,
     args: []const Arg,
 };
@@ -161,6 +165,16 @@ pub const tools = [_]Tool{
         .{ .key = "geolocation", .kind = .json_value, .flag = "--geolocation-json", .json_types = &.{ "object", "string", "null" }, .description = "{latitude, longitude, accuracy? (m, default 50)} or \"unavailable\", or null to clear" },
         .{ .key = "media", .kind = .json_value, .flag = "--media-json", .json_types = &.{ "object", "null" }, .description = "{type? screen|print, color_scheme? light|dark, reduced_motion? reduce|no-preference, forced_colors? active|none, contrast? more|less|no-preference}, or null to clear" },
         .{ .key = "vision", .kind = .json_value, .flag = "--vision-json", .json_types = &.{ "string", "null" }, .description = "blurredVision, reducedContrast, achromatopsia, deuteranopia, protanopia or tritanopia, or null to clear" },
+        .{ .key = "cpu", .kind = .json_value, .flag = "--cpu-json", .json_types = &.{ "number", "null" }, .description = "slow the CPU down 1-20 times (1 or null turns it off) — the whole renderer process, so popups this tab opened and other tabs' same-site iframes in it slow down too; refused (process_shared) when another tab's frame shares the process" },
+        .{ .key = "network", .kind = .json_value, .flag = "--network-json", .json_types = &.{ "string", "object", "null" }, .description = "slow-3g, fast-3g, slow-4g, fast-4g or offline (this tab's requests fail; navigator.onLine is false also for frames and popups in the same renderer process, but their requests are not blocked), or {latency_ms 0-10000, download_kbps?, upload_kbps?} (kbps 0 = no limit, or 16-1000000), or null to clear; only this tab's requests are slowed or blocked — not popups it opened (not_covered: popups); on the user's tabs only presets, no offline" },
+    }) },
+    .{ .name = "browser_trace_start", .subcommand = "trace", .fixed = &.{"start"}, .description = "Start recording a performance trace of a Chromium tab you opened with browser_open (W9e②; the user's tabs are not traced). It stops by itself after duration_ms (default 5000, 1000-30000) — call browser_trace_stop to stop earlier or to get the result. A hidden tab is kept rendering while it records (focus emulation), but its renderer runs at background CPU priority, so main-thread times read higher than on a shown tab (warning hidden_tab_cpu_background). Chromium records one trace at a time for the whole browser (trace_busy with retry_after_ms otherwise). If someone uses the tab while it records, the trace is discarded (human_input). The tab title shows ◔ while it records.", .args = withSurface(&.{
+        .{ .key = "duration_ms", .kind = .int, .flag = "--duration", .description = "auto-stop after this many milliseconds (1000-30000, default 5000)", .min = 1000, .max = 30000 },
+        .{ .key = "reload", .kind = .flag, .flag = "--reload", .description = "reload the tab right after recording starts (to measure page load)" },
+        .{ .key = "screenshots", .kind = .bool_choice, .flag = "--screenshots", .flag_false = "--no-screenshots", .description = "include filmstrip screenshots (default true)" },
+    }) },
+    .{ .name = "browser_trace_stop", .subcommand = "trace", .fixed = &.{"stop"}, .description = "Stop the tab's performance trace (or get the result of one that stopped by itself) and summarize it: covered time, main-thread long tasks and blocking time, first and largest contentful paint candidates, requests and the slowest ones, frames. maru keeps only this tab's own renderer events (other processes, service workers and cross-site iframes are left out) and of those only the main and compositor threads (this tab's own worker, background compile and raster threads are left out too — their tracks are empty in DevTools; not_covered own_worker_threads) and discards the whole trace if another tab's frame showed up in it (mixed_content — it shares this tab's renderer process). With file_path (absolute) it also writes the filtered trace as gzip JSON for Chrome DevTools' Performance panel — never over an existing file; the result is kept in maru for 10 minutes.", .args = withSurface(&.{
+        .{ .key = "file_path", .kind = .abs_path, .flag = "--out", .description = "absolute path of a new .json.gz file to write the filtered trace to (it must not exist)" },
     }) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address. On Chromium tabs only http, https and about:blank, and it waits up to 25 seconds for the first load (loaded:false when no page loaded — a download, an empty response, a same-page link, or the time ran out).", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
     .{ .name = "browser_get_url", .subcommand = "get-url", .description = "Print the tab's current document address.", .args = withSurface(&.{}) },
@@ -253,6 +267,7 @@ pub const ArgError = error{ UnknownArgument, WrongType, MissingArgument, Relativ
 pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Value) ArgError![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     try out.append(arena, tool.subcommand);
+    for (tool.fixed) |f| try out.append(arena, f);
     var positional: ?[]const u8 = null;
     var positional_list: []const std.json.Value = &.{};
     const obj: ?std.json.ObjectMap = if (arguments) |a| switch (a) {
@@ -300,6 +315,14 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                     .string => |s| positional = s,
                     else => return error.WrongType,
                 },
+                // W9e②: 절대 경로 하나.
+                .abs_path => switch (v) {
+                    .string => |p| {
+                        if (p.len == 0 or p[0] != '/') return error.RelativePath;
+                        try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, p }));
+                    },
+                    else => return error.WrongType,
+                },
                 .path_list => switch (v) {
                     .array => |a| {
                         if (a.items.len == 0 or a.items.len > spec.max_items) return error.WrongType;
@@ -324,10 +347,19 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                 },
                 // W9e①: 값 그대로(객체·글·null) — 한 토큰으로(`--flag=<JSON>` — 값이 `-` 로 시작해도 옵션으로 읽히지 않는다).
                 .json_value => {
-                    switch (v) {
-                        .object, .string, .null => {},
+                    // 스키마가 내보인 형만(W9e② — cpu 는 수).
+                    const t: []const u8 = switch (v) {
+                        .object => "object",
+                        .string => "string",
+                        .null => "null",
+                        .integer, .float => "number",
                         else => return error.WrongType,
-                    }
+                    };
+                    var allowed = false;
+                    for (spec.json_types) |jt| if (std.mem.eql(u8, jt, t)) {
+                        allowed = true;
+                    };
+                    if (!allowed) return error.WrongType;
                     var aw: std.Io.Writer.Allocating = .init(arena);
                     std.json.Stringify.value(v, .{}, &aw.writer) catch return error.OutOfMemory;
                     try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, aw.written() }));
@@ -551,7 +583,9 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "the tab's control and network permissions; service and shared workers never see mocks, nor a shared worker's script — use strict for pages a service worker controls). " ++
             "browser_emulate makes a tab look like another device (screen, user agent, language, time zone, location, media) to its pages and servers " ++
             "(the tab title shows ◫; asked once per site on the user's tabs and applied only while that site is shown; cross-site iframes and service " ++
-            "workers keep the real values).") catch |e| break :blk e;
+            "workers keep the real values; cpu and network conditions last while you — this MCP connection — run). " ++
+            "browser_trace_start and browser_trace_stop record and summarize a performance trace of a tab you opened (the tab title shows ◔; " ++
+            "one trace at a time in the browser; discarded when the user uses the tab or another tab's frame shares its renderer process).") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -575,6 +609,7 @@ fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
             .flag, .bool_choice => "boolean",
             .json_array, .path_list, .string_list, .int_list => "array",
             .mock_response => "object",
+            .abs_path => "string",
             .json_value => unreachable,
         });
         if (a.kind == .mock_response) {
@@ -995,7 +1030,7 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
         if (std.mem.eql(u8, opt.key, "visible")) _ = obj.swapRemove("selector");
         if (std.mem.eql(u8, opt.key, "visible")) try obj.put(arena, "role", .{ .string = "button" });
         try obj.put(arena, opt.key, switch (opt.kind) {
-            .int => .{ .integer = 3 },
+            .int => .{ .integer = @max(3, opt.min) }, // W9e②: trace 길이는 1000 부터
             .number => .{ .float = 0.5 },
             .flag => .{ .bool = true },
             .json_array => try jsonOf(arena, "[1]"),
@@ -1004,6 +1039,7 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             .bool_choice => .{ .bool = true },
             .mock_response => try jsonOf(arena, "{\"status\":200,\"content_type\":\"text/plain\",\"headers\":{\"X-A\":\"1\"},\"body\":\"x\"}"),
             .json_value => .null,
+            .abs_path => .{ .string = "/tmp/trace.json.gz" },
             else => .{ .string = if (std.mem.eql(u8, opt.key, "rect")) "0,0,10,10" else if (std.mem.eql(u8, opt.key, "role")) "button" else if (std.mem.eql(u8, opt.key, "url")) "https://e.test/" else if (std.mem.eql(u8, opt.key, "types")) "xhr,image" else if (std.mem.eql(u8, opt.key, "status")) "4xx" else if (std.mem.eql(u8, opt.key, "out")) "/tmp/body" else "x" },
         });
         const a = try argv(arena, t, .{ .object = obj });
@@ -1526,4 +1562,28 @@ test "W9e①: browser_emulate — 동작·reload·무리 값(객체·글·null)�
         seen = true;
     };
     try testing.expect(seen);
+}
+
+test "W9e②: browser_trace_start·stop 은 CLI 의 trace start·stop 으로(낱말 하나 고정), file_path 는 절대 경로만, browser_emulate 의 cpu 는 수·network 는 글·객체" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const start = findTool("browser_trace_start").?;
+    const a1 = try argv(arena, start, try jsonOf(arena, "{\"surface\":4,\"duration_ms\":3000,\"reload\":true,\"screenshots\":false}"));
+    const t1 = (try browser.parse(a1)).trace;
+    try testing.expect(t1.action == .start and t1.duration_ms.? == 3000 and t1.reload and !t1.screenshots);
+    const stop = findTool("browser_trace_stop").?;
+    const a2 = try argv(arena, stop, try jsonOf(arena, "{\"surface\":4,\"file_path\":\"/tmp/t.json.gz\"}"));
+    const t2 = (try browser.parse(a2)).trace;
+    try testing.expect(t2.action == .stop and std.mem.eql(u8, t2.out.?, "/tmp/t.json.gz"));
+    try testing.expectError(error.RelativePath, argv(arena, stop, try jsonOf(arena, "{\"surface\":4,\"file_path\":\"t.json.gz\"}")));
+    const emu = findTool("browser_emulate").?;
+    const a3 = try argv(arena, emu, try jsonOf(arena, "{\"surface\":4,\"action\":\"set\",\"cpu\":4,\"network\":\"slow-4g\"}"));
+    const c = (try browser.parse(a3)).request.emulate;
+    try testing.expectEqualStrings("4", c.json[7].?);
+    try testing.expectEqualStrings("\"slow-4g\"", c.json[8].?);
+    try testing.expectError(error.WrongType, argv(arena, emu, try jsonOf(arena, "{\"surface\":4,\"action\":\"set\",\"cpu\":\"4\"}")));
+    try testing.expectError(error.WrongType, argv(arena, emu, try jsonOf(arena, "{\"surface\":4,\"action\":\"set\",\"network\":5}")));
+    try testing.expect(std.mem.indexOf(u8, start.description, "◔") != null);
+    try testing.expect(std.mem.indexOf(u8, stop.description, "mixed_content") != null);
 }

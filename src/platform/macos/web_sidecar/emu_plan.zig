@@ -22,6 +22,10 @@
 //!     바뀌면 다시 셈해 다시 보낸다(Chromium 은 셈하지 않는다 — E2).
 //!   - 위치는 CDP 를 여기서 보내지 않는다 — W5b2 와 한 칸(`permissions.zig`)이 건다. 이 표는 「무엇을 바라는가」 만 정한다.
 //!
+//! W9e②: 무리 `cpu`(`Emulation.setCPUThrottlingRate` — 지움은 `{"rate":1}`)와 풀림 회차 — sidecar 가 혼자 푼 무리(사람이 몸·CPU 를 나누는 남의
+//! 프레임)는 maru 가 그 무리를 지운 frame 을 보낼 때까지 걸지 않는다(PLAN v2 §5.3 — 그 사이 온 덧쓰기·재생이 풀린 조건을 다시 걸지 않게).
+//! 네트워크 조건은 이 표가 바람만 정하고(`target`) 걸기는 `net_domain` 이 한다(같은 Network 도메인 — `blocking.zig`).
+//!
 //! 시험이 증명하는 것: 바뀐 것만 명령, 지움 꼴(미디어 네 이름 빈 값·UA ""·시간대 ""·언어 {}·색각 none), 죽은 동안 빈 열·되살아나면 쌓인 차이만,
 //! metrics 는 살아 있을 때만(변이: 이 검사를 지우면 시험이 실패한다), 사이트 밖 모두 지움·돌아오면 다시, 밖→안 홉의 기다림(탭 전체에 아무것도·상태는 밖,
 //! 그 홉의 문서 요청에 넣을 머리 — 넣지 않는 경우·client hints 의 꼴·Accept-Language 의 q 값), fit 셈과 resize, 답 받기의 마스크·까닭, 번호 대역.
@@ -38,9 +42,9 @@ const net_policy = protocol.net_policy;
 pub const id_base: i32 = 1 << 26;
 pub const id_end: i32 = (1 << 26) + (1 << 20);
 
-/// 명령 종류 — 차례가 보내는 차례다(화면 → 터치 → 머리 → 언어 → 시간대 → 미디어 → 색각 → 위치).
-pub const Kind = enum(u3) { metrics, touch, ua, locale, timezone, media, vision, geo };
-pub const kind_count = 8;
+/// 명령 종류 — 차례가 보내는 차례다(화면 → 터치 → 머리 → 언어 → 시간대 → 미디어 → 색각 → 위치 → CPU).
+pub const Kind = enum(u4) { metrics, touch, ua, locale, timezone, media, vision, geo, cpu };
+pub const kind_count = 9;
 
 /// 걸어 둔 값이 무엇인지 모른다(답을 받기 전에 DevTools 가 떨어졌다) — 다음 계획이 다시 보낸다.
 const unknown_hash: u64 = std.math.maxInt(u64);
@@ -78,8 +82,12 @@ pub fn groupOf(kind: Kind, ua_set: bool) msg.EmuGroup {
         .media => .media,
         .vision => .vision,
         .geo => .geolocation,
+        .cpu => .cpu,
     };
 }
+
+const cpu_bit: u16 = @as(u16, 1) << @backingInt(msg.EmuGroup.cpu);
+const net_bit: u16 = @as(u16, 1) << @backingInt(msg.EmuGroup.network);
 
 pub const Status = enum { idle, pending, ok, failed };
 
@@ -135,11 +143,44 @@ pub const Tab = struct {
     pane_h: u32 = 0,
     /// 마지막으로 보낸 metrics 의 fit(상태가 싣는다).
     fit: f32 = 1,
+    /// W9e②: sidecar 가 혼자 푼 무리(cpu·network 비트)와 그 까닭 — maru 가 그 무리를 뺀 frame 을 보낼 때까지 걸지 않고 상태에 싣는다.
+    released: u16 = 0,
+    cpu_release: msg.EmuReleaseReason = .none,
+    network_release: msg.EmuReleaseReason = .none,
 
-    /// maru 의 새 상태. 사이트가 바뀌었을 수 있다 — `on_site` 는 부른 쪽이 지금 맨 위 호스트로 다시 정한다(`siteCovers`).
+    /// maru 의 새 상태. 사이트가 바뀌었을 수 있다 — `on_site` 는 부른 쪽이 지금 맨 위 호스트로 다시 정한다(`siteCovers`). W9e②: 풀린 무리를
+    /// 뺀 frame 이 오면 그 풀림은 maru 가 받았다 — 다음에 그 무리를 실은 frame 은 에이전트가 다시 건 것이다.
     pub fn setWant(self: *Tab, v: msg.Emulation) !void {
         try self.want.put(v);
         self.generation = v.generation;
+        if (self.released & cpu_bit != 0 and !v.flags.cpu) {
+            self.released &= ~cpu_bit;
+            self.cpu_release = .none;
+        }
+        if (self.released & net_bit != 0 and !v.flags.network) {
+            self.released &= ~net_bit;
+            self.network_release = .none;
+        }
+    }
+
+    /// W9e②: 걸린(바라는) 무리를 sidecar 가 혼자 푼다 — 사람이 그 탭을 몸(`human_input`)·CPU 를 나누는 남의 프레임(`process_shared`, cpu 만).
+    /// 그 무리를 바라지 않거나 이미 풀었으면 거짓. 참이면 부른 쪽이 계획을 다시 돌리고 상태를 보낸다.
+    pub fn release(self: *Tab, group: msg.EmuGroup, why: msg.EmuReleaseReason) bool {
+        const w = self.want.get() orelse return false;
+        switch (group) {
+            .cpu => {
+                if (!w.flags.cpu or self.released & cpu_bit != 0) return false;
+                self.released |= cpu_bit;
+                self.cpu_release = why;
+            },
+            .network => {
+                if (!w.flags.network or self.released & net_bit != 0 or why == .process_shared) return false;
+                self.released |= net_bit;
+                self.network_release = why;
+            },
+            else => return false,
+        }
+        return true;
     }
 
     pub fn wanted(self: *const Tab) ?msg.Emulation {
@@ -153,11 +194,31 @@ pub const Tab = struct {
         return net_policy.hostCovers(w.site, host orelse return false);
     }
 
-    /// 지금 걸려야 하는 상태(사이트 밖이면 빈 상태).
-    fn target(self: *const Tab) msg.Emulation {
-        const w = self.want.get() orelse return .{ .browser = 0 };
+    /// 지금 걸려야 하는 상태(사이트 밖이면 빈 상태, 풀린 무리는 뺀다). 네트워크 조건은 `blocking.zig` 가 이것을 보고 건다.
+    pub fn target(self: *const Tab) msg.Emulation {
+        var w = self.want.get() orelse return .{ .browser = 0 };
         if (w.flags.site_bound and !self.on_site) return .{ .browser = w.browser };
+        if (self.released & cpu_bit != 0) {
+            w.flags.cpu = false;
+            w.cpu_rate = 0;
+        }
+        if (self.released & net_bit != 0) {
+            w.flags.network = false;
+            w.flags.offline = false;
+            w.latency_ms = 0;
+            w.download_kbps = 0;
+            w.upload_kbps = 0;
+        }
         return w;
+    }
+
+    /// W9e②: 네트워크 조건에 지금 걸려야 하는 상태(`emulation.syncConditions` 가 `blocking.zig` 에 넘긴다) — 밖→안 홉의 커밋을 기다리는 동안(`hold`)은
+    /// 빈 상태다. W9e① 의 「기다리는 동안 탭 전체에 아무것도 걸지 않는다」(사용자 결정 2026-11-12)를 네트워크 조건에도 — 옛(밖의) 문서와 그 문서가
+    /// 만든 요청이 허락하지 않은 사이트에서 지연·느림을 받지 않게(main 위로 옮길 때 더함 — 옛 W9e② 는 `target` 을 그대로 썼다). 커밋(`navigate`)
+    /// 뒤의 계획이 건다 — 새 문서의 첫 요청들은 조건보다 앞설 수 있다(E12 꼴).
+    pub fn networkTarget(self: *const Tab) msg.Emulation {
+        if (self.hold) return .{ .browser = if (self.want.get()) |w| w.browser else 0 };
+        return self.target();
     }
 
     /// 그 종류에 지금 걸려야 하는 상태 — 커밋을 기다리는 동안(`hold`) 미루는 종류(지금은 모두 — `heldUntilCommit`)는 빈 상태.
@@ -204,6 +265,15 @@ pub const Tab = struct {
         self.status[i] = if (cmd.set) .pending else .idle;
         if (kind == .ua) self.ua_was_set = t.flags.ua;
         if (kind == .geo) self.status[i] = if (cmd.set) .ok else .idle; // 위치는 답을 기다리지 않는다(`permissions.zig` 가 곧 건다)
+    }
+
+    /// W9e②: 걸지 않기로 했다(CPU 를 나누는 남의 프레임 — `process_shared`). 그 종류는 실패이고 걸어 둔 것은 지움으로 친다(부른 쪽이 지움을
+    /// 보낸다 — 앞 값이 남지 않게).
+    pub fn refuse(self: *Tab, kind: Kind, why: msg.EmuFailReason) void {
+        const i = @backingInt(kind);
+        self.status[i] = .failed;
+        self.sent[i] = 0;
+        if (self.reason == .none) self.reason = why;
     }
 
     /// 보내지 못했다(`send_dev_tools_message` 가 0) — 그 종류는 실패, 다음 바뀜에 다시.
@@ -325,6 +395,9 @@ pub const Tab = struct {
             }
         }
         active &= ~(failed | pending);
+        // 풀린 무리는 걸려 있지 않다고 답한다 — 렌더러가 죽은 동안 풀면 지움을 아직 못 냈어도(새 렌더러에서 낸다) 「걸림」 과 「풀림」 이 함께
+        // 서면 wire 가 그 상태를 거절해 maru 가 풀림을 받지 못했다(구현 적대 리뷰 2 회차 M-b).
+        active &= ~self.released;
         const t = self.targetFor(.metrics);
         return .{
             .browser = browser,
@@ -336,6 +409,9 @@ pub const Tab = struct {
             .active_mask = active,
             .failed_mask = failed,
             .reason = if (failed != 0) (if (self.reason == .none) .cdp_error else self.reason) else .none,
+            .released_mask = self.released,
+            .cpu_release = self.cpu_release,
+            .network_release = self.network_release,
         };
     }
 
@@ -553,6 +629,14 @@ pub fn buildParams(kind: Kind, t: msg.Emulation, fit: f32, buf: []u8, cmd: *Cmd)
                 cmd.set = true;
                 cmd.geo = if (t.flags.geo_unavailable) .{ .unavailable = true } else .{ .latitude = t.latitude, .longitude = t.longitude, .accuracy = t.accuracy };
             }
+        },
+        // W9e②: 렌더러 프로세스 전체에 걸린다(같은 프로세스의 팝업도 — c1). 1 이 끔(c1).
+        .cpu => {
+            cmd.method = "Emulation.setCPUThrottlingRate";
+            if (t.flags.cpu) {
+                cmd.set = true;
+                try w.print("{{\"rate\":{d}}}", .{t.cpu_rate});
+            } else try w.writeAll("{\"rate\":1}");
         },
     }
     return w.buffered();
@@ -1092,7 +1176,8 @@ test "W9e①: 답의 마스크와 까닭 — 시간대를 모르면 timezone_unk
 
 test "W9e①: 가장 큰 인자(UA 512·client hints 상한)도 명령 버퍼에 들고, 번호 대역은 다른 사용처와 겹치지 않는다" {
     const hint = array_repeat.repeat("x", 64);
-    var v: msg.Emulation = .{ .browser = 1, .generation = 1, .flags = .{ .ua = true, .hints = true, .locale = true, .viewport = true, .touch = true, .landscape = true, .timezone = true, .media = true, .vision = true, .geo = true }, .ua = array_repeat.repeat("\"", 512), .platform = array_repeat.repeat("p", 64), .accept_language = array_repeat.repeat("a", 128), .icu_locale = array_repeat.repeat("i", 40), .timezone = array_repeat.repeat("t", 64), .width = 1, .height = 1, .dsf = 1, .media = .{ .type = .print, .color_scheme = .dark, .reduced_motion = .no_preference, .forced_colors = .off, .contrast = .no_preference }, .vision = .tritanopia, .latitude = 1 };
+    var v: msg.Emulation = .{ .browser = 1, .generation = 1, .flags = .{ .ua = true, .hints = true, .locale = true, .viewport = true, .touch = true, .landscape = true, .timezone = true, .media = true, .vision = true, .geo = true }, .ua = array_repeat.repeat("\"", 512), .platform = array_repeat.repeat("p", 64), .accept_language = array_repeat.repeat("a", 128), .icu_locale = array_repeat.repeat("i", 40), .timezone = array_repeat.repeat("t", 64), .width = 1, .height = 1, .dsf = 1, .media = .{ .type = .print, .color_scheme = .dark, .reduced_motion = .no_preference, .forced_colors = .off, .contrast = .no_preference }, .vision = .tritanopia, .latitude = 1, .cpu_rate = 20 };
+    v.flags.cpu = true; // W9e②
     v.hints = .{ .brand_count = 4, .full_count = 4, .platform = hint, .platform_version = hint, .architecture = hint, .model = hint, .bitness = hint, .mobile = true };
     for (0..4) |i| {
         v.hints.brands[i] = .{ .brand = array_repeat.repeat("\\", 64), .version = hint };
@@ -1193,4 +1278,110 @@ test "W9e① 변이: 위치 해시는 값의 칸마다·지움은 기다리지 �
     wide.height = 400;
     try d.setWant(wide);
     try testing.expectEqual(fitScale(640, 400, 390, 400), d.state(1).fit_scale);
+}
+
+test "W9e②: CPU — 걸면 setCPUThrottlingRate 의 배수, 지움은 rate 1, 무리는 cpu, 같은 값은 다시 보내지 않는다" {
+    var t: Tab = .{};
+    try t.setWant(.{ .browser = 1, .generation = 1, .flags = .{ .cpu = true }, .cpu_rate = 4 });
+    var c: Cmds = .{};
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 1), c.len);
+    const cpu = find(&c, .cpu).?;
+    try testing.expect(cpu.set);
+    try testing.expectEqualStrings("Emulation.setCPUThrottlingRate", cpu.method);
+    try testing.expectEqualStrings("{\"rate\":4}", cpu.params);
+    t.answered(.cpu, true, "");
+    try testing.expectEqual(@as(u16, 1 << 7), t.state(1).active_mask);
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 0), c.len);
+    try t.setWant(.{ .browser = 1, .generation = 2, .flags = .{ .cpu = true }, .cpu_rate = 2.5 });
+    t.plan(&c);
+    try testing.expectEqualStrings("{\"rate\":2.5}", find(&c, .cpu).?.params);
+    try t.setWant(.{ .browser = 1, .generation = 3 });
+    t.plan(&c);
+    const clear = find(&c, .cpu).?;
+    try testing.expect(!clear.set);
+    try testing.expectEqualStrings("{\"rate\":1}", clear.params);
+    try testing.expectEqual(msg.EmuGroup.cpu, groupOf(.cpu, false));
+}
+
+test "W9e②: 풀림 회차 — 풀린 CPU 는 곧 지우고 상태에 까닭, 그 무리를 실은 늦은 frame 은 걸지 않는다, maru 가 무리를 뺀 frame 을 보내면 풀림이 끝나고 다시 걸 수 있다" {
+    var t: Tab = .{};
+    try t.setWant(.{ .browser = 1, .generation = 1, .flags = .{ .cpu = true, .network = true }, .cpu_rate = 6, .latency_ms = 400 });
+    var c: Cmds = .{};
+    t.plan(&c);
+    t.answered(.cpu, true, "");
+    try testing.expect(t.release(.cpu, .process_shared));
+    try testing.expect(!t.release(.cpu, .human_input)); // 이미 풀었다
+    t.plan(&c);
+    try testing.expectEqualStrings("{\"rate\":1}", find(&c, .cpu).?.params);
+    var st = t.state(1);
+    try testing.expectEqual(@as(u16, 1 << 7), st.released_mask);
+    try testing.expectEqual(msg.EmuReleaseReason.process_shared, st.cpu_release);
+    try testing.expectEqual(@as(u16, 0), st.active_mask & (1 << 7));
+    // maru 가 풀림을 받기 전에 보낸 덧쓰기(무리가 남았다) — 걸지 않는다.
+    try t.setWant(.{ .browser = 1, .generation = 2, .flags = .{ .cpu = true, .network = true }, .cpu_rate = 6, .latency_ms = 400 });
+    t.plan(&c);
+    try testing.expect(find(&c, .cpu) == null);
+    try testing.expect(!t.target().flags.cpu);
+    try testing.expect(t.target().flags.network); // 네트워크는 풀리지 않았다
+    // 네트워크는 「CPU 를 나누는 남의 프레임」 으로 풀지 않는다(탭 단위), 사람이 몰면 푼다.
+    try testing.expect(!t.release(.network, .process_shared));
+    try testing.expect(t.release(.network, .human_input));
+    try testing.expect(!t.target().flags.network and t.target().latency_ms == 0);
+    st = t.state(1);
+    try testing.expectEqual(@as(u16, (1 << 7) | (1 << 8)), st.released_mask);
+    try testing.expectEqual(msg.EmuReleaseReason.human_input, st.network_release);
+    // maru 가 둘을 뺀 frame — 풀림이 끝난다.
+    try t.setWant(.{ .browser = 1, .generation = 3 });
+    try testing.expectEqual(@as(u16, 0), t.state(1).released_mask);
+    // 에이전트가 다시 건다 — 걸린다.
+    try t.setWant(.{ .browser = 1, .generation = 4, .flags = .{ .cpu = true }, .cpu_rate = 3 });
+    t.plan(&c);
+    try testing.expectEqualStrings("{\"rate\":3}", find(&c, .cpu).?.params);
+    // 바라지 않는 무리는 풀 수 없다.
+    try t.setWant(.{ .browser = 1, .generation = 5 });
+    try testing.expect(!t.release(.cpu, .human_input));
+    try testing.expect(!t.release(.viewport, .human_input));
+}
+
+test "W9e② 적대 리뷰 2 회차: 렌더러가 죽은 동안 사람이 몰아 풀면 — 지움은 쌓이지만 상태는 걸림 없이 풀림만, wire 가 받는다" {
+    var t: Tab = .{};
+    try t.setWant(.{ .browser = 1, .generation = 1, .flags = .{ .cpu = true }, .cpu_rate = 4 });
+    var c: Cmds = .{};
+    t.plan(&c);
+    t.answered(.cpu, true, "");
+    try testing.expect(t.state(1).active_mask & (1 << 7) != 0);
+    t.rendererGone();
+    t.detached();
+    try testing.expect(t.release(.cpu, .human_input));
+    c = .{};
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 0), c.len); // 죽은 렌더러에는 내지 않는다
+    const st = t.state(1);
+    try testing.expectEqual(@as(u16, 1 << 7), st.released_mask);
+    try testing.expectEqual(@as(u16, 0), st.active_mask & (1 << 7));
+    try emu_fields.checkState(st);
+}
+
+test "W9e②: 사이트 밖·풀림의 target 은 네트워크 조건도 뺀다(블로킹 쪽이 이것을 보고 건다)" {
+    var t: Tab = .{};
+    try t.setWant(.{ .browser = 1, .generation = 1, .flags = .{ .site_bound = true, .network = true, .offline = true }, .site = "a.test" });
+    t.on_site = t.siteCovers("a.test");
+    try testing.expect(t.target().flags.offline);
+    _ = t.navigate("b.test");
+    try testing.expect(!t.target().flags.network and !t.target().flags.offline);
+}
+
+test "W9e② main 위로 옮김: 밖→안 홉의 커밋을 기다리는 동안 네트워크 조건도 걸지 않는다 — 기다림 전·커밋 뒤는 건다(W9e① 「탭 전체에 아무것도」)" {
+    var t: Tab = .{};
+    try t.setWant(.{ .browser = 1, .generation = 1, .flags = .{ .site_bound = true, .network = true }, .site = "a.test", .latency_ms = 400 });
+    try testing.expect(t.navigate("bank.test")); // 밖의 문서 — 사이트 밖
+    try testing.expect(!t.networkTarget().flags.network);
+    try testing.expect(t.hop("a.test", "bank.test") and t.hold); // 밖 → 안 홉
+    try testing.expect(t.target().flags.network); // 바람은 안이다
+    try testing.expect(!t.networkTarget().flags.network); // 그래도 기다리는 동안은 걸지 않는다
+    try testing.expect(t.navigate("a.test")); // 커밋
+    try testing.expectEqual(@as(u32, 400), t.networkTarget().latency_ms);
+    try testing.expect(t.networkTarget().flags.network);
 }

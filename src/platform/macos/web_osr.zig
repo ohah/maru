@@ -275,6 +275,8 @@ const Surface = struct {
     emu: emu_mod.Tab = .{},
     /// W9e①: 사용자가 흉내 중인 에이전트 탭을 처음 몰았다(탭·세대마다 한 번) — 창이 꺼내 보인다.
     emu_notice_pending: bool = false,
+    /// W9e②: 사람이 그 탭을 몰아 sidecar 가 CPU·네트워크 조건을 풀었다 — 한 번 알린다(PLAN v2 §3).
+    cond_notice_pending: bool = false,
     /// W9e①: 흉내가 바뀌었다(설정·지움·sidecar 의 상태) — 그 탭이 있는 창이 다시 짓는다(제목의 ◫·맞춤 바깥의 어둡게). 웹 프레임만으로는
     /// 세대만 올라 탭 줄·덧그림을 다시 짓지 않는다(실제 앱 스크린샷이 잡았다 — ◫ 도 어둡게도 없었다).
     emu_redraw: bool = false,
@@ -747,6 +749,13 @@ fn testTeardown(gpa: std.mem.Allocator) void {
     mock_budget = .{};
     mock_pump.deinit(gpa);
     net_full = true;
+    // W9e②: trace 의 자리·결과 칸·답.
+    dropTraceRun(gpa);
+    dropKeptFor(gpa, 0, 0);
+    trace_kept.clearAndFree(gpa);
+    for (trace_answers.items) |x| gpa.free(x.json);
+    trace_answers.clearAndFree(gpa);
+    trace_redraw = 0;
 }
 
 test "closing a tab that is still downloading hides it on about:blank and closes it once the downloads end (W10c)" {
@@ -951,7 +960,7 @@ test "a page-asked close of a downloading tab goes to about:blank and closes on 
     try std.testing.expect(askClose(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .before_unload, .origin = "", .message = "" } }, 0);
     const d = nextDialog(7).?;
-    replyDialog(gpa, 7, d.token, false, "", false);
+    replyDialog(gpa, 7, d.token, false, "", false, .program);
     try std.testing.expectEqual(CloseAskOutcome.stayed, takeCloseAsk(7, 10));
     try std.testing.expect(!surfaces.getPtr(7).?.close_park);
     apply(gpa, .{ .page_started = 7 }, 0);
@@ -959,7 +968,7 @@ test "a page-asked close of a downloading tab goes to about:blank and closes on 
     // 떠나기를 고르면 새 문서가 닫는다.
     try std.testing.expect(askClose(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 4, .kind = .before_unload, .origin = "", .message = "" } }, 0);
-    replyDialog(gpa, 7, nextDialog(7).?.token, true, "", false);
+    replyDialog(gpa, 7, nextDialog(7).?.token, true, "", false, .program);
     try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, 10));
     apply(gpa, .{ .page_started = 7 }, 0);
     try std.testing.expectEqual(CloseAskOutcome.closed, takeCloseAsk(7, 10));
@@ -1222,6 +1231,7 @@ test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every en
         @embedFile("web_sidecar/mocking.zig"), // W9d④ — `MARU_WEB_TEST_MOCK_LOG`·`MARU_WEB_TEST_MOCK_INJECT_SET_COOKIE`(판정자의 쿠키 필터 훅)
         @embedFile("web_sidecar/emulation.zig"), // W9e① — `MARU_WEB_TEST_EMU_LOG`(판정자의 흉내 CDP·사이트 갈림 줄)
         @embedFile("web_sidecar/permissions.zig"), // W9e① — `MARU_WEB_TEST_EMU_LOG`(위치 대신 허용·되돌림 줄)
+        @embedFile("web_sidecar/tracing.zig"), // W9e② — `MARU_WEB_TEST_TRACE_LOG`(판정자의 trace CDP·답·사건 줄)
     };
     var names: usize = 0;
     for (sources) |src| {
@@ -1245,11 +1255,11 @@ test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every en
             }
         }
     }
-    // 오늘 이 아홉 파일이 `getenv` 로 읽는 자리는 스물다섯이다(이름 열여덟 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳, W9d③ 의 `MARU_WEB_TEST_BLOCK_LOG` 가
+    // 오늘 이 열 파일이 `getenv` 로 읽는 자리는 스물여섯이다(이름 열아홉 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳, W9d③ 의 `MARU_WEB_TEST_BLOCK_LOG` 가
     // 네 곳, W9d④ 의 `MARU_WEB_TEST_MOCK_LOG` 가 두 곳(blocking·mocking)과 `MARU_WEB_TEST_MOCK_INJECT_SET_COOKIE` 한 곳, W9e① 의 `MARU_WEB_TEST_EMU_LOG`
-    // 가 세 곳(emulation 하나·permissions 둘); 제품 코드에서 `getenv` 를 부르는 sidecar 파일은 이 아홉뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈
+    // 가 세 곳(emulation 하나·permissions 둘), W9e② 의 `MARU_WEB_TEST_TRACE_LOG` 가 한 곳(tracing); 제품 코드에서 `getenv` 를 부르는 sidecar 파일은 이 열뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈
     // 손잡이). 줄면 훑기가 소스를 못 읽은 것이다.
-    try std.testing.expect(names >= 25);
+    try std.testing.expect(names >= 26);
 }
 
 test "a hardened (release) build ignores the development env overrides" {
@@ -1908,6 +1918,9 @@ pub fn testForget(gpa: std.mem.Allocator) void {
         surfaces.deinit(gpa);
         surfaces = .empty;
     }
+    // 위치 허용 기록의 표도(탭이 닫히면 그 탭의 줄은 빠지지만 표의 자리는 남는다 — W9e② v20c N3 시험이 sheet 로 위치를 허용한 뒤 그 자리가
+    // 시험 할당자에 남았다, main 위로 옮길 때 찾음). 남은 줄이 있으면 그 시험의 몫이라 두지 않는다.
+    forgetAllLocations(gpa);
 }
 
 pub fn owns(surface_id: u64) bool {
@@ -2487,6 +2500,7 @@ pub fn destroy(gpa: std.mem.Allocator, surface_id: u64) void {
     destroyed_next = (destroyed_next + 1) % destroyed_ids.len;
     // W9-0b: 호출은 끝내되 sidecar 가 살아 있으면 그 답(닫힘의 `detached`·주차면 결과)까지 자리를 쥔다.
     failDevtools(gpa, surface_id, .closed, state == .running or state == .starting);
+    traceTabGone(gpa, surface_id, "tab_closed"); // W9e②
     // Term 이 사라졌다 — 다음 프레임부터 그리지 않는다. 이미 GPU 에 올라간 장은 renderer 캐시의 텍스처가 IOSurface 를
     // 쥐고 있어 여기서 놓아도 안전하다.
     for (kv.value.view.clear()) |ring| if (ring) |r| r.release();
@@ -2678,6 +2692,8 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     gpa_ref = gpa;
     defer deliverDevtools(gpa); // W9-0b: 이 tick 에 끝난 DevTools 호출을 알린다(어느 갈래로 끝나도)
     reapRetiring(gpa, now_ms);
+    pumpTrace(gpa, now_ms); // W9e②: 거르기가 끝난 trace·시한
+    reapConditionOwners(gpa, now_ms, false); // W9e②: 주인 프로세스가 끝난 CPU·네트워크 조건
     const generation = process_generation;
     const p = if (process) |*p| p else {
         // sidecar 가 멈췄어도(실패·프로필 사용 중) 붙이지 못한 팝업의 만료·정리는 한다 — 기록이 앱이 끝날 때까지 남지 않게(W6f② 적대 검증
@@ -2959,7 +2975,7 @@ pub fn nextLocation(window: usize) ?struct { surface_id: u64, token: u64 } {
 
 /// W5b2: 위치 요청의 답 — `accept` 면 좌표(없으면 「없음」)를 먼저 걸고 허용한다(허용 뒤에 걸면 기다리던 요청이 실패한다 —
 /// 실측), 아니면 그 답만. 답했으면 true — 위치 요청이 아니거나 이미 사라졌으면 false.
-pub fn replyLocation(gpa: std.mem.Allocator, surface_id: u64, token: u64, position: ?Position, result: ws.message.PermissionResult) bool {
+pub fn replyLocation(gpa: std.mem.Allocator, surface_id: u64, token: u64, position: ?Position, result: ws.message.PermissionResult, by: ReplyBy) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     const d = dialogPending(surface_id, token) orelse return false;
     if (d.kind != .permission or d.permission_kinds & ws.message.PermissionKind.geolocation.bit() == 0) return false;
@@ -2975,12 +2991,12 @@ pub fn replyLocation(gpa: std.mem.Allocator, surface_id: u64, token: u64, positi
         // 규칙(범위·유한)을 못 지나는 좌표는 「없음」으로.
         ws.fields.checkGeolocation(geo) catch {
             send(gpa, .{ .geolocation = .{ .browser = surface_id, .request = request, .available = false } });
-            send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = .accept } });
+            send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = .accept, .user = by == .human } });
             return true;
         };
         send(gpa, .{ .geolocation = geo });
     }
-    send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = effective } });
+    send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = effective, .user = by == .human } });
     return true;
 }
 
@@ -2999,8 +3015,13 @@ pub fn dialogPending(surface_id: u64, token: u64) ?*const Dialog {
     return null;
 }
 
+/// 대화상자·파일 선택·권한 요청에 누가 답했나(W9e② 적대 검증 v20c N3). `human` — 사람이 maru 의 sheet 로 답했다: 사람이 그 탭을 쓴 것이다(사용자
+/// 결정 2·7 — 그 탭의 trace 를 버리고 CPU·네트워크 조건을 푼다; prompt 에 친 글이 페이지로 가고 그 화면이 스크린샷에 든다). `program` — 에이전트의
+/// `browser.handleDialog`·maru 가 스스로 낸 답(창 닫힘의 취소·기억된 위치 요청·막힌 요청의 자동 답). sidecar 는 둘을 가를 수 없어 답에 싣는다(`user`).
+pub const ReplyBy = enum { human, program };
+
 /// JS 대화상자의 답. 요청이 없으면(이미 사라졌다) 무동작. `suppress` 면 그 페이지가 이동할 때까지 대화상자를 더 띄우지 못한다.
-pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool) void {
+pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool, by: ReplyBy) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     const d = dialogPending(surface_id, token) orelse return;
     if (d.kind.isFile() or d.kind == .permission) return;
@@ -3022,7 +3043,7 @@ pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: 
     // 시작되지 않아도 불러오기의 끝(`nav_state` 의 「불러오는 중 아님」)이나 탭 닫힘이 푼다).
     if (d.kind == .before_unload and accept) s.nav_uncommitted = true;
     removeDialog(gpa, s, token);
-    if (s.created) send(gpa, .{ .dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept, .text = buf[0..clamped.len], .suppress = suppress } });
+    if (s.created) send(gpa, .{ .dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept, .text = buf[0..clamped.len], .suppress = suppress, .user = by == .human } });
     flushDeferredCalls(gpa); // 답 뒤에 — 대화상자가 풀린 다음 미룬 정리를 보낸다(3 회차 — 「떠나기」 면 위에서 확정까지 둔다)
 }
 
@@ -3713,6 +3734,8 @@ pub const EmulateRequest = struct {
     grant_host: []const u8 = "",
     birth: bool = false,
     params: *const emu_mod.Params,
+    /// W9e②: CPU·네트워크 조건의 주인(앱이 연결의 출처에서 — `control_self_origin.ownerOf`).
+    owner: ?maru.session.control_self_origin.Owner = null,
 };
 
 pub const EmulateAnswer = union(enum) { ok: []u8, fail: emu_mod.Failure };
@@ -3721,7 +3744,8 @@ pub fn browserEmulate(out: std.mem.Allocator, surface_id: u64, req: EmulateReque
     const s = surfaces.getPtr(surface_id) orelse return .{ .fail = .{ .reason = "needs_grant", .message = "this tab is not a Chromium tab" } };
     const gpa = gpa_ref orelse return .{ .fail = .{ .reason = "needs_grant", .message = "the Chromium engine is not running" } };
     var why: emu_mod.Failure = undefined;
-    const outcome = s.emu.apply(.{ .pane = req.pane, .params = req.params, .any_host = req.any_host, .grant_host = req.grant_host, .birth = req.birth, .now_ms = monotonicNow() }, &why) catch return .{ .fail = why };
+    const outcome = s.emu.apply(.{ .pane = req.pane, .params = req.params, .any_host = req.any_host, .grant_host = req.grant_host, .birth = req.birth, .now_ms = monotonicNow(), .owner = req.owner }, &why) catch return .{ .fail = why };
+    s.emu.tab_hidden = s.record.hidden; // W9e②: 숨은 탭의 CPU 경고(배경 우선순위)
     if (outcome.changed) sendEmulation(gpa, surface_id, s);
     // `reload:true` — 걸고 나서 새로고침(첫 문서의 머리·터치 이벤트까지 — 실측 E5·E6). 에이전트의 새로고침이다(사용자 이동이 아니다 — D2 예외 없음).
     const reloaded = req.params.reload and req.params.action != .get and s.created;
@@ -3765,11 +3789,657 @@ pub fn takeEmulationRedraw(surface_id: u64) bool {
     return s.emu_redraw;
 }
 
+/// W9e②: 사람이 몰아 풀린 조건의 알림(한 번).
+pub fn takeConditionsNotice(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    defer s.cond_notice_pending = false;
+    return s.cond_notice_pending;
+}
+
 /// W9e①: 걸린 흉내 알림(한 번 — 그 탭이 있는 창이 꺼내 보인다).
 pub fn takeEmulationNotice(surface_id: u64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     defer s.emu_notice_pending = false;
     return s.emu_notice_pending;
+}
+
+// ── W9e②: 성능 trace(`browser.trace`) ──────────────────────────────────────────────────────────────────────
+// 브라우저 전체에 trace 하나(Chromium — 실측 t2)라 maru 도 한 번에 하나를 쥔다(`trace_run`). sidecar 가 보낸 gzip 조각·프레임 id 를 모으고, 끝나면
+// **주 스레드 밖에서** 거른다(`web_osr_trace.filter` — 30 s trace 를 풀면 100–160 MB). 끝난 결과(요약 + 거른 gzip)는 pane 마다 한 칸, 10 분
+// (`trace_kept`). 파일 바이트는 에이전트가 `read` 로 당겨 간다(256 KiB 씩 — 요청마다 인가를 다시 본다). 답을 기다리는 op 은 `trace_answers` 에
+// 넣고 앱이 tick 마다 꺼내 끝낸다(`takeTraceAnswer`).
+
+const trace_mod = maru.session.web_osr_trace;
+
+/// 결과 칸의 수명(PLAN v2 §6.3 — 10 분, grant 철회·탭 닫힘이면 먼저 지운다).
+const trace_keep_ms: i64 = 10 * 60 * 1000;
+/// sidecar 가 답하지 않을 때의 maru 쪽 시한(시작 — sidecar 의 5 s 시한 + 여유, 멈춤 — 길이 + 읽기 30 s + 여유).
+const trace_start_timeout_ms: i64 = 12_000;
+const trace_stop_slack_ms: i64 = 45_000;
+
+pub const TraceFailure = struct { reason: []const u8, message: []const u8, retry_after_ms: ?u32 = null };
+pub const TraceAnswer = union(enum) { ok: []u8, fail: TraceFailure, pending };
+
+const TracePhase = enum { starting, recording, receiving, filtering, done, discarded, failed };
+
+const TraceWorker = struct {
+    gz: []u8,
+    frames: trace_mod.FrameSet,
+    covered_ms: u32,
+    /// sidecar 가 gzip 상한 앞에서 잘랐다(A4-1 — 거르기가 덮은 시간을 다시 잰다).
+    truncated: bool = false,
+    /// sidecar 가 보낸 프레임 집합이 비었다 — 그 탭의 렌더러가 기록 내내 답하지 않았다(V-A1, `trace_mod.Options.renderer_silent`).
+    renderer_silent: bool = false,
+    /// 기록하는 동안 그 탭의 렌더러 프로세스에 가족 밖의 프레임이 들 수 있었다(sidecar 의 `trace_state.shared_process` — 결정 12).
+    shared_process: bool = false,
+    result: ?trace_mod.Result = null,
+    err: bool = false,
+    done: std.atomic.Value(bool) = .init(false),
+};
+
+const TraceRun = struct {
+    surface: u64,
+    pane: u64,
+    generation: u32,
+    phase: TracePhase = .starting,
+    duration_ms: u32,
+    screenshots: bool,
+    reload: bool,
+    hidden: bool,
+    /// 보이던 탭이 기록 중에 숨었다(A6-1 — maru 가 `set_hidden` 을 보낼 때 안다; sidecar 는 그때 focus 흉내를 켠다).
+    hidden_during: bool = false,
+    focus_emulated: bool = false,
+    data_loss: bool = false,
+    /// sidecar 가 gzip 상한(16 MiB) 앞에서 잘랐다(A4-1).
+    truncated: bool = false,
+    /// 결정 12: 기록하는 동안 그 탭의 렌더러 프로세스에 가족 밖의 프레임이 들 수 있었다(`done` 의 표시).
+    shared_process: bool = false,
+    covered_ms: u32 = 0,
+    reason: []const u8 = "",
+    start_waiter: ?u64 = null,
+    stop_waiter: ?u64 = null,
+    gz: std.ArrayList(u8) = .empty,
+    frames: trace_mod.FrameSet,
+    sent_ms: i64,
+    started_ms: i64 = 0,
+    conditions_json: []u8 = &.{},
+    worker: ?*TraceWorker = null,
+    thread: ?std.Thread = null,
+};
+
+const TraceKept = struct {
+    pane: u64,
+    surface: u64,
+    finished_ms: i64,
+    /// stop 의 결과 JSON(요약 — 파일 바이트는 따로).
+    json: []u8,
+    gz: []u8,
+};
+
+var trace_run: ?*TraceRun = null;
+var trace_gen: u32 = 0;
+var trace_kept: std.ArrayList(TraceKept) = .empty;
+var trace_answers: std.ArrayList(struct { async_id: u64, ok: bool, json: []u8 }) = .empty;
+
+fn traceAnswer(gpa: std.mem.Allocator, async_id: ?u64, ok: bool, json: []const u8) void {
+    const id = async_id orelse return;
+    const copy = gpa.dupe(u8, json) catch return;
+    trace_answers.append(gpa, .{ .async_id = id, .ok = ok, .json = copy }) catch gpa.free(copy);
+}
+
+fn traceFailJson(buf: []u8, reason: []const u8, message: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{{\"reason\":\"{s}\",\"message\":\"{s}\"}}", .{ reason, message }) catch "{\"reason\":\"failed\",\"message\":\"trace failed\"}";
+}
+
+/// trace 가 시작·끝나 탭 제목(◔)을 다시 지어야 하는 탭(한 번).
+var trace_redraw: u64 = 0;
+
+pub fn takeTraceRedraw(surface_id: u64) bool {
+    if (trace_redraw != surface_id or surface_id == 0) return false;
+    trace_redraw = 0;
+    return true;
+}
+
+pub fn hasTraceAnswer() bool {
+    return trace_answers.items.len > 0;
+}
+
+/// 앱이 tick 마다 — 끝난 trace op 하나(그 async_id 를 끝낸다). 글은 부른 쪽이 `gpa` 로 놓는다.
+pub fn takeTraceAnswer() ?struct { async_id: u64, ok: bool, json: []u8 } {
+    if (trace_answers.items.len == 0) return null;
+    const a = trace_answers.orderedRemove(0);
+    return .{ .async_id = a.async_id, .ok = a.ok, .json = a.json };
+}
+
+pub const TraceRequest = struct {
+    pane: u64,
+    params: *const trace_mod.Params,
+    async_id: u64,
+};
+
+/// 그 탭이 trace 중인가(탭 제목의 ⏺·Browser Grants 줄).
+pub fn tracing(surface_id: u64) bool {
+    const r = trace_run orelse return false;
+    return r.surface == surface_id and (r.phase == .starting or r.phase == .recording);
+}
+
+/// Browser Grants 줄 「performance trace (recording|ready)」 — 그 pane 의 것만(없으면 빈 글).
+pub fn traceSummary(surface_id: u64, pane: u64) []const u8 {
+    if (trace_run) |r| if (r.surface == surface_id and r.pane == pane) return switch (r.phase) {
+        .starting, .recording => "recording",
+        .receiving, .filtering => "finishing",
+        .done => "ready",
+        .discarded, .failed => "",
+    };
+    for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == pane) return "ready";
+    return "";
+}
+
+fn traceElapsed(r: *const TraceRun, now: i64) i64 {
+    return if (r.started_ms == 0) 0 else now - r.started_ms;
+}
+
+pub fn browserTrace(out: std.mem.Allocator, surface_id: u64, req: TraceRequest) std.mem.Allocator.Error!TraceAnswer {
+    const gpa = gpa_ref orelse return .{ .fail = .{ .reason = "engine_not_running", .message = "the Chromium engine is not running" } };
+    const s = surfaces.getPtr(surface_id) orelse return .{ .fail = .{ .reason = "not_chromium", .message = "this tab is not a Chromium tab" } };
+    const now = monotonicNow();
+    expireTraceKept(gpa, now);
+    const p = req.params;
+    switch (p.action) {
+        .start => {
+            // 버린 뒤에도 거르기 스레드가 아직 돌면 바쁨이다 — 새 start 가 그 스레드를 join 하며 주 스레드를 세우지 않게(구현 적대 리뷰 M2).
+            if (trace_run) |r| if (r.phase == .starting or r.phase == .recording or r.phase == .receiving or r.phase == .filtering or r.thread != null) {
+                const left: i64 = @max(1000, @as(i64, r.duration_ms) - traceElapsed(r, now) + 5000);
+                return .{ .fail = .{ .reason = "trace_busy", .message = "another performance trace is running in this browser (Chromium records one at a time) — try again after it finishes", .retry_after_ms = @intCast(@min(left, 120_000)) } };
+            };
+            if (!s.created) return .{ .fail = .{ .reason = "not_ready", .message = "the tab is still starting — try again in a moment" } };
+            dropTraceRun(gpa);
+            dropKeptFor(gpa, req.pane, surface_id); // 그 pane 의 옛 결과는 새 start 가 버린다(PLAN v2 §6.3 — 남의 pane 결과는 그대로)
+            trace_gen +%= 1;
+            if (trace_gen == 0) trace_gen = 1;
+            const r = gpa.create(TraceRun) catch return error.OutOfMemory;
+            r.* = .{ .surface = surface_id, .pane = req.pane, .generation = trace_gen, .duration_ms = p.duration_ms, .screenshots = p.screenshots, .reload = p.reload, .hidden = s.record.hidden, .frames = .init(gpa), .sent_ms = now, .start_waiter = req.async_id };
+            r.conditions_json = conditionsJson(gpa, s) catch &.{};
+            trace_run = r;
+            send(gpa, .{ .trace = .{ .browser = surface_id, .generation = r.generation, .action = .start, .duration_ms = p.duration_ms, .screenshots = p.screenshots, .reload = p.reload } });
+            if (testReporting()) std.debug.print("osr-test trace start {d} gen={d} hidden={}\n", .{ surface_id, r.generation, s.record.hidden });
+            return .pending;
+        },
+        .stop => {
+            if (trace_run) |r| if (r.surface == surface_id and r.pane == req.pane) switch (r.phase) {
+                .starting, .recording => {
+                    if (r.stop_waiter != null) return .{ .fail = .{ .reason = "trace_busy", .message = "a stop is already waiting for this trace", .retry_after_ms = 2000 } };
+                    r.stop_waiter = req.async_id;
+                    send(gpa, .{ .trace = .{ .browser = surface_id, .generation = r.generation, .action = .stop } });
+                    return .pending;
+                },
+                .receiving, .filtering => {
+                    if (r.stop_waiter != null) return .{ .fail = .{ .reason = "trace_busy", .message = "a stop is already waiting for this trace", .retry_after_ms = 2000 } };
+                    r.stop_waiter = req.async_id;
+                    return .pending;
+                },
+                .done, .discarded, .failed => {},
+            };
+            for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == req.pane) return .{ .ok = try out.dupe(u8, k.json) };
+            return .{ .fail = .{ .reason = "not_tracing", .message = "no performance trace on this tab — start one with maru browser trace start" } };
+        },
+        .status => return .{ .ok = try traceStatusJson(out, surface_id, req.pane, now) },
+        .abort => {
+            if (trace_run) |r| if (r.surface == surface_id and r.pane == req.pane and r.phase != .done and r.phase != .discarded and r.phase != .failed) {
+                send(gpa, .{ .trace = .{ .browser = surface_id, .generation = r.generation, .action = .abort } });
+                finishTrace(gpa, r, .discarded, "aborted");
+            };
+            dropKeptFor(gpa, req.pane, surface_id);
+            return .{ .ok = try out.dupe(u8, "{\"state\":\"aborted\"}") };
+        },
+        .read => {
+            for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == req.pane) {
+                if (k.gz.len == 0) return .{ .fail = .{ .reason = "no_file", .message = "this trace was not kept as a file (it was discarded or failed)" } };
+                if (p.offset > k.gz.len) return .{ .fail = .{ .reason = "offset_invalid", .message = "offset is past the end of the trace file" } };
+                const end = @min(k.gz.len, @as(usize, p.offset) + trace_mod.read_chunk_bytes);
+                const chunk = k.gz[p.offset..end];
+                const enc = std.base64.standard.Encoder;
+                const b64 = try out.alloc(u8, enc.calcSize(chunk.len));
+                defer out.free(b64);
+                _ = enc.encode(b64, chunk);
+                return .{ .ok = try std.fmt.allocPrint(out, "{{\"offset\":{d},\"total\":{d},\"eof\":{},\"data\":\"{s}\"}}", .{ p.offset, k.gz.len, end == k.gz.len, b64 }) };
+            };
+            return .{ .fail = .{ .reason = "not_tracing", .message = "no finished trace on this tab to read — stop one first" } };
+        },
+    }
+}
+
+fn conditionsJson(gpa: std.mem.Allocator, s: *const Surface) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var js: std.json.Stringify = .{ .writer = &aw.writer };
+    try js.beginObject();
+    if (s.emu.settings.cpu) |r| {
+        try js.objectField("cpu");
+        try js.print("{d}", .{r});
+    }
+    if (s.emu.settings.network) |n| {
+        try js.objectField("network");
+        if (n.offline) try js.write("offline") else if (n.preset) |pr| try js.write(emu_mod.netPresetName(pr)) else try js.print("{{\"latency_ms\":{d},\"download_kbps\":{d},\"upload_kbps\":{d}}}", .{ n.latency_ms, n.download_kbps, n.upload_kbps });
+    }
+    try js.endObject();
+    return aw.toOwnedSlice();
+}
+
+fn traceStatusJson(out: std.mem.Allocator, surface_id: u64, pane: u64, now: i64) ![]u8 {
+    if (trace_run) |r| if (r.surface == surface_id and r.pane == pane) {
+        return std.fmt.allocPrint(out, "{{\"state\":\"{s}\",\"elapsed_ms\":{d},\"auto_stop_ms\":{d},\"hidden\":{},\"focus_emulated\":{}}}", .{ @tagName(r.phase), traceElapsed(r, now), r.duration_ms, r.hidden, r.focus_emulated });
+    };
+    for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == pane) return std.fmt.allocPrint(out, "{{\"state\":\"ready\",\"kept_ms\":{d}}}", .{now - k.finished_ms});
+    return out.dupe(u8, "{\"state\":\"idle\"}");
+}
+
+fn dropKeptFor(gpa: std.mem.Allocator, pane: u64, surface: u64) void {
+    var i: usize = 0;
+    while (i < trace_kept.items.len) {
+        const k = trace_kept.items[i];
+        if ((pane == 0 or k.pane == pane) and (surface == 0 or k.surface == surface)) {
+            gpa.free(k.json);
+            gpa.free(k.gz);
+            _ = trace_kept.orderedRemove(i);
+        } else i += 1;
+    }
+}
+
+/// 결과 칸의 상한 — 거른 파일(gzip ≤ 16 MiB)이 있는 칸만 센다(버림·실패의 이유만 든 칸은 작고 (pane, 탭)마다 하나다). pane 마다
+/// `trace_keep_per_pane` 개: 한 pane 이 제 에이전트 탭 여럿을 10 분 안에 거듭 trace 해도 **다른 pane 이 아직 읽지 않은 결과를 밀어내지 않는다**
+/// (W9e② 적대 검증 14 회차 V-14 — 전에는 앱 전체 8 칸을 가장 오래된 것부터 밀어냈다). 앱 전체 `trace_keep_max` 개(메모리 상한 — 128 MiB)를
+/// 넘으면 칸을 가장 많이 쥔 pane 의 가장 오래된 것부터(모든 pane 이 하나씩이면 가장 오래된 것).
+const trace_keep_max: usize = 8;
+const trace_keep_per_pane: usize = 4;
+
+/// 거른 결과를 칸에 넣기 전에 — 그 pane 의 상한, 그다음 앱 전체 상한.
+fn capTraceKept(gpa: std.mem.Allocator, pane: u64) void {
+    while (keptFiles(pane) >= trace_keep_per_pane) removeKept(gpa, oldestFile(pane) orelse return);
+    while (keptFiles(null) >= trace_keep_max) {
+        // 칸을 가장 많이 쥔 pane(같으면 가장 오래된 칸을 쥔 쪽).
+        var victim: ?usize = null;
+        var most: usize = 0;
+        for (trace_kept.items) |k| if (k.gz.len > 0) {
+            const n = keptFiles(k.pane);
+            if (n > most or (n == most and victim != null and k.finished_ms < trace_kept.items[victim.?].finished_ms)) {
+                most = n;
+                victim = oldestFile(k.pane);
+            }
+        };
+        removeKept(gpa, victim orelse return);
+    }
+}
+
+/// 파일이 있는 칸의 수(`pane` 이 null 이면 모두).
+fn keptFiles(pane: ?u64) usize {
+    var n: usize = 0;
+    for (trace_kept.items) |k| if (k.gz.len > 0 and (pane == null or k.pane == pane.?)) {
+        n += 1;
+    };
+    return n;
+}
+
+fn oldestFile(pane: u64) ?usize {
+    var at: ?usize = null;
+    for (trace_kept.items, 0..) |k, i| if (k.gz.len > 0 and k.pane == pane) {
+        if (at == null or k.finished_ms < trace_kept.items[at.?].finished_ms) at = i;
+    };
+    return at;
+}
+
+fn removeKept(gpa: std.mem.Allocator, i: usize) void {
+    const k = trace_kept.orderedRemove(i);
+    gpa.free(k.json);
+    gpa.free(k.gz);
+}
+
+fn expireTraceKept(gpa: std.mem.Allocator, now: i64) void {
+    var i: usize = 0;
+    while (i < trace_kept.items.len) {
+        const k = trace_kept.items[i];
+        if (now - k.finished_ms >= trace_keep_ms) {
+            gpa.free(k.json);
+            gpa.free(k.gz);
+            _ = trace_kept.orderedRemove(i);
+        } else i += 1;
+    }
+}
+
+/// 진행 중인 trace 를 버린다(새 start·탭 닫힘·sidecar 가 사라짐) — 기다리던 op 에는 실패로 답한다.
+fn dropTraceRun(gpa: std.mem.Allocator) void {
+    const r = trace_run orelse return;
+    if (r.thread) |t| t.join(); // 거르기는 끝까지 기다린다(그 자료를 놓기 전에)
+    if (r.worker) |w| {
+        if (w.result) |*res| res.deinit();
+        gpa.free(w.gz);
+        w.frames.deinit();
+        gpa.destroy(w);
+    }
+    r.gz.deinit(gpa);
+    r.frames.deinit();
+    if (r.conditions_json.len > 0) gpa.free(r.conditions_json);
+    gpa.destroy(r);
+    trace_run = null;
+}
+
+/// 끝냄 — 버림·실패는 곧 답하고(이유를 늘 싣는다 — 사용자 결정 6) 자리를 둔다(상태를 보이려고). 끝은 거른 뒤 `traceWorkerDone` 이.
+fn finishTrace(gpa: std.mem.Allocator, r: *TraceRun, phase: TracePhase, reason: []const u8) void {
+    r.phase = phase;
+    trace_redraw = r.surface;
+    r.reason = reason;
+    var jb: [512]u8 = undefined;
+    const json = std.fmt.bufPrint(&jb, "{{\"state\":\"{s}\",\"reason\":\"{s}\",\"message\":\"{s}\",\"covered_ms\":{d},\"hidden\":{},\"focus_emulated\":{}}}", .{ @tagName(phase), reason, traceReasonMessage(reason), r.covered_ms, r.hidden, r.focus_emulated }) catch return;
+    // start 를 기다리던 op 은 실패로(기록이 시작되지 않았다), stop 을 기다리던 op 은 결과로(버림·실패도 결과다).
+    if (r.start_waiter) |id| {
+        var fb: [600]u8 = undefined;
+        // sidecar 가 아직 앞 trace 를 거두는 중이다(버린 뒤 Chromium 의 완료까지 자리를 쥔다) — maru 의 바쁨과 같은 이름·다시 볼 때로(구현 적대
+        // 리뷰 2 회차 L-a: 전에는 `busy` 가 -32602 로 나갔다).
+        const busy = std.mem.eql(u8, reason, "busy");
+        const fail_json = if (busy)
+            (std.fmt.bufPrint(&fb, "{{\"reason\":\"trace_busy\",\"message\":\"{s}\",\"retry_after_ms\":2000}}", .{traceReasonMessage(reason)}) catch traceFailJson(&fb, reason, traceReasonMessage(reason)))
+        else
+            traceFailJson(&fb, reason, traceReasonMessage(reason));
+        traceAnswer(gpa, id, false, fail_json);
+        r.start_waiter = null;
+    }
+    if (r.stop_waiter) |id| {
+        traceAnswer(gpa, id, true, json);
+        r.stop_waiter = null;
+    }
+    // 끝난 상태를 결과 칸에도(다음 stop·status 가 이유를 본다 — 파일 없음).
+    if (phase == .discarded or phase == .failed) {
+        dropKeptFor(gpa, r.pane, r.surface); // 이유만 든 칸은 상한에 세지 않는다 — 남의 결과를 밀어내지 않는다(V-14)
+        const copy = gpa.dupe(u8, json) catch return;
+        trace_kept.append(gpa, .{ .pane = r.pane, .surface = r.surface, .finished_ms = monotonicNow(), .json = copy, .gz = &.{} }) catch gpa.free(copy);
+    }
+}
+
+fn traceReasonMessage(reason: []const u8) []const u8 {
+    const table = [_][2][]const u8{
+        .{ "mixed_content", "another tab's frame shares this tab's renderer process and showed up in the trace — the whole trace was discarded (it is not shown to you); close the other tab or trace a different site" },
+        .{ "human_input", "someone used this tab or a popup of its family (click, key, typing, scrolling, editing, drop, navigation, or answering a dialog, file chooser or permission prompt) while it was being traced — the trace was discarded" },
+        .{ "frames_overflow", "the page created more than 65536 frames during the trace — discarded" },
+        .{ "aborted", "the trace was aborted" },
+        .{ "busy", "another trace is running in this browser" },
+        .{ "tab_closed", "the tab closed during the trace" },
+        .{ "cdp_error", "Chromium refused the trace" },
+        .{ "read_timeout", "the trace data did not arrive in time" },
+        .{ "too_large", "the trace was larger than 16 MiB compressed" },
+        .{ "start_timeout", "Chromium did not start the trace in time (the page may be busy)" },
+        .{ "not_found", "the tab is gone" },
+        .{ "sidecar_restarted", "the Chromium engine restarted during the trace" },
+        .{ "malformed_trace", "the trace data could not be read" },
+        .{ "renderer_unresponsive", "the page did not answer while the trace ran and the trace did not name this tab's frames, so maru could not tell them from other tabs' frames — nothing was kept; trace again once the page responds" },
+        .{ "left_agent_control", "this tab is no longer under your control" },
+    };
+    for (table) |row| if (std.mem.eql(u8, row[0], reason)) return row[1];
+    return "the trace ended";
+}
+
+fn wireReason(r: ws.message.TraceReason) []const u8 {
+    return switch (r) {
+        .human_input, .frames_overflow, .aborted, .busy, .tab_closed, .cdp_error, .read_timeout, .too_large, .start_timeout, .not_found => @tagName(r),
+        else => "cdp_error",
+    };
+}
+
+/// sidecar 의 `trace_state`.
+fn onTraceState(gpa: std.mem.Allocator, v: ws.message.TraceState) void {
+    const r = trace_run orelse return;
+    if (r.generation != v.generation or r.surface != v.browser) return; // 옛 trace 의 늦은 답
+    if (r.phase == .done or r.phase == .discarded or r.phase == .failed or r.phase == .filtering) return;
+    r.focus_emulated = r.focus_emulated or v.focus_emulated;
+    switch (v.state) {
+        .starting => {},
+        .recording => {
+            r.phase = .recording;
+            r.started_ms = monotonicNow();
+            trace_redraw = r.surface;
+            if (r.start_waiter) |id| {
+                // `own_worker_threads`: 렌더러 스레드 허용 목록(v20c N1)이 그 탭 **자신의** 전용 워커·백그라운드 컴파일·래스터 트랙도 뺀다 —
+                // 주인을 가를 수 없어서다. 요약 값은 그대로지만 gzip 을 DevTools 로 열면 그 트랙이 비므로 「워커가 놀았다」 로 읽지 않게 알린다.
+                const json = std.fmt.allocPrint(gpa, "{{\"state\":\"recording\",\"auto_stop_ms\":{d},\"hidden\":{},\"focus_emulated\":{},\"conditions\":{s},\"warnings\":{s},\"not_covered\":[\"service_workers\",\"cross_site_iframes\",\"other_renderer_processes\",\"own_worker_threads\"]}}", .{ r.duration_ms, r.hidden, r.focus_emulated, if (r.conditions_json.len > 0) r.conditions_json else "{}", if (r.hidden_during) "[\"hidden_tab_cpu_background\",\"hidden_during_trace\"]" else if (r.focus_emulated or r.hidden) "[\"hidden_tab_cpu_background\"]" else "[]" }) catch return;
+                defer gpa.free(json);
+                traceAnswer(gpa, id, true, json);
+                r.start_waiter = null;
+            }
+        },
+        .receiving => {
+            r.phase = .receiving;
+            r.covered_ms = v.covered_ms;
+            trace_redraw = r.surface;
+        },
+        .done => {
+            r.covered_ms = v.covered_ms;
+            r.data_loss = v.data_loss;
+            r.truncated = v.truncated;
+            r.shared_process = v.shared_process;
+            if (r.gz.items.len != v.gz_bytes or r.frames.count() < @min(v.frames, 1)) return finishTrace(gpa, r, .failed, "read_timeout");
+            startTraceWorker(gpa, r) catch return finishTrace(gpa, r, .failed, "malformed_trace");
+        },
+        .discarded => finishTrace(gpa, r, .discarded, wireReason(v.reason)),
+        .failed => finishTrace(gpa, r, .failed, wireReason(v.reason)),
+    }
+}
+
+fn onTraceData(gpa: std.mem.Allocator, v: ws.message.TraceData) void {
+    const r = trace_run orelse return;
+    if (r.generation != v.generation or r.surface != v.browser or r.phase != .receiving) return;
+    if (v.offset != r.gz.items.len) return finishTrace(gpa, r, .failed, "read_timeout"); // 조각이 빠졌다
+    r.gz.appendSlice(gpa, v.bytes) catch return finishTrace(gpa, r, .failed, "too_large");
+}
+
+fn onTraceFrames(v: ws.message.TraceFrames) void {
+    const r = trace_run orelse return;
+    if (r.generation != v.generation or r.surface != v.browser) return;
+    for (v.ids[0..v.count]) |id| r.frames.add(id) catch {};
+}
+
+fn startTraceWorker(gpa: std.mem.Allocator, r: *TraceRun) !void {
+    const w = try gpa.create(TraceWorker);
+    errdefer gpa.destroy(w);
+    w.* = .{ .gz = try r.gz.toOwnedSlice(gpa), .frames = r.frames, .covered_ms = r.covered_ms, .truncated = r.truncated, .renderer_silent = r.frames.count() == 0, .shared_process = r.shared_process };
+    r.frames = .init(gpa); // 넘겼다
+    r.worker = w;
+    r.phase = .filtering;
+    r.thread = std.Thread.spawn(.{}, traceWorkerMain, .{ gpa, w }) catch {
+        traceWorkerMain(gpa, w); // 스레드를 못 띄우면 여기서(드물다 — 주 스레드가 잠깐 선다)
+        return;
+    };
+}
+
+fn traceWorkerMain(gpa: std.mem.Allocator, w: *TraceWorker) void {
+    w.result = trace_mod.filter(gpa, w.gz, &w.frames, .{ .covered_ms = w.covered_ms, .truncated = w.truncated, .renderer_silent = w.renderer_silent, .shared_process = w.shared_process }) catch null;
+    w.err = w.result == null;
+    w.done.store(true, .release);
+}
+
+/// tick 마다 — 거르기가 끝났으면 결과를 만든다, 시한.
+fn pumpTrace(gpa: std.mem.Allocator, now: i64) void {
+    expireTraceKept(gpa, now);
+    const r = trace_run orelse return;
+    // 끝난 거르기는 단계와 상관없이 거둔다 — 거르는 동안 abort·grant 철회·탭 닫힘으로 버렸으면 결과는 버린다(구현 적대 리뷰 M2).
+    if (r.worker) |w| if (w.done.load(.acquire)) {
+        if (r.thread) |t| t.join();
+        r.thread = null;
+        if (r.phase == .filtering) return traceWorkerDone(gpa, r, w);
+        freeTraceWorker(gpa, r, w);
+        return;
+    };
+    switch (r.phase) {
+        .starting => if (now - r.sent_ms > trace_start_timeout_ms) {
+            // sidecar 에도 그만두라고 한다(제 시한이 결국 풀지만 그동안 헛일을 한다 — 구현 적대 리뷰 LOW).
+            send(gpa, .{ .trace = .{ .browser = r.surface, .generation = r.generation, .action = .abort } });
+            finishTrace(gpa, r, .failed, "start_timeout");
+        },
+        // 기록 시작을 못 받고 받는 중이 먼저 와도(망가진 sidecar) 시한이 걸리게 — 보낸 때를 바탕으로(구현 적대 리뷰 2 회차 L-b).
+        .recording, .receiving => if (now - (if (r.started_ms != 0) r.started_ms else r.sent_ms) > @as(i64, r.duration_ms) + trace_stop_slack_ms) {
+            send(gpa, .{ .trace = .{ .browser = r.surface, .generation = r.generation, .action = .abort } });
+            finishTrace(gpa, r, .failed, "read_timeout");
+        },
+        else => {},
+    }
+}
+
+fn freeTraceWorker(gpa: std.mem.Allocator, r: *TraceRun, w: *TraceWorker) void {
+    if (w.result) |*res| res.deinit();
+    gpa.free(w.gz);
+    w.frames.deinit();
+    gpa.destroy(w);
+    r.worker = null;
+}
+
+fn traceWorkerDone(gpa: std.mem.Allocator, r: *TraceRun, w: *TraceWorker) void {
+    defer freeTraceWorker(gpa, r, w);
+    const res = if (w.result) |*x| x else return finishTrace(gpa, r, .failed, "malformed_trace");
+    switch (res.outcome) {
+        .mixed_content => {
+            if (testReporting()) std.debug.print("osr-test trace discarded mixed_content foreign={s}\n", .{res.foreign});
+            return finishTrace(gpa, r, .discarded, "mixed_content");
+        },
+        .malformed => return finishTrace(gpa, r, .failed, "malformed_trace"),
+        // V-A1: 그 탭의 프레임을 알 수 없었다(sidecar 의 물음에 답하지 않았고 trace 에도 그 탭의 프레임이 없다) — 남의 것이 섞였다는 틀린 이유 대신
+        // 실패의 까닭을 그대로(막혔어도 프레임을 알면 결정 12 대로 가를 수 없는 것만 빼고 남긴다).
+        .renderer_unresponsive => return finishTrace(gpa, r, .failed, "renderer_unresponsive"),
+        .kept => {},
+    }
+    var sha: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(res.gz, &sha, .{});
+    const hex = std.fmt.bytesToHex(sha, .lower);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var js: std.json.Stringify = .{ .writer = &aw.writer };
+    (blk: {
+        js.beginObject() catch |e| break :blk e;
+        js.objectField("state") catch |e| break :blk e;
+        js.write("done") catch |e| break :blk e;
+        js.objectField("stopped_by") catch |e| break :blk e;
+        js.write(if (r.covered_ms +| 50 < r.duration_ms) "request_or_buffer" else "duration") catch |e| break :blk e;
+        js.objectField("hidden") catch |e| break :blk e;
+        js.write(r.hidden) catch |e| break :blk e;
+        js.objectField("focus_emulated") catch |e| break :blk e;
+        js.write(r.focus_emulated) catch |e| break :blk e;
+        js.objectField("data_loss") catch |e| break :blk e;
+        js.write(r.data_loss) catch |e| break :blk e;
+        // A4-1: gzip 상한 앞에서 잘렸다 — 뒷부분이 없다(덮은 시간은 요약의 `covered_ms`).
+        js.objectField("truncated") catch |e| break :blk e;
+        js.write(r.truncated) catch |e| break :blk e;
+        js.objectField("conditions") catch |e| break :blk e;
+        js.print("{s}", .{if (r.conditions_json.len > 0) r.conditions_json else "{}"}) catch |e| break :blk e;
+        js.objectField("summary") catch |e| break :blk e;
+        trace_mod.writeSummary(&js, &res.summary) catch |e| break :blk e;
+        js.objectField("file") catch |e| break :blk e;
+        js.print("{{\"gz_bytes\":{d},\"sha256\":\"{s}\"}}", .{ res.gz.len, &hex }) catch |e| break :blk e;
+        js.objectField("not_covered") catch |e| break :blk e;
+        // start 의 넷(`own_worker_threads` 는 그 탭 자신의 워커·백그라운드 컴파일·래스터 트랙 — v20c N1 의 허용 목록이 뺀다)에 브라우저·GPU 를 더한 다섯.
+        js.write(&[_][]const u8{ "service_workers", "cross_site_iframes", "other_renderer_processes", "own_worker_threads", "browser_and_gpu_threads" }) catch |e| break :blk e;
+        js.objectField("warnings") catch |e| break :blk e;
+        var warns: [6][]const u8 = undefined;
+        var n: usize = 0;
+        if (r.focus_emulated or r.hidden) {
+            warns[n] = "hidden_tab_cpu_background";
+            n += 1;
+        }
+        if (r.hidden_during) {
+            warns[n] = "hidden_during_trace"; // A6-1: 보이는 탭으로 시작해 기록 중에 숨었다 — 앞부분과 뒷부분의 수치가 다르다
+            n += 1;
+        }
+        if (r.data_loss) {
+            warns[n] = "buffer_full_data_lost";
+            n += 1;
+        }
+        if (r.truncated) {
+            warns[n] = "trace_truncated"; // A4-1
+            n += 1;
+        }
+        if (res.summary.compositor_dropped > 0) {
+            // 결정 12: 주 스레드가 기록 내내 막혀 그 프로세스의 컴포지터·프로파일러 이벤트가 누구 것인지 가를 수 없었다 — 그것만 뺐다.
+            warns[n] = "compositor_events_dropped";
+            n += 1;
+        }
+        js.write(warns[0..n]) catch |e| break :blk e;
+        js.endObject() catch |e| break :blk e;
+    }) catch return finishTrace(gpa, r, .failed, "malformed_trace");
+    const json = aw.toOwnedSlice() catch return finishTrace(gpa, r, .failed, "malformed_trace");
+    const gz = gpa.dupe(u8, res.gz) catch {
+        gpa.free(json);
+        return finishTrace(gpa, r, .failed, "too_large");
+    };
+    r.phase = .done;
+    dropKeptFor(gpa, r.pane, r.surface);
+    capTraceKept(gpa, r.pane);
+    trace_kept.append(gpa, .{ .pane = r.pane, .surface = r.surface, .finished_ms = monotonicNow(), .json = json, .gz = gz }) catch {
+        gpa.free(json);
+        gpa.free(gz);
+        return;
+    };
+    if (r.stop_waiter) |id| {
+        traceAnswer(gpa, id, true, json);
+        r.stop_waiter = null;
+    }
+    if (testReporting()) std.debug.print("osr-test trace done {d} kept={d} gz={d}\n", .{ r.surface, res.summary.events_kept, res.gz.len });
+}
+
+/// 탭이 닫혔다·sidecar 가 사라졌다 — 진행 중 trace 는 실패로, 결과 칸은(탭 닫힘이면) 지운다.
+fn traceTabGone(gpa: std.mem.Allocator, surface_id: u64, reason: []const u8) void {
+    if (trace_run) |r| if (surface_id == 0 or r.surface == surface_id) {
+        // 탭이 닫혔으면 거르는 중이어도 실패로 — 끝난 거르기의 결과는 `pumpTrace` 가 버린다(닫힌 탭의 결과가 10 분 남지 않게 — 구현 적대 리뷰
+        // M2). sidecar 가 다시 뜬 것(`surface_id == 0`)은 이미 다 받은 거르기를 두고 끝내게 한다(2 회차 L-e).
+        if (r.phase == .starting or r.phase == .recording or r.phase == .receiving or (r.phase == .filtering and surface_id != 0)) finishTrace(gpa, r, .failed, reason);
+    };
+    if (surface_id != 0) dropKeptFor(gpa, 0, surface_id);
+}
+
+/// grant 가 바뀌었다 — 그 pane 이 그 탭의 trace 권한(탭과 함께 생긴 네트워크 grant)을 잃으면 trace 를 버리고 결과를 지운다(PLAN v2 §6.3).
+pub const TraceTab = struct { pane: u64, tab: u64 };
+
+pub fn traceSync(birth_tabs: []const TraceTab) void {
+    const gpa = gpa_ref orelse return;
+    if (trace_run) |r| {
+        var still = false;
+        for (birth_tabs) |b| if (b.pane == r.pane and b.tab == r.surface) {
+            still = true;
+        };
+        if (!still and r.phase != .done and r.phase != .discarded and r.phase != .failed) {
+            send(gpa, .{ .trace = .{ .browser = r.surface, .generation = r.generation, .action = .abort } });
+            finishTrace(gpa, r, .discarded, "left_agent_control");
+        }
+    }
+    var i: usize = 0;
+    while (i < trace_kept.items.len) {
+        const k = trace_kept.items[i];
+        var still = false;
+        for (birth_tabs) |b| if (b.pane == k.pane and b.tab == k.surface) {
+            still = true;
+        };
+        if (!still) {
+            gpa.free(k.json);
+            gpa.free(k.gz);
+            _ = trace_kept.orderedRemove(i);
+        } else i += 1;
+    }
+}
+
+// ── W9e②: 조건의 주인 ───────────────────────────────────────────────────────────────────────────────────
+
+var owners_checked_ms: i64 = 0;
+const owners_interval_ms: i64 = 500;
+
+/// 주인 프로세스가 끝난 CPU·네트워크 조건을 푼다(0.5 s 마다 — 사용자 결정 7, PHASE0_v3 c: pid 와 시작 시각).
+fn reapConditionOwners(gpa: std.mem.Allocator, now: i64, force: bool) void {
+    if (!force and now - owners_checked_ms < owners_interval_ms) return;
+    owners_checked_ms = now;
+    const provider = @import("control_self_origin_macos.zig").provider();
+    var it = surfaces.iterator();
+    while (it.next()) |e| {
+        const s = e.value_ptr;
+        if (!s.emu.hasOwners()) continue;
+        if (s.emu.reapOwners(provider)) {
+            if (testReporting()) std.debug.print("osr-test conditions released owner_exited {d}\n", .{e.key_ptr.*});
+            sendEmulation(gpa, e.key_ptr.*, s);
+        }
+    }
 }
 
 /// W9d④: 그 pane 의 가짜 규칙(번호·패턴·지금 본문·번호) — 네트워크 기록의 `mock_pattern`·`body_state:"mocked"` 의 본문.
@@ -4099,7 +4769,7 @@ pub fn agentReplyDialog(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, ac
     if (kind.isFile()) {
         if (accept) return error.FileChooser;
         target.s.agent_input_ms = monotonicNow();
-        replyFileDialog(gpa, target.id, tok, false);
+        replyFileDialog(gpa, target.id, tok, false, .program);
         return .{ .kind = kind, .continues = false };
     }
     const leaving = kind == .before_unload and accept;
@@ -4110,7 +4780,7 @@ pub fn agentReplyDialog(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, ac
     }
     // 답이 부른 다음 대화상자(confirm 뒤 alert)도 에이전트 것이다.
     target.s.agent_input_ms = monotonicNow();
-    replyDialog(gpa, target.id, tok, accept, text, false);
+    replyDialog(gpa, target.id, tok, accept, text, false, .program);
     return .{ .kind = kind, .continues = leaving };
 }
 
@@ -4123,18 +4793,18 @@ pub fn fileDialogPath(gpa: std.mem.Allocator, surface_id: u64, token: u64, path:
     if (s.created) send(gpa, .{ .file_dialog_path = .{ .browser = surface_id, .request = d.request, .path = path } });
 }
 
-pub fn replyFileDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: bool) void {
+pub fn replyFileDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: bool, by: ReplyBy) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     const d = dialogPending(surface_id, token) orelse return;
     if (!d.kind.isFile()) return;
     const request = d.request;
     removeDialog(gpa, s, token);
-    if (s.created) send(gpa, .{ .file_dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept } });
+    if (s.created) send(gpa, .{ .file_dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept, .user = by == .human } });
 }
 
 /// 권한 요청의 답(W5b). 허용·차단은 Chromium 이 출처별로 기억하고(프롬프트 — 미디어는 기억하지 않는다), 닫기·못 물음은
 /// 기억하지 않는다. 답했으면 true — 권한 요청이 아니거나 이미 사라졌으면(이동·닫힘) false.
-pub fn replyPermission(gpa: std.mem.Allocator, surface_id: u64, token: u64, result: ws.message.PermissionResult) bool {
+pub fn replyPermission(gpa: std.mem.Allocator, surface_id: u64, token: u64, result: ws.message.PermissionResult, by: ReplyBy) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     const d = dialogPending(surface_id, token) orelse return false;
     if (d.kind != .permission) return false;
@@ -4146,7 +4816,7 @@ pub fn replyPermission(gpa: std.mem.Allocator, surface_id: u64, token: u64, resu
         revokeLocationOrigin(d.origin, token);
     }
     removeDialog(gpa, s, token);
-    if (s.created) send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = result } });
+    if (s.created) send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = result, .user = by == .human } });
     return true;
 }
 
@@ -4168,9 +4838,9 @@ pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
                 i += 1;
                 continue;
             }
-            if (d.kind.isFile()) replyFileDialog(gpa, surface_id, d.token, false) else if (d.kind == .permission) {
-                _ = replyPermission(gpa, surface_id, d.token, .ignore);
-            } else replyDialog(gpa, surface_id, d.token, d.kind == .before_unload, "", false);
+            if (d.kind.isFile()) replyFileDialog(gpa, surface_id, d.token, false, .program) else if (d.kind == .permission) {
+                _ = replyPermission(gpa, surface_id, d.token, .ignore, .program);
+            } else replyDialog(gpa, surface_id, d.token, d.kind == .before_unload, "", false, .program);
         }
     }
 }
@@ -5606,6 +6276,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         }
     }
     failDevtools(gpa, 0, .sidecar_gone, false); // W9-0b: 답은 오지 않는다 — 버린 자리도 푼다(알림은 pump 끝에)
+    traceTabGone(gpa, 0, "sidecar_restarted"); // W9e②: trace 는 sidecar 와 함께 사라졌다
     mock_pump.reset(); // W9d④: 새 관 — 옛 상자의 바이트는 없다
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②) — 붙은 팝업은 새 sidecar 에서 보통 탭으로 되살아난다
     parked.clearRetainingCapacity(); // W10c: 주차한 브라우저도 sidecar 와 함께 사라졌다(다시 만들지 않는다 — 탭이 없다)
@@ -5682,8 +6353,21 @@ fn sendCommand(gpa: std.mem.Allocator, command: plan.Command) void {
     switch (command) {
         .create => |c| send(gpa, .{ .create_browser = .{ .browser = c.browser, .size = c.size, .hidden = c.hidden, .url = "about:blank" } }),
         .resize => |c| send(gpa, .{ .resize = .{ .browser = c.browser, .size = c.size } }),
-        .set_hidden => |c| send(gpa, .{ .set_hidden = .{ .browser = c.browser, .value = c.value } }),
+        .set_hidden => |c| {
+            traceHiddenChanged(c.browser, c.value);
+            send(gpa, .{ .set_hidden = .{ .browser = c.browser, .value = c.value } });
+        },
     }
+}
+
+/// W9e② A6-1: 기록 중(또는 시작 중)인 탭이 숨으면 결과의 `hidden` 과 경고에 싣는다 — 전에는 시작 때 값만 실어 숨은 채 잰 trace 가 「보이는
+/// 탭」 결과로 나왔다(sidecar 는 같은 `set_hidden` 으로 그때 focus 흉내를 켠다 — 사용자 결정 5 「측정하는 동안」).
+fn traceHiddenChanged(surface_id: u64, hidden: bool) void {
+    const r = trace_run orelse return;
+    if (!hidden or r.surface != surface_id or r.hidden) return;
+    if (r.phase != .starting and r.phase != .recording) return;
+    r.hidden = true;
+    r.hidden_during = true;
 }
 
 /// 보낸다 — handshake 전이면 쥐었다가 hello_ack 에 보낸다.
@@ -5700,6 +6384,10 @@ pub fn recentUserInput(surface_id: u64, window_ms: i64, now_ms: i64) bool {
     return now_ms - downloadGestureMs(s) <= window_ms;
 }
 
+/// 시험 전용(W9e② v20c N3): 마지막으로 보낸 대화상자·파일·권한 답의 `user` — app_session 의 sheet 진입(`osrDialogReply` 등)이 답을 사람의 것으로
+/// 싣는지 본다(sidecar 가 없는 시험에서 보낸 frame 은 버려진다).
+pub var test_last_reply_user: ?bool = null;
+
 fn send(gpa: std.mem.Allocator, message: Message) void {
     _ = trySend(gpa, message);
 }
@@ -5707,6 +6395,12 @@ fn send(gpa: std.mem.Allocator, message: Message) void {
 /// 보낸다 — 만든 값이 codec 규칙을 어겨 frame 을 만들지 못했으면 거짓(보내지 않았다). 엔진이 내려가 있어 버린 것은 참이다(다시 뜨면
 /// `browser_created` 가 지금 상태를 다시 보낸다).
 fn trySend(gpa: std.mem.Allocator, message: Message) bool {
+    if (builtin.is_test) switch (message) {
+        .dialog_reply => |v| test_last_reply_user = v.user,
+        .file_dialog_reply => |v| test_last_reply_user = v.user,
+        .permission_reply => |v| test_last_reply_user = v.user,
+        else => {},
+    };
     var frame: [ws.wire.max_frame_bytes]u8 = undefined;
     const len = ws.codec.encode(message, &frame) catch return false; // maru 가 만든 값이 codec 규칙을 어기면 보내지 않는다
     switch (state) {
@@ -5714,7 +6408,26 @@ fn trySend(gpa: std.mem.Allocator, message: Message) bool {
         .running => if (process) |*p| {
             _ = lsp_process.write(p, gpa, frame[0..len]) catch false;
         } else if (builtin.is_test and test_record_sends) outbox_pending.appendSlice(gpa, frame[0..len]) catch {},
-        .off, .failed => {},
+        .off, .failed => return true, // 엔진이 내려가 버린 것 — 다시 뜨면 `browser_created` 가 지금 상태를 보낸다(사람 입력의 풂도 하지 않는다)
+    }
+    // W9e② 12 회차: 사람이 그 탭을 건드리는 메시지(sidecar 가 그것으로 조건을 푼다 — `human_use.touchOf`)면 maru 의 설정에서도 곧 푼다 — sidecar 가
+    // 풀고 그 알림을 maru 가 읽기 전에 죽어도 다시 뜬 sidecar 에 옛 조건을 재생하지 않게. 그 입력 뒤에 무리를 뺀 상태를 보낸다(차례 그대로).
+    if (ws.human_use.touchOf(message)) |b| {
+        if (surfaces.getPtr(b)) |s| if (s.emu.releaseByHuman()) {
+            s.cond_notice_pending = true;
+            s.emu_redraw = true;
+            sendEmulation(gpa, b, s);
+        };
+        // W9e② v20c N4: 같은 팝업 가족(그 탭을 연 탭·그 탭이 연 탭 — 렌더러 프로세스를 함께 쓴다)의 CPU 조건도 푼다. CPU 는 프로세스 전체에 걸려
+        // 에이전트 탭의 조건이 그 팝업을 몰기 시작한 사람도 느리게 했다(sidecar 도 같은 판단으로 푼다 — `emulation.humanInput`). 네트워크 조건은 그
+        // 탭의 요청만이라 그대로 둔다.
+        const family = popupFamily(b);
+        for (surfaces.keys(), surfaces.values()) |id, *o| {
+            if (id == b or popupFamily(id) != family or !o.emu.releaseCpuByHuman()) continue;
+            o.cond_notice_pending = true;
+            o.emu_redraw = true;
+            sendEmulation(gpa, id, o);
+        }
     }
     return true;
 }
@@ -5810,6 +6523,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // W9e①: 기기 흉내도 재생 이동보다 **먼저**(about:blank → 흉내 → navigate — 실측 E5: 그래야 문서 요청부터 흉내다). 옛 sidecar 가 대신
             // 허용한 위치 출처의 되돌림도 같은 frame 에(계획 §13 P2-6).
             s.emu.browserRecreated();
+            reapConditionOwners(gpa, monotonicNow(), true); // W9e②: 재생 frame 을 짓기 직전 — 그 사이 끝난 주인의 조건은 다시 걸지 않는다
             sendEmulation(gpa, id, s);
             if (s.last_url) |u| {
                 send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
@@ -6010,9 +6724,17 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .net_mock_hits => |v| if (surfaces.getPtr(v.browser)) |s| s.mock.onHits(v, net_full),
         // W9e①: 흉내의 상태(걸림·실패·사이트 안팎·렌더러·줄임·대신 허용한 위치 출처).
         .emulation_state => |v| if (surfaces.getPtr(v.browser)) |s| {
-            s.emu.onState(v);
+            // W9e②: sidecar 가 혼자 푼 무리(사람이 몸·CPU 를 나누는 남의 프레임) — 지우고 그 무리를 뺀 상태를 보낸다(풀림 회차가 끝난다).
+            if (s.emu.onState(v)) {
+                if (v.cpu_release == .human_input or v.network_release == .human_input) s.cond_notice_pending = true;
+                sendEmulation(gpa, v.browser, s);
+            }
             s.emu_redraw = true;
         },
+        // W9e②: 성능 trace.
+        .trace_state => |v| onTraceState(gpa, v),
+        .trace_data => |v| onTraceData(gpa, v),
+        .trace_frames => |v| onTraceFrames(v),
         .net_mock_ack => |v| mock_pump.ack(v.body_id, v.received),
         // W9d①: 지켜보는 탭의 요청 기록 — 지켜보기를 끈 뒤에 늦게 온 것은 버린다(끌 때 지웠다).
         .net_begin => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) {
@@ -6183,7 +6905,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .emulation, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .emulation, .trace, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 
@@ -6220,8 +6942,8 @@ test "dialogs queue per tab, show one at a time, and each answer goes out exactl
     // 떠 있는 동안 다음 요청은 나오지 않는다(한 탭에 하나씩).
     markDialogShown(7, first_token, 11);
     try std.testing.expect(nextDialog(7) == null);
-    replyDialog(gpa, 7, first_token, true, "", false);
-    replyDialog(gpa, 7, first_token, true, "", false); // 두 번째 답은 무동작
+    replyDialog(gpa, 7, first_token, true, "", false, .program);
+    replyDialog(gpa, 7, first_token, true, "", false, .program); // 두 번째 답은 무동작
     const second = nextDialog(7).?;
     const second_token = second.token;
     try std.testing.expect(second_token != first_token);
@@ -6290,7 +7012,7 @@ test "W6j: a close asked of the page closes, stays or is forced after the wait �
     try std.testing.expect(askClose(gpa, 7, t)); // 묻는 중 — 다시 보내지 않는다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 5, .kind = .before_unload, .origin = "", .message = "" } }, 0);
     try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, t + close_ask_wait_ms * 10));
-    replyDialog(gpa, 7, nextDialog(7).?.token, false, "", false);
+    replyDialog(gpa, 7, nextDialog(7).?.token, false, "", false, .program);
     try std.testing.expectEqual(CloseAskOutcome.stayed, takeCloseAsk(7, t));
     try std.testing.expectEqual(CloseAskOutcome.none, takeCloseAsk(7, t));
 
@@ -6298,7 +7020,7 @@ test "W6j: a close asked of the page closes, stays or is forced after the wait �
     t = monotonicNow();
     try std.testing.expect(askClose(gpa, 7, t));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .before_unload, .origin = "", .message = "" } }, 0);
-    replyDialog(gpa, 7, nextDialog(7).?.token, true, "", false);
+    replyDialog(gpa, 7, nextDialog(7).?.token, true, "", false, .program);
     t = monotonicNow();
     try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, t));
     try std.testing.expectEqual(CloseAskOutcome.timed_out, takeCloseAsk(7, t + close_ask_wait_ms + 1));
@@ -6312,7 +7034,7 @@ test "W6j: a close asked of the page closes, stays or is forced after the wait �
     // 떠나기 뒤 닫힘이 오면 닫힌다.
     try std.testing.expect(askClose(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 8, .kind = .before_unload, .origin = "", .message = "" } }, 0);
-    replyDialog(gpa, 7, nextDialog(7).?.token, true, "", false);
+    replyDialog(gpa, 7, nextDialog(7).?.token, true, "", false, .program);
     apply(gpa, .{ .browser_closed = 7 }, 0);
     try std.testing.expect(!takePageClosed(7));
     try std.testing.expectEqual(CloseAskOutcome.closed, takeCloseAsk(7, 0));
@@ -6362,18 +7084,18 @@ test "permission requests share the dialog queue: one answer each, other answers
     try std.testing.expectEqualStrings("https://meet.example", asked.origin);
     const token = asked.token;
     // JS 대화상자·파일 선택의 답은 권한 요청을 닫지 못한다.
-    replyDialog(gpa, 7, token, true, "", false);
-    replyFileDialog(gpa, 7, token, true);
+    replyDialog(gpa, 7, token, true, "", false, .program);
+    replyFileDialog(gpa, 7, token, true, .program);
     try std.testing.expect(dialogPending(7, token) != null);
-    try std.testing.expect(replyPermission(gpa, 7, token, .accept));
-    try std.testing.expect(!replyPermission(gpa, 7, token, .deny)); // 두 번째 답은 무동작
+    try std.testing.expect(replyPermission(gpa, 7, token, .accept, .program));
+    try std.testing.expect(!replyPermission(gpa, 7, token, .deny, .program)); // 두 번째 답은 무동작
     try std.testing.expect(dialogPending(7, token) == null);
     // 권한 답은 대화상자를 닫지 못한다.
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .confirm, .origin = "", .message = "" } }, 0);
     const confirm = nextDialog(7).?.token;
-    try std.testing.expect(!replyPermission(gpa, 7, confirm, .accept));
+    try std.testing.expect(!replyPermission(gpa, 7, confirm, .accept, .program));
     try std.testing.expect(dialogPending(7, confirm) != null);
-    replyDialog(gpa, 7, confirm, false, "", false);
+    replyDialog(gpa, 7, confirm, false, "", false, .program);
     // 창이 닫히면 그 창이 띄운 권한 요청은 「못 물음」으로(차단은 기억되고 닫기는 embargo 를 쌓는다), 상한을 넘은 요청·모르는
     // 탭도 「못 물음」으로.
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 3, .origin = "", .kinds = ws.message.PermissionKind.notifications.bit() } }, 0);
@@ -6418,8 +7140,8 @@ test "remembered location requests skip the sheet only for origins the user allo
     const asked = nextDialog(7).?;
     try std.testing.expect(!asked.remembered);
     // sheet 에서 허용하면 좌표를 먼저 걸고 허용한다 — 그 출처가 기록된다.
-    try std.testing.expect(replyLocation(gpa, 7, asked.token, .{ .latitude = 37.5, .longitude = 127, .accuracy = 30 }, .accept));
-    try std.testing.expect(!replyLocation(gpa, 7, asked.token, null, .accept)); // 두 번째 답은 무동작
+    try std.testing.expect(replyLocation(gpa, 7, asked.token, .{ .latitude = 37.5, .longitude = 127, .accuracy = 30 }, .accept, .program));
+    try std.testing.expect(!replyLocation(gpa, 7, asked.token, null, .accept, .program)); // 두 번째 답은 무동작
     // 이제 그 출처의 기억된 요청은 sheet 를 건너뛰고 창 하나가 맡는다. 빈 출처·다른 출처는 여전히 sheet.
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 2, .origin = site, .kinds = geo, .remembered = true } }, 0);
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 3, .origin = "", .kinds = geo, .remembered = true } }, 0);
@@ -6430,7 +7152,7 @@ test "remembered location requests skip the sheet only for origins the user allo
     try std.testing.expect(blank.request == 3 and !blank.remembered);
     const blank_token = blank.token;
     // 범위를 벗어난 좌표는 「없음」으로.
-    try std.testing.expect(replyLocation(gpa, 7, loc.token, .{ .latitude = 91, .longitude = 0, .accuracy = 5 }, .accept));
+    try std.testing.expect(replyLocation(gpa, 7, loc.token, .{ .latitude = 91, .longitude = 0, .accuracy = 5 }, .accept, .program));
     // 맡은 창이 닫히면 기억된 요청은 끝내지 않고 맡음만 푼다 — 다른 창이 맡는다.
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 4, .origin = site, .kinds = geo, .remembered = true } }, 0);
     const held = nextLocation(11).?;
@@ -6443,10 +7165,10 @@ test "remembered location requests skip the sheet only for origins the user allo
     try std.testing.expect(!other_tab.remembered);
     const other_tab_token = other_tab.token;
     // 차단하면 기록에서 빠지고, 좌표를 기다리던 같은 출처의 허용(탭 8)은 늦게 와도 허용이 되지 않는다(못 물음).
-    try std.testing.expect(replyPermission(gpa, 7, blank_token, .deny));
+    try std.testing.expect(replyPermission(gpa, 7, blank_token, .deny, .program));
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 5, .origin = site, .kinds = geo } }, 0);
-    try std.testing.expect(replyPermission(gpa, 7, nextDialog(7).?.token, .deny));
-    try std.testing.expect(replyLocation(gpa, 8, other_tab_token, .{ .latitude = 1, .longitude = 1, .accuracy = 1 }, .accept));
+    try std.testing.expect(replyPermission(gpa, 7, nextDialog(7).?.token, .deny, .program));
+    try std.testing.expect(replyLocation(gpa, 8, other_tab_token, .{ .latitude = 1, .longitude = 1, .accuracy = 1 }, .accept, .program));
     try std.testing.expect(!locationAllowed(8, site));
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 6, .origin = site, .kinds = geo, .remembered = true } }, 0);
     try std.testing.expect(!nextDialog(7).?.remembered);
@@ -7030,9 +7752,9 @@ test "file chooser answers: bad paths are dropped, a JS answer cannot close a fi
     fileDialogPath(gpa, 7, token, "relative/a.png"); // 절대 경로가 아니다 — 버린다
     fileDialogPath(gpa, 7, token, "/a\nb"); // 제어 문자 — 버린다
     fileDialogPath(gpa, 7, token, "/tmp/a.png");
-    replyDialog(gpa, 7, token, true, "", false); // JS 답은 파일 요청을 닫지 못한다
+    replyDialog(gpa, 7, token, true, "", false, .program); // JS 답은 파일 요청을 닫지 못한다
     try std.testing.expect(dialogPending(7, token) != null);
-    replyFileDialog(gpa, 7, token, true);
+    replyFileDialog(gpa, 7, token, true, .program);
     try std.testing.expect(dialogPending(7, token) == null);
     var frames: [8]Message = undefined;
     const n = sentFrames(&frames);
@@ -7047,7 +7769,7 @@ test "file chooser answers: bad paths are dropped, a JS answer cannot close a fi
     try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames));
     // 다시 뜬 sidecar 가 같은 요청 번호(6)로 새 요청을 보내도 옛 토큰의 답은 붙지 않는다.
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .confirm, .origin = "", .message = "" } }, 0);
-    replyDialog(gpa, 7, dropped, true, "", false);
+    replyDialog(gpa, 7, dropped, true, "", false, .program);
     try std.testing.expect(nextDialog(7) != null);
     try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames));
 }
@@ -7068,7 +7790,7 @@ test "a prompt answer is trimmed to the dialog text rules instead of being dropp
     const d = nextDialog(7).?;
     try std.testing.expect(d.offer_suppress);
     const long = array_repeat.repeat("가", 2000); // 6000 바이트 — 상한(4 KiB)을 넘는다
-    replyDialog(gpa, 7, d.token, true, long ++ "\x1b", true);
+    replyDialog(gpa, 7, d.token, true, long ++ "\x1b", true, .program);
     var frames: [2]Message = undefined;
     try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
     const r = frames[0].dialog_reply;
@@ -7673,7 +8395,7 @@ test "W9b③ 적대 리뷰 3 회차: 대화상자 중 거절된 묶음 놓기는
     var buf: [32]Message = undefined;
     const before = sentFrames(&buf);
     for (buf[0..before]) |m| if (m == .devtools_call) try std.testing.expect(!std.mem.eql(u8, m.devtools_call.method, "Runtime.releaseObjectGroup"));
-    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false);
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false, .program);
     const after = sentFrames(&buf);
     var released = false;
     for (buf[before..after]) |m| if (m == .devtools_call and std.mem.eql(u8, m.devtools_call.method, "Runtime.releaseObjectGroup")) {
@@ -7777,7 +8499,7 @@ test "W9b③ 적대 리뷰 5 회차: 미룬 놓기는 tick 마다 탭에 하나�
     var rec: DevtoolsRecorder = .{};
     applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "hi" } });
     for (0..3) |_| try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"g\"}", rec.sink()));
-    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false); // 하나 보낸다
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false, .program); // 하나 보낸다
     try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(7).?.deferred_calls.items.len);
 }
 
@@ -7806,7 +8528,7 @@ test "W9c③ 적대 리뷰 3·4 회차: 업로드의 정리(떼기·놓기)는 �
     devtoolsCleanup(gpa, 99, "Runtime.releaseObjectGroup", "{}"); // 모르는 탭 — 버린다
     try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(7).?.deferred_calls.items.len);
     outbox_pending.clearRetainingCapacity();
-    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false); // 답 뒤에 하나(떼기)
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false, .program); // 답 뒤에 하나(떼기)
     flushDeferredCalls(gpa); // 떼기가 아직 자리를 쥐었다 — 놓기는 기다린다(4 회차: 붙잡힌 정리 둘이 자리 둘을 다 쥐었다)
     var methods: [4][]const u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), sentDevtoolsMethods(&methods));
@@ -7868,7 +8590,7 @@ test "W9c③ 적대 리뷰 5 회차 재현 N3b: 떠나기 확인에 「떠나기
     devtoolsCleanup(gpa, 7, "Runtime.callFunctionOn", "{\"objectId\":\"o-1\"}");
     devtoolsCleanup(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-42\"}");
     outbox_pending.clearRetainingCapacity();
-    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false); // 「떠나기」 — 이동은 이제 시작된다
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false, .program); // 「떠나기」 — 이동은 이제 시작된다
     applyD(gpa, .{ .main_frame_navigating = 7 }); // 실측: 답 뒤 1 ms
     var methods: [4][]const u8 = undefined;
     const sent = sentDevtoolsMethods(&methods);
@@ -7893,7 +8615,7 @@ test "W9c③ 적대 리뷰 5 회차 N3b: 「머물기」 답 뒤에는 미룬 �
     applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
     devtoolsCleanup(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-41\"}");
     outbox_pending.clearRetainingCapacity();
-    replyDialog(gpa, 7, testDialogToken(7).?, false, "", false);
+    replyDialog(gpa, 7, testDialogToken(7).?, false, "", false, .program);
     try std.testing.expect(!navigationUncommitted(7));
     try std.testing.expectEqual(@as(usize, 1), sentDevtoolsMethods(&methods));
     applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = surfaces.getPtr(7).?.deferred_in_flight, .status = .ok, .size = 0 } });
@@ -7901,7 +8623,7 @@ test "W9c③ 적대 리뷰 5 회차 N3b: 「머물기」 답 뒤에는 미룬 �
     applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .alert, .origin = "", .message = "" } });
     devtoolsCleanup(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-42\"}");
     outbox_pending.clearRetainingCapacity();
-    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false);
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false, .program);
     try std.testing.expect(!navigationUncommitted(7));
     try std.testing.expectEqual(@as(usize, 1), sentDevtoolsMethods(&methods));
     applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = surfaces.getPtr(7).?.deferred_in_flight, .status = .ok, .size = 0 } });
@@ -7909,7 +8631,7 @@ test "W9c③ 적대 리뷰 5 회차 N3b: 「머물기」 답 뒤에는 미룬 �
     applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .before_unload, .origin = "", .message = "" } });
     devtoolsCleanup(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-43\"}");
     outbox_pending.clearRetainingCapacity();
-    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false);
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false, .program);
     try std.testing.expect(navigationUncommitted(7));
     flushDeferredCalls(gpa);
     try std.testing.expectEqual(@as(usize, 0), sentDevtoolsMethods(&methods));
@@ -8095,7 +8817,7 @@ test "W9a 변이 생존 재현: 다른 호스트 가족 탭의 대화상자 중�
     try std.testing.expect(jsDialogShowing(7));
     _ = try devtoolsCall(gpa, 7, "Runtime.terminateExecution", "{}", rec.sink());
     try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.evaluate", "{}", rec.sink()));
-    replyDialog(gpa, 9, testDialogToken(9) orelse return error.NoDialog, true, "", false);
+    replyDialog(gpa, 9, testDialogToken(9) orelse return error.NoDialog, true, "", false, .program);
     applyD(gpa, .{ .js_dialog = .{ .browser = 9, .request = 2, .kind = .alert, .origin = "http://127.0.0.1:8000", .message = "" } });
     try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.terminateExecution", "{}", rec.sink()));
 }
@@ -8118,11 +8840,11 @@ test "W9a 적대 리뷰 5 회차: 가족 탭의 대화상자는 같은 호스트
     // 다른 호스트(localhost — 다른 렌더러)의 alert — 51 의 스크립트는 돈다.
     testApply(gpa, .{ .js_dialog = .{ .browser = 52, .request = 1, .kind = .alert, .origin = "http://localhost:8000", .message = "" } });
     try std.testing.expect(jsDialogShowing(51) and !dialogPausesScript(51));
-    replyDialog(gpa, 52, testDialogToken(52) orelse return error.NoDialog, true, "", false);
+    replyDialog(gpa, 52, testDialogToken(52) orelse return error.NoDialog, true, "", false, .program);
     // 같은 호스트(같은 렌더러)의 confirm — 51 의 스크립트도 멈췄다.
     testApply(gpa, .{ .js_dialog = .{ .browser = 52, .request = 2, .kind = .confirm, .origin = "http://127.0.0.1:8000", .message = "" } });
     try std.testing.expect(dialogPausesScript(51));
-    replyDialog(gpa, 52, testDialogToken(52) orelse return error.NoDialog, true, "", false);
+    replyDialog(gpa, 52, testDialogToken(52) orelse return error.NoDialog, true, "", false, .program);
     // 자기 대화상자.
     testApply(gpa, .{ .js_dialog = .{ .browser = 51, .request = 3, .kind = .alert, .origin = "http://127.0.0.1:8000", .message = "" } });
     try std.testing.expect(dialogPausesScript(51));
@@ -8353,34 +9075,34 @@ test "W9c②: 대화상자의 원인은 도착할 때 팝업 가족의 마지막
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "https://a.test", .message = "" } }, 3_000);
     try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
     try std.testing.expectEqual(@as(i64, 3_000), testLastDialog(7).arrived_ms);
-    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false);
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false, .program);
     // 사용자가 팝업(같은 가족)에서 눌렀다 — 다른 가족(9)의 에이전트 입력은 세지 않는다.
     surfaces.getPtr(8).?.last_user_input_ms = 9_000;
     surfaces.getPtr(9).?.agent_input_ms = 9_400;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .confirm, .origin = "https://a.test", .message = "" } }, 9_500);
     try std.testing.expectEqual(dialog_cause.Cause.user, testLastDialog(7).cause);
-    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false);
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false, .program);
     // 둘 다 창 안 — 모호.
     s7.agent_input_ms = 9_500;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .alert, .origin = "", .message = "" } }, 9_700);
     try std.testing.expectEqual(dialog_cause.Cause.ambiguous, testLastDialog(7).cause);
-    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false);
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false, .program);
     // 둘 다 오래됐다 — 모름.
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 4, .kind = .alert, .origin = "", .message = "" } }, 100_000);
     try std.testing.expectEqual(dialog_cause.Cause.unknown, testLastDialog(7).cause);
-    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false);
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false, .program);
     // 사용자가 고른 닫기를 묻는 중의 떠나기 확인 — 에이전트가 방금 움직였어도 사용자 것.
     try std.testing.expect(askClose(gpa, 7, 0));
     s7.agent_input_ms = 200_000;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 5, .kind = .before_unload, .origin = "", .message = "" } }, 200_001);
     try std.testing.expectEqual(dialog_cause.Cause.user, testLastDialog(7).cause);
-    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false);
+    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false, .program);
     _ = takeCloseAsk(7, 0); // 머물렀다 — 닫기 끝
     // 에이전트가 묻는 닫기(`browser.close`) — 그 떠나기 확인은 에이전트 것이다(묻는 순간 에이전트 시각을 적는다).
     try std.testing.expect(askCloseByAgent(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
     try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
-    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false);
+    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false, .program);
     // 파일 선택도 같은 규칙.
     noteAgentInput(7);
     apply(gpa, .{ .file_dialog = .{ .browser = 7, .request = 7, .mode = .open } }, monotonicNow());
@@ -8490,7 +9212,7 @@ test "W9c②: agentReplyDialog — 사용자 것은 거절, 에이전트 것은 
     s7.last_user_input_ms = t + 50_000;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .confirm, .origin = "", .message = "" } }, t + 50_100);
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
-    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false);
+    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false, .program);
     // 가족 탭의 대화상자 — 번호로. grant 가 없으면 모르는 번호와 같은 실패.
     surfaces.getPtr(8).?.agent_input_ms = t + 100_000;
     apply(gpa, .{ .js_dialog = .{ .browser = 8, .request = 4, .kind = .alert, .origin = "", .message = "" } }, t + 100_001);
@@ -8619,7 +9341,7 @@ test "W9c② 적대 리뷰 1 회차 재현 C: 사용자가 권한 sheet 에 답�
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 1, .origin = "https://meet.example", .kinds = ws.message.PermissionKind.notifications.bit() } }, 0);
     const ptoken = testLastDialog(7).token;
     noteAgentInput(7);
-    try std.testing.expect(replyPermission(gpa, 7, ptoken, .accept)); // 사용자가 권한 sheet 에 답한다
+    try std.testing.expect(replyPermission(gpa, 7, ptoken, .accept, .program)); // 사용자가 권한 sheet 에 답한다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .confirm, .origin = "https://meet.example", .message = "Share?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
@@ -11787,4 +12509,588 @@ test "W9e① 변이: 브라우저 전에는 보내지 않음·처음 몬 에이�
     const e = emulation(295, &eb).?;
     try std.testing.expect(!e.active);
     try std.testing.expect(std.mem.indexOf(u8, e.summary, "off-site") != null);
+}
+
+// ── W9e② 시험 ──
+// 시험이 증명하는 것: trace 의 차례(start 는 sidecar 에 trace 를 보내고 recording 에 답한다 → stop → 조각·프레임·done → 작업 스레드가 거른 결과를
+// stop 에 답하고 결과 칸에 둔다 → read 는 그 gzip 을 base64 로, 끝을 알린다), 브라우저에 하나(trace_busy 와 다시 볼 때), 옛 세대의 늦은 답은
+// 버린다, 빠진 조각·모자란 바이트는 실패, 남의 프레임이 섞이면 결과 없이 버림(mixed_content — 이유를 싣는다), 탭이 닫히면 실패·칸을 지운다,
+// grant 를 잃으면 진행 중 trace 를 버리고(sidecar 에 abort) 결과 칸을 지운다, 다른 pane 은 그 결과를 읽지 못한다. 조건의 주인: 주인 프로세스가
+// 없으면(pid 와 시작 시각이 맞지 않는다) 앱 tick 이 그 무리를 지우고 sidecar 에 보낸다, 살아 있는 주인(이 시험 프로세스)은 그대로다.
+
+fn traceParams(json: []const u8) !trace_mod.Params {
+    const v = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer v.deinit();
+    var why: ?trace_mod.Why = null;
+    return trace_mod.parseParams(v.value, &why);
+}
+
+/// 쌓인 frame 중 마지막 `trace`(없으면 null) — 쌓인 것은 비운다.
+fn lastTraceFrame() ?ws.message.Trace {
+    var all: [64]Message = undefined;
+    const n = sentFrames(&all);
+    var last: ?ws.message.Trace = null;
+    for (all[0..n]) |m| if (m == .trace) {
+        last = m.trace;
+    };
+    outbox_pending.clearRetainingCapacity();
+    return last;
+}
+
+const trace_test_frame = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1";
+const trace_test_foreign = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB9";
+
+fn traceTestGzip(gpa: std.mem.Allocator, foreign: bool) ![]u8 {
+    return traceTestGzipWith(gpa, foreign, "");
+}
+
+/// `extra` 는 마지막 이벤트 뒤에 붙는다(앞에 쉼표를 단다).
+fn traceTestGzipWith(gpa: std.mem.Allocator, foreign: bool, extra: []const u8) ![]u8 {
+    const json = "{\"traceEvents\":[" ++
+        "{\"name\":\"process_name\",\"ph\":\"M\",\"pid\":1,\"tid\":0,\"args\":{\"name\":\"Browser\"}}," ++
+        "{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":10,\"tid\":11,\"args\":{\"name\":\"CrRendererMain\"}}," ++
+        // 렌더러에서는 이름이 정해진 스레드의 이벤트만 남는다(v20c N1) — 컴포지터 스레드.
+        "{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":10,\"tid\":12,\"args\":{\"name\":\"Compositor\"}}," ++
+        "{\"name\":\"TracingStartedInBrowser\",\"ph\":\"I\",\"pid\":1,\"tid\":1,\"ts\":1000,\"args\":{\"data\":{\"frames\":[{\"frame\":\"" ++ trace_test_frame ++ "\",\"url\":\"http://a.test/\",\"processId\":10}]}}}," ++
+        "{\"name\":\"RunTask\",\"ph\":\"X\",\"pid\":10,\"tid\":11,\"ts\":2000,\"dur\":120000,\"args\":{}}," ++
+        "{\"name\":\"ParseHTML\",\"ph\":\"X\",\"pid\":10,\"tid\":11,\"ts\":3100,\"dur\":10,\"args\":{\"beginData\":{\"frame\":\"";
+    const tail = "\",\"url\":\"http://a.test/\"}}}";
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(gpa);
+    try raw.appendSlice(gpa, json);
+    try raw.appendSlice(gpa, if (foreign) trace_test_foreign else trace_test_frame);
+    try raw.appendSlice(gpa, tail);
+    try raw.appendSlice(gpa, extra);
+    try raw.appendSlice(gpa, "]}");
+    var out: std.Io.Writer.Allocating = try .initCapacity(gpa, 64 * 1024);
+    defer out.deinit();
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var c = try std.compress.flate.Compress.init(&out.writer, &window, .gzip, .level_1);
+    try c.writer.writeAll(raw.items);
+    try c.writer.flush();
+    try c.finish();
+    return gpa.dupe(u8, out.written());
+}
+
+/// sidecar 역할 — 받는 중 → 조각(8 바이트씩, 오프셋이 잇는다) → 프레임 → done.
+fn traceTestDeliver(gpa: std.mem.Allocator, surface: u64, gen: u32, gz: []const u8) void {
+    apply(gpa, .{ .trace_state = .{ .browser = surface, .generation = gen, .state = .receiving, .covered_ms = 2500 } }, 0);
+    var off: usize = 0;
+    while (off < gz.len) {
+        const n = @min(8, gz.len - off);
+        apply(gpa, .{ .trace_data = .{ .browser = surface, .generation = gen, .offset = @intCast(off), .bytes = gz[off .. off + n] } }, 0);
+        off += n;
+    }
+    var f: ws.message.TraceFrames = .{ .browser = surface, .generation = gen, .count = 1 };
+    f.ids[0] = trace_test_frame;
+    apply(gpa, .{ .trace_frames = f }, 0);
+    apply(gpa, .{ .trace_state = .{ .browser = surface, .generation = gen, .state = .done, .reason = .duration, .covered_ms = 2500, .gz_bytes = @intCast(gz.len), .frames = 1 } }, 0);
+}
+
+/// 작업 스레드의 거르기가 끝날 때까지 tick(최대 5 s).
+fn traceTestPump(gpa: std.mem.Allocator) void {
+    var i: usize = 0;
+    while (i < 500) : (i += 1) {
+        pumpTrace(gpa, monotonicNow());
+        const r = trace_run orelse return;
+        if (r.phase != .filtering) return;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, &ts);
+    }
+}
+
+fn takeAnswerFor(id: u64) ?struct { ok: bool, json: []u8 } {
+    var i: usize = 0;
+    while (i < trace_answers.items.len) : (i += 1) if (trace_answers.items[i].async_id == id) {
+        const a = trace_answers.orderedRemove(i);
+        return .{ .ok = a.ok, .json = a.json };
+    };
+    return null;
+}
+
+test "W9e②: trace 차례 — start·recording 답·stop·조각·프레임·done → 거른 결과와 파일 읽기, 브라우저에 하나, 옛 세대 버림, 다른 pane 은 못 읽음" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 401, 402 });
+    const start_p = try traceParams("{\"action\":\"start\",\"duration_ms\":2500}");
+    try std.testing.expect((try browserTrace(gpa, 401, .{ .pane = 5, .params = &start_p, .async_id = 11 })) == .pending);
+    const sent = lastTraceFrame().?;
+    try std.testing.expect(sent.action == .start and sent.browser == 401 and sent.duration_ms == 2500 and sent.screenshots);
+    try std.testing.expect(tracing(401) and takeTraceRedraw(401) == false); // 시작 전에는 다시 짓지 않는다 — recording 에서
+    // 브라우저에 하나 — 다른 탭의 start 는 곧 trace_busy(다시 볼 때를 싣는다).
+    switch (try browserTrace(gpa, 402, .{ .pane = 6, .params = &start_p, .async_id = 12 })) {
+        .fail => |f| {
+            try std.testing.expectEqualStrings("trace_busy", f.reason);
+            try std.testing.expect(f.retry_after_ms != null and f.retry_after_ms.? >= 1000);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 옛 세대의 늦은 recording 은 버린다.
+    apply(gpa, .{ .trace_state = .{ .browser = 401, .generation = sent.generation +% 7, .state = .recording } }, 0);
+    try std.testing.expect(takeAnswerFor(11) == null);
+    apply(gpa, .{ .trace_state = .{ .browser = 401, .generation = sent.generation, .state = .recording } }, 0);
+    const rec = takeAnswerFor(11).?;
+    defer gpa.free(rec.json);
+    try std.testing.expect(rec.ok and std.mem.indexOf(u8, rec.json, "\"state\":\"recording\"") != null and std.mem.indexOf(u8, rec.json, "\"auto_stop_ms\":2500") != null);
+    // 덮지 않는 것 — 에이전트 탭 자신의 워커·백그라운드 컴파일·래스터 트랙(v20c N1 의 허용 목록이 뺀다)도 결과가 말한다(v20d D2).
+    try std.testing.expect(std.mem.indexOf(u8, rec.json, "\"not_covered\":[\"service_workers\",\"cross_site_iframes\",\"other_renderer_processes\",\"own_worker_threads\"]") != null);
+    try std.testing.expect(takeTraceRedraw(401)); // ◔
+    try std.testing.expectEqualStrings("recording", traceSummary(401, 5));
+    try std.testing.expectEqualStrings("", traceSummary(401, 6)); // 다른 pane 의 Grants 줄에는 없다
+    // stop — sidecar 에 멈춤을 보내고 기다린다.
+    const stop_p = try traceParams("{\"action\":\"stop\"}");
+    try std.testing.expect((try browserTrace(gpa, 401, .{ .pane = 5, .params = &stop_p, .async_id = 13 })) == .pending);
+    try std.testing.expect(lastTraceFrame().?.action == .stop);
+    const gz = try traceTestGzip(gpa, false);
+    defer gpa.free(gz);
+    traceTestDeliver(gpa, 401, sent.generation, gz);
+    traceTestPump(gpa);
+    const done = takeAnswerFor(13).?;
+    defer gpa.free(done.json);
+    try std.testing.expect(done.ok and std.mem.indexOf(u8, done.json, "\"state\":\"done\"") != null and std.mem.indexOf(u8, done.json, "\"sha256\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, done.json, "\"not_covered\":[\"service_workers\",\"cross_site_iframes\",\"other_renderer_processes\",\"own_worker_threads\",\"browser_and_gpu_threads\"]") != null);
+    try std.testing.expect(!tracing(401));
+    try std.testing.expectEqualStrings("ready", traceSummary(401, 5));
+    // read — 거른 gzip(풀리는 것)을 base64 로, 끝.
+    const read = try traceParams("{\"action\":\"read\",\"offset\":0}");
+    switch (try browserTrace(gpa, 401, .{ .pane = 5, .params = &read, .async_id = 14 })) {
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"offset\":0") != null and std.mem.indexOf(u8, json, "\"eof\":true") != null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 다른 pane 은 그 결과를 읽지도 멈춤 결과를 받지도 못한다.
+    switch (try browserTrace(gpa, 401, .{ .pane = 6, .params = &read, .async_id = 15 })) {
+        .fail => |f| try std.testing.expectEqualStrings("not_tracing", f.reason),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (try browserTrace(gpa, 401, .{ .pane = 6, .params = &stop_p, .async_id = 16 })) {
+        .fail => |f| try std.testing.expectEqualStrings("not_tracing", f.reason),
+        else => return error.TestUnexpectedResult,
+    }
+    // 끝났으니 다른 탭의 start 가 된다.
+    try std.testing.expect((try browserTrace(gpa, 402, .{ .pane = 6, .params = &start_p, .async_id = 17 })) == .pending);
+    // grant 를 잃으면(그 (pane, 탭) 이 목록에서 빠짐) 진행 중 trace 는 abort 를 보내고 버림, 남은 결과 칸도 지운다.
+    _ = lastTraceFrame();
+    traceSync(&.{});
+    const ab = lastTraceFrame().?;
+    try std.testing.expect(ab.action == .abort and ab.browser == 402);
+    try std.testing.expectEqualStrings("", traceSummary(401, 5)); // 401 의 결과 칸도 지웠다
+    const lost = takeAnswerFor(17).?;
+    defer gpa.free(lost.json);
+    try std.testing.expect(!lost.ok and std.mem.indexOf(u8, lost.json, "left_agent_control") != null);
+}
+
+test "W9e② 결정 12: 주 스레드가 막혀 sidecar 의 프레임 집합이 빈 trace — 프로세스를 나눴으면 가를 수 없는 컴포지터만 빼고 남기고 경고, 가족만 썼으면 그대로 남긴다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{407});
+    const draw = ",{\"name\":\"DrawFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"ts\":4000,\"args\":{\"layerTreeId\":5,\"frameSeqId\":1}}";
+    const gz = try traceTestGzipWith(gpa, false, draw);
+    defer gpa.free(gz);
+    for ([_]bool{ true, false }, 0..) |shared, k| {
+        const start_p = try traceParams("{\"action\":\"start\",\"duration_ms\":2500}");
+        try std.testing.expect((try browserTrace(gpa, 407, .{ .pane = 5, .params = &start_p, .async_id = 30 + k * 10 })) == .pending);
+        const sent = lastTraceFrame().?;
+        apply(gpa, .{ .trace_state = .{ .browser = 407, .generation = sent.generation, .state = .recording } }, 0);
+        if (takeAnswerFor(30 + k * 10)) |a| gpa.free(a.json);
+        const stop_p = try traceParams("{\"action\":\"stop\"}");
+        try std.testing.expect((try browserTrace(gpa, 407, .{ .pane = 5, .params = &stop_p, .async_id = 31 + k * 10 })) == .pending);
+        // 렌더러가 답하지 않아 sidecar 의 프레임은 0 개 — 가족은 trace 안의 TracingStartedInBrowser 로 안다.
+        apply(gpa, .{ .trace_state = .{ .browser = 407, .generation = sent.generation, .state = .receiving, .covered_ms = 2500 } }, 0);
+        apply(gpa, .{ .trace_data = .{ .browser = 407, .generation = sent.generation, .offset = 0, .bytes = gz } }, 0);
+        apply(gpa, .{ .trace_state = .{ .browser = 407, .generation = sent.generation, .state = .done, .reason = .duration, .covered_ms = 2500, .gz_bytes = @intCast(gz.len), .shared_process = shared } }, 0);
+        traceTestPump(gpa);
+        const done = takeAnswerFor(31 + k * 10).?;
+        defer gpa.free(done.json);
+        try std.testing.expect(done.ok and std.mem.indexOf(u8, done.json, "\"state\":\"done\"") != null);
+        // 경고 목록의 이름(요약의 `compositor_events_dropped` 수와 갈라 본다 — 경고 줄만 지워도 잡히게).
+        const warned = std.mem.indexOf(u8, done.json, "\"compositor_events_dropped\"]") != null;
+        try std.testing.expectEqual(shared, std.mem.indexOf(u8, done.json, "\"compositor_events_dropped\":") != null);
+        try std.testing.expectEqual(shared, warned);
+        try std.testing.expect(std.mem.indexOf(u8, done.json, if (shared) "\"frames_presented\":0" else "\"frames_presented\":1") != null);
+    }
+}
+
+test "W9e② V-14: 결과 칸은 pane 마다 상한 — 한 pane 이 거듭 trace 해도 다른 pane 의 읽지 않은 결과는 남는다, 앱 전체 상한은 칸을 가장 많이 쥔 pane 에서, 이유만 든 칸은 세지 않는다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (trace_kept.items) |k| {
+            gpa.free(k.json);
+            gpa.free(k.gz);
+        }
+        trace_kept.clearAndFree(gpa);
+    }
+    const keep = struct {
+        fn one(a: std.mem.Allocator, pane: u64, surface: u64, at: i64, file: bool) !void {
+            if (file) capTraceKept(a, pane);
+            try trace_kept.append(a, .{ .pane = pane, .surface = surface, .finished_ms = at, .json = try a.dupe(u8, "{}"), .gz = if (file) try a.dupe(u8, "gz") else &.{} });
+        }
+        fn has(pane: u64, surface: u64) bool {
+            for (trace_kept.items) |k| if (k.pane == pane and k.surface == surface) return true;
+            return false;
+        }
+    };
+    // pane 5 가 결과 하나(가장 오래된 것), 그 뒤 pane 6 이 제 탭 열 개를 차례로 — 전에는 pane 5 의 것이 밀려났다.
+    try keep.one(gpa, 5, 401, 1, true);
+    for (0..10) |i| try keep.one(gpa, 6, 500 + i, @intCast(10 + i), true);
+    try std.testing.expect(keep.has(5, 401));
+    try std.testing.expectEqual(trace_keep_per_pane, keptFiles(6));
+    try std.testing.expect(keep.has(6, 509) and !keep.has(6, 505)); // 그 pane 의 가장 오래된 것부터
+    // 이유만 든 칸(버림·실패)은 세지 않는다 — 많아도 남의 파일을 밀어내지 않는다.
+    for (0..6) |i| try keep.one(gpa, 7, 600 + i, @intCast(30 + i), false);
+    try std.testing.expect(keep.has(5, 401) and keptFiles(null) == 1 + trace_keep_per_pane);
+    // 앱 전체 상한 — pane 8·9 가 둘씩 더하면 8 칸을 넘는다: 칸을 가장 많이 쥔 pane 6 에서 민다(pane 5 의 하나는 남는다).
+    for (0..2) |i| try keep.one(gpa, 8, 700 + i, @intCast(40 + i), true);
+    for (0..2) |i| try keep.one(gpa, 9, 800 + i, @intCast(50 + i), true);
+    try std.testing.expect(keptFiles(null) <= trace_keep_max);
+    try std.testing.expect(keep.has(5, 401) and keptFiles(8) == 2 and keptFiles(9) == 2);
+    try std.testing.expect(keptFiles(6) < trace_keep_per_pane);
+}
+
+test "W9e② A6-1·A4-1: 기록 중 숨은 탭은 결과에 hidden·경고(hidden_during_trace), sidecar 가 자른 trace 는 truncated·경고·덮은 시간을 거르기가 다시 잰다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 411, 412 });
+    const start_p = try traceParams("{\"action\":\"start\",\"duration_ms\":2500}");
+    try std.testing.expect((try browserTrace(gpa, 411, .{ .pane = 5, .params = &start_p, .async_id = 21 })) == .pending);
+    const sent = lastTraceFrame().?;
+    // 시작 중에 그 탭이 숨는다 — 다른 탭의 숨김은 상관없다.
+    sendCommand(gpa, .{ .set_hidden = .{ .browser = 412, .value = true } });
+    try std.testing.expect(!trace_run.?.hidden);
+    sendCommand(gpa, .{ .set_hidden = .{ .browser = 411, .value = true } });
+    try std.testing.expect(trace_run.?.hidden and trace_run.?.hidden_during);
+    apply(gpa, .{ .trace_state = .{ .browser = 411, .generation = sent.generation, .state = .recording, .focus_emulated = true } }, 0);
+    const rec = takeAnswerFor(21).?;
+    defer gpa.free(rec.json);
+    try std.testing.expect(std.mem.indexOf(u8, rec.json, "\"hidden\":true") != null and std.mem.indexOf(u8, rec.json, "\"hidden_during_trace\"") != null and std.mem.indexOf(u8, rec.json, "\"hidden_tab_cpu_background\"") != null);
+    const stop_p = try traceParams("{\"action\":\"stop\"}");
+    try std.testing.expect((try browserTrace(gpa, 411, .{ .pane = 5, .params = &stop_p, .async_id = 22 })) == .pending);
+    // sidecar 가 gzip 상한 앞에서 잘랐다 — 덮은 시간은 남은 주 스레드 이벤트(1000 µs 시작 ~ RunTask 2000 + 120000 µs)로 다시 잰다.
+    const gz = try traceTestGzip(gpa, false);
+    defer gpa.free(gz);
+    apply(gpa, .{ .trace_state = .{ .browser = 411, .generation = sent.generation, .state = .receiving, .covered_ms = 2500 } }, 0);
+    apply(gpa, .{ .trace_data = .{ .browser = 411, .generation = sent.generation, .offset = 0, .bytes = gz } }, 0);
+    var f: ws.message.TraceFrames = .{ .browser = 411, .generation = sent.generation, .count = 1 };
+    f.ids[0] = trace_test_frame;
+    apply(gpa, .{ .trace_frames = f }, 0);
+    apply(gpa, .{ .trace_state = .{ .browser = 411, .generation = sent.generation, .state = .done, .reason = .buffer_full, .truncated = true, .covered_ms = 2500, .gz_bytes = @intCast(gz.len), .frames = 1 } }, 0);
+    traceTestPump(gpa);
+    const done = takeAnswerFor(22).?;
+    defer gpa.free(done.json);
+    for ([_][]const u8{ "\"state\":\"done\"", "\"truncated\":true", "\"trace_truncated\"", "\"hidden_during_trace\"", "\"hidden\":true", "\"covered_ms\":121" }) |needle| {
+        if (std.mem.indexOf(u8, done.json, needle) == null) {
+            std.debug.print("missing {s} in {s}\n", .{ needle, done.json });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // 기록이 끝난 뒤의 숨김은 다음 trace 와 상관없다(새 start 는 그때 값으로).
+    sendCommand(gpa, .{ .set_hidden = .{ .browser = 411, .value = false } });
+}
+
+test "W9e②: trace 실패 갈래 — 남의 프레임이면 결과 없이 버림(이유), 빠진 조각·모자란 바이트는 실패, 탭이 닫히면 실패·칸 지움, abort" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{403});
+    const start_p = try traceParams("{\"action\":\"start\"}");
+    const stop_p = try traceParams("{\"action\":\"stop\"}");
+    // 남의 프레임(가족 밖 id) — 통째로 버림, stop 의 답은 discarded·mixed_content, 파일은 없다.
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &start_p, .async_id = 21 });
+    const g1 = lastTraceFrame().?.generation;
+    apply(gpa, .{ .trace_state = .{ .browser = 403, .generation = g1, .state = .recording } }, 0);
+    if (takeAnswerFor(21)) |a| gpa.free(a.json);
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &stop_p, .async_id = 22 });
+    const bad = try traceTestGzip(gpa, true);
+    defer gpa.free(bad);
+    traceTestDeliver(gpa, 403, g1, bad);
+    traceTestPump(gpa);
+    const mixed = takeAnswerFor(22).?;
+    defer gpa.free(mixed.json);
+    try std.testing.expect(std.mem.indexOf(u8, mixed.json, "\"state\":\"discarded\"") != null and std.mem.indexOf(u8, mixed.json, "\"reason\":\"mixed_content\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mixed.json, trace_test_foreign) == null); // 그 프레임은 싣지 않는다
+    const read = try traceParams("{\"action\":\"read\",\"offset\":0}");
+    switch (try browserTrace(gpa, 403, .{ .pane = 5, .params = &read, .async_id = 23 })) {
+        .fail => |f| try std.testing.expectEqualStrings("no_file", f.reason),
+        else => return error.TestUnexpectedResult,
+    }
+    // 빠진 조각 — 실패(read_timeout), 다음 start 는 된다.
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &start_p, .async_id = 24 });
+    const g2 = lastTraceFrame().?.generation;
+    try std.testing.expect(g2 != g1);
+    apply(gpa, .{ .trace_state = .{ .browser = 403, .generation = g2, .state = .recording } }, 0);
+    if (takeAnswerFor(24)) |a| gpa.free(a.json);
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &stop_p, .async_id = 25 });
+    apply(gpa, .{ .trace_state = .{ .browser = 403, .generation = g2, .state = .receiving } }, 0);
+    apply(gpa, .{ .trace_data = .{ .browser = 403, .generation = g2, .offset = 0, .bytes = "abcd" } }, 0);
+    apply(gpa, .{ .trace_data = .{ .browser = 403, .generation = g2, .offset = 8, .bytes = "efgh" } }, 0); // 4..8 이 빠졌다
+    const gap = takeAnswerFor(25).?;
+    defer gpa.free(gap.json);
+    try std.testing.expect(std.mem.indexOf(u8, gap.json, "\"state\":\"failed\"") != null and std.mem.indexOf(u8, gap.json, "read_timeout") != null);
+    // 바이트가 모자란 done — 실패.
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &start_p, .async_id = 26 });
+    const g3 = lastTraceFrame().?.generation;
+    apply(gpa, .{ .trace_state = .{ .browser = 403, .generation = g3, .state = .recording } }, 0);
+    if (takeAnswerFor(26)) |a| gpa.free(a.json);
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &stop_p, .async_id = 27 });
+    apply(gpa, .{ .trace_state = .{ .browser = 403, .generation = g3, .state = .receiving } }, 0);
+    apply(gpa, .{ .trace_data = .{ .browser = 403, .generation = g3, .offset = 0, .bytes = "abcd" } }, 0);
+    apply(gpa, .{ .trace_state = .{ .browser = 403, .generation = g3, .state = .done, .gz_bytes = 9, .frames = 0 } }, 0);
+    const short = takeAnswerFor(27).?;
+    defer gpa.free(short.json);
+    try std.testing.expect(std.mem.indexOf(u8, short.json, "\"state\":\"failed\"") != null);
+    // 탭이 닫히면 진행 중 trace 는 실패(tab_closed), 그 탭의 결과 칸도 지운다.
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &start_p, .async_id = 28 });
+    const g4 = lastTraceFrame().?.generation;
+    apply(gpa, .{ .trace_state = .{ .browser = 403, .generation = g4, .state = .recording } }, 0);
+    if (takeAnswerFor(28)) |a| gpa.free(a.json);
+    traceTabGone(gpa, 403, "tab_closed");
+    try std.testing.expectEqualStrings("", traceSummary(403, 5));
+    try std.testing.expect(!tracing(403));
+    // 거르는 중에 탭이 닫히면(적대 리뷰 M2): 실패로 답하고, 거르기 스레드가 아직 있는 동안 새 start 는 바쁨(주 스레드가 join 하지 않는다),
+    // 끝난 거르기는 결과 없이 거둔다 — 닫힌 탭의 결과가 남지 않는다.
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &start_p, .async_id = 32 });
+    const g6 = lastTraceFrame().?.generation;
+    apply(gpa, .{ .trace_state = .{ .browser = 403, .generation = g6, .state = .recording } }, 0);
+    if (takeAnswerFor(32)) |a| gpa.free(a.json);
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &stop_p, .async_id = 33 });
+    const good = try traceTestGzip(gpa, false);
+    defer gpa.free(good);
+    traceTestDeliver(gpa, 403, g6, good);
+    try std.testing.expect(trace_run.?.phase == .filtering and trace_run.?.thread != null);
+    traceTabGone(gpa, 403, "tab_closed");
+    const closed = takeAnswerFor(33).?;
+    defer gpa.free(closed.json);
+    try std.testing.expect(std.mem.indexOf(u8, closed.json, "tab_closed") != null);
+    switch (try browserTrace(gpa, 403, .{ .pane = 5, .params = &start_p, .async_id = 34 })) {
+        .fail => |f| try std.testing.expectEqualStrings("trace_busy", f.reason),
+        else => return error.TestUnexpectedResult,
+    }
+    var spins: usize = 0;
+    while (trace_run.?.thread != null and spins < 500) : (spins += 1) {
+        pumpTrace(gpa, monotonicNow());
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, &ts);
+    }
+    try std.testing.expect(trace_run.?.thread == null and trace_run.?.worker == null);
+    try std.testing.expectEqualStrings("", traceSummary(403, 5));
+    try std.testing.expectEqual(@as(usize, 0), trace_kept.items.len);
+    // abort — sidecar 에 abort, 기다리던 start 는 aborted 로 끝난다.
+    _ = try browserTrace(gpa, 403, .{ .pane = 5, .params = &start_p, .async_id = 29 });
+    const g5 = lastTraceFrame().?.generation;
+    const abort = try traceParams("{\"action\":\"abort\"}");
+    switch (try browserTrace(gpa, 403, .{ .pane = 5, .params = &abort, .async_id = 30 })) {
+        .ok => |json| gpa.free(json),
+        else => return error.TestUnexpectedResult,
+    }
+    const ab = lastTraceFrame().?;
+    try std.testing.expect(ab.action == .abort and ab.generation == g5);
+    const aw = takeAnswerFor(29).?;
+    defer gpa.free(aw.json);
+    try std.testing.expect(!aw.ok and std.mem.indexOf(u8, aw.json, "aborted") != null);
+    // abort 는 결과 칸도 지운다 — 다음 stop 은 남은 것이 없다.
+    switch (try browserTrace(gpa, 403, .{ .pane = 5, .params = &stop_p, .async_id = 31 })) {
+        .fail => |f| try std.testing.expectEqualStrings("not_tracing", f.reason),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "W9e② 12 회차: 사람이 건드리는 메시지를 보내는 순간 maru 도 조건을 푼다 — sidecar 의 풀림 알림을 못 읽고 다시 떠도 옛 조건을 재생하지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{406});
+    networkSync(&.{.{ .tab = 406, .who = 7, .any_host = true, .pane = 5, .birth = true }});
+    emulationSync(&.{.{ .tab = 406, .who = 0, .any_host = true, .pane = 5, .birth = true }});
+    const provider = @import("control_self_origin_macos.zig").provider();
+    const me = provider.lookup(provider.ctx, @intCast(std.c.getpid())).?;
+    const alive: maru.session.control_self_origin.Owner = .{ .job = .{ .pid = me.pid, .start_us = me.start_us } };
+    const p = try emuParams("{\"action\":\"set\",\"cpu\":4,\"network\":\"slow-3g\"}");
+    switch (try browserEmulate(gpa, 406, .{ .pane = 5, .any_host = true, .birth = true, .params = &p, .owner = alive })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    var eb: [160]u8 = undefined;
+    const surface = surfaces.getPtr(406).?;
+    const set_gen = surface.emu.gen;
+    // 지켜보기(포인터 옮김)는 풀지 않는다.
+    outbox_pending.clearRetainingCapacity();
+    _ = sendInput(gpa, .{ .mouse = .{ .browser = 406, .kind = .move, .point = .{ .x = 3, .y = 4 } } });
+    try std.testing.expect(emulation(406, &eb) != null);
+    // 사람의 누름 — 그 입력 뒤에 CPU 를 뺀 상태를 곧 보낸다(sidecar 의 알림을 기다리지 않는다).
+    outbox_pending.clearRetainingCapacity();
+    _ = sendInput(gpa, .{ .mouse = .{ .browser = 406, .kind = .down, .point = .{ .x = 3, .y = 4 }, .click_count = 1 } });
+    var all: [16]Message = undefined;
+    const n = sentFrames(&all);
+    try std.testing.expect(n == 2 and all[0] == .mouse and all[1] == .emulation and !all[1].emulation.flags.cpu and !all[1].emulation.flags.network);
+    try std.testing.expect(surface.emu.settings.cpu == null and surface.emu.settings.network == null);
+    try std.testing.expect(emulation(406, &eb) == null and takeConditionsNotice(406));
+    // sidecar 가 같은 입력으로 푼 늦은 알림(옛 세대)은 아무것도 바꾸지 않는다 — 다시 보내지 않는다.
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .emulation_state = .{ .browser = 406, .generation = set_gen, .fit_scale = 1, .released_mask = 1 << 7, .cpu_release = .human_input } }, 0);
+    try std.testing.expectEqual(@as(usize, 0), sentFrames(&all));
+    // sidecar 가 다시 떠도(새 브라우저) 재생할 조건이 없다.
+    surface.emu.browserRecreated();
+    sendEmulation(gpa, 406, surface);
+    for (all[0..sentFrames(&all)]) |m| if (m == .emulation) try std.testing.expect(!m.emulation.flags.cpu and !m.emulation.flags.network);
+    // 사람의 이동(주소창)도 같다.
+    switch (try browserEmulate(gpa, 406, .{ .pane = 5, .any_host = true, .birth = true, .params = &p, .owner = alive })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    // 에이전트의 이동(user 거짓)·멈춤은 사람이 아니다.
+    send(gpa, .{ .navigate = .{ .browser = 406, .url = "https://a.test/", .user = false } });
+    send(gpa, .{ .nav_action = .{ .browser = 406, .action = .stop, .user = true } });
+    try std.testing.expect(emulation(406, &eb) != null);
+    send(gpa, .{ .navigate = .{ .browser = 406, .url = "https://a.test/", .user = true } });
+    try std.testing.expect(emulation(406, &eb) == null);
+}
+
+test "W9e② v20c N3: 사람의 sheet 답(대화상자·파일·권한)은 사람이 그 탭을 쓴 것 — maru 가 곧 조건을 풀고 답에 user 를 싣는다, 에이전트·자동 답은 아니다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{406});
+    networkSync(&.{.{ .tab = 406, .who = 7, .any_host = true, .pane = 5, .birth = true }});
+    emulationSync(&.{.{ .tab = 406, .who = 0, .any_host = true, .pane = 5, .birth = true }});
+    const provider = @import("control_self_origin_macos.zig").provider();
+    const me = provider.lookup(provider.ctx, @intCast(std.c.getpid())).?;
+    const alive: maru.session.control_self_origin.Owner = .{ .job = .{ .pid = me.pid, .start_us = me.start_us } };
+    const p = try emuParams("{\"action\":\"set\",\"cpu\":4,\"network\":\"slow-3g\"}");
+    var eb: [160]u8 = undefined;
+    var all: [16]Message = undefined;
+    const Case = struct { kind: enum { dialog, file, permission }, by: ReplyBy };
+    for ([_]Case{
+        .{ .kind = .dialog, .by = .program },
+        .{ .kind = .dialog, .by = .human },
+        .{ .kind = .file, .by = .program },
+        .{ .kind = .file, .by = .human },
+        .{ .kind = .permission, .by = .program },
+        .{ .kind = .permission, .by = .human },
+    }, 0..) |c, i| {
+        switch (try browserEmulate(gpa, 406, .{ .pane = 5, .any_host = true, .birth = true, .params = &p, .owner = alive })) {
+            .ok => |json| gpa.free(json),
+            .fail => return error.TestUnexpectedResult,
+        }
+        const req: ws.message.RequestId = @intCast(i + 1);
+        switch (c.kind) {
+            .dialog => apply(gpa, .{ .js_dialog = .{ .browser = 406, .request = req, .kind = .prompt, .origin = "", .message = "" } }, 0),
+            .file => apply(gpa, .{ .file_dialog = .{ .browser = 406, .request = req, .mode = .open } }, 0),
+            .permission => apply(gpa, .{ .permission_request = .{ .browser = 406, .request = req, .origin = "https://meet.example", .media = 0b11 } }, 0),
+        }
+        const token = testDialogToken(406).?;
+        outbox_pending.clearRetainingCapacity();
+        switch (c.kind) {
+            .dialog => replyDialog(gpa, 406, token, true, "typed", false, c.by),
+            .file => replyFileDialog(gpa, 406, token, false, c.by),
+            .permission => _ = replyPermission(gpa, 406, token, .deny, c.by),
+        }
+        const n = sentFrames(&all);
+        try std.testing.expect(n >= 1);
+        const user = switch (all[0]) {
+            .dialog_reply => |v| v.user,
+            .file_dialog_reply => |v| v.user,
+            .permission_reply => |v| v.user,
+            else => return error.TestUnexpectedResult,
+        };
+        const human = c.by == .human;
+        try std.testing.expectEqual(human, user);
+        // 사람의 답이면 곧 CPU·네트워크를 뺀 상태가 뒤따른다(sidecar 의 알림을 기다리지 않는다), 아니면 조건은 그대로.
+        try std.testing.expectEqual(human, emulation(406, &eb) == null);
+        if (human) try std.testing.expect(n == 2 and all[1] == .emulation and !all[1].emulation.flags.cpu and !all[1].emulation.flags.network);
+        _ = takeConditionsNotice(406);
+    }
+}
+
+test "W9e② v20c N4: 사람이 에이전트 탭의 팝업(같은 팝업 가족)을 몰면 연 탭의 CPU 도 곧 푼다 — 네트워크는 그 탭의 요청만이라 남고, 가족 밖 탭은 그대로" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 406, 407, 408 });
+    testSetPopupFamily(407, 406); // 406 이 연 팝업
+    networkSync(&.{ .{ .tab = 406, .who = 7, .any_host = true, .pane = 5, .birth = true }, .{ .tab = 408, .who = 7, .any_host = true, .pane = 5, .birth = true } });
+    emulationSync(&.{ .{ .tab = 406, .who = 0, .any_host = true, .pane = 5, .birth = true }, .{ .tab = 408, .who = 0, .any_host = true, .pane = 5, .birth = true } });
+    const provider = @import("control_self_origin_macos.zig").provider();
+    const me = provider.lookup(provider.ctx, @intCast(std.c.getpid())).?;
+    const alive: maru.session.control_self_origin.Owner = .{ .job = .{ .pid = me.pid, .start_us = me.start_us } };
+    const p = try emuParams("{\"action\":\"set\",\"cpu\":4,\"network\":\"slow-3g\"}");
+    for ([_]u64{ 406, 408 }) |tab| switch (try browserEmulate(gpa, tab, .{ .pane = 5, .any_host = true, .birth = true, .params = &p, .owner = alive })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    };
+    outbox_pending.clearRetainingCapacity();
+    _ = sendInput(gpa, .{ .mouse = .{ .browser = 407, .kind = .down, .point = .{ .x = 3, .y = 4 }, .click_count = 1 } });
+    var all: [16]Message = undefined;
+    const n = sentFrames(&all);
+    try std.testing.expect(n == 2 and all[0] == .mouse and all[1] == .emulation and all[1].emulation.browser == 406);
+    try std.testing.expect(!all[1].emulation.flags.cpu and all[1].emulation.flags.network);
+    const opener = surfaces.getPtr(406).?;
+    try std.testing.expect(opener.emu.settings.cpu == null and opener.emu.settings.network != null);
+    try std.testing.expect(takeConditionsNotice(406));
+    // 가족 밖(408)은 그대로.
+    try std.testing.expect(surfaces.getPtr(408).?.emu.settings.cpu != null);
+    // 거꾸로 — 사람이 연 탭(뿌리)을 몰면 그 탭의 조건이 풀린다(가족의 다른 탭에 조건이 있으면 그것도 — 같은 판단).
+    outbox_pending.clearRetainingCapacity();
+    _ = sendInput(gpa, .{ .mouse = .{ .browser = 406, .kind = .down, .point = .{ .x = 3, .y = 4 }, .click_count = 1 } });
+    try std.testing.expect(opener.emu.settings.network == null);
+}
+
+test "W9e②: 조건의 주인 — 끝난 주인(없는 pid)의 CPU 는 앱 tick 이 지우고 보낸다, 살아 있는 주인(이 프로세스)은 그대로" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 404, 405 });
+    networkSync(&.{ .{ .tab = 404, .who = 7, .any_host = true, .pane = 5, .birth = true }, .{ .tab = 405, .who = 7, .any_host = true, .pane = 5, .birth = true } });
+    emulationSync(&.{ .{ .tab = 404, .who = 0, .any_host = true, .pane = 5, .birth = true }, .{ .tab = 405, .who = 0, .any_host = true, .pane = 5, .birth = true } });
+    const provider = @import("control_self_origin_macos.zig").provider();
+    const me = provider.lookup(provider.ctx, @intCast(std.c.getpid())).?;
+    const alive: maru.session.control_self_origin.Owner = .{ .job = .{ .pid = me.pid, .start_us = me.start_us } };
+    // 같은 pid 라도 시작 시각이 다르면 다른 프로세스다(pid 재사용).
+    const gone: maru.session.control_self_origin.Owner = .{ .job = .{ .pid = me.pid, .start_us = me.start_us +% 1 } };
+    const p = try emuParams("{\"action\":\"set\",\"cpu\":4}");
+    switch (try browserEmulate(gpa, 404, .{ .pane = 5, .any_host = true, .birth = true, .params = &p, .owner = gone })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    switch (try browserEmulate(gpa, 405, .{ .pane = 5, .any_host = true, .birth = true, .params = &p, .owner = alive })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    outbox_pending.clearRetainingCapacity();
+    reapConditionOwners(gpa, monotonicNow(), true);
+    var buf: [16]Message = undefined;
+    const sent = emuFrames(&buf);
+    try std.testing.expect(sent.len == 1 and sent[0].emulation.browser == 404 and !sent[0].emulation.flags.cpu);
+    var eb: [160]u8 = undefined;
+    try std.testing.expect(emulation(404, &eb) == null);
+    const e = emulation(405, &eb).?;
+    try std.testing.expect(std.mem.indexOf(u8, e.summary, "CPU") != null);
+    // 주인이 없으면 걸지 않는다(no_agent_process).
+    switch (try browserEmulate(gpa, 405, .{ .pane = 5, .any_host = true, .birth = true, .params = &p })) {
+        .ok => |json| {
+            gpa.free(json);
+            return error.TestUnexpectedResult;
+        },
+        .fail => |f| try std.testing.expectEqualStrings("no_agent_process", f.reason),
+    }
 }

@@ -1,4 +1,4 @@
-//! 기기 흉내 메시지(W9e① — wire 25: `emulation` 140·`emulation_state` 82)의 닫힌 필드 규칙과 몸통 쓰기·읽기. encode 와 decode 가 **같은 검사
+//! 기기 흉내 메시지(W9e① — wire 25: `emulation` 140·`emulation_state` 82, W9e② — wire 26: CPU·네트워크 조건과 풀림)의 닫힌 필드 규칙과 몸통 쓰기·읽기. encode 와 decode 가 **같은 검사
 //! 함수**(`checkEmulation`·`checkState`)를 지나야 한쪽만 느슨해지지 않는다(`net_fields.zig` 와 같은 규율). maru 와 sidecar 가 같은 파일을 쓴다.
 //!
 //! 시험이 증명하는 것(시험은 `codec.zig` 에): 표시와 값의 짝(표시 없는 무리에 값이 있으면·표시만 있고 값이 없으면 거절), 범위(가로·세로
@@ -65,6 +65,16 @@ pub fn geoOk(latitude: f64, longitude: f64, accuracy: f64) bool {
     return latitude >= -90 and latitude <= 90 and longitude >= -180 and longitude <= 180 and accuracy >= 0 and accuracy <= message.max_emu_accuracy;
 }
 
+/// W9e②: CPU 줄이기 — 1 < 값 ≤ 20(유한). 1 은 끔이라 maru 가 표시 없이 보낸다.
+pub fn cpuRateOk(rate: f32) bool {
+    return finite(rate) and rate > 1 and rate <= message.max_emu_cpu_rate;
+}
+
+/// W9e②: 처리량 kbps — 0(제한 없음) 또는 16..1 000 000. CDP 의 0 은 「줄이지 않음」 이라 「0 kbps」 를 만들 수 없다(오프라인은 따로).
+pub fn kbpsOk(kbps: u32) bool {
+    return kbps == 0 or (kbps >= message.min_emu_kbps and kbps <= message.max_emu_kbps);
+}
+
 /// 위치를 대신 허용한 출처 — `http(s)://host[:port]`(`fields.checkOrigin` 의 모양, 빈 글 거절).
 pub fn geoOriginOk(origin: []const u8) bool {
     if (origin.len == 0) return false;
@@ -112,7 +122,6 @@ pub fn fitScale(pane_w: u32, pane_h: u32, emu_w: u16, emu_h: u16) f32 {
 /// 있다」 를 어떻게 읽을지 고르지 않게).
 pub fn checkEmulation(v: message.Emulation) Error!void {
     const f = v.flags;
-    if (f._reserved != 0) return error.InvalidEmulation;
     if (f.site_bound) try net_fields.checkHost(v.site) else if (v.site.len != 0) return error.InvalidEmulation;
     if (f.viewport) {
         if (!viewportOk(v.width, v.height, v.dsf)) return error.InvalidEmulation;
@@ -139,6 +148,17 @@ pub fn checkEmulation(v: message.Emulation) Error!void {
     if (v.restore_count > message.max_emu_geo_origins) return error.InvalidEmulation;
     for (v.restore[0..v.restore_count]) |o| if (!geoOriginOk(o)) return error.InvalidEmulation;
     for (v.restore[v.restore_count..]) |o| if (o.len != 0) return error.InvalidEmulation;
+    // W9e②: CPU — 표시가 있으면 1 < 값 ≤ 20, 없으면 0(-0 도 거절 — 바이트 하나).
+    if (f.cpu) {
+        if (!cpuRateOk(v.cpu_rate)) return error.InvalidEmulation;
+    } else if (v.cpu_rate != 0 or std.math.signbit(v.cpu_rate)) return error.InvalidEmulation;
+    // W9e②: 네트워크 — 오프라인은 `network` 와 함께만이고 수치가 모두 0, 아니면 지연 ≤ 10 000 ms·처리량 0 또는 16..1 000 000 kbps. 표시가
+    // 없으면 모두 0.
+    if (f.network) {
+        if (f.offline) {
+            if (v.latency_ms != 0 or v.download_kbps != 0 or v.upload_kbps != 0) return error.InvalidEmulation;
+        } else if (v.latency_ms > message.max_emu_latency_ms or !kbpsOk(v.download_kbps) or !kbpsOk(v.upload_kbps)) return error.InvalidEmulation;
+    } else if (f.offline or v.latency_ms != 0 or v.download_kbps != 0 or v.upload_kbps != 0) return error.InvalidEmulation;
 }
 
 fn writeShort(cursor: *Cursor, text: []const u8) Error!void {
@@ -195,6 +215,10 @@ pub fn writeEmulation(cursor: *Cursor, v: message.Emulation) Error!void {
     try cursor.writeByte(@backingInt(v.vision));
     try cursor.writeByte(v.restore_count);
     for (v.restore[0..v.restore_count]) |o| try writeShort(cursor, o);
+    try cursor.writeU32(@bitCast(v.cpu_rate)); // W9e②
+    try cursor.writeU32(v.latency_ms);
+    try cursor.writeU32(v.download_kbps);
+    try cursor.writeU32(v.upload_kbps);
 }
 
 fn readEnum(comptime E: type, cursor: *ReadCursor) Error!E {
@@ -238,6 +262,10 @@ pub fn readEmulation(cursor: *ReadCursor) Error!message.Emulation {
     v.restore_count = try cursor.readByte();
     if (v.restore_count > message.max_emu_geo_origins) return error.InvalidEmulation;
     for (v.restore[0..v.restore_count]) |*o| o.* = try readShort(cursor);
+    v.cpu_rate = @bitCast(try cursor.readU32()); // W9e②
+    v.latency_ms = try cursor.readU32();
+    v.download_kbps = try cursor.readU32();
+    v.upload_kbps = try cursor.readU32();
     try checkEmulation(v);
     return v;
 }
@@ -254,6 +282,14 @@ pub fn checkState(v: message.EmulationState) Error!void {
     if (v.auto_count > message.max_emu_geo_origins) return error.InvalidEmulation;
     for (v.auto_allowed[0..v.auto_count]) |o| if (!geoOriginOk(o)) return error.InvalidEmulation;
     for (v.auto_allowed[v.auto_count..]) |o| if (o.len != 0) return error.InvalidEmulation;
+    // W9e②: 풀림은 cpu·network 만, 풀린 무리는 까닭이 있고 아니면 없다, 풀린 무리는 걸린 무리가 아니다.
+    if (v.released_mask & ~message.emu_releasable_mask != 0 or v.released_mask & v.active_mask != 0) return error.InvalidEmulation;
+    const cpu_bit: u16 = @as(u16, 1) << @backingInt(message.EmuGroup.cpu);
+    const net_bit: u16 = @as(u16, 1) << @backingInt(message.EmuGroup.network);
+    if ((v.released_mask & cpu_bit != 0) != (v.cpu_release != .none)) return error.InvalidEmulation;
+    if ((v.released_mask & net_bit != 0) != (v.network_release != .none)) return error.InvalidEmulation;
+    // 네트워크를 「CPU 를 나누는 남의 프레임」 으로 풀지는 않는다(네트워크 조건은 탭 단위 — PHASE0 n1).
+    if (v.network_release == .process_shared) return error.InvalidEmulation;
 }
 
 pub fn writeState(cursor: *Cursor, v: message.EmulationState) Error!void {
@@ -269,6 +305,9 @@ pub fn writeState(cursor: *Cursor, v: message.EmulationState) Error!void {
     try cursor.writeByte(@backingInt(v.reason));
     try cursor.writeByte(v.auto_count);
     for (v.auto_allowed[0..v.auto_count]) |o| try writeShort(cursor, o);
+    try cursor.writeU16(v.released_mask); // W9e②
+    try cursor.writeByte(@backingInt(v.cpu_release));
+    try cursor.writeByte(@backingInt(v.network_release));
 }
 
 pub fn readState(cursor: *ReadCursor) Error!message.EmulationState {
@@ -286,6 +325,9 @@ pub fn readState(cursor: *ReadCursor) Error!message.EmulationState {
     };
     if (v.auto_count > message.max_emu_geo_origins) return error.InvalidEmulation;
     for (v.auto_allowed[0..v.auto_count]) |*o| o.* = try readShort(cursor);
+    v.released_mask = try cursor.readU16(); // W9e②
+    v.cpu_release = try readEnum(message.EmuReleaseReason, cursor);
+    v.network_release = try readEnum(message.EmuReleaseReason, cursor);
     try checkState(v);
     return v;
 }
@@ -294,4 +336,4 @@ pub fn readState(cursor: *ReadCursor) Error!message.EmulationState {
 pub const max_emulation_body_bytes: usize = 8 + 4 + 2 + (1 + message.max_net_host_bytes) + 2 + 2 + 4 + (2 + message.max_emu_ua_bytes) + (1 + message.max_emu_platform_bytes) +
     2 * (1 + message.max_emu_brands * 2 * (1 + message.max_emu_hint_bytes)) + 5 * (1 + message.max_emu_hint_bytes) + 1 +
     (1 + message.max_emu_accept_language_bytes) + (1 + message.max_emu_icu_locale_bytes) + (1 + message.max_emu_timezone_bytes) + 3 * 8 + 6 +
-    1 + message.max_emu_geo_origins * (1 + fields.max_origin_bytes);
+    1 + message.max_emu_geo_origins * (1 + fields.max_origin_bytes) + 4 * 4;

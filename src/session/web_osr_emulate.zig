@@ -11,6 +11,12 @@
 //! 진짜 Safari·Firefox 는 Sec-CH-UA 를 보내지 않는다, 작성자 선택 §17-4)·Accept-Language 목록(`acceptLanguage` — q 값 없이: Chromium 이 붙인다,
 //! 실측 E7)·ICU 이름·결과 JSON 도 여기다.
 //!
+//! W9e②: CPU 줄이기(`cpu` 1–20 — 1 은 끔)와 네트워크 조건(`network` — 프리셋·수치·offline)을 더했다. 이 둘은 **주인 프로세스**의 수명을 따른다
+//! (사용자 결정 7 — `control_self_origin.Owner`: CLI 는 그 명령을 낸 에이전트 프로세스, MCP·REPL 은 그 프로세스와 에이전트, 15 분 기한 없음).
+//! 사람이 셸에서 직접 친 한 번짜리 CLI 는 그 명령을 띄운 셸이 주인이다(확인 결정 9 — 셸이 끝나거나 `clear` 하면 푼다, `owner.kind:"shell"`).
+//! 주인이 없으면(cap 인가·셸이 `exec` 로 그 명령이 됨) 걸지 않는다(`no_agent_process`). 사용자 탭은 네트워크 프리셋만·offline 없음(PLAN v2 §2.2).
+//! sidecar 가 혼자 푼 무리(`released` — 사람이 몸·CPU 를 나누는 남의 프레임)와 주인이 끝나 푼 무리는 지우고 세대를 올린다(풀림 회차 — §5.3).
+//!
 //! 시험이 증명하는 것: 인자 표(범위·NaN·64 Mpx·모르는 키·null 지움·덧쓰기 합치기·까닭 이름), client hints 추정(Chrome/N 있음·없음·Mobile 토큰·
 //! viewport.mobile·플랫폼 토큰), Accept-Language 목록(`fr-FR`→`fr-FR,fr`, `en`→`en`), ICU 이름, 주인 pane, 초당 10 번, grant sync, sidecar 상태의
 //! 받기, wire 꼴(`emulation` 의 닫힌 칸을 지난다), 결과 JSON(state·active·not_covered·process_shared·warnings), 요약 글.
@@ -18,6 +24,7 @@
 const std = @import("std");
 const ws = @import("web_sidecar/root.zig");
 const cpg = @import("control_pane_grant.zig");
+const self_origin = @import("control_self_origin.zig"); // W9e②: 조건의 주인
 
 const msg = ws.message;
 const emu_fields = ws.emu_fields;
@@ -29,7 +36,35 @@ pub const max_locale_bytes: usize = 35;
 
 pub const Action = enum { set, clear, get };
 
-pub const Group = enum { viewport, user_agent, locale, timezone, geolocation, media, vision };
+pub const Group = enum { viewport, user_agent, locale, timezone, geolocation, media, vision, cpu, network };
+
+/// W9e②: 네트워크 프리셋 — Chrome DevTools `NetworkManager.ts`(공개 소스)의 값. DevTools 는 2024-05 에 「Fast 3G」 를 「Slow 4G」 로 바꿨다
+/// (crbug.com/342406608) — `fast-3g` 는 같은 값의 옛 이름(Chrome DevTools MCP 가 아직 그 이름을 쓴다). 지연은 ms 로(DevTools 의 562.5 → 563).
+pub const NetPreset = enum { slow_3g, fast_3g, slow_4g, fast_4g, offline };
+pub const net_preset_names = [_][]const u8{ "slow-3g", "fast-3g", "slow-4g", "fast-4g", "offline" };
+
+pub fn netPresetName(p: NetPreset) []const u8 {
+    return net_preset_names[@backingInt(p)];
+}
+
+pub const Network = struct {
+    preset: ?NetPreset = null,
+    latency_ms: u32 = 0,
+    download_kbps: u32 = 0,
+    upload_kbps: u32 = 0,
+    offline: bool = false,
+};
+
+/// 프리셋의 값(DevTools: slow 3G 400 ms × 5·500 kbps × 0.8, slow 4G 150 ms × 3.75·1.6 Mbps × 0.9 / 750 kbps × 0.9, fast 4G 60 ms × 2.75·9 Mbps × 0.9 /
+/// 1.5 Mbps × 0.9).
+pub fn presetNetwork(p: NetPreset) Network {
+    return switch (p) {
+        .slow_3g => .{ .preset = p, .latency_ms = 2000, .download_kbps = 400, .upload_kbps = 400 },
+        .fast_3g, .slow_4g => .{ .preset = p, .latency_ms = 563, .download_kbps = 1440, .upload_kbps = 675 },
+        .fast_4g => .{ .preset = p, .latency_ms = 165, .download_kbps = 8100, .upload_kbps = 1350 },
+        .offline => .{ .preset = p, .offline = true },
+    };
+}
 
 /// 바이트 칸(고정 버퍼 — 탭 상태가 할당 없이 쥔다).
 pub fn Text(comptime n: usize) type {
@@ -91,9 +126,13 @@ pub const Settings = struct {
     geolocation: ?Geo = null,
     media: ?msg.EmuMedia = null,
     vision: ?msg.EmuVision = null,
+    /// W9e②: CPU 를 몇 배 느리게(1 < 값 ≤ 20).
+    cpu: ?f32 = null,
+    /// W9e②: 네트워크 조건.
+    network: ?Network = null,
 
     pub fn any(self: *const Settings) bool {
-        return self.viewport != null or self.user_agent != null or self.locale != null or self.timezone != null or self.geolocation != null or self.media != null or self.vision != null;
+        return self.viewport != null or self.user_agent != null or self.locale != null or self.timezone != null or self.geolocation != null or self.media != null or self.vision != null or self.cpu != null or self.network != null;
     }
 };
 
@@ -112,10 +151,15 @@ pub const Params = struct {
     geolocation: Change(Geo) = .keep,
     media: Change(msg.EmuMedia) = .keep,
     vision: Change(msg.EmuVision) = .keep,
+    /// W9e②.
+    cpu: Change(f32) = .keep,
+    network: Change(Network) = .keep,
+    /// W9e②: 부른 쪽이 오래 사는 세션(MCP·REPL)이다 — 그 프로세스도 조건의 주인(연결이 끊기면 푼다).
+    holder: bool = false,
 };
 
 /// 인자 거절의 까닭(`-32602` 의 `data.reason` — 계획 §4).
-pub const Why = enum { unknown_key, action_invalid, viewport_invalid, viewport_too_large, dsf_invalid, ua_invalid, platform_invalid, client_hints_invalid, locale_invalid, timezone_invalid, geolocation_invalid, media_invalid, vision_invalid, reload_invalid };
+pub const Why = enum { unknown_key, action_invalid, viewport_invalid, viewport_too_large, dsf_invalid, ua_invalid, platform_invalid, client_hints_invalid, locale_invalid, timezone_invalid, geolocation_invalid, media_invalid, vision_invalid, reload_invalid, cpu_invalid, network_invalid, holder_invalid };
 
 pub fn whyMessage(why: Why) []const u8 {
     return switch (why) {
@@ -133,6 +177,9 @@ pub fn whyMessage(why: Why) []const u8 {
         .media_invalid => "media takes type screen|print, color_scheme light|dark, reduced_motion reduce|no-preference, forced_colors active|none, contrast more|less|no-preference",
         .vision_invalid => "vision is blurredVision, reducedContrast, achromatopsia, deuteranopia, protanopia or tritanopia",
         .reload_invalid => "reload is true or false (with set or clear)",
+        .cpu_invalid => "cpu is a number from 1 to 20 (how many times slower; 1 turns it off)",
+        .network_invalid => "network is slow-3g, fast-3g, slow-4g, fast-4g or offline, or {latency_ms 0..10000, download_kbps?, upload_kbps?} with kbps 0 (no limit) or 16..1000000",
+        .holder_invalid => "holder is true or false",
     };
 }
 
@@ -420,7 +467,49 @@ fn parseVision(v: std.json.Value, why: *?Why) ParamError!msg.EmuVision {
     return fail(why, .vision_invalid);
 }
 
-const top_keys = [_][]const u8{ "id", "action", "reload", "viewport", "user_agent", "locale", "timezone", "geolocation", "media", "vision" };
+const group_keys = [_][]const u8{ "viewport", "user_agent", "locale", "timezone", "geolocation", "media", "vision", "cpu", "network" };
+const top_keys = [_][]const u8{ "id", "action", "reload", "holder" } ++ group_keys;
+
+/// W9e②: `cpu` — 1..20 의 수, 1 은 끔(지움과 같다).
+fn parseCpu(v: std.json.Value, why: *?Why) ParamError!Change(f32) {
+    if (v == .null) return .clear;
+    const n = numberOf(v) orelse return fail(why, .cpu_invalid);
+    if (n < 1 or n > msg.max_emu_cpu_rate) return fail(why, .cpu_invalid);
+    if (n == 1) return .clear;
+    return .{ .set = @floatCast(n) };
+}
+
+fn kbpsOf(o: std.json.ObjectMap, key: []const u8, why: *?Why) ParamError!u32 {
+    const v = o.get(key) orelse return 0;
+    const n = switch (v) {
+        .integer => |i| i,
+        else => return fail(why, .network_invalid),
+    };
+    if (n < 0 or n > msg.max_emu_kbps) return fail(why, .network_invalid);
+    const k: u32 = @intCast(n);
+    if (!emu_fields.kbpsOk(k)) return fail(why, .network_invalid);
+    return k;
+}
+
+/// W9e②: `network` — 프리셋 이름 또는 수치 객체.
+fn parseNetwork(v: std.json.Value, why: *?Why) ParamError!Network {
+    switch (v) {
+        .string => |name| {
+            for (net_preset_names, 0..) |n, i| if (std.mem.eql(u8, n, name)) return presetNetwork(@fromBackingInt(@intCast(i)));
+            return fail(why, .network_invalid);
+        },
+        .object => |o| {
+            if (!onlyKeys(o, &.{ "latency_ms", "download_kbps", "upload_kbps" })) return fail(why, .network_invalid);
+            const lat = switch (o.get("latency_ms") orelse return fail(why, .network_invalid)) {
+                .integer => |i| i,
+                else => return fail(why, .network_invalid),
+            };
+            if (lat < 0 or lat > msg.max_emu_latency_ms) return fail(why, .network_invalid);
+            return .{ .latency_ms = @intCast(lat), .download_kbps = try kbpsOf(o, "download_kbps", why), .upload_kbps = try kbpsOf(o, "upload_kbps", why) };
+        },
+        else => return fail(why, .network_invalid),
+    }
+}
 
 /// `browser.emulate` 인자 — 모르는 키는 `unknown_key`, 무리마다 까닭(계획 §4). `clear`·`get` 은 무리를 받지 않는다(`get` 은 reload 도).
 pub fn parseParams(params: ?std.json.Value, why: *?Why) ParamError!Params {
@@ -440,8 +529,12 @@ pub fn parseParams(params: ?std.json.Value, why: *?Why) ParamError!Params {
         .bool => |b| p.reload = b,
         else => return fail(why, .reload_invalid),
     };
+    if (obj.get("holder")) |h| switch (h) {
+        .bool => |b| p.holder = b,
+        else => return fail(why, .holder_invalid),
+    };
     if (action != .set) {
-        for (top_keys[3..]) |k| if (obj.get(k) != null) return fail(why, .action_invalid);
+        for (group_keys) |k| if (obj.get(k) != null) return fail(why, .action_invalid);
         if (action == .get and p.reload) return fail(why, .reload_invalid);
         return p;
     }
@@ -452,6 +545,8 @@ pub fn parseParams(params: ?std.json.Value, why: *?Why) ParamError!Params {
     p.geolocation = try change(Geo, obj.get("geolocation"), parseGeo, why);
     p.media = try change(msg.EmuMedia, obj.get("media"), parseMedia, why);
     p.vision = try change(msg.EmuVision, obj.get("vision"), parseVision, why);
+    if (obj.get("cpu")) |c| p.cpu = try parseCpu(c, why);
+    p.network = try change(Network, obj.get("network"), parseNetwork, why);
     return p;
 }
 
@@ -591,6 +686,23 @@ fn writeUaVal(s: *std.json.Stringify, v: UserAgent) !void {
     try writeUserAgentArg(s, &v);
 }
 
+fn writeCpuVal(s: *std.json.Stringify, v: f32) !void {
+    try s.print("{d}", .{v});
+}
+
+/// W9e②: 네트워크 값 — 프리셋이면 그 이름(같은 값으로 다시 풀린다), 아니면 수치 객체.
+fn writeNetworkVal(s: *std.json.Stringify, v: Network) !void {
+    if (v.preset) |pr| return s.write(netPresetName(pr));
+    try s.beginObject();
+    try s.objectField("latency_ms");
+    try s.write(v.latency_ms);
+    try s.objectField("download_kbps");
+    try s.write(v.download_kbps);
+    try s.objectField("upload_kbps");
+    try s.write(v.upload_kbps);
+    try s.endObject();
+}
+
 /// op.arg — 정규형 인자 JSON(앱이 같은 `parseParams` 로 다시 푼다).
 pub fn serializeArg(gpa: std.mem.Allocator, p: *const Params) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
@@ -611,6 +723,12 @@ pub fn serializeArg(gpa: std.mem.Allocator, p: *const Params) std.mem.Allocator.
         writeChange(&s, "geolocation", p.geolocation, writeGeo) catch |e| break :blk e;
         writeChange(&s, "media", p.media, writeMedia) catch |e| break :blk e;
         writeChange(&s, "vision", p.vision, writeVisionVal) catch |e| break :blk e;
+        writeChange(&s, "cpu", p.cpu, writeCpuVal) catch |e| break :blk e;
+        writeChange(&s, "network", p.network, writeNetworkVal) catch |e| break :blk e;
+        if (p.holder) {
+            s.objectField("holder") catch |e| break :blk e;
+            s.write(true) catch |e| break :blk e;
+        }
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -648,6 +766,8 @@ pub const Call = struct {
     /// 그 grant 가 탭과 함께 생겼다(에이전트 탭 — 처음 몰 때 알림).
     birth: bool = false,
     now_ms: i64 = 0,
+    /// W9e②: CPU·네트워크 조건의 주인(`control_self_origin.ownerOf` — 없으면 그 둘은 걸지 않는다).
+    owner: ?self_origin.Owner = null,
 };
 
 pub const Outcome = struct { changed: bool = false, touch_added: bool = false };
@@ -683,6 +803,17 @@ pub const Tab = struct {
     hints_kind: enum { given, derived, none } = .none,
     accept_buf: [msg.max_emu_accept_language_bytes]u8 = undefined,
     icu_buf: [msg.max_emu_icu_locale_bytes]u8 = undefined,
+    /// W9e②: 무리마다 조건의 주인(그 무리를 마지막으로 건 호출의 것 — ATTACK_4 #4).
+    cpu_owner: ?self_origin.Owner = null,
+    net_owner: ?self_origin.Owner = null,
+    /// W9e②: 마지막으로 풀린 까닭(`owner_exited`·`human_input`·`process_shared` — 결과의 `released`; 그 무리를 다시 걸면 지운다).
+    cpu_release: ?[]const u8 = null,
+    net_release: ?[]const u8 = null,
+    /// W9e②: 그 무리를 건 세대 — 그보다 앞 세대의 sidecar 상태가 실은 풀림은 옛 설정의 것이다(구현 적대 리뷰 2 회차 L-c).
+    cpu_set_gen: u32 = 0,
+    net_set_gen: u32 = 0,
+    /// W9e②: 레이아웃이 그 탭을 숨겼다(앱이 결과 전에 둔다 — 숨은 탭은 배경 CPU 우선순위: 실측 c2·PHASE0_v3).
+    tab_hidden: bool = false,
 
     /// 흉내가 설정됐다(탭 제목의 ◫ — 사용자 탭이 사이트 밖이라 걸려 있지 않아도: 「이 탭에 흉내가 설정됨」, 계획 §11).
     pub fn active(self: *const Tab) bool {
@@ -714,6 +845,24 @@ pub const Tab = struct {
             why.* = .{ .reason = "resource_busy", .message = "too many emulation changes on this tab — at most 10 per second" };
             return error.Rejected;
         }
+        // W9e②: CPU·네트워크는 주인 프로세스가 있어야 건다(사용자 결정 7 — 그 프로세스가 끝나면 푼다). 사용자 탭은 네트워크 프리셋만·offline 없음.
+        const sets_cpu = p.cpu == .set;
+        const sets_net = p.network == .set;
+        if ((sets_cpu or sets_net) and call.owner == null) {
+            why.* = .{ .reason = "no_agent_process", .message = "CPU and network conditions last while the process that set them runs (the calling agent, maru browser repl or maru mcp, or the shell you typed the command in) — no such process was found for this call" };
+            return error.Rejected;
+        }
+        if (sets_net and !call.any_host) {
+            const n = p.network.set;
+            if (n.offline) {
+                why.* = .{ .reason = "offline_user_tab", .message = "offline is only for tabs you opened (browser open) — on the user's tab use a preset such as slow-3g" };
+                return error.Rejected;
+            }
+            if (n.preset == null) {
+                why.* = .{ .reason = "network_preset_only", .message = "on the user's tab, network takes a preset only (slow-3g, fast-3g, slow-4g, fast-4g)" };
+                return error.Rejected;
+            }
+        }
         var out: Outcome = .{};
         const before_touch = if (self.settings.viewport) |v| v.touch else false;
         var next = self.settings;
@@ -727,6 +876,8 @@ pub const Tab = struct {
             merge(Geo, p.geolocation, &next.geolocation);
             merge(msg.EmuMedia, p.media, &next.media);
             merge(msg.EmuVision, p.vision, &next.vision);
+            merge(f32, p.cpu, &next.cpu);
+            merge(Network, p.network, &next.network);
             // `media:{}` 은 흉내 없음 — 지운 것과 같다.
             if (next.media) |m| if (!m.any()) {
                 next.media = null;
@@ -736,6 +887,19 @@ pub const Tab = struct {
         if (!std.meta.eql(next, self.settings)) {
             self.settings = next;
             self.bump();
+        }
+        // W9e②: 무리마다 주인 — 건 호출의 것(같은 값을 다시 걸어도 주인은 이 호출로), 지우면 없다.
+        if (p.action == .clear or p.cpu == .clear) self.cpu_owner = null;
+        if (p.action == .clear or p.network == .clear) self.net_owner = null;
+        if (sets_cpu) {
+            self.cpu_owner = call.owner;
+            self.cpu_release = null;
+            self.cpu_set_gen = self.gen;
+        }
+        if (sets_net) {
+            self.net_owner = call.owner;
+            self.net_release = null;
+            self.net_set_gen = self.gen;
         }
         out.touch_added = !before_touch and if (self.settings.viewport) |v| v.touch else false;
         if (self.active()) {
@@ -770,14 +934,104 @@ pub const Tab = struct {
         self.owner = 0;
         self.site = .{};
         self.agent_tab = false;
+        self.cpu_owner = null;
+        self.net_owner = null;
         self.bump();
     }
 
-    /// sidecar 의 답(그 세대가 아니어도 받는다 — 살아 있음·사이트 안팎·줄임은 지금 값이다). 대신 허용한 출처는 늘 마지막 목록.
-    pub fn onState(self: *Tab, st: msg.EmulationState) void {
+    /// 무리 둘(cpu·network)을 지운 뒤 — 다른 흉내도 없으면 주인 pane 을 놓는다.
+    fn afterConditionsCleared(self: *Tab) void {
+        self.bump();
+        if (!self.active()) {
+            self.owner = 0;
+            self.site = .{};
+            self.agent_tab = false;
+        }
+    }
+
+    /// W9e②: 주인 프로세스가 끝난 무리를 푼다(앱 틱 — 0.5 s 마다, sidecar 재생 frame 을 짓기 직전에도). 바꿨으면 참(부른 쪽이 보낸다).
+    pub fn reapOwners(self: *Tab, provider: self_origin.Provider) bool {
+        var changed = false;
+        if (self.cpu_owner) |o| if (!self_origin.ownerAlive(provider, o)) {
+            self.settings.cpu = null;
+            self.cpu_owner = null;
+            self.cpu_release = "owner_exited";
+            changed = true;
+        };
+        if (self.net_owner) |o| if (!self_origin.ownerAlive(provider, o)) {
+            self.settings.network = null;
+            self.net_owner = null;
+            self.net_release = "owner_exited";
+            changed = true;
+        };
+        if (changed) self.afterConditionsCleared();
+        return changed;
+    }
+
+    /// W9e②: 주인이 있는 조건이 걸려 있다(앱 틱이 볼 탭).
+    pub fn hasOwners(self: *const Tab) bool {
+        return self.cpu_owner != null or self.net_owner != null;
+    }
+
+    /// sidecar 의 답(그 세대가 아니어도 받는다 — 살아 있음·사이트 안팎·줄임은 지금 값이다). 대신 허용한 출처는 늘 마지막 목록. W9e②: sidecar 가
+    /// 혼자 푼 무리(`released_mask`)는 지우고 세대를 올린다 — 참이면 부른 쪽이 그 무리를 뺀 상태를 보낸다(그래야 sidecar 의 풀림이 끝난다).
+    pub fn onState(self: *Tab, st: msg.EmulationState) bool {
         self.acked = .{ .generation = st.generation, .on_site = st.on_site, .alive = st.alive, .pending = st.pending, .fit_scale = st.fit_scale, .active_mask = st.active_mask, .failed_mask = st.failed_mask, .reason = st.reason };
         self.auto_count = st.auto_count;
         for (st.auto_allowed[0..st.auto_count], 0..) |o, i| self.auto[i] = .init(o);
+        var changed = false;
+        if (st.released_mask & (1 << @backingInt(msg.EmuGroup.cpu)) != 0 and self.settings.cpu != null and genAtLeast(st.generation, self.cpu_set_gen)) {
+            self.settings.cpu = null;
+            self.cpu_owner = null;
+            self.cpu_release = @tagName(st.cpu_release);
+            changed = true;
+        }
+        if (st.released_mask & (1 << @backingInt(msg.EmuGroup.network)) != 0 and self.settings.network != null and genAtLeast(st.generation, self.net_set_gen)) {
+            self.settings.network = null;
+            self.net_owner = null;
+            self.net_release = @tagName(st.network_release);
+            changed = true;
+        }
+        if (changed) self.afterConditionsCleared();
+        return changed;
+    }
+
+    /// W9e②: 사람이 그 탭을 건드렸다(maru 가 sidecar 에 보내는 입력·이동 — `web_sidecar.human_use.touchOf`). sidecar 도 같은 메시지로 풀지만
+    /// maru 도 보내는 순간 제 설정에서 CPU·네트워크를 푼다(적대 검증 12 회차: sidecar 가 풀고 그 알림을 maru 가 읽기 전에 죽으면 다시 뜬 sidecar
+    /// 에 옛 설정을 재생해 조건이 다시 걸렸다). 바꿨으면 참(부른 쪽이 그 무리를 뺀 상태를 보낸다 — sidecar 의 늦은 풀림 알림은 이미 지운 것이라
+    /// 아무것도 바꾸지 않는다).
+    pub fn releaseByHuman(self: *Tab) bool {
+        var changed = false;
+        if (self.settings.cpu != null) {
+            self.settings.cpu = null;
+            self.cpu_owner = null;
+            self.cpu_release = "human_input";
+            changed = true;
+        }
+        if (self.settings.network != null) {
+            self.settings.network = null;
+            self.net_owner = null;
+            self.net_release = "human_input";
+            changed = true;
+        }
+        if (changed) self.afterConditionsCleared();
+        return changed;
+    }
+
+    /// W9e② v20c N4: 사람이 이 탭과 한 팝업 가족인 다른 탭을 건드렸다 — CPU 만 푼다(같은 렌더러 프로세스라 그 탭도 느려진다; 네트워크 조건은 이
+    /// 탭의 요청만이라 남긴다). 바꿨으면 참.
+    pub fn releaseCpuByHuman(self: *Tab) bool {
+        if (self.settings.cpu == null) return false;
+        self.settings.cpu = null;
+        self.cpu_owner = null;
+        self.cpu_release = "human_input";
+        self.afterConditionsCleared();
+        return true;
+    }
+
+    /// 세대 비교(감기는 u32 — 반 바퀴 안을 앞으로 본다).
+    fn genAtLeast(a: u32, b: u32) bool {
+        return a -% b < (1 << 31);
     }
 
     /// 브라우저가 새로 만들어졌다(처음이거나 sidecar 가 다시 떴다) — 다음 `emulation` 은 지금 상태 + 옛 sidecar 가 대신 허용한 출처의 되돌림.
@@ -853,6 +1107,18 @@ pub const Tab = struct {
         if (st.vision) |x| {
             v.flags.vision = true;
             v.vision = x;
+        }
+        if (st.cpu) |r| {
+            v.flags.cpu = true;
+            v.cpu_rate = r;
+        }
+        if (st.network) |n| {
+            v.flags.network = true;
+            if (n.offline) v.flags.offline = true else {
+                v.latency_ms = n.latency_ms;
+                v.download_kbps = n.download_kbps;
+                v.upload_kbps = n.upload_kbps;
+            }
         }
         if (self.restore_next) {
             v.restore_count = @intCast(self.auto_count);
@@ -954,6 +1220,14 @@ pub const Tab = struct {
             sep.put(&w, &first);
             w.writeAll(visionName(x)) catch {};
         }
+        if (st.cpu) |r| {
+            sep.put(&w, &first);
+            w.print("CPU \u{00D7}{d}", .{r}) catch {};
+        }
+        if (st.network) |n| {
+            sep.put(&w, &first);
+            if (n.offline) w.writeAll("offline") catch {} else if (n.preset) |pr| w.writeAll(netPresetName(pr)) catch {} else w.print("latency {d} ms", .{n.latency_ms}) catch {};
+        }
         if (!self.onSite()) {
             sep.put(&w, &first);
             w.writeAll("off-site") catch {};
@@ -1042,7 +1316,62 @@ pub const Tab = struct {
             try s.objectField("vision");
             try s.write(visionName(x));
         }
+        if (st.cpu) |r| {
+            try s.objectField("cpu");
+            try s.print("{d}", .{r});
+        }
+        if (st.network) |n| {
+            try s.objectField("network");
+            try s.beginObject();
+            if (n.preset) |pr| {
+                try s.objectField("preset");
+                try s.write(netPresetName(pr));
+            }
+            try s.objectField("offline");
+            try s.write(n.offline);
+            if (!n.offline) {
+                try s.objectField("latency_ms");
+                try s.write(n.latency_ms);
+                try s.objectField("download_kbps");
+                try s.write(n.download_kbps);
+                try s.objectField("upload_kbps");
+                try s.write(n.upload_kbps);
+            }
+            try s.endObject();
+        }
         try s.endObject();
+        // W9e②: 조건의 주인(무리마다) — 그 프로세스가 끝나면 푼다(사용자 결정 7).
+        if (self.cpu_owner != null or self.net_owner != null) {
+            try s.objectField("owner");
+            try s.beginObject();
+            inline for (.{ .{ "cpu", self.cpu_owner }, .{ "network", self.net_owner } }) |pair| if (pair[1]) |o| {
+                try s.objectField(pair[0]);
+                try s.beginObject();
+                try s.objectField("kind");
+                try s.write(o.kind());
+                try s.objectField("pid");
+                try s.write(o.job.pid);
+                if (o.holder) |h| {
+                    try s.objectField("holder_pid");
+                    try s.write(h.pid);
+                }
+                try s.endObject();
+            };
+            try s.endObject();
+        }
+        if (self.cpu_release != null or self.net_release != null) {
+            try s.objectField("released");
+            try s.beginArray();
+            inline for (.{ .{ "cpu", self.cpu_release }, .{ "network", self.net_release } }) |pair| if (pair[1]) |why| {
+                try s.beginObject();
+                try s.objectField("group");
+                try s.write(pair[0]);
+                try s.objectField("reason");
+                try s.write(why);
+                try s.endObject();
+            };
+            try s.endArray();
+        }
         try s.objectField("site");
         if (self.site.len == 0) try s.write(null) else try s.write(self.site.slice());
         try s.objectField("active");
@@ -1075,10 +1404,17 @@ pub const Tab = struct {
             try s.write(true);
         }
         try s.objectField("not_covered");
-        try s.write(&[_][]const u8{ "cross_site_iframes", "service_workers", "workers_started_before", "worker_accept_language" });
-        if (st.timezone != null or st.locale != null) {
+        // W9e②: 네트워크 조건은 가짜 응답(곧 답한다 — n2)·WebSocket 도 덮지 않는다(서비스 워커·다른 사이트 iframe 은 이미 목록에). 그 탭이 연
+        // 팝업의 요청도 아니다 — 지연·막기(`emulateNetworkConditionsByRule`)는 그 탭의 DevTools 세션에만 걸린다(적대 검증 8 회차 A8-1 실측: 팝업의
+        // 요청은 지연 1 ms·offline 에도 성공, `navigator.onLine` 만 같은 렌더러 프로세스라 false).
+        if (st.network != null)
+            try s.write(&[_][]const u8{ "cross_site_iframes", "service_workers", "workers_started_before", "worker_accept_language", "mocked_responses", "websocket_unmeasured", "popups" })
+        else
+            try s.write(&[_][]const u8{ "cross_site_iframes", "service_workers", "workers_started_before", "worker_accept_language" });
+        const offline = if (st.network) |n| n.offline else false;
+        if (st.timezone != null or st.locale != null or st.cpu != null or offline) {
             try s.objectField("process_shared");
-            var shared: [2][]const u8 = undefined;
+            var shared: [4][]const u8 = undefined;
             var n: usize = 0;
             if (st.timezone != null) {
                 shared[n] = "timezone";
@@ -1088,9 +1424,19 @@ pub const Tab = struct {
                 shared[n] = "locale";
                 n += 1;
             }
+            // W9e②: CPU 줄이기와 offline 의 `navigator.onLine` 은 렌더러 프로세스 전체 — 그 탭이 연 팝업·같은 프로세스에 든 남의 같은 사이트
+            // iframe 도(실측 c1·o1·PHASE0_v3 D1, 사용자 결정 3).
+            if (st.cpu != null) {
+                shared[n] = "cpu";
+                n += 1;
+            }
+            if (offline) {
+                shared[n] = "navigator_online";
+                n += 1;
+            }
             try s.write(shared[0..n]);
         }
-        var warns: [5][]const u8 = undefined;
+        var warns: [6][]const u8 = undefined;
         var nw: usize = 0;
         if (touch_added and !reloaded) {
             warns[nw] = "touch_events_after_reload";
@@ -1106,6 +1452,10 @@ pub const Tab = struct {
         }
         if (self.active() and !self.onSite()) {
             warns[nw] = "off_site_inactive";
+            nw += 1;
+        }
+        if (st.cpu != null and self.tab_hidden) {
+            warns[nw] = "hidden_tab_cpu_background";
             nw += 1;
         }
         if (nw > 0) {
@@ -1276,7 +1626,7 @@ test "W9e①: wire 꼴 — 사용자 탭은 사이트에 묶이고, 언어는 �
     _ = try t.apply(.{ .pane = 5, .params = &p, .any_host = false, .grant_host = "a.test" }, &why);
     var auto: msg.EmulationState = .{ .browser = 9, .generation = t.gen, .auto_count = 1 };
     auto.auto_allowed[0] = "https://a.test";
-    t.onState(auto);
+    _ = t.onState(auto);
     t.browserRecreated();
     try testing.expect(t.needsSend());
     const v = t.toWire(9);
@@ -1322,16 +1672,16 @@ test "W9e①: 결과 JSON — viewport 의 fit·shown, client_hints 이름, not_
     try testing.expectEqualStrings("pointer_events_are_mouse", warns[1].string);
     try testing.expectEqualStrings("user_sees_scaled", warns[2].string);
     // sidecar 답 — 사이트 밖·실패.
-    t.onState(.{ .browser = 9, .generation = t.gen, .on_site = false, .fit_scale = 0.4739, .active_mask = 1, .failed_mask = 1 << 3, .reason = .timezone_unknown });
+    _ = t.onState(.{ .browser = 9, .generation = t.gen, .on_site = false, .fit_scale = 0.4739, .active_mask = 1, .failed_mask = 1 << 3, .reason = .timezone_unknown });
     try testing.expectEqualStrings("failed", t.stateName());
     try testing.expectEqual(@as(f32, 1), t.inputScale(640, 400)); // 사이트 밖 — 걸려 있지 않다
     try testing.expect(t.shownSize(640, 400) == null);
-    t.onState(.{ .browser = 9, .generation = t.gen, .fit_scale = 0.4739, .active_mask = 1 });
+    _ = t.onState(.{ .browser = 9, .generation = t.gen, .fit_scale = 0.4739, .active_mask = 1 });
     try testing.expectEqual(@as(f32, 0.4739), t.inputScale(640, 400));
     try testing.expectEqual(@as(f32, 0.5924), t.inputScale(800, 500)); // pane 이 바뀌면 곧 — 답을 기다리지 않는다
     const shown = t.shownSize(640, 400).?;
     try testing.expectApproxEqAbs(@as(f32, 184.82), shown.w, 0.01);
-    t.onState(.{ .browser = 9, .generation = t.gen, .on_site = false, .fit_scale = 0.4739, .active_mask = 1, .failed_mask = 1 << 3, .reason = .timezone_unknown });
+    _ = t.onState(.{ .browser = 9, .generation = t.gen, .on_site = false, .fit_scale = 0.4739, .active_mask = 1, .failed_mask = 1 << 3, .reason = .timezone_unknown });
     var sb: [128]u8 = undefined;
     try testing.expectEqualStrings("390\u{00D7}844 touch, user agent, UTC, off-site", t.summary(&sb));
     const j2 = try t.resultJson(testing.allocator, 640, 400, true, false);
@@ -1339,9 +1689,9 @@ test "W9e①: 결과 JSON — viewport 의 fit·shown, client_hints 이름, not_
     try testing.expect(std.mem.indexOf(u8, j2, "\"active\":false") != null and std.mem.indexOf(u8, j2, "off_site_inactive") != null);
     try testing.expect(std.mem.indexOf(u8, j2, "{\"group\":\"timezone\",\"reason\":\"timezone_unknown\"}") != null);
     try testing.expect(std.mem.indexOf(u8, j2, "\"reloaded\":true") != null and std.mem.indexOf(u8, j2, "\"headers_from\":\"now\"") != null);
-    t.onState(.{ .browser = 9, .generation = t.gen, .alive = false, .pending = true, .fit_scale = 1 });
+    _ = t.onState(.{ .browser = 9, .generation = t.gen, .alive = false, .pending = true, .fit_scale = 1 });
     try testing.expectEqualStrings("waiting_renderer", t.stateName());
-    t.onState(.{ .browser = 9, .generation = t.gen, .fit_scale = 1, .active_mask = 0b1001 });
+    _ = t.onState(.{ .browser = 9, .generation = t.gen, .fit_scale = 1, .active_mask = 0b1001 });
     try testing.expectEqualStrings("active", t.stateName());
 }
 
@@ -1405,15 +1755,15 @@ test "W9e① 변이: 인자 까닭의 남은 칸·forced none·1 초 창·데스
     const vp = try parse("{\"id\":1,\"action\":\"set\",\"viewport\":{\"width\":390,\"height\":844}}", &w);
     const out_vp = try f.apply(testCall(&vp, 5, 0), &why);
     _ = out_vp;
-    f.onState(.{ .browser = 1, .generation = f.gen, .pending = true, .fit_scale = 1 });
+    _ = f.onState(.{ .browser = 1, .generation = f.gen, .pending = true, .fit_scale = 1 });
     const j0 = try f.resultJson(testing.allocator, 640, 400, false, false);
     defer testing.allocator.free(j0);
     try testing.expect(std.mem.indexOf(u8, j0, "\"fit_scale\":0.4739") != null);
-    f.onState(.{ .browser = 1, .generation = f.gen, .fit_scale = 0.4739, .failed_mask = 1, .reason = .cdp_error });
+    _ = f.onState(.{ .browser = 1, .generation = f.gen, .fit_scale = 0.4739, .failed_mask = 1, .reason = .cdp_error });
     try testing.expectEqual(@as(f32, 1), f.inputScale(640, 400));
     try testing.expect(f.shownSize(640, 400) == null);
     // 옛 세대의 답인데 렌더러가 죽었다 — waiting_renderer.
-    f.onState(.{ .browser = 1, .generation = f.gen -% 1, .alive = false, .fit_scale = 1 });
+    _ = f.onState(.{ .browser = 1, .generation = f.gen -% 1, .alive = false, .fit_scale = 1 });
     try testing.expectEqualStrings("waiting_renderer", f.stateName());
     // pane 보다 작은 흉내 화면 — exact.
     const j1 = try f.resultJson(testing.allocator, 1280, 900, false, false);
@@ -1448,7 +1798,7 @@ test "W9e①: 지운 흉내의 결과 state — 죽은 렌더러에 쌓인 지�
     var w: ?Why = null;
     const set = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
     _ = try t.apply(testCall(&set, 5, 0), &why);
-    t.onState(.{ .browser = 1, .generation = t.gen, .fit_scale = 1, .active_mask = 1 << @backingInt(msg.EmuGroup.timezone) });
+    _ = t.onState(.{ .browser = 1, .generation = t.gen, .fit_scale = 1, .active_mask = 1 << @backingInt(msg.EmuGroup.timezone) });
     const clear = try parse("{\"id\":1,\"action\":\"clear\"}", &w);
     _ = try t.apply(testCall(&clear, 5, 10), &why);
     try testing.expect(!t.active());
@@ -1463,10 +1813,219 @@ test "W9e①: 지운 흉내의 결과 state — 죽은 렌더러에 쌓인 지�
         }
     }.f;
     try expectState(&t, "sent"); // 이 세대의 답 전
-    t.onState(.{ .browser = 1, .generation = t.gen, .alive = false, .pending = true, .fit_scale = 1 });
+    _ = t.onState(.{ .browser = 1, .generation = t.gen, .alive = false, .pending = true, .fit_scale = 1 });
     try expectState(&t, "waiting_renderer");
-    t.onState(.{ .browser = 1, .generation = t.gen, .fit_scale = 1, .failed_mask = 1 << @backingInt(msg.EmuGroup.timezone), .reason = .cdp_error });
+    _ = t.onState(.{ .browser = 1, .generation = t.gen, .fit_scale = 1, .failed_mask = 1 << @backingInt(msg.EmuGroup.timezone), .reason = .cdp_error });
     try expectState(&t, "failed");
-    t.onState(.{ .browser = 1, .generation = t.gen, .fit_scale = 1 });
+    _ = t.onState(.{ .browser = 1, .generation = t.gen, .fit_scale = 1 });
     try expectState(&t, "active");
+}
+
+// ── W9e②: CPU·네트워크 조건 ─────────────────────────────────────────────────────────────────────────────
+
+const FakeProcs = struct {
+    procs: []const self_origin.ProcInfo,
+    fn lookup(ctx: *anyopaque, pid: i32) ?self_origin.ProcInfo {
+        const self: *FakeProcs = @ptrCast(@alignCast(ctx));
+        for (self.procs) |p| if (p.pid == pid) return p;
+        return null;
+    }
+    fn sessionOf(_: *anyopaque, _: i32) ?i32 {
+        return null;
+    }
+    fn provider(self: *FakeProcs) self_origin.Provider {
+        return .{ .ctx = self, .lookup = lookup, .session_of = sessionOf };
+    }
+};
+
+fn procInfo(pid: i32, start: u64) self_origin.ProcInfo {
+    return .{ .pid = pid, .ppid = 1, .pgid = pid, .uid = 501, .has_ctty = true, .tpgid = pid, .start_us = start };
+}
+
+const agent_owner: self_origin.Owner = .{ .job = .{ .pid = 300, .start_us = 7 } };
+const mcp_owner: self_origin.Owner = .{ .job = .{ .pid = 300, .start_us = 7 }, .holder = .{ .pid = 301, .start_us = 9 } };
+
+test "W9e②: 인자 — cpu 1..20(1 은 지움), network 프리셋·수치·offline, holder, 까닭 이름, 정규형으로 되돌아온다" {
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":4,\"network\":\"slow-3g\",\"holder\":true}", &w);
+    try testing.expectEqual(@as(f32, 4), p.cpu.set);
+    try testing.expectEqual(@as(u32, 2000), p.network.set.latency_ms);
+    try testing.expectEqual(NetPreset.slow_3g, p.network.set.preset.?);
+    try testing.expect(p.holder);
+    try testing.expect((try parse("{\"id\":1,\"action\":\"set\",\"cpu\":1}", &w)).cpu == .clear);
+    try testing.expect((try parse("{\"id\":1,\"action\":\"set\",\"cpu\":null}", &w)).cpu == .clear);
+    try testing.expect((try parse("{\"id\":1,\"action\":\"set\",\"network\":\"offline\"}", &w)).network.set.offline);
+    const custom = try parse("{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":300,\"download_kbps\":16}}", &w);
+    try testing.expect(custom.network.set.preset == null and custom.network.set.download_kbps == 16 and custom.network.set.upload_kbps == 0);
+    try testing.expectEqual(@as(u32, 563), (try parse("{\"id\":1,\"action\":\"set\",\"network\":\"fast-3g\"}", &w)).network.set.latency_ms); // 옛 이름 = slow-4g
+    const bad = [_]struct { j: []const u8, w: Why }{
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"cpu\":0.5}", .w = .cpu_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"cpu\":21}", .w = .cpu_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"cpu\":\"4\"}", .w = .cpu_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"network\":\"3g\"}", .w = .network_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":10001}}", .w = .network_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":10,\"download_kbps\":15}}", .w = .network_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"network\":{\"download_kbps\":100}}", .w = .network_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":10,\"offline\":true}}", .w = .network_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"set\",\"holder\":1}", .w = .holder_invalid },
+        .{ .j = "{\"id\":1,\"action\":\"get\",\"cpu\":4}", .w = .action_invalid },
+    };
+    for (bad) |b| {
+        try testing.expectError(error.InvalidParams, parse(b.j, &w));
+        try testing.expectEqual(b.w, w.?);
+    }
+    const arg = try serializeArg(testing.allocator, &custom);
+    defer testing.allocator.free(arg);
+    const again = try parse(arg, &w);
+    try testing.expectEqual(@as(u32, 300), again.network.set.latency_ms);
+    const arg2 = try serializeArg(testing.allocator, &p);
+    defer testing.allocator.free(arg2);
+    const again2 = try parse(arg2, &w);
+    try testing.expect(again2.holder and again2.network.set.preset.? == .slow_3g and again2.cpu.set == 4);
+}
+
+test "W9e②: 주인이 없으면 거절(no_agent_process), 사용자 탭은 네트워크 프리셋만·offline 없음, 무리마다 주인, 지우면 주인도" {
+    var t: Tab = .{};
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":4}", &w);
+    var call = testCall(&p, 5, 0);
+    try testing.expectError(error.Rejected, t.apply(call, &why));
+    try testing.expectEqualStrings("no_agent_process", why.reason);
+    // 네트워크도 주인 없이는 걸지 않는다(변이 M16).
+    const net_only = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"slow-3g\"}", &w);
+    try testing.expectError(error.Rejected, t.apply(testCall(&net_only, 5, 0), &why));
+    try testing.expectEqualStrings("no_agent_process", why.reason);
+    call.owner = agent_owner;
+    _ = try t.apply(call, &why);
+    try testing.expectEqual(@as(i32, 300), t.cpu_owner.?.job.pid);
+    try testing.expect(t.net_owner == null);
+    // 사용자 탭(사이트에 묶임).
+    var u: Tab = .{};
+    const custom = try parse("{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":300}}", &w);
+    try testing.expectError(error.Rejected, u.apply(.{ .pane = 5, .params = &custom, .any_host = false, .grant_host = "a.test", .owner = agent_owner }, &why));
+    try testing.expectEqualStrings("network_preset_only", why.reason);
+    const off = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"offline\"}", &w);
+    try testing.expectError(error.Rejected, u.apply(.{ .pane = 5, .params = &off, .any_host = false, .grant_host = "a.test", .owner = agent_owner }, &why));
+    try testing.expectEqualStrings("offline_user_tab", why.reason);
+    const preset = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"slow-4g\"}", &w);
+    _ = try u.apply(.{ .pane = 5, .params = &preset, .any_host = false, .grant_host = "a.test", .owner = mcp_owner, .now_ms = 10 }, &why);
+    try testing.expectEqual(@as(i32, 301), u.net_owner.?.holder.?.pid);
+    // MCP 가 건 network 를 CLI 가 덮으면 주인이 CLI 의 것으로.
+    _ = try u.apply(.{ .pane = 5, .params = &preset, .any_host = false, .grant_host = "a.test", .owner = agent_owner, .now_ms = 20 }, &why);
+    try testing.expect(u.net_owner.?.holder == null);
+    // 지우면 주인도 없다.
+    const clear = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":null}", &w);
+    _ = try t.apply(.{ .pane = 5, .params = &clear, .any_host = true, .now_ms = 30 }, &why); // 지움은 주인 없이도 된다
+    try testing.expect(t.cpu_owner == null and t.settings.cpu == null);
+}
+
+test "W9e② 확인 결정 9: 사람이 친 CLI — 주인은 셸(kind shell), 셸이 끝나면 풀고, 에이전트가 덮으면 에이전트 주인으로, clear 는 주인과 무관" {
+    var t: Tab = .{};
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const shell_owner: self_origin.Owner = .{ .job = .{ .pid = 400, .start_us = 11 }, .shell = true };
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":4,\"network\":\"slow-3g\"}", &w);
+    var call = testCall(&p, 5, 0);
+    call.owner = shell_owner;
+    _ = try t.apply(call, &why);
+    try testing.expect(t.cpu_owner.?.shell and t.net_owner.?.shell);
+    const json = try t.resultJson(testing.allocator, 640, 400, false, false);
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.indexOf(u8, json, "\"owner\":{\"cpu\":{\"kind\":\"shell\",\"pid\":400},\"network\":{\"kind\":\"shell\",\"pid\":400}}") != null);
+    // 에이전트가 network 를 다시 걸면 그 무리는 에이전트 주인(마지막으로 건 호출의 것), cpu 는 셸에 남는다.
+    const net = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"fast-4g\"}", &w);
+    _ = try t.apply(.{ .pane = 5, .params = &net, .any_host = true, .owner = agent_owner, .now_ms = 10 }, &why);
+    try testing.expect(t.cpu_owner.?.shell and !t.net_owner.?.shell);
+    // 셸이 끝났다(목록에 없다) — cpu 만 풀린다.
+    var procs: FakeProcs = .{ .procs = &.{procInfo(300, 7)} };
+    try testing.expect(t.reapOwners(procs.provider()));
+    try testing.expect(t.settings.cpu == null and t.settings.network != null);
+    try testing.expectEqualStrings("owner_exited", t.cpu_release.?);
+    // clear 는 주인 없이도(사람이 셸에서 친 --clear 도) 모두 지운다.
+    _ = try t.apply(.{ .pane = 5, .params = &(try parse("{\"id\":1,\"action\":\"clear\"}", &w)), .any_host = true, .now_ms = 20 }, &why);
+    try testing.expect(!t.active() and !t.hasOwners());
+}
+
+test "W9e②: 주인이 끝나면 푼다 — pid 재사용(시작 시각)·MCP 연결 끊김(holder), 다른 흉내는 남기고 세대를 올린다, 결과에 released" {
+    var t: Tab = .{};
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":4,\"timezone\":\"UTC\"}", &w);
+    var call = testCall(&p, 5, 0);
+    call.owner = agent_owner;
+    _ = try t.apply(call, &why);
+    const p2 = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"fast-4g\"}", &w);
+    var call2 = testCall(&p2, 5, 10);
+    call2.owner = mcp_owner;
+    _ = try t.apply(call2, &why);
+    var live: FakeProcs = .{ .procs = &.{ procInfo(300, 7), procInfo(301, 9) } };
+    try testing.expect(!t.reapOwners(live.provider()));
+    // MCP 프로세스(holder)가 끝났다 — network 만.
+    var mcp_gone: FakeProcs = .{ .procs = &.{procInfo(300, 7)} };
+    const g = t.gen;
+    try testing.expect(t.reapOwners(mcp_gone.provider()));
+    try testing.expect(t.settings.network == null and t.settings.cpu != null and t.gen != g);
+    try testing.expectEqualStrings("owner_exited", t.net_release.?);
+    // pid 300 을 다른 프로세스가 물려받았다(시작 시각이 다르다) — cpu 도.
+    var reused: FakeProcs = .{ .procs = &.{procInfo(300, 8)} };
+    try testing.expect(t.reapOwners(reused.provider()));
+    try testing.expect(t.settings.cpu == null and t.settings.timezone != null and t.active()); // 시간대는 남는다(주인이 없는 흉내)
+    try testing.expect(!t.hasOwners());
+    const json = try t.resultJson(testing.allocator, 640, 400, false, false);
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.indexOf(u8, json, "\"released\":[{\"group\":\"cpu\",\"reason\":\"owner_exited\"},{\"group\":\"network\",\"reason\":\"owner_exited\"}]") != null);
+}
+
+test "W9e②: sidecar 의 풀림(released) — 그 무리를 지우고 세대를 올린다, 다른 흉내가 없으면 주인 pane 도 놓는다" {
+    var t: Tab = .{};
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":6,\"network\":\"slow-3g\"}", &w);
+    var call = testCall(&p, 5, 0);
+    call.owner = agent_owner;
+    _ = try t.apply(call, &why);
+    const g = t.gen;
+    try testing.expect(t.onState(.{ .browser = 1, .generation = g, .fit_scale = 1, .released_mask = 1 << 7, .cpu_release = .process_shared }));
+    try testing.expect(t.settings.cpu == null and t.settings.network != null and t.gen != g);
+    try testing.expectEqualStrings("process_shared", t.cpu_release.?);
+    try testing.expect(!t.onState(.{ .browser = 1, .generation = t.gen, .fit_scale = 1, .released_mask = 1 << 7, .cpu_release = .process_shared })); // 이미 지웠다
+    try testing.expect(t.onState(.{ .browser = 1, .generation = t.gen, .fit_scale = 1, .released_mask = 1 << 8, .network_release = .human_input }));
+    try testing.expect(!t.active() and t.owner == 0);
+    // 다시 걸면 풀림 까닭이 지워진다.
+    _ = try t.apply(.{ .pane = 5, .params = &p, .any_host = true, .birth = true, .now_ms = 2000, .owner = agent_owner }, &why);
+    try testing.expect(t.cpu_release == null and t.net_release == null);
+    // 다시 건 뒤에 늦게 온 옛 세대의 풀림(같은 무리)은 새 설정을 지우지 않는다(적대 리뷰 2 회차 L-c).
+    try testing.expect(!t.onState(.{ .browser = 1, .generation = g, .fit_scale = 1, .released_mask = (1 << 7) | (1 << 8), .cpu_release = .human_input, .network_release = .human_input }));
+    try testing.expect(t.settings.cpu != null and t.settings.network != null);
+}
+
+test "W9e②: wire 꼴(닫힌 칸을 지난다)·결과 JSON(cpu·network·owner·process_shared·not_covered·숨은 탭 경고)·요약 글" {
+    var t: Tab = .{};
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":4,\"network\":\"offline\"}", &w);
+    var call = testCall(&p, 5, 0);
+    call.owner = mcp_owner;
+    _ = try t.apply(call, &why);
+    const v = t.toWire(9);
+    try emu_fields.checkEmulation(v);
+    try testing.expect(v.flags.cpu and v.cpu_rate == 4 and v.flags.network and v.flags.offline and v.latency_ms == 0);
+    t.tab_hidden = true;
+    const json = try t.resultJson(testing.allocator, 640, 400, false, false);
+    defer testing.allocator.free(json);
+    for ([_][]const u8{ "\"cpu\":4", "\"network\":{\"preset\":\"offline\",\"offline\":true}", "\"owner\":{\"cpu\":{\"kind\":\"session\",\"pid\":300,\"holder_pid\":301}", "\"process_shared\":[\"cpu\",\"navigator_online\"]", "\"mocked_responses\"", "\"popups\"", "\"hidden_tab_cpu_background\"" }) |needle| {
+        if (std.mem.indexOf(u8, json, needle) == null) {
+            std.debug.print("missing {s} in {s}\n", .{ needle, json });
+            return error.TestUnexpectedResult;
+        }
+    }
+    var buf: [160]u8 = undefined;
+    try testing.expectEqualStrings("CPU \u{00D7}4, offline", t.summary(&buf));
+    const q = try parse("{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":250,\"download_kbps\":800}}", &w);
+    _ = try t.apply(.{ .pane = 5, .params = &q, .any_host = true, .now_ms = 100, .owner = agent_owner }, &why);
+    const v2 = t.toWire(9);
+    try emu_fields.checkEmulation(v2);
+    try testing.expect(!v2.flags.offline and v2.latency_ms == 250 and v2.download_kbps == 800 and v2.upload_kbps == 0);
+    try testing.expectEqualStrings("CPU \u{00D7}4, latency 250 ms", t.summary(&buf));
 }

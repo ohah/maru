@@ -176,6 +176,9 @@ pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     if (m.core == .browser and eq(rest, "networkMock")) return .browser_network_mock;
     // browser-emulation(W9e①): 기기 흉내 — 서버·페이지가 보는 정체를 바꾼다. generic `browser.*` 보다 먼저.
     if (m.core == .browser and eq(rest, "emulate")) return .browser_emulation;
+    // browser.trace(W9e②): 성능 trace 는 그 탭의 네트워크 기록(요청 주소·시각)을 담는다 — 네트워크 grant(에이전트 탭은 탭과 함께 생긴 것)로 본다.
+    // control_browser 가 그 grant 가 탭과 함께 생긴 것인지(에이전트 탭만 — 사용자 결정 4)와 `browser` grant 도 본다.
+    if (m.core == .browser and eq(rest, "trace")) return .browser_network;
     // browser.*(§6 line 111 와일드카드) — 나머지 페이지 조작/관찰.
     if (m.core == .browser) return .browser;
     return null;

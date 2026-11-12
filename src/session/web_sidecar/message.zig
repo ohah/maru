@@ -199,6 +199,10 @@ pub const Tag = enum(u8) {
     /// 않으면 그 호스트(와 하위 도메인)를 맨 위 페이지가 보일 때만 건다(사용자 탭 — 사용자 결정 Q1). `geo_restore` 는 옛 sidecar 가 대신 허용한
     /// 위치 출처(재생 때만 — 새 sidecar 가 저장된 허용을 기본으로 되돌린다, 사용자 결정 Q2). 답은 `emulation_state`.
     emulation = 140,
+    /// 그 탭의 성능 trace 를 시작·멈춤·버림(W9e② — maru 가 `browser.trace` 로). sidecar 의 `tracing.zig` 가 한 주인으로 CDP `Tracing.*`·`IO.*`
+    /// 를 스스로 낸다(브라우저 전체에 trace 하나 — 실측 t2). 숨은 탭이면 측정하는 동안만 focus 흉내를 켠다(사용자 결정 5). 답은 `trace_state`,
+    /// 바이트는 `trace_data`, 그 탭 가족의 프레임 id 는 `trace_frames`.
+    trace = 141,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
@@ -248,6 +252,14 @@ pub const Tag = enum(u8) {
     /// 흉내의 지금 상태(W9e①) — 그 세대를 걸었는가(무리마다 걸림·실패와 까닭), 사이트 안인가, 렌더러가 살아 있는가(죽은 동안은 쌓았다),
     /// 사용자가 보는 줄임(`fit_scale` — W9b 입력 좌표에도), 위치를 대신 허용한 출처(maru 가 기억해 재시작 때 되돌린다).
     emulation_state = 82,
+    /// trace 의 지금 상태(W9e②) — 시작 중·기록 중·받는 중·끝·버림·실패와 까닭, focus 흉내를 켰는가, 덮은 시간, 잃은 자료가 있는가, 보낸 gzip
+    /// 바이트 수.
+    trace_state = 83,
+    /// trace 의 gzip 바이트 한 조각(W9e② — `Tracing.tracingComplete` 의 압축 없는 스트림을 `IO.read` 로 읽어 sidecar 가 gzip 으로 묶은 바이트, 16 KiB). 오프셋이 이어진다.
+    trace_data = 84,
+    /// 그 탭 가족(그 탭·그 탭이 연 팝업)의 프레임 id(W9e② — 시작 전 `Page.getFrameTree` 와 trace 동안의 `Page.frameAttached`·`frameNavigated`).
+    /// maru 의 거르기(F3)가 이 집합 밖의 프레임을 보면 trace 를 통째로 버린다. 64 개씩 나눠 `trace_state` 의 `done` 앞에 온다.
+    trace_frames = 85,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -461,6 +473,8 @@ pub const PermissionReply = struct {
     browser: BrowserId,
     request: RequestId,
     result: PermissionResult,
+    /// 사람이 maru 의 sheet 로 답했다(W9e② v20c N3 — `human_use.touchOf` 가 사람이 그 탭을 쓴 것으로 센다). 에이전트·maru 의 자동 답은 거짓.
+    user: bool = false,
 };
 
 pub const DialogReply = struct {
@@ -472,6 +486,8 @@ pub const DialogReply = struct {
     text: []const u8 = "",
     /// 이 페이지가 이동할 때까지 대화상자를 더 띄우지 못하게 한다(sidecar 가 억제한다).
     suppress: bool = false,
+    /// 사람이 maru 의 sheet 로 답했다(W9e② v20c N3 — 에이전트의 `browser.handleDialog`·자동 답은 거짓).
+    user: bool = false,
 };
 
 pub const FileDialogPath = struct {
@@ -485,6 +501,8 @@ pub const FileDialogReply = struct {
     request: RequestId,
     /// 거짓이면 취소 — 앞서 보낸 경로는 버린다.
     accept: bool,
+    /// 사람이 maru 의 파일 창으로 골랐다(W9e② v20c N3 — 에이전트·자동 취소는 거짓).
+    user: bool = false,
 };
 
 /// 입력 좌표·스크롤 양의 상한(절댓값, DIP). 제스처 주인은 view 밖까지 끌 수 있어(C5 — rect 밖 클램프 없음) 음수와 view
@@ -1728,7 +1746,12 @@ pub const EmuFlags = packed struct(u16) {
     vision: bool = false,
     /// client hints 를 싣는다(`hints` — 주거나 추정한 것). 없으면 UA 만(진짜 Safari·Firefox 처럼 Sec-CH-UA 가 없다).
     hints: bool = false,
-    _reserved: u3 = 0,
+    /// W9e②: CPU 를 느리게(`cpu_rate` — `Emulation.setCPUThrottlingRate`).
+    cpu: bool = false,
+    /// W9e②: 네트워크 조건(`latency_ms`·`download_kbps`·`upload_kbps` — `Network.emulateNetworkConditionsByRule`).
+    network: bool = false,
+    /// W9e②: 오프라인 — 요청 막기(ByRule `offline`)와 `navigator.onLine`(`Network.overrideNetworkState` — 사용자 결정 3). `network` 와 함께만.
+    offline: bool = false,
 };
 
 pub const EmuBrand = struct { brand: []const u8 = "", version: []const u8 = "" };
@@ -1768,6 +1791,13 @@ pub const EmuMedia = struct {
 
 pub const EmuVision = enum(u8) { none = 0, blurred_vision = 1, reduced_contrast = 2, achromatopsia = 3, deuteranopia = 4, protanopia = 5, tritanopia = 6 };
 
+/// W9e②: CPU 줄이기 상한(Chrome DevTools MCP 의 `cpuThrottlingRate` 1–20 과 같다 — 1 은 끔이라 maru 는 보내지 않는다).
+pub const max_emu_cpu_rate: f32 = 20;
+/// W9e②: 네트워크 조건의 지연 상한(ms)과 처리량(kbps — 0 은 제한 없음, 아니면 이 범위).
+pub const max_emu_latency_ms: u32 = 10_000;
+pub const min_emu_kbps: u32 = 16;
+pub const max_emu_kbps: u32 = 1_000_000;
+
 /// `emulation`(W9e①) — 그 탭의 흉내 **전체 상태**(무리가 없으면 그 무리를 지운다). 무리의 칸은 그 표시가 있을 때만 값을 갖는다(닫힌 칸 —
 /// `emu_fields.checkEmulation`).
 pub const Emulation = struct {
@@ -1799,13 +1829,25 @@ pub const Emulation = struct {
     /// 옛 sidecar 가 대신 허용한 위치 출처(재생 때만 — 새 sidecar 가 기본으로 되돌린다).
     restore_count: u8 = 0,
     restore: [max_emu_geo_origins][]const u8 = @splat(""),
+    /// W9e②: CPU 를 몇 배 느리게(1 < 값 ≤ 20, `flags.cpu` 일 때만).
+    cpu_rate: f32 = 0,
+    /// W9e②: 네트워크 조건(`flags.network` 일 때만 — 오프라인이면 모두 0). kbps 는 0(제한 없음) 또는 16..1 000 000.
+    latency_ms: u32 = 0,
+    download_kbps: u32 = 0,
+    upload_kbps: u32 = 0,
 };
 
 /// 흉내 무리(마스크의 비트 차례 — `emulation_state` 의 `active_mask`·`failed_mask`).
-pub const EmuGroup = enum(u4) { viewport = 0, user_agent = 1, locale = 2, timezone = 3, geolocation = 4, media = 5, vision = 6 };
-pub const emu_group_mask_valid: u16 = (1 << 7) - 1;
+pub const EmuGroup = enum(u4) { viewport = 0, user_agent = 1, locale = 2, timezone = 3, geolocation = 4, media = 5, vision = 6, cpu = 7, network = 8 };
+pub const emu_group_mask_valid: u16 = (1 << 9) - 1;
+/// W9e②: sidecar 가 혼자 풀 수 있는 무리(사람이 몸·CPU 를 나누는 남의 프레임 — `released_mask`).
+pub const emu_releasable_mask: u16 = (1 << @backingInt(EmuGroup.cpu)) | (1 << @backingInt(EmuGroup.network));
 
-pub const EmuFailReason = enum(u8) { none = 0, timezone_unknown = 1, process_shared_conflict = 2, cdp_error = 3 };
+/// W9e②: `process_shared` — CPU 줄이기는 렌더러 프로세스 전체에 걸리는데 그 프로세스에 이 탭 가족 밖의 프레임이 있다(사용자 결정 6 — 이유를 늘 싣는다).
+pub const EmuFailReason = enum(u8) { none = 0, timezone_unknown = 1, process_shared_conflict = 2, cdp_error = 3, process_shared = 4 };
+
+/// W9e②: sidecar 가 그 무리를 혼자 푼 까닭 — 사람이 그 탭을 몸(입력·이동), CPU 를 나누는 남의 프레임이 생김.
+pub const EmuReleaseReason = enum(u8) { none = 0, human_input = 1, process_shared = 2 };
 
 pub const EmulationState = struct {
     browser: BrowserId,
@@ -1825,6 +1867,102 @@ pub const EmulationState = struct {
     /// 이 탭에서 대신 허용한 위치 출처(흉내가 끝나면 sidecar 가 되돌린다 — maru 는 재시작 때 쓰려고 기억한다).
     auto_count: u8 = 0,
     auto_allowed: [max_emu_geo_origins][]const u8 = @splat(""),
+    /// W9e②: sidecar 가 혼자 푼 무리(cpu·network)와 그 까닭 — maru 는 그 무리를 지우고 세대를 올린다(PLAN v2 §5.3 풀림 회차). sidecar 는
+    /// 그 뒤 이 세대 이하의 `emulation` 이 싣는 그 무리를 걸지 않는다.
+    released_mask: u16 = 0,
+    cpu_release: EmuReleaseReason = .none,
+    network_release: EmuReleaseReason = .none,
+};
+
+// ── W9e② trace ────────────────────────────────────────────────────────────────────────────────────────────
+
+/// trace 길이 상한(Chrome DevTools MCP 의 자동 멈춤 5 초가 기본 — maru 는 1–30 초).
+pub const min_trace_duration_ms: u32 = 1_000;
+pub const max_trace_duration_ms: u32 = 30_000;
+/// gzip 조각 하나(sidecar 의 `IO.read` 결과를 이 크기로 나눠 보낸다).
+pub const trace_chunk_bytes: usize = 16 * 1024;
+/// 받는 gzip 의 상한 — 적대 페이지 실측 9.65 MB(ATTACK_3 a3_flood). 넘으면 sidecar 가 그만 읽고 `too_large`.
+pub const max_trace_gz_bytes: u32 = 16 * 1024 * 1024;
+/// `trace_frames` 한 frame 의 id 수와 id 하나의 길이(DevTools 프레임 id 는 32 자 16 진).
+pub const max_trace_frame_ids: usize = 64;
+pub const max_trace_frame_id_bytes: usize = 64;
+/// 가족 프레임 집합 상한 — 넘으면 `frames_overflow`(페이지 탓 — PLAN v2 §4.2).
+pub const max_trace_frames_total: u32 = 65_536;
+
+pub const TraceAction = enum(u8) { start = 1, stop = 2, abort = 3 };
+
+pub const Trace = struct {
+    browser: BrowserId,
+    /// maru 가 trace 마다 올리는 세대(0 아님) — 답·조각이 싣는다(늦게 온 옛 trace 의 것을 버린다).
+    generation: u32,
+    action: TraceAction,
+    /// `start` 만: 자동 멈춤(1 000..30 000). 다른 것은 0.
+    duration_ms: u32 = 0,
+    /// `start` 만: 스크린샷 범주를 넣는가.
+    screenshots: bool = false,
+    /// `start` 만: 기록을 시작한 뒤 그 탭을 새로 불러온다.
+    reload: bool = false,
+};
+
+pub const TraceStateKind = enum(u8) { starting = 1, recording = 2, receiving = 3, done = 4, discarded = 5, failed = 6 };
+
+/// 까닭은 상태마다 쓸 수 있는 것이 정해져 있다(`trace_fields.reasonFits`).
+pub const TraceReason = enum(u8) {
+    none = 0,
+    // done — 왜 멈췄나
+    requested = 1,
+    duration = 2,
+    buffer_full = 3,
+    // discarded(sidecar 가 버림)
+    human_input = 10,
+    frames_overflow = 11,
+    aborted = 12,
+    // failed
+    busy = 20,
+    tab_closed = 21,
+    cdp_error = 22,
+    read_timeout = 23,
+    too_large = 24,
+    start_timeout = 25,
+    not_found = 26,
+};
+
+pub const TraceState = struct {
+    browser: BrowserId,
+    generation: u32,
+    state: TraceStateKind,
+    reason: TraceReason = .none,
+    /// 숨은 탭이라 측정하는 동안 focus 흉내를 켰다(사용자 결정 5).
+    focus_emulated: bool = false,
+    /// Chromium 이 버퍼가 넘쳐 자료를 잃었다(`dataLossOccurred`).
+    data_loss: bool = false,
+    /// gzip 상한(`max_trace_gz_bytes`)에 닿을 것 같아 sidecar 가 그 앞에서 잘랐다(`done` 만 — W9e② 적대 검증 4 회차 A4-1). 뒷부분이 없다 —
+    /// maru 가 남은 이벤트로 덮은 시간을 다시 잰다.
+    truncated: bool = false,
+    /// 기록하는 동안 그 탭의 렌더러 프로세스에 가족 밖의 프레임이 들 수 있었다(`done` 만 — sidecar 의 `proc_share` 판정을 기록 시작·프레임이 바뀔
+    /// 때·멈출 때 모은 것). 거짓이면 그 프로세스는 가족만 쓴다 — 주 스레드가 기록 내내 막혀 가족 layer tree 를 모르는 trace 도 그 프로세스의 것은
+    /// 가족의 것이다(W9e② 사용자 결정 12, 2026-10-30).
+    shared_process: bool = false,
+    /// 실제로 덮은 시간(ms — 버퍼 90 % 자동 멈춤이면 `duration_ms` 보다 짧다).
+    covered_ms: u32 = 0,
+    /// 보낸 gzip 바이트(받는 중·끝).
+    gz_bytes: u32 = 0,
+    /// 보낸 가족 프레임 id 수(끝).
+    frames: u32 = 0,
+};
+
+pub const TraceData = struct {
+    browser: BrowserId,
+    generation: u32,
+    offset: u32,
+    bytes: []const u8,
+};
+
+pub const TraceFrames = struct {
+    browser: BrowserId,
+    generation: u32,
+    count: u8,
+    ids: [max_trace_frame_ids][]const u8 = @splat(""),
 };
 
 pub const DownloadAction = enum(u8) {
@@ -1925,6 +2063,7 @@ pub const Message = union(Tag) {
     net_mock_body: NetMockBody,
     net_mock_commit: NetMockCommit,
     emulation: Emulation,
+    trace: Trace,
     main_frame_navigating: BrowserId,
     console_message: ConsoleMessage,
     error_page: ErrorPage,
@@ -1942,6 +2081,9 @@ pub const Message = union(Tag) {
     net_mock_ack: NetMockAck,
     net_mock_hits: NetMockHits,
     emulation_state: EmulationState,
+    trace_state: TraceState,
+    trace_data: TraceData,
+    trace_frames: TraceFrames,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

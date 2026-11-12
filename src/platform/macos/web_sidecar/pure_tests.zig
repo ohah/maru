@@ -1,4 +1,4 @@
-//! 웹 OSR sidecar 중 CEF 를 모르는 부분의 시험 입구(W1b·W1c·W2) — 명령 상자·명령 처리·브라우저 목록·제목 조절·링 알림 검사·링 알림 권리·대화상자 표(W5a)·콘솔 조절(W9c①)·네트워크 문(W9d①)·본문 기록의 표와 보내는 줄(W9d②)·요청 막기의 표·서비스 워커 길 판정·Network 도메인 주인(W9d③)·사용자 이동의 예외 표·가짜 응답의 표(W9d④)·기기 흉내의 명령 열과 위치 한 칸(W9e①). 링 시험은 실제 mach·IOSurface 를 쓴다(CEF 는 안 쓴다). CEF SDK 없이 기본 `zig build test`
+//! 웹 OSR sidecar 중 CEF 를 모르는 부분의 시험 입구(W1b·W1c·W2) — 명령 상자·명령 처리·브라우저 목록·제목 조절·링 알림 검사·링 알림 권리·대화상자 표(W5a)·콘솔 조절(W9c①)·네트워크 문(W9d①)·본문 기록의 표와 보내는 줄(W9d②)·요청 막기의 표·서비스 워커 길 판정·Network 도메인 주인(W9d③)·사용자 이동의 예외 표·가짜 응답의 표(W9d④)·기기 흉내의 명령 열과 위치 한 칸(W9e①)·CPU 나눔 판정과 trace 의 순수 절반(W9e②). 링 시험은 실제 mach·IOSurface 를 쓴다(CEF 는 안 쓴다). CEF SDK 없이 기본 `zig build test`
 //! 에서 돈다(build/web_sidecar.zig 가 시험 수를 잠근다).
 
 test {
@@ -30,4 +30,6 @@ test {
     _ = @import("net_mock_table.zig"); // W9d④ 가짜 규칙 묶음·본문 덩어리
     _ = @import("emu_plan.zig"); // W9e① 기기 흉내 계획
     _ = @import("geo_slot.zig"); // W9e① 위치 한 칸
+    _ = @import("proc_share.zig"); // W9e② CPU 조건의 프로세스 나눔 판정
+    _ = @import("trace_plan.zig"); // W9e② trace 의 순수 계획
 }

@@ -23,9 +23,9 @@ pub const Context = struct {
     maru_version: []const u8,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 3 + unsandboxed_policy 4 + datalist_page 3 + devtools_table 11 + console_gate 16 + net_gate 23 + net_body_table 267 + net_body_sw 38 + out_queue 4 + net_block_table 18 + sw_share 3 + net_domain 22 + net_block_review_tests 38 + net_block_review_b4_tests 7 + net_block_review_a5_tests 11 + net_block_review_a6_tests 4 + net_block_review_a7_tests 4 + nav_exempt 2 + net_mock_table 14 + emu_plan 13 + geo_slot 4 + events 1 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 3 + unsandboxed_policy 4 + datalist_page 3 + devtools_table 12 + console_gate 16 + net_gate 23 + net_body_table 267 + net_body_sw 38 + out_queue 4 + net_block_table 18 + sw_share 3 + net_domain 27 + net_block_review_tests 38 + net_block_review_b4_tests 7 + net_block_review_a5_tests 11 + net_block_review_a6_tests 4 + net_block_review_a7_tests 4 + nav_exempt 4 + net_mock_table 14 + emu_plan 18 + geo_slot 4 + proc_share 11 + trace_plan 6 + events 1 + 입구 파일의 `test {}` 블록 1 — W9e② 가 devtools_table 1·net_domain 5(옛 W9e② 의 넷 중 렌더러 죽음 시험 하나를 main 의 다시 맞추기 꼴로 바꾸고, 옮길 때 ByRule 의 먼저 적는 짝 하나를 더했다)·nav_exempt 2·emu_plan 5(옮길 때 하나 — 홉 기다림의 네트워크 조건)를 늘리고 proc_share 11·trace_plan 6 을 더했다). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 539;
+const pure_test_count = 569;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{
@@ -118,8 +118,33 @@ pub fn register(b: *std.Build, ctx: Context) void {
         .imports = &.{.{ .name = "web_sidecar_protocol", .module = protocol_mod }},
     }));
 
+    // W9e②: 조건의 주인 판정(`control_self_origin` — 앱이 쓰는 그 함수)을 진짜 자식 프로세스에 댄다.
+    judge.root_module.addImport("control_self_origin", b.createModule(.{
+        .root_source_file = b.path("src/session/control_self_origin.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+    }));
+    // W9e②: maru 의 trace 거르기(`web_osr_trace.filter`)를 판정자가 받은 gzip 에 댄다 — 거르기는 와이어 정의를 상대 경로로 가져오므로
+    // `web_sidecar_protocol` 모듈을 쓰는 판정자와 한 실행 파일에 둘 수 없다(한 파일은 한 모듈에만 — 보조 실행 파일).
+    const trace_filter = b.addExecutable(.{
+        .name = "maru-web-trace-filter",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/web_sidecar_judge/trace_filter_main.zig"),
+            .target = ctx.target,
+            .optimize = ctx.optimize,
+            .link_libc = true,
+        }),
+    });
+    trace_filter.root_module.addImport("web_osr_trace", b.createModule(.{
+        .root_source_file = b.path("src/session/web_osr_trace.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+    }));
+    support.attachArrayRepeatImports(b, trace_filter.root_module);
+
     const dest: std.Build.InstallDir = .{ .custom = "web-sidecar" };
-    for ([_]*std.Build.Step.Compile{ host, helper, judge }) |artifact| {
+    for ([_]*std.Build.Step.Compile{ host, helper, judge, trace_filter }) |artifact| {
         sidecar_step.dependOn(&b.addInstallArtifact(artifact, .{ .dest_dir = .{ .override = dest } }).step);
     }
     sidecar_step.dependOn(copyFramework(b, sdk, dest));

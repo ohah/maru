@@ -54,6 +54,7 @@ pub fn run(
         },
         .request => |req| try runRequest(io, allocator, req, stdout, stderr),
         .screenshot => |shot| try runScreenshot(io, allocator, shot, stdout, stderr),
+        .trace => |t| try runTrace(io, allocator, t, stdout, stderr), // W9e②
         // 컨트롤 소켓이 없는 빌드(Windows) — 줄을 읽기 전에 끝낸다. comptime 이라 repl(`std.c.read` 에 HANDLE 을 넘기던 읽기)이 그 빌드에서
         // 분석되지 않는다(W9f 적대 리뷰 5 회차).
         .repl => |r| if (control_client.gate) |reason| return control_client.noInstance(stderr, reason) else runRepl(io, allocator, r.surface, null, stdout, stderr) catch |e| switch (e) {
@@ -124,6 +125,7 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.InvalidBlockAction => "network-block needs exactly one of --add <pattern>, --remove <pattern>, --rule <n>, --clear, --list or --strict on|off",
         error.InvalidBlockArgs => "network-block: --add/--remove take a pattern (scheme://host[:port]/path, * wildcards), --rule a rule number, --type goes with --add, --strict takes on or off; at most 32 patterns or rules",
         error.InvalidMockAction => "network-mock needs exactly one of --add <pattern>, --remove <pattern>, --rule <n>, --clear, --list or --strict on|off",
+        error.InvalidTraceArgs => "trace: start takes --reload, --duration <1s-30s> and --no-screenshots; stop takes --out <file> and --json; status and abort take only --surface; give each once",
         error.InvalidEmulateArgs => "emulate: give each setting once (a value or --no-<setting>, not both); --platform and --client-hints go with --user-agent; --viewport is WxH[@dpr][,mobile][,touch][,landscape], --geolocation lat,lon[,acc] or unavailable; --clear and --get take no settings, and set needs at least one",
         error.InvalidMockArgs => "network-mock: --add/--remove take one pattern, --rule a rule number, --status a number, --header 'Name: value' (up to 32), one of --body/--body-file/--body-base64; response options and --type/--method go with --add, --strict takes on or off",
     };
@@ -139,6 +141,10 @@ pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError) !void {
 
 /// `maru browser navigate/get-url/exec/get-cookies`를 컨트롤 소켓에 왕복한다(§9.6 CLI-2). sessions와 **동형**(같은
 /// `control_client.fetchResponse` 소켓 흐름 공유) — 요청 조립·응답 렌더만 `browser.zig`.
+/// W9e②: 이 프로세스가 오래 사는 세션(`maru mcp`·`maru browser repl`)이다 — 흉내의 CPU·네트워크 조건에 `holder:true` 를 싣는다(그 프로세스가
+/// 끝나면 — MCP 연결이 끊기면 — 조건이 풀린다, 사용자 결정 7). 한 번짜리 CLI 는 거짓(부른 에이전트 프로세스가 주인).
+pub var session_holder: bool = false;
+
 fn runRequest(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -147,6 +153,11 @@ fn runRequest(
     stderr: *std.Io.Writer,
 ) !void {
     if (req == .exec) return runExecuteScript(io, allocator, req.exec, stdout, stderr);
+    if (req == .emulate and session_holder and !req.emulate.holder) {
+        var e = req.emulate;
+        e.holder = true;
+        return runPlainRequest(io, allocator, .{ .emulate = e }, stdout, stderr);
+    }
     // §9.5.10 통일: inline이 method-특화 wrapper인 메서드(snapshot·console)는 bounded transfer라 chunk 재조립 러너로 간다.
     if (req == .snapshot) return runWrappedResult(io, allocator, req, cp.browser_snapshot_chunk_method, "snapshot", .snapshot, stdout, stderr);
     if (req == .console) return runWrappedResult(io, allocator, req, cp.browser_console_chunk_method, "console", .console, stdout, stderr);
@@ -186,6 +197,142 @@ fn runRequest(
     // W9d②: 본문 전부를 파일로 — 조각(64 KiB)을 이어 받아 다 모은 뒤 0600 으로 원자적으로 쓴다(바이너리 본문은 이 길로만).
     if (req == .network_request and req.network_request.out != null) return runNetworkBodyOut(io, allocator, req.network_request, stdout, stderr);
     return runPlainRequest(io, allocator, req, stdout, stderr);
+}
+
+// ── W9e②: trace ───────────────────────────────────────────────────────────────────────────────────────────
+
+/// 한 번에(`trace --surface N`)의 시작 뒤 기다림의 여유 — sidecar 가 시간이 되면 스스로 멈춘다.
+const trace_run_slack_ms: u64 = 300;
+/// 받는 gzip 의 상한(서버의 상한과 같다 — 16 MiB).
+const trace_file_max: usize = 16 * 1024 * 1024;
+
+fn traceError(stderr: *std.Io.Writer, msg: []const u8) error{UnknownCommand} {
+    stderr.print("maru browser trace: {s}\n", .{msg}) catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
+}
+
+fn runTrace(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    switch (cmd.action) {
+        .start, .status, .abort => return runPlainRequest(io, allocator, .{ .trace = cmd }, stdout, stderr),
+        .stop => return traceStop(io, allocator, cmd, stdout, stderr),
+        .read => unreachable,
+        .run => {
+            // 파일이 이미 있으면 기다리기 전에 실패한다(덮지 않는다 — 사용자 결정 1).
+            if (cmd.out) |path| try traceOutFree(std.Io.Dir.cwd(), io, path, stderr);
+            var start = cmd;
+            start.action = .start;
+            try runPlainRequest(io, allocator, .{ .trace = start }, stdout, stderr);
+            const wait_ms: u64 = @as(u64, cmd.duration_ms orelse 5000) + trace_run_slack_ms;
+            io.sleep(.fromMilliseconds(@intCast(wait_ms)), .awake) catch {};
+            var stop = cmd;
+            stop.action = .stop;
+            return traceStop(io, allocator, stop, stdout, stderr);
+        },
+    }
+}
+
+const trace_out_exists = "the --out file already exists — maru never overwrites a trace file; pick a new name";
+
+/// `--out` 이 가리키는 곳에 무엇이 있으면 멈추기 전에 실패(심볼릭 링크도 — 따라가지 않는다). 쓰는 순간의 확인은 `writeNewFile` 의 link 가 한다.
+fn traceOutFree(dir: std.Io.Dir, io: std.Io, path: []const u8, stderr: *std.Io.Writer) !void {
+    _ = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
+    return traceError(stderr, trace_out_exists);
+}
+
+/// `trace stop [--out f] [--json]` — 멈추고(결과를 기다린다) 요약을 내고, `--out` 이면 거른 gzip 을 256 KiB 씩 당겨(요청마다 인가를 다시 본다)
+/// sha256 을 맞춘 뒤 **새 파일로만**(이름 없는 임시 파일 → link — 있으면 실패, 0600) 쓴다.
+fn traceStop(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (cmd.out) |path| try traceOutFree(std.Io.Dir.cwd(), io, path, stderr);
+    const request_bytes = try browser.buildTraceRequest(allocator, cmd, .{ .number = 1 });
+    defer allocator.free(request_bytes);
+    const resp = try control_client.fetchResponse(io, allocator, request_bytes, stderr);
+    defer allocator.free(resp);
+    var pm = cp.parseMessage(allocator, resp) catch return traceError(stderr, "the server returned a malformed answer");
+    defer pm.deinit();
+    const result = switch (pm.message) {
+        .response => |r| r.result orelse {
+            _ = browser.renderResponse(allocator, resp, .trace, stderr) catch false;
+            stderr.flush() catch {};
+            return error.UnknownCommand;
+        },
+        else => return traceError(stderr, "the server returned a malformed answer"),
+    };
+    if (result != .object) return traceError(stderr, "the server returned a malformed answer");
+    const done = std.mem.eql(u8, if (result.object.get("state")) |v| (if (v == .string) v.string else "") else "", "done");
+    if (cmd.json) {
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        std.json.Stringify.value(result, .{}, &aw.writer) catch return error.OutOfMemory;
+        try stdout.writeAll(aw.written());
+        try stdout.writeAll("\n");
+        try stdout.flush();
+    } else {
+        const ok = try browser.renderTrace(allocator, result.object, stdout);
+        try stdout.flush();
+        if (!ok) return error.UnknownCommand;
+    }
+    if (!done) return if (cmd.json) error.UnknownCommand else {};
+    const path = cmd.out orelse return;
+    const file = result.object.get("file") orelse return traceError(stderr, "the trace has no file");
+    if (file != .object) return traceError(stderr, "the trace has no file");
+    const total: usize = @intCast(@max(0, (if (file.object.get("gz_bytes")) |v| (if (v == .integer) v.integer else -1) else -1)));
+    const want_sha = if (file.object.get("sha256")) |v| (if (v == .string) v.string else "") else "";
+    if (total == 0 or total > trace_file_max or want_sha.len != 64) return traceError(stderr, "the trace file size or digest is missing");
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var rounds: usize = 0;
+    while (bytes.items.len < total) : (rounds += 1) {
+        if (rounds > total / (64 * 1024) + 8) return traceError(stderr, "the trace file did not arrive");
+        var read_cmd = cmd;
+        read_cmd.action = .read;
+        read_cmd.offset = @intCast(bytes.items.len);
+        const rb = try browser.buildTraceRequest(allocator, read_cmd, .{ .number = 1 });
+        defer allocator.free(rb);
+        const rr = try control_client.fetchResponse(io, allocator, rb, stderr);
+        defer allocator.free(rr);
+        var rpm = cp.parseMessage(allocator, rr) catch return traceError(stderr, "the server returned a malformed answer");
+        defer rpm.deinit();
+        const piece = switch (rpm.message) {
+            .response => |r| r.result orelse {
+                _ = browser.renderResponse(allocator, rr, .trace, stderr) catch false;
+                stderr.flush() catch {};
+                return error.UnknownCommand;
+            },
+            else => return traceError(stderr, "the server returned a malformed answer"),
+        };
+        if (piece != .object) return traceError(stderr, "the server returned a malformed answer");
+        const off = if (piece.object.get("offset")) |v| (if (v == .integer) v.integer else -1) else -1;
+        const ptotal = if (piece.object.get("total")) |v| (if (v == .integer) v.integer else -1) else -1;
+        const data = if (piece.object.get("data")) |v| (if (v == .string) v.string else "") else "";
+        if (off != bytes.items.len or ptotal != total) return traceError(stderr, "the trace file changed while reading it — stop again");
+        const dec = std.base64.standard.Decoder;
+        const n = dec.calcSizeForSlice(data) catch return traceError(stderr, "the server returned a malformed piece");
+        if (n == 0 or bytes.items.len + n > total) return traceError(stderr, "the server returned a malformed piece");
+        const old = bytes.items.len;
+        try bytes.resize(allocator, old + n);
+        dec.decode(bytes.items[old..], data) catch return traceError(stderr, "the server returned a malformed piece");
+    }
+    var sha: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes.items, &sha, .{});
+    const hex = std.fmt.bytesToHex(sha, .lower);
+    if (!std.mem.eql(u8, &hex, want_sha)) return traceError(stderr, "the trace file digest does not match — not written");
+    try writeNewFile(std.Io.Dir.cwd(), io, path, bytes.items, stderr);
+    try stdout.print("wrote {s} ({d} bytes, gzip JSON — open it in Chrome DevTools' Performance panel)\n", .{ path, bytes.items.len });
+    try stdout.flush();
+}
+
+/// 새 파일로만 쓴다 — 이름 없는 임시 파일(0600)에 다 쓰고 동기화한 뒤 **link** 로 그 이름을 붙인다: 무엇이 있으면(심볼릭 링크 포함 — 따라가지
+/// 않는다) `PathAlreadyExists` 로 실패하고, 끝까지 못 쓰면 이름이 생기지 않는다(`publishResult` 와 같은 원자적 길, 덮어쓰기만 없다 — 사용자 결정 1).
+fn writeNewFile(dir: std.Io.Dir, io: std.Io, path: []const u8, bytes: []const u8, stderr: *std.Io.Writer) !void {
+    // Windows 에는 0600 에 맞는 것이 없다(`publishResult` 의 주석) — 컨트롤 소켓이 없어 여기 닿지 않는다.
+    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
+    var af = dir.createFileAtomic(io, path, .{ .permissions = std.Io.File.Permissions.fromMode(0o600) }) catch
+        return traceError(stderr, "cannot create the --out file");
+    defer af.deinit(io);
+    af.file.writeStreamingAll(io, bytes) catch return traceError(stderr, "writing the --out file failed");
+    af.file.sync(io) catch return traceError(stderr, "writing the --out file failed");
+    af.link(io) catch |e| return traceError(stderr, if (e == error.PathAlreadyExists) trace_out_exists else "writing the --out file failed");
 }
 
 /// W9d②: `network-request --body --out <file>` — `browser.networkRequest` 를 `body_offset` 을 옮기며 되풀이해 본문을 모은다(글은 UTF-8 그대로,
@@ -717,6 +864,33 @@ test "publishResult: 0600 원자 공개 + 기존 파일 덮어쓰기(폴링 재�
     try std.testing.expectEqualStrings("second", buf[0..n]);
 }
 
+test "W9e②: trace 파일 — 새 파일로만 0600, 있으면(심볼릭 링크도) 덮지 않고 실패, 멈추기 전 확인도 같다" {
+    if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var err_buf: [512]u8 = undefined;
+    var err_w: std.Io.Writer = .fixed(&err_buf);
+
+    try traceOutFree(tmp.dir, io, "t.json.gz", &err_w);
+    try writeNewFile(tmp.dir, io, "t.json.gz", "first", &err_w);
+    const stat = try tmp.dir.statFile(io, "t.json.gz", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+    // 있으면 멈추기 전에도, 쓰는 순간에도 실패 — 내용은 그대로.
+    try std.testing.expectError(error.UnknownCommand, traceOutFree(tmp.dir, io, "t.json.gz", &err_w));
+    try std.testing.expectError(error.UnknownCommand, writeNewFile(tmp.dir, io, "t.json.gz", "second", &err_w));
+    try std.testing.expect(std.mem.indexOf(u8, err_w.buffered(), "never overwrites") != null);
+    var buf: [8]u8 = undefined;
+    const file = try tmp.dir.openFile(io, "t.json.gz", .{});
+    defer file.close(io);
+    try std.testing.expectEqualStrings("first", buf[0..try file.readPositionalAll(io, &buf, 0)]);
+    // 심볼릭 링크(가리키는 곳이 없어도)는 따라가지 않고 실패 — 링크가 가리킬 파일을 만들지 않는다.
+    try tmp.dir.symLink(io, "victim", "link.gz", .{});
+    try std.testing.expectError(error.UnknownCommand, traceOutFree(tmp.dir, io, "link.gz", &err_w));
+    try std.testing.expectError(error.UnknownCommand, writeNewFile(tmp.dir, io, "link.gz", "x", &err_w));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "victim", .{}));
+}
+
 test "validateJsonSlice: 완결 strict JSON만 통과하고 빈 입력·깊은 중첩은 막는다" {
     const a = std.testing.allocator;
     try std.testing.expect(validateJsonSlice(a, "{\"k\":[1,2,null]}"));
@@ -825,6 +999,7 @@ const repl_help =
 /// `maru browser repl` — 줄마다 하위 명령 하나를 돌린다. 한 명령이 실패해도 다음 줄로 간다(실패는 끝의 종료 상태로).
 /// 표준 입력이 터미널이면 표준 오류에 프롬프트(`maru browser[7]> `)를 낸다 — 표준 출력은 명령 출력만(파이프로 넘겨도 섞이지 않게).
 fn runRepl(io: std.Io, allocator: std.mem.Allocator, first: ?u64, fd: ?std.c.fd_t, stdout: *std.Io.Writer, stderr_raw: *std.Io.Writer) !void {
+    session_holder = true; // W9e②: repl 은 오래 사는 세션 — 이 프로세스가 끝나면 조건이 풀린다
     var current = first;
     var any_failed = false;
     const interactive = std.c.isatty(fd orelse std.Io.File.stdin().handle) == 1;
@@ -958,6 +1133,10 @@ fn replCommand(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u
                 try stderr.writeAll("(the picked tab was closed — pick another with `use <id>`)\n");
                 try stderr.flush();
             }
+            return true;
+        },
+        .trace => |t| {
+            runTrace(io, allocator, t, stdout, stderr) catch |e| return replFailure(e);
             return true;
         },
         .screenshot => |shot| {

@@ -72,7 +72,7 @@ extern "c" fn getsockname(fd: c_int, addr: *SockaddrIn, len: *u32) c_int;
 extern "c" fn setsockopt(fd: c_int, level: c_int, name: c_int, value: *const anyopaque, len: u32) c_int;
 const Timeval = extern struct { sec: i64, usec: i32 };
 
-var port: u16 = 0;
+pub var port: u16 = 0;
 
 /// 서버가 받은 요청 하나(머리 몇 가지).
 const Rec = struct {
@@ -119,7 +119,7 @@ const Rec = struct {
 var srv_lock: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
 var srv_recs: std.ArrayList(Rec) = .empty;
 
-fn startServer() !void {
+pub fn startServer() !void {
     if (port != 0) return;
     const fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return error.SocketFailed;
@@ -295,6 +295,18 @@ fn replyCacheable(conn: c_int, body: []const u8) void {
     _ = std.c.write(conn, head.ptr, head.len);
     _ = std.c.write(conn, body.ptr, body.len);
 }
+/// W9e②: 에이전트 탭(rAF 수·보임·바쁜 반복·가져오기·긴 작업).
+const tr_common_js =
+    \\window.__frames=0;(function t(){window.__frames++;requestAnimationFrame(t)})();
+    \\window.bench=function(n){n=n||3e7;var s=performance.now(),x=0;for(var i=0;i<n;i++){x=(x+i*7)%1000003}window.__x=x;return Math.round(performance.now()-s)};
+    \\window.ft=async function(u){var s=performance.now();try{var r=await fetch(u,{cache:'no-store'});await r.text();return 'ok '+Math.round(performance.now()-s)}catch(e){return 'err '+Math.round(performance.now()-s)}};
+    \\window.ST=function(){return JSON.stringify({vis:document.visibilityState,frames:__frames,online:navigator.onLine})};
+    \\window.LONG=function(ms){var s=performance.now();while(performance.now()-s<ms){}return 'long'};
+;
+const tr_html = "<!doctype html><title>TR-AGENT</title><body style='background:#0c0'><div id=n>trace page</div><script>" ++ tr_common_js ++ "setInterval(function(){var d=document.createElement('div');d.textContent=Math.random();document.body.appendChild(d);if(document.body.childNodes.length>200)document.body.removeChild(document.body.childNodes[2])},100);</script>";
+/// 사용자 탭 안의 같은 사이트 iframe — 늘 일한다(trace 에 그 프레임 이벤트가 든다 — F3).
+const tif_html = "<!doctype html><title>TIF</title><body><script>" ++ tr_common_js ++ "setInterval(function(){var d=document.createElement('p');d.textContent='IFRAMEWORK'+Math.random();document.body.appendChild(d);if(document.body.childNodes.length>50)document.body.removeChild(document.body.firstChild)},30);addEventListener('message',function(e){e.ports[0].postMessage(ST()+' bench='+bench(1e7))});</script>";
+const tu_tail = "<script>window.IF=function(){return new Promise(function(r){var ch=new MessageChannel();ch.port1.onmessage=function(e){r(e.data)};document.getElementById('f').contentWindow.postMessage('x','*',[ch.port2]);setTimeout(function(){r('timeout')},6000)})};</script>";
 
 const po_html = "<!doctype html><title>po</title><button id=o onclick=\"window.pop=window.open('/pp?child','w1')\" style='position:fixed;left:0;top:0;width:300px;height:200px'>open</button><script>" ++ p_js ++ "</script>";
 
@@ -318,6 +330,9 @@ fn serveParsed(conn: c_int, r: []const u8) void {
         srv_recs.append(std.heap.c_allocator, rec) catch {};
         _ = std.c.pthread_mutex_unlock(&srv_lock);
     }
+    if (@import("w9e2_probe_a.zig").serve(conn, path, target, host_hdr)) return; // v20a 탐침 페이지
+    if (@import("w9e2_probe_b.zig").serve(conn, path, target, host_hdr)) return; // v20b 탐침 페이지
+    if (@import("w9e2_probe_c.zig").serve(conn, path, target, host_hdr)) return; // v20c 탐침 페이지
     var bb: [16384]u8 = undefined;
     if (std.mem.eql(u8, path, "/vp")) return reply(conn, "200 OK", html, accept_ch, vp_html);
     if (std.mem.eql(u8, path, "/pp")) {
@@ -332,6 +347,13 @@ fn serveParsed(conn: c_int, r: []const u8) void {
         return reply(conn, "200 OK", html, "", body);
     }
     if (std.mem.eql(u8, path, "/po")) return reply(conn, "200 OK", html, accept_ch, po_html);
+    // W9e②(perf_check.zig): trace·CPU·네트워크 조건의 페이지.
+    if (std.mem.eql(u8, path, "/tr")) return reply(conn, "200 OK", html, "", tr_html);
+    if (std.mem.eql(u8, path, "/tif")) return reply(conn, "200 OK", html, "", tif_html);
+    if (std.mem.eql(u8, path, "/tu")) {
+        const body = std.fmt.bufPrint(&bb, "<!doctype html><title>TU-USER</title><body style='background:#e00'><iframe id=f src='http://127.0.0.1:{d}/tif?acct=IFRAMEUSERSECRET' width=300 height=200></iframe>{s}", .{ port, tu_tail }) catch return;
+        return reply(conn, "200 OK", html, "", body);
+    }
     if (std.mem.eql(u8, path, "/r2")) {
         // 묶인 사이트(127.0.0.1)에서 다른 사이트로 나가는 리다이렉트(E12 — 그 홉 요청은 흉내를 싣는다).
         const loc = std.fmt.bufPrint(&bb, "Location: http://localhost:{d}/pp?via=r2\r\n", .{port}) catch return;
@@ -488,7 +510,10 @@ fn findColor(segs: []const Seg, color: u32) ?Seg {
 
 // ── 운전 ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-const Run = struct {
+/// v20b 탐침(`w9e2_probe_b.zig`): `Run.take` 가 받는 메시지를 함께 본다(없으면 null — 기존 판정의 동작은 그대로).
+pub var extra_hook: ?*const fn (msg.Message) void = null;
+
+pub const Run = struct {
     host: *Host,
     gpa: std.mem.Allocator,
     receiver: ?*Receiver = null,
@@ -512,8 +537,16 @@ const Run = struct {
     seen_media: [48]u8 = @splat(0),
     seen_n: usize = 0,
     failures: u32 = 0,
+    /// W9e②: trace(판정자가 maru 역할로 받는다 — `perf_check.zig`).
+    tr_states: [32]msg.TraceState = undefined,
+    tr_state_n: usize = 0,
+    tr_gz: std.ArrayList(u8) = .empty,
+    tr_gz_bad: bool = false,
+    tr_frames: std.ArrayList([64]u8) = .empty,
+    tr_frame_lens: std.ArrayList(u8) = .empty,
 
     fn take(self: *Run, m: msg.Message) void {
+        if (extra_hook) |h| h(m); // v20b 탐침: 판정자가 따로 세는 메시지(net_begin 등)
         switch (m) {
             .browser_created => |id| if (id < max_tabs) {
                 self.created[id] = true;
@@ -528,6 +561,20 @@ const Run = struct {
                 self.gone[v.browser] += 1;
             },
             .failure => self.failures += 1,
+            .trace_state => |v| if (self.tr_state_n < self.tr_states.len) {
+                self.tr_states[self.tr_state_n] = v;
+                self.tr_state_n += 1;
+            },
+            .trace_data => |v| {
+                if (v.offset != self.tr_gz.items.len) self.tr_gz_bad = true;
+                self.tr_gz.appendSlice(self.gpa, v.bytes) catch {};
+            },
+            .trace_frames => |v| for (v.ids[0..v.count]) |id| {
+                var b: [64]u8 = undefined;
+                @memcpy(b[0..id.len], id);
+                self.tr_frames.append(self.gpa, b) catch {};
+                self.tr_frame_lens.append(self.gpa, @intCast(id.len)) catch {};
+            },
             .emulation_state => |v| if (v.browser < max_tabs) {
                 var keep = v;
                 if (v.auto_count > 0) {
@@ -573,7 +620,7 @@ const Run = struct {
         for (&self.views) |*v| v.poll();
     }
 
-    fn pump(self: *Run, ms: u32) void {
+    pub fn pump(self: *Run, ms: u32) void {
         const deadline = os.nowMs() + ms;
         while (os.nowMs() < deadline) {
             self.pollFrames();
@@ -582,7 +629,7 @@ const Run = struct {
         }
     }
 
-    fn until(self: *Run, comptime cond: fn (*Run, u64, u32) bool, b: u64, want: u32, ms: u32) bool {
+    pub fn until(self: *Run, comptime cond: fn (*Run, u64, u32) bool, b: u64, want: u32, ms: u32) bool {
         const deadline = os.nowMs() + ms;
         while (os.nowMs() < deadline and !cond(self, b, want)) {
             self.pollFrames();
@@ -592,40 +639,40 @@ const Run = struct {
         return cond(self, b, want);
     }
 
-    fn loadsAt(self: *Run, b: u64, want: u32) bool {
+    pub fn loadsAt(self: *Run, b: u64, want: u32) bool {
         return self.loads[b] >= want;
     }
-    fn createdAt(self: *Run, b: u64, _: u32) bool {
+    pub fn createdAt(self: *Run, b: u64, _: u32) bool {
         return self.created[b];
     }
-    fn goneAt(self: *Run, b: u64, want: u32) bool {
+    pub fn goneAt(self: *Run, b: u64, want: u32) bool {
         return self.gone[b] >= want;
     }
     /// 그 세대의 상태가 와서 기다리는 것이 없다.
-    fn settledAt(self: *Run, b: u64, want: u32) bool {
+    pub fn settledAt(self: *Run, b: u64, want: u32) bool {
         const s = self.st[b] orelse return false;
         return s.generation == want and !s.pending;
     }
-    fn genAt(self: *Run, b: u64, want: u32) bool {
+    pub fn genAt(self: *Run, b: u64, want: u32) bool {
         const s = self.st[b] orelse return false;
         return s.generation == want;
     }
 
-    fn create(self: *Run, b: u64, u: []const u8) !void {
+    pub fn create(self: *Run, b: u64, u: []const u8) !void {
         try self.host.send(.{ .create_browser = .{ .browser = b, .size = .{ .width = 640, .height = 400, .scale = 2 }, .hidden = false, .url = u } });
         _ = self.until(createdAt, b, 0, wait_ms);
         _ = self.until(loadsAt, b, 1, wait_ms);
         self.pump(200);
     }
 
-    fn nav(self: *Run, b: u64, u: []const u8) !void {
+    pub fn nav(self: *Run, b: u64, u: []const u8) !void {
         const before = self.loads[b];
         try self.host.send(.{ .navigate = .{ .browser = b, .url = u } });
         _ = self.until(loadsAt, b, before + 1, wait_ms);
         self.pump(200);
     }
 
-    fn action(self: *Run, b: u64, a: msg.NavActionKind) !void {
+    pub fn action(self: *Run, b: u64, a: msg.NavActionKind) !void {
         const before = self.loads[b];
         try self.host.send(.{ .nav_action = .{ .browser = b, .action = a } });
         _ = self.until(loadsAt, b, before + 1, wait_ms);
@@ -633,7 +680,7 @@ const Run = struct {
     }
 
     /// 흉내 하나(세대를 올려 보낸다) — 그 세대가 자리 잡을 때까지(답을 다 받을 때까지) 기다린다. 받은 상태(없으면 null).
-    fn emulate(self: *Run, b: u64, v: msg.Emulation) !?msg.EmulationState {
+    pub fn emulate(self: *Run, b: u64, v: msg.Emulation) !?msg.EmulationState {
         self.gen[b] += 1;
         var e = v;
         e.browser = b;
@@ -644,7 +691,7 @@ const Run = struct {
         return self.st[b];
     }
 
-    fn call(self: *Run, browser: u64, method: []const u8, params: []const u8, ms: u32) !?msg.DevtoolsStatus {
+    pub fn call(self: *Run, browser: u64, method: []const u8, params: []const u8, ms: u32) !?msg.DevtoolsStatus {
         self.next_call += 1;
         const id = self.next_call;
         try self.host.send(.{ .devtools_call = .{ .browser = browser, .call = id, .method = method, .params_size = @intCast(params.len) } });
@@ -672,12 +719,12 @@ const Run = struct {
         return null;
     }
 
-    fn ev(self: *Run, browser: u64, expr: []const u8, out: []u8) []const u8 {
+    pub fn ev(self: *Run, browser: u64, expr: []const u8, out: []u8) []const u8 {
         return self.evWith(browser, expr, out, false);
     }
 
     /// `gesture` — 사용자 누름 안에서 돈 것처럼(`userGesture` — 활성화가 있어야 묻는 권한).
-    fn evWith(self: *Run, browser: u64, expr: []const u8, out: []u8, gesture: bool) []const u8 {
+    pub fn evWith(self: *Run, browser: u64, expr: []const u8, out: []u8, gesture: bool) []const u8 {
         var pb: [8192]u8 = undefined;
         var w: std.Io.Writer = .fixed(&pb);
         w.writeAll(if (gesture) "{\"returnByValue\":true,\"awaitPromise\":true,\"userGesture\":true,\"expression\":" else "{\"returnByValue\":true,\"awaitPromise\":true,\"expression\":") catch return "<arg>";
@@ -699,7 +746,7 @@ const Run = struct {
     }
 
     /// 사람의 누름(maru 의 `mouse` — DIP).
-    fn userClick(self: *Run, b: u64, x: i32, y: i32) void {
+    pub fn userClick(self: *Run, b: u64, x: i32, y: i32) void {
         self.host.send(.{ .mouse = .{ .browser = b, .kind = .move, .point = .{ .x = x, .y = y } } }) catch {};
         self.host.send(.{ .mouse = .{ .browser = b, .kind = .down, .point = .{ .x = x, .y = y }, .click_count = 1 } }) catch {};
         self.host.send(.{ .mouse = .{ .browser = b, .kind = .up, .point = .{ .x = x, .y = y }, .click_count = 1 } }) catch {};
@@ -707,7 +754,7 @@ const Run = struct {
     }
 
     /// 에이전트의 누름(DevTools `Input.dispatchMouseEvent` — W9b 의 길).
-    fn cdpClick(self: *Run, b: u64, x: f64, y: f64) void {
+    pub fn cdpClick(self: *Run, b: u64, x: f64, y: f64) void {
         var p: [256]u8 = undefined;
         _ = self.call(b, "Input.dispatchMouseEvent", std.fmt.bufPrint(&p, "{{\"type\":\"mousePressed\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x, y }) catch return, 5000) catch {};
         _ = self.call(b, "Input.dispatchMouseEvent", std.fmt.bufPrint(&p, "{{\"type\":\"mouseReleased\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ x, y }) catch return, 5000) catch {};
@@ -715,7 +762,7 @@ const Run = struct {
     }
 
     /// 화면을 새로 그리게 한 뒤(링이 그 크기의 새 장을 받을 때까지) 잠깐 기다린다.
-    fn settleFrames(self: *Run, b: u64) void {
+    pub fn settleFrames(self: *Run, b: u64) void {
         const before = self.views[b].frames;
         const deadline = os.nowMs() + 3000;
         while (os.nowMs() < deadline and self.views[b].frames < before + 2) {
@@ -726,7 +773,7 @@ const Run = struct {
         self.pump(300);
     }
 
-    fn renderers(self: *Run) u32 {
+    pub fn renderers(self: *Run) u32 {
         var kids_buf: [64]c_int = undefined;
         var n: u32 = 0;
         for (os.children(self.host.pid, &kids_buf)) |kid| {
@@ -735,7 +782,7 @@ const Run = struct {
         return n;
     }
 
-    fn killRenderers(self: *Run) u32 {
+    pub fn killRenderers(self: *Run) u32 {
         var kids_buf: [64]c_int = undefined;
         var killed: u32 = 0;
         for (os.children(self.host.pid, &kids_buf)) |kid| {
@@ -750,18 +797,21 @@ const Run = struct {
     fn deinit(self: *Run) void {
         for (&self.views) |*v| v.release();
         self.result.deinit(self.gpa);
+        self.tr_gz.deinit(self.gpa);
+        self.tr_frames.deinit(self.gpa);
+        self.tr_frame_lens.deinit(self.gpa);
     }
 };
 
-fn uLoop(buf: []u8, path: []const u8) []const u8 {
+pub fn uLoop(buf: []u8, path: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}{s}", .{ port, path }) catch unreachable;
 }
 
-fn uLocal(buf: []u8, path: []const u8) []const u8 {
+pub fn uLocal(buf: []u8, path: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "http://localhost:{d}{s}", .{ port, path }) catch unreachable;
 }
 
-fn contains(s: []const u8, needle: []const u8) bool {
+pub fn contains(s: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, s, needle) != null;
 }
 
@@ -773,29 +823,30 @@ fn jsonNum(s: []const u8, comptime key: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, s[start..end]) catch null;
 }
 
-/// 판정자 훅: sidecar 가 흉내의 CDP·위치·사이트 갈림을 stderr 에 적는다(판정 실패를 읽을 때).
+/// 판정자 훅: sidecar 가 흉내의 CDP·위치·사이트 갈림을 stderr 에 적는다(판정 실패를 읽을 때). W9e②: trace 의 차례도.
 const env_log: [*:0]const u8 = "MARU_WEB_TEST_EMU_LOG=1";
+const env_trace_log: [*:0]const u8 = "MARU_WEB_TEST_TRACE_LOG=1";
 
-const Session = struct {
+pub const Session = struct {
     host: Host,
     receiver: Receiver,
     run: Run,
 
-    fn deinit(self: *Session) void {
+    pub fn deinit(self: *Session) void {
         self.run.deinit();
         stop(&self.host);
         self.receiver.close();
     }
 };
 
-fn open(sess: *Session, host_path: [:0]const u8, root: []const u8, name: []const u8) !void {
+pub fn open(sess: *Session, host_path: [:0]const u8, root: []const u8, name: []const u8) !void {
     var prof_buf: [1024]u8 = undefined;
     const profile = try std.fmt.bufPrintSentinel(&prof_buf, "--profile-dir={s}/{s}", .{ root, name }, 0);
     sess.receiver = try Receiver.open();
     errdefer sess.receiver.close();
     var log_buf: [1100]u8 = undefined;
     const log = std.fmt.bufPrintSentinel(&log_buf, "{s}/{s}.host.log", .{ root, name }, 0) catch null;
-    sess.host = try Host.spawnWith(host_path, profile, log, &.{env_log});
+    sess.host = try Host.spawnWith(host_path, profile, log, &.{ env_log, env_trace_log });
     sess.receiver.expected_pid = sess.host.pid;
     try browsers_check.handshake(&sess.host);
     try sess.host.send(.{ .frame_channel = .{ .service = sess.receiver.serviceName(), .token = sess.receiver.token } });

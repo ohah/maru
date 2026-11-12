@@ -192,6 +192,14 @@ description = "Run the W1b/W1c/W2/W4 judge against a real maru-web-host (sandbox
 depends = ["web-sidecar"]
 run = 'profile=$(mktemp -d) && trap "rm -rf \"$profile\"" EXIT && zig-out/web-sidecar/maru-web-judge "$PWD/zig-out/web-sidecar" "$profile"'
 
+# 판정자의 한 모드(`--w9e2a`·`--w9e2b`·`--trace` …)를 **새로 지은** host·판정자로 돌린다. 빌드가 실패하면 판정하지 않는다 — 판정자를 고친 뒤 빌드가
+# 깨진 채 `zig-out` 의 옛 판정자로 돌면 고친 탐침이 없는 판이 「통과」 로 보였다(W9e② 적대 검증 20 회차 V-J1). 고를 탐침은 `W9E2A_ONLY`·`W9E2B_ONLY`
+# (틀린 이름·0 개면 판정자가 실패한다).
+[tasks.web-sidecar-judge-mode]
+description = "Run one judge mode (MODE=--w9e2b etc.) against a freshly built maru-web-host — a failed build stops it, never a stale judge"
+depends = ["web-sidecar"]
+run = '[ -n "$MODE" ] || { echo "set MODE, e.g. MODE=--w9e2b" >&2; exit 2; }; profile=$(mktemp -d) && trap "rm -rf \"$profile\"" EXIT && zig-out/web-sidecar/maru-web-judge "$MODE" "$PWD/zig-out/web-sidecar" "$profile"'
+
 [tasks.macos-editor-smoke]
 description = "Run the MergeView WKWebView gate with a visible window"
 run = "zig build macos-editor-smoke"

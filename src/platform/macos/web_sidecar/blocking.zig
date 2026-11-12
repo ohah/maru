@@ -503,6 +503,8 @@ const Strict = struct {
     ok: bool = true,
     /// W9d④: 막기 쪽 `net_block` 을 받은 적이 있다(엄격의 CDP 답을 막기 상태로도 알릴지 — 가짜 엄격만 있는 탭은 막기 상태를 보내지 않는다).
     block_seen: bool = false,
+    /// W9e②: 네트워크 조건의 바람(`emulation.zig` 가 정한다 — 없으면 null). 답 셈은 `tab`(`net_domain.Tab` 의 `cond_*`).
+    cond: ?CondWish = null,
 
     fn forgetCrossing(self: *Strict) void {
         self.nav_crossed = false;
@@ -510,6 +512,18 @@ const Strict = struct {
         self.landing = false;
     }
 };
+
+/// W9e②: 네트워크 조건 — 인자의 해시(0 아님)·오프라인·지연·처리량(kbps, 0 = 제한 없음). ByRule 의 인자는 이것으로 만든다.
+pub const CondWish = struct {
+    hash: u64,
+    offline: bool = false,
+    latency_ms: u32 = 0,
+    download_kbps: u32 = 0,
+    upload_kbps: u32 = 0,
+};
+
+pub const CondStatus = net_domain.CondStatus;
+
 var stricts: [registry_mod.capacity]?Strict = @splat(null);
 var observer: c.cef_dev_tools_message_observer_t = undefined;
 var resync_task: c.cef_task_t = undefined;
@@ -839,18 +853,29 @@ fn sendCmd(entry: *const registry_mod.Entry, s: *Strict, cmd: net_domain.Cmd) vo
     // 결과를 받으려면 관찰자가 있어야 한다(결과는 그 브라우저의 모든 관찰자에게 간다 — 제 대역만 고른다).
     if (s.reg == null) s.reg = host.*.add_dev_tools_message_observer.?(host, &observer);
     const id = takeId();
-    var jb: [256]u8 = undefined;
+    var jb: [512]u8 = undefined;
     const json = switch (cmd) {
         .enable_light => std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"Network.enable\",\"params\":{{\"maxTotalBufferSize\":0,\"maxResourceBufferSize\":0,\"maxPostDataSize\":1}}}}", .{id}),
         .enable_record => std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"Network.enable\",\"params\":{{\"maxResourceBufferSize\":2097152,\"maxTotalBufferSize\":8388608,\"maxPostDataSize\":1}}}}", .{id}),
         .disable => std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"Network.disable\",\"params\":{{}}}}", .{id}),
         .bypass_on => std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"Network.setBypassServiceWorker\",\"params\":{{\"bypass\":true}}}}", .{id}),
         .bypass_off => std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"Network.setBypassServiceWorker\",\"params\":{{\"bypass\":false}}}}", .{id}),
+        // W9e②: 조건 — 규칙 하나(`urlPattern:""` — 모든 요청), 처리량은 바이트/초(kbps × 125, 0 = 제한 없음 -1). 오프라인은 요청 막기(ByRule)와
+        // `navigator.onLine`(override) 둘(사용자 결정 3).
+        .cond_set => condJson(&jb, id, s.cond orelse CondWish{ .hash = 1 }),
+        .cond_clear => std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"Network.emulateNetworkConditionsByRule\",\"params\":{{\"matchedNetworkConditions\":[]}}}}", .{id}),
+        .online_off => std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"Network.overrideNetworkState\",\"params\":{{\"offline\":true,\"latency\":0,\"downloadThroughput\":-1,\"uploadThroughput\":-1}}}}", .{id}),
+        .online_on => std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"Network.overrideNetworkState\",\"params\":{{\"offline\":false,\"latency\":0,\"downloadThroughput\":-1,\"uploadThroughput\":-1}}}}", .{id}),
     } catch return;
+    // W9e②(main 위로 옮김): 브라우저 쪽 명령(ByRule — `emulateNetworkConditionsByRule`)은 보내는 자리에서 곧 답한다 — 관찰자가 그 답을
+    // `send_dev_tools_message` 안에서 받는다(실측: 보낸 뒤에 짝을 적으면 답이 짝을 못 찾아 조건 켬의 셈이 끝나지 않고 상태가 영영 `pending` —
+    // 판정 `emu-net-latency`·`-offline` 의 「걸림 0x0」). 그래서 짝을 **먼저** 적고, 보내지 못하면 거둔다(`Tab.unsent`). 렌더러 쪽 명령의 답은
+    // 렌더러를 거쳐 늦게 온다 — 9 차·10 차의 차례(보낸 뒤 적기 — 보내지 못한 명령은 앞 자리를 덮지 않는다) 그대로.
+    if (!cmd.rendererSide()) s.tab.sent(cmd, id, true);
     const ok = host.*.send_dev_tools_message.?(host, json.ptr, json.len) != 0;
     // 10 차 MED-1: **모든** 명령의 답을 짝짓는다(엄격 밖의 `disable`·가벼운 enable 도) — 바쁜 렌더러가 처리하지 못한 채 죽으면 그 명령도 새 렌더러에
     // 닿지 않는다; 죽을 때 답을 기다리던 명령이 있어야 다시 맞춘다(`net_domain.Tab.sent` — 자리는 이 탭의 종류마다 하나, 엄격 켬의 셈·죽음 표시도 거기서).
-    s.tab.sent(cmd, id, ok);
+    if (cmd.rendererSide()) s.tab.sent(cmd, id, ok) else if (!ok) s.tab.unsent(cmd, id);
     if (std.c.getenv("MARU_WEB_TEST_BLOCK_LOG") != null) std.debug.print("block: cdp b={d} {s}{s}{s}\n", .{ s.browser, @tagName(cmd), if (s.tab.life.dead) " dead" else "", if (ok) "" else " send-failed" });
 }
 
@@ -867,6 +892,7 @@ fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browse
     // 바란 상태의 다시 보내기를 건다(`armResync` — 그 묶음이 끝난 뒤).
     if (a.resync) armResync(s);
     if (a.state != null) strictSettled(s);
+    if (a.cond) @import("emulation.zig").conditionsSettled(s.browser); // W9e②: 조건 켬의 답 셈이 끝났다
     if (std.c.getenv("MARU_WEB_TEST_BLOCK_LOG") != null) std.debug.print("block: cdp b={d} answer ok={d}{s}\n", .{ s.browser, success, if (a.resync) " resync" else "" });
 }
 
@@ -877,7 +903,9 @@ fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_brow
     if (browser == null) return;
     const cef_id = browser.*.get_identifier.?(browser);
     const s = strictOf(cef_id) orelse return;
+    const cond_lost = s.tab.condDetached(); // W9e②: 조건의 답을 기다리던 것도 오지 않는다 — 실패로 알린다(에이전트가 다시 걸 수 있다)
     if (s.tab.detached() != null) strictSettled(s);
+    if (cond_lost) @import("emulation.zig").conditionsSettled(s.browser);
 }
 
 /// 다시 맞추기를 걸어 둔다 — 지금 보내지 않고 UI task 로 미룬다. 죽은 동안 보낸 명령의 실패 답은 되살리는 이동이 **시작할 때** 한꺼번에 오는데,
@@ -910,8 +938,9 @@ fn resync(entry: *const registry_mod.Entry, s: *Strict) void {
     // W9d④: 막기·가짜 엄격 사이트 어느 쪽이든(엄격의 원하는 값 — `strictCovers`).
     const covers = if (table.findCef(s.cef_id)) |t| t.strictCovers(t.topHost()) else false;
     doUnlock();
-    runCmds(entry, s, s.tab.batch.resync(&s.tab.domain, covers));
+    runCmds(entry, s, s.tab.resync(covers)); // W9e②: 조건 켬의 답 셈도 새 차례(`Tab.resync`)
     if (s.tab.domain.strict) if (s.tab.batch.settle() != null) strictSettled(s);
+    if (s.tab.domain.cond and s.tab.cond_waiting == 0) @import("emulation.zig").conditionsSettled(s.browser); // 기다릴 조건 답이 없다 — 지금 상태
 }
 
 /// 렌더러가 죽었다(`client.onRenderProcessTerminated` — 9 차). 답을 기다리던 명령과 그 뒤 보내는 명령을 표시한다(`net_domain.Tab.gone`) — 표시한
@@ -923,6 +952,39 @@ pub fn rendererGone(browser: BrowserId, cef_id: c_int) void {
     const s = strictEnsure(cef_id, browser) orelse return;
     s.tab.gone();
     if (std.c.getenv("MARU_WEB_TEST_BLOCK_LOG") != null) std.debug.print("block: renderer gone b={d} in-flight {d}\n", .{ browser, s.tab.inFlight() });
+}
+
+// ── W9e②: 네트워크 조건(`emulation.zig` 가 바람을 정한다 — 같은 Network 도메인이라 여기서 낸다) ─────────────────────────────
+
+fn condJson(buf: []u8, id: i32, w: CondWish) ![]const u8 {
+    if (w.offline) return std.fmt.bufPrint(buf, "{{\"id\":{d},\"method\":\"Network.emulateNetworkConditionsByRule\",\"params\":{{\"offline\":true,\"matchedNetworkConditions\":[{{\"urlPattern\":\"\",\"latency\":0,\"downloadThroughput\":-1,\"uploadThroughput\":-1}}]}}}}", .{id});
+    const down: i64 = if (w.download_kbps == 0) -1 else @as(i64, w.download_kbps) * 125;
+    const up: i64 = if (w.upload_kbps == 0) -1 else @as(i64, w.upload_kbps) * 125;
+    return std.fmt.bufPrint(buf, "{{\"id\":{d},\"method\":\"Network.emulateNetworkConditionsByRule\",\"params\":{{\"offline\":false,\"matchedNetworkConditions\":[{{\"urlPattern\":\"\",\"latency\":{d},\"downloadThroughput\":{d},\"uploadThroughput\":{d}}}]}}}}", .{ id, w.latency_ms, down, up });
+}
+
+/// 그 탭의 네트워크 조건을 바람대로(null = 푼다). 같은 바람이면 아무것도 내지 않는다(`net_domain` 이 해시로 가른다).
+pub fn setConditions(entry: *const registry_mod.Entry, wish: ?CondWish) void {
+    init();
+    const s = strictEnsure(entry.cef_id, entry.id) orelse return;
+    if (wish) |w| {
+        const changed = s.cond == null or s.cond.?.hash != w.hash or s.cond.?.offline != w.offline;
+        s.cond = w;
+        if (changed) s.tab.cond_failed = false;
+        runCmds(entry, s, s.tab.domain.conditionsOn(w.hash, w.offline));
+    } else {
+        if (s.cond == null and !s.tab.domain.cond) return;
+        s.cond = null;
+        s.tab.cond_failed = false;
+        runCmds(entry, s, s.tab.domain.conditionsOff());
+    }
+}
+
+/// 그 탭의 조건 상태(`emulation_state` 의 network 무리) — 렌더러가 죽은 동안·답을 기다리면 `pending`(`net_domain.Tab.condStatus`). 렌더러 죽음은
+/// 위의 `rendererGone`(W9d③ 9 차의 길 — 엄격·기록·조건을 쓴 적 없는 탭도 자리를 만든다: 옛 W9e② 구현 적대 리뷰 2 회차 M-a 와 같은 규칙)이 적는다.
+pub fn conditionsStatus(cef_id: c_int) CondStatus {
+    const s = strictOf(cef_id) orelse return .off;
+    return s.tab.condStatus();
 }
 
 // ── W9d② 기록과 나누기(`net_body.zig`) ──────────────────────────────────────────────────────────────────
@@ -952,10 +1014,7 @@ pub fn recordingFailed(entry: *const registry_mod.Entry) void {
 
 /// 본문 기록의 DevTools 가 떨어졌다·브라우저가 닫힌다 — 명령 없이 기록 몫만 내린다.
 pub fn recordingGone(cef_id: c_int) void {
-    if (strictOf(cef_id)) |s| {
-        s.tab.domain.recording = false;
-        if (!s.tab.domain.strict) s.tab.domain.enabled = .off;
-    }
+    if (strictOf(cef_id)) |s| s.tab.domain.recordingGone(); // 엄격·조건이 없으면 도메인은 꺼진 것으로(`net_domain`)
 }
 
 // ── UI 스레드: CEF 사건 ────────────────────────────────────────────────────────────────────────────────

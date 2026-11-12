@@ -672,6 +672,7 @@ test "A-R9: net_domain — {엄격 켬·끔, 기록 켬·끔} 24 차례 × 밸�
                         flag = false;
                         if (saw_disable) saw_disable_before_bypass_off = true;
                     },
+                    .cond_set, .cond_clear, .online_off, .online_on => unreachable, // W9e② 조건은 이 차례에 없다
                 };
                 if (saw_disable_before_bypass_off) bfv.* += 1;
                 // invariants after each op

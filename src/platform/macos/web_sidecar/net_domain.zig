@@ -1,17 +1,21 @@
-//! 탭마다 CDP Network 도메인의 주인 하나(W9d③ — docs/plans/web-osr-backend.md 「W9d③ 결정·실측」 §6.4). CEF 를 모른다 — 무엇을 보낼지(명령 열)만
-//! 정하고 보내기는 `blocking.zig` 가 한다.
+//! 탭마다 CDP Network 도메인의 주인 하나(W9d③ — docs/plans/web-osr-backend.md 「W9d③ 결정·실측」 §6.4, W9e② 「결정·실측」). CEF 를 모른다 —
+//! 무엇을 보낼지(명령 열)만 정하고 보내기는 `blocking.zig` 가 한다.
 //!
-//! Network 도메인을 쓰는 이가 둘이다: W9d② 의 본문 기록(`net_body.zig` — 버퍼 2 MiB·8 MiB 로 켠다)과 W9d③ 의 엄격 모드(서비스 워커 우회 —
-//! `Network.setBypassServiceWorker` 는 `Network.enable` 없이는 듣지 않는다, 실측 D3(ii)). 둘이 따로 켜고 끄면:
-//!   - 기록이 끄는 `Network.disable` 이 엄격을 말없이 멈추고(실측 sw2 — 서비스 워커가 다시 다스린다),
+//! Network 도메인을 쓰는 이가 셋이다: W9d② 의 본문 기록(`net_body.zig` — 버퍼 2 MiB·8 MiB 로 켠다), W9d③ 의 엄격 모드(서비스 워커 우회 —
+//! `Network.setBypassServiceWorker` 는 `Network.enable` 없이는 듣지 않는다, 실측 D3(ii)), W9e② 의 네트워크 조건(`emulateNetworkConditionsByRule`
+//! 도 enable 이 있어야 듣는다 — 실측 n1). 셋이 따로 켜고 끄면:
+//!   - 기록이 끄는 `Network.disable` 이 엄격을 말없이 멈추고(실측 sw2 — 서비스 워커가 다시 다스린다), 조건(ByRule·온라인 여부)도 지운다(n1),
 //!   - 그런데 우회 **표시는 남아** 다음 `Network.enable{}` 에 엄격이 저절로 되살아난다(실측 sw2 — 끈 엄격이 돌아온다).
-//! 그래서 이 표가 둘의 바람을 합쳐 명령을 낸다:
+//! 그래서 이 표가 셋의 바람을 합쳐 명령을 낸다:
 //!   - 엄격 켬: 꺼져 있으면 `enable_light`(`{maxTotalBufferSize:0,maxResourceBufferSize:0,maxPostDataSize:1}` — 이벤트는 받기만), 지금 사이트를
 //!     덮으면 `bypass_on`.
 //!   - 엄격 끔(끔·grant 철회·탭 닫힘): **먼저** `bypass_off`(표시를 지운다), 그다음 기록이 없으면 `disable`.
-//!   - 기록 켬: `enable_record`(기록의 상한 — 우회는 그대로 유지된다, 실측). 기록 끔: 엄격이 있으면 `disable` 대신 `enable_light`(버퍼를 내린다).
-//!   - 쏟아짐 밸브(W9d② 5000/s × 2 s): 엄격이 도메인을 쥐고 있으면 기록만 멈추고 도메인은 끄지 않는다(엄격이 말없이 꺼지지 않게).
+//!   - 기록 켬: `enable_record`(기록의 상한 — 우회는 그대로 유지된다, 실측). 기록 끔: 엄격·조건이 있으면 `disable` 대신 `enable_light`(버퍼를 내린다).
+//!   - 쏟아짐 밸브(W9d② 5000/s × 2 s): 엄격·조건이 도메인을 쥐고 있으면 기록만 멈추고 도메인은 끄지 않는다(말없이 꺼지지 않게).
 //!   - 사이트 묶기: 주 프레임 `on_before_browse`(홉마다)에서 바라는 우회 값이 바뀌면 보낸다(실측 latch — 그 이동에 듣는다).
+//!   - W9e② 조건(`condSync`): 켬은 도메인(꺼졌거나 모르면 `enable_light`) → ByRule(`cond_set` — 값이 바뀔 때만) → 오프라인이면 온라인 여부
+//!     (`online_off` — 사용자 결정 3: 요청 막기 + `navigator.onLine`). 끔은 온라인 되돌림(`online_on`) → ByRule 비움(`cond_clear`) → 기록·엄격이
+//!     없으면 `disable`. 조건이 있는 동안은 `disable` 이 없다.
 //!
 //!   - 실패한 엄격 CDP 뒤에는 브라우저의 우회 표시·도메인을 **모른다**(`unknown` — 4 차 검증 B-LOW-2: 실패한 짝 중 `bypass_on` 이 닿았는지
 //!     모르는데 「꺼짐」 으로 두어, 덮지 않는 곳의 다시 켬·엄격 끔이 `bypass_off` 를 보내지 않았다 — 남은 표시를 기록의 `Network.enable` 이
@@ -27,10 +31,16 @@
 //!     답을 기다리던 것을 표시한다(MED-1). 짝 자리는 탭마다 종류(도메인·우회)마다 하나 — 같은 종류의 새 명령이 앞 자리를 덮는다(LOW-1: 모든 탭이
 //!     나눈 256 자리를 죽은 탭 하나가 다 썼다). 다시 보낸 값은 되살린 문서의 머리 하위 자원(css·script·img)보다 늦게 닿는다 — 그것들은 옛 우회로
 //!     나간다(LOW-2 — 남는 틈, 늘 「더 우회」 쪽).
+//!   - W9e② 조건도 이 길을 탄다(main 위로 옮김 2026-11-12 — 옛 W9e② 는 죽은 동안 렌더러 쪽 명령을 쌓았다가 새 문서에서 냈는데, 9 차·10 차의 이 길이
+//!     같은 출시 버그(a3_dead2·a3_dead3)를 살아 있을 때 보낸 채 죽은 명령까지 덮어 고쳤다). 온라인 여부(`online_*` — 렌더러 쪽)는 짝 자리 하나를
+//!     더 쥐고 죽음에 표시되며, 다시 맞추기가 오프라인 바람을 명시해 다시 보낸다(`forgetRenderer` — 온라인 여부를 쓴 탭만 「모름」). ByRule
+//!     (`cond_*`)은 **브라우저 쪽**이라(죽은 동안에도 곧 답한다 — 실측 a3_dead) 죽음에 표시하지 않는다: 표시하면 렌더러가 서기 전에 온 그 답이
+//!     다시 맞추기를 일찍 걸어, 맞추는 명령이 표시 없이 죽은 렌더러로 나가 사라진다. 조건 켬의 답 셈은 `Tab` 의 `cond_*`(도메인 켬·ByRule·오프라인).
 //!
-//! 시험이 증명하는 것: 각 차례의 명령 열 — 끔은 `bypass_off` 가 늘 먼저, 기록 끔은 엄격이 있으면 `enable_light`, 밸브는 엄격이 있으면 도메인을 두고,
-//! 사이트 묶기는 값이 바뀔 때만, 엄격이 없으면 우회를 보내지 않는다, 모르는 우회는 명시해 보낸다; 답 셈의 차례(`Batch`); 렌더러 죽음 뒤 다시
-//! 보내기의 명령 열과 그 때(`Renderer` — 죽은 동안 보낸 명령의 첫 답에 한 번).
+//! 시험이 증명하는 것: 각 차례의 명령 열 — 끔은 `bypass_off` 가 늘 먼저, 기록 끔은 엄격·조건이 있으면 `enable_light`, 밸브는 엄격·조건이 있으면
+//! 도메인을 두고, 사이트 묶기는 값이 바뀔 때만, 엄격이 없으면 우회를 보내지 않는다, 모르는 우회는 명시해 보낸다; 답 셈의 차례(`Batch`); 렌더러 죽음 뒤
+//! 다시 보내기의 명령 열과 그 때(`Renderer` — 죽은 동안 보낸 명령의 첫 답에 한 번). W9e②: 조건이 있는 동안 `disable` 이 없다, 오프라인은 ByRule 과
+//! 온라인 여부 둘, 같은 조건은 다시 보내지 않는다, ByRule 은 죽음에 표시하지 않고 온라인 여부는 표시해 다시 맞춘다, 조건 켬의 답 셈.
 
 const std = @import("std");
 
@@ -43,11 +53,27 @@ pub const Cmd = enum {
     disable,
     bypass_on,
     bypass_off,
+    /// W9e②: `Network.emulateNetworkConditionsByRule` — 규칙 하나(`urlPattern:""`)와 오프라인(인자는 `blocking.zig` 가 바람에서 만든다).
+    cond_set,
+    /// W9e②: `Network.emulateNetworkConditionsByRule{matchedNetworkConditions:[]}`.
+    cond_clear,
+    /// W9e②: `Network.overrideNetworkState{offline:true,…}` — `navigator.onLine` false(사용자 결정 3 — 같은 렌더러 프로세스의 프레임 모두).
+    online_off,
+    /// W9e②: `Network.overrideNetworkState{offline:false,…}` — 되돌림.
+    online_on,
+
+    /// 렌더러 쪽 명령인가(죽은 동안 보내면 새 렌더러에 닿지 않는다 — 9 차). ByRule 은 브라우저 쪽이다(a3_dead).
+    pub fn rendererSide(self: Cmd) bool {
+        return switch (self) {
+            .cond_set, .cond_clear => false,
+            else => true,
+        };
+    }
 };
 
-/// 명령 열(많아야 셋).
+/// 명령 열(많아야 여섯 — 우회·온라인·ByRule·도메인 … 한 번의 바뀜에 여섯을 넘지 않는다).
 pub const Cmds = struct {
-    items: [3]Cmd = undefined,
+    items: [6]Cmd = undefined,
     len: u8 = 0,
 
     fn push(self: *Cmds, c: Cmd) void {
@@ -82,6 +108,17 @@ pub const Domain = struct {
     enabled: Enabled = .off,
     /// 브라우저의 우회 표시(마지막으로 보낸 값 — 실패 뒤에는 `unknown`).
     bypass: Bypass = .off,
+    /// W9e②: 네트워크 조건의 바람 — 걸 것인가, 그 인자의 해시(0 아님), 오프라인인가.
+    cond: bool = false,
+    cond_hash: u64 = 0,
+    offline: bool = false,
+    /// W9e②: 걸어 둔 ByRule 의 해시(0 = 없음 — 브라우저 쪽이라 렌더러 죽음에 「모름」 이 되지 않는다).
+    applied_cond: u64 = 0,
+    /// W9e②: `navigator.onLine` 덮어쓰기 — `on` 은 오프라인으로 덮어 두었다(마지막으로 보낸 값), `unknown` 은 렌더러 죽음 뒤 닿았는지 모른다.
+    online: Bypass = .off,
+    /// W9e②: 온라인 여부 명령을 보낸 적이 있다 — 렌더러 쪽 상태를 모르게 되면(`forgetRenderer`) 이 탭만 온라인 여부를 「모름」 으로 둔다(쓴 적 없는
+    /// 탭에 명령을 더하지 않는다).
+    online_used: bool = false,
 
     /// 지금 우회 중인가(보낸 값이 `on` — 모르면 거짓).
     pub fn bypassing(self: *const Domain) bool {
@@ -100,10 +137,45 @@ pub const Domain = struct {
             out.push(if (covers_now) .bypass_on else .bypass_off);
             self.bypass = Bypass.of(covers_now);
         }
+        self.condSync(&out);
         return out;
     }
 
-    /// 엄격 끔 — 우회를 먼저 지우고(표시가 `Network.disable` 뒤에도 남는다 — sw2 — 모르면 그래도 보낸다), 기록이 없으면 도메인을 끈다.
+    /// W9e②: 조건의 바람과 걸어 둔 것의 차이(머리 주석의 차례) — 끔 쪽(온라인 되돌림·ByRule 비움)을 먼저, 그다음 켬 쪽(도메인·ByRule·온라인 여부).
+    /// 모르는 온라인 여부(렌더러 죽음 뒤)는 바라는 값을 명시해 보낸다. 도메인 끔(`disable`)은 부른 쪽이 정한다(기록·엄격도 본다).
+    fn condSync(self: *Domain, out: *Cmds) void {
+        const want_online_off = self.cond and self.offline;
+        if (self.online != .off and !want_online_off) {
+            out.push(.online_on);
+            self.online = .off;
+        }
+        if (self.applied_cond != 0 and !self.cond) {
+            out.push(.cond_clear);
+            self.applied_cond = 0;
+        }
+        if (!self.cond) return;
+        if (self.enabled == .off or self.enabled == .unknown) {
+            out.push(.enable_light);
+            self.enabled = .light;
+        }
+        if (self.applied_cond != self.cond_hash) {
+            out.push(.cond_set);
+            self.applied_cond = self.cond_hash;
+        }
+        if (want_online_off and self.online != .on) {
+            out.push(.online_off);
+            self.online = .on;
+        }
+    }
+
+    /// 기록·엄격·조건 어느 것도 도메인을 바라지 않으면 끈다(`disable` 이 ByRule·온라인 여부도 지운다 — n1; 그 전에 condSync 가 이미 되돌렸다).
+    fn offIfUnused(self: *Domain, out: *Cmds) void {
+        if (self.recording or self.strict or self.cond or self.enabled == .off) return;
+        out.push(.disable);
+        self.enabled = .off;
+    }
+
+    /// 엄격 끔 — 우회를 먼저 지우고(표시가 `Network.disable` 뒤에도 남는다 — sw2 — 모르면 그래도 보낸다), 기록·조건이 없으면 도메인을 끈다.
     pub fn strictOff(self: *Domain) Cmds {
         var out: Cmds = .{};
         if (!self.strict and self.bypass == .off) return out;
@@ -112,10 +184,8 @@ pub const Domain = struct {
             out.push(.bypass_off);
             self.bypass = .off;
         }
-        if (!self.recording and self.enabled != .off) {
-            out.push(.disable);
-            self.enabled = .off;
-        }
+        self.condSync(&out);
+        self.offIfUnused(&out);
         return out;
     }
 
@@ -149,24 +219,54 @@ pub const Domain = struct {
         return out;
     }
 
-    /// 본문 기록 끔 — 엄격이 있으면 가벼운 enable 로 버퍼를 내리고, 없으면 끈다.
+    /// 본문 기록 끔 — 엄격·조건이 있으면 가벼운 enable 로 버퍼를 내리고, 없으면 끈다.
     pub fn recordOff(self: *Domain) Cmds {
         var out: Cmds = .{};
         if (!self.recording and self.enabled != .record) return out;
         self.recording = false;
-        if (self.strict) {
+        if (self.strict or self.cond) {
             out.push(.enable_light);
             self.enabled = .light;
-        } else if (self.enabled != .off) {
-            out.push(.disable);
-            self.enabled = .off;
+        } else {
+            self.condSync(&out);
+            self.offIfUnused(&out);
         }
         return out;
     }
 
-    /// 쏟아짐 밸브 — 기록은 멈춘다. 엄격이 도메인을 쥐고 있으면 끄지 않는다(기록의 버퍼만 가벼운 값으로).
+    /// 쏟아짐 밸브 — 기록은 멈춘다. 엄격·조건이 도메인을 쥐고 있으면 끄지 않는다(기록의 버퍼만 가벼운 값으로).
     pub fn valve(self: *Domain) Cmds {
         return self.recordOff();
+    }
+
+    /// W9e②: 네트워크 조건을 건다(`hash` — 인자 JSON 의 해시, 0 이 아니다). 오프라인이면 ByRule 과 온라인 여부 둘(사용자 결정 3).
+    pub fn conditionsOn(self: *Domain, hash: u64, offline: bool) Cmds {
+        std.debug.assert(hash != 0);
+        var out: Cmds = .{};
+        self.cond = true;
+        self.cond_hash = hash;
+        self.offline = offline;
+        if (offline) self.online_used = true;
+        self.condSync(&out);
+        return out;
+    }
+
+    /// W9e②: 조건을 푼다 — 온라인 여부를 되돌리고 ByRule 을 비우고, 기록·엄격이 없으면 도메인을 끈다.
+    pub fn conditionsOff(self: *Domain) Cmds {
+        var out: Cmds = .{};
+        if (!self.cond and self.applied_cond == 0 and self.online == .off) return out;
+        self.cond = false;
+        self.cond_hash = 0;
+        self.offline = false;
+        self.condSync(&out);
+        self.offIfUnused(&out);
+        return out;
+    }
+
+    /// 본문 기록의 DevTools 가 떨어졌다·브라우저가 닫힌다 — 명령 없이 기록 몫만 내린다(엄격·조건이 없으면 도메인은 꺼진 것으로).
+    pub fn recordingGone(self: *Domain) void {
+        self.recording = false;
+        if (!self.strict and !self.cond) self.enabled = .off;
     }
 
     /// 엄격의 CDP 가 실패했다(`setBypassServiceWorker`·`Network.enable` 의 답이 실패·DevTools 떨어짐) — 보냈다고 적은 값을 믿지 않는다: 다음
@@ -179,11 +279,12 @@ pub const Domain = struct {
     }
 
     /// 렌더러 쪽 상태를 모른다(9 차 — 렌더러가 죽은 동안 보낸 명령은 새 렌더러에 닿지 않고, 새 렌더러는 죽기 전 상태를 되받는다) — 다음 켬·끔이
-    /// 우회와 도메인을 모두 명시해 보낸다(`strictOff` 도 `disable` 을). 기록이 켠 도메인(`record`)은 그대로 둔다 — 기록의 켬은 `net_body` 가 보내고
+    /// 우회와 도메인을 모두 명시해 보낸다(`strictOff` 도 `disable` 을 — 조건이 있으면 `enable_light`, W9e② 온라인 여부도). 기록이 켠 도메인(`record`)은 그대로 둔다 — 기록의 켬은 `net_body` 가 보내고
     /// 그 답이 기록의 켜짐이다(죽은 동안 보낸 켬은 실패로 답하고 `recordFailed` 가 내린다).
     pub fn forgetRenderer(self: *Domain) void {
         self.bypass = .unknown;
         if (self.enabled != .record) self.enabled = .unknown;
+        if (self.online_used) self.online = .unknown; // W9e②: 죽은 동안 보낸 온라인 여부도 닿지 않았다 — 오프라인 바람을 명시해 다시
     }
 
     /// 본문 기록의 켬이 실패했다(9 차 — 죽은 동안 보낸 켬은 되살리는 이동에 실패로 답하는데 새 렌더러는 죽기 전 상태를 되받는다) — 기록 몫을 내리고
@@ -193,10 +294,12 @@ pub const Domain = struct {
         if (self.enabled == .record) self.enabled = .unknown;
     }
 
-    /// 탭이 닫힌다·지켜보기가 꺼졌다 — 엄격·기록 모두(우회 먼저).
+    /// 탭이 닫힌다·지켜보기가 꺼졌다 — 엄격·기록·조건 모두(우회 먼저, 온라인 되돌림·ByRule 비움, 도메인).
     pub fn closeAll(self: *Domain) Cmds {
         var out: Cmds = .{};
         if (self.bypass != .off) out.push(.bypass_off);
+        if (self.online != .off) out.push(.online_on);
+        if (self.applied_cond != 0) out.push(.cond_clear);
         if (self.enabled != .off) out.push(.disable);
         self.* = .{};
         return out;
@@ -338,15 +441,20 @@ pub const Renderer = struct {
     }
 };
 
-/// 명령의 종류 — 같은 종류는 마지막 명령이 렌더러 쪽 값을 정한다(한 세션의 명령은 보낸 차례로 처리된다): 도메인(`Network.enable`·`disable`)과 우회.
-pub const Kind = enum(u1) {
+/// 명령의 종류 — 같은 종류는 마지막 명령이 렌더러 쪽 값을 정한다(한 세션의 명령은 보낸 차례로 처리된다): 도메인(`Network.enable`·`disable`)과 우회,
+/// W9e② 의 온라인 여부(렌더러 쪽)와 ByRule(브라우저 쪽 — 죽음에 표시하지 않는다).
+pub const Kind = enum(u2) {
     domain,
     bypass,
+    online,
+    cond,
 
     pub fn of(cmd: Cmd) Kind {
         return switch (cmd) {
             .enable_light, .enable_record, .disable => .domain,
             .bypass_on, .bypass_off => .bypass,
+            .online_off, .online_on => .online,
+            .cond_set, .cond_clear => .cond,
         };
     }
 };
@@ -358,6 +466,9 @@ pub const Pending = struct {
     epoch: u32 = 0,
     counted: bool = false,
     dead: bool = false,
+    /// W9e②: 조건 켬의 답 셈에 든다(그 차례 `cond_epoch`).
+    cond_counted: bool = false,
+    cond_epoch: u32 = 0,
 };
 
 /// 짝지은 답이 낸 일(`Tab.answered`).
@@ -366,6 +477,8 @@ pub const Answer = struct {
     resync: bool = false,
     /// 엄격 켬의 답 셈이 끝났다 — 낼 상태.
     state: ?Batch.State = null,
+    /// W9e②: 조건 켬의 답 셈이 끝났다(`Tab.condStatus` 가 바뀌었다 — 흉내 상태를 다시 보낸다).
+    cond: bool = false,
 };
 
 /// 탭 하나의 렌더러 쪽 명령 길(10 차 — `blocking.zig` 의 `Strict` 가 쥔다; CDP 를 모른다): 바람(`Domain`)·켬의 답 셈(`Batch`)·렌더러의 삶(`Renderer`)·
@@ -382,7 +495,11 @@ pub const Tab = struct {
     domain: Domain = .{},
     batch: Batch = .{},
     life: Renderer = .{},
-    slots: [2]Pending = @splat(.{}),
+    slots: [4]Pending = @splat(.{}),
+    /// W9e②: 조건 켬의 답 셈(도메인 켬·ByRule·오프라인 — 조건이 있을 때 보낸 것) — 기다리는 수·실패·차례(다시 맞추면 오른다).
+    cond_waiting: u16 = 0,
+    cond_failed: bool = false,
+    cond_epoch: u32 = 0,
 
     /// 명령 하나를 보냈다(`id` — CDP 번호, `ok` — 보내기가 받아들여졌는가; 보낼 길이 없으면 거짓). 받아들여졌으면 같은 종류의 앞 명령 자리를 덮는다 —
     /// 그것이 이 차례의 셈에 들었으면 셈에서 뺀다(그 몫의 결과는 이 명령의 답이 낸다). 받아들여지지 않았으면 앞 자리는 그대로 둔다(그 답은 여전히 온다 —
@@ -390,11 +507,17 @@ pub const Tab = struct {
     pub fn sent(self: *Tab, cmd: Cmd, id: i32, ok: bool) void {
         // 엄격 켬 쪽 명령(도메인·우회)의 답은 엄격 상태에 쓴다(`Batch`).
         const counted = self.domain.strict and (cmd == .enable_light or cmd == .bypass_on or cmd == .bypass_off);
+        // W9e②: 조건 켬 쪽 명령(도메인 켬·ByRule·오프라인)의 답은 조건 상태에 쓴다.
+        const cond_counted = self.domain.cond and (cmd == .enable_light or cmd == .cond_set or cmd == .online_off);
         // 죽은 렌더러로 가는 명령은 표시한다 — 그 답이 새 렌더러가 붙은 때다. 보내기는 그대로 한다(브라우저 쪽 몫 — 이동의 서비스 워커 우회 — 은 죽은
-        // 동안에도 듣는다, 실측). 보내지 못했어도 표시는 남는다(`life.stale` — 새 문서가 다시 맞춘다).
-        const dead = self.life.tagSend();
+        // 동안에도 듣는다, 실측). 보내지 못했어도 표시는 남는다(`life.stale` — 새 문서가 다시 맞춘다). W9e②: ByRule 은 브라우저 쪽이라 표시하지 않는다
+        // (그 답은 죽은 동안에도 곧 온다 — 표시하면 렌더러가 서기 전에 다시 맞추기를 건다).
+        const dead = cmd.rendererSide() and self.life.tagSend();
         const k = Kind.of(cmd);
         if (counted) self.batch.sent(ok);
+        if (cond_counted) {
+            if (ok) self.cond_waiting += 1 else self.cond_failed = true;
+        }
         if (!ok) {
             // 우회 명령이 닿았는지 모른다 — 다음 켬·끔이 명시해 보낸다.
             if (k == .bypass) self.domain.bypassUnknown();
@@ -402,7 +525,21 @@ pub const Tab = struct {
         }
         const old = self.slots[@backingInt(k)];
         if (old.id != 0 and old.counted) self.batch.superseded(old.epoch);
-        self.slots[@backingInt(k)] = .{ .id = id, .epoch = self.batch.epoch, .counted = counted, .dead = dead };
+        if (old.id != 0 and old.cond_counted and old.cond_epoch == self.cond_epoch) self.cond_waiting -|= 1;
+        self.slots[@backingInt(k)] = .{ .id = id, .epoch = self.batch.epoch, .counted = counted, .dead = dead, .cond_counted = cond_counted, .cond_epoch = self.cond_epoch };
+    }
+
+    /// W9e②: 먼저 적은 브라우저 쪽 명령(`cond_*` — 보내는 자리에서 곧 답한다, `blocking.sendCmd`)을 보내지 못했다 — 그 자리를 거두고(아직 이 명령의
+    /// 것이면) 조건 켬의 셈이면 실패로. 엄격 켬의 셈(`counted`)에는 들지 않는 종류다.
+    pub fn unsent(self: *Tab, cmd: Cmd, id: i32) void {
+        std.debug.assert(!cmd.rendererSide());
+        const p = &self.slots[@backingInt(Kind.of(cmd))];
+        if (p.id != id) return; // 이미 답했다(그럴 수 없다 — 보내지 못했다) 또는 덮였다
+        if (p.cond_counted and p.cond_epoch == self.cond_epoch) {
+            self.cond_waiting -|= 1;
+            self.cond_failed = true;
+        }
+        p.* = .{};
     }
 
     /// 짝지은 명령의 답 — 이 탭의 것이 아니면 null.
@@ -415,8 +552,14 @@ pub const Tab = struct {
             // 맞추기를 걸고, 나머지 답은 버린다(다시 보낼 명령이 그 뒤에 선다 — 우회 「모름」·답 셈에 넣지 않는다).
             if (done.dead) return .{ .resync = self.life.answeredDead() };
             if (!ok and i == @backingInt(Kind.bypass)) self.domain.bypassUnknown();
-            if (done.counted) return .{ .state = self.batch.answered(done.epoch, ok) };
-            return .{};
+            var a: Answer = .{};
+            if (done.counted) a.state = self.batch.answered(done.epoch, ok);
+            if (done.cond_counted and done.cond_epoch == self.cond_epoch and self.cond_waiting > 0) {
+                self.cond_waiting -= 1;
+                if (!ok) self.cond_failed = true;
+                a.cond = self.cond_waiting == 0;
+            }
+            return a;
         };
         return null;
     }
@@ -424,7 +567,7 @@ pub const Tab = struct {
     /// 렌더러가 죽었다 — 답을 기다리던 명령을 표시하고 그 뒤 보내는 명령도 표시한다.
     pub fn gone(self: *Tab) void {
         var in_flight = false;
-        for (&self.slots) |*p| if (p.id != 0) {
+        for (&self.slots, 0..) |*p, i| if (p.id != 0 and i != @backingInt(Kind.cond)) { // ByRule 은 브라우저 쪽(W9e②)
             p.dead = true;
             in_flight = true;
         };
@@ -447,13 +590,40 @@ pub const Tab = struct {
         return self.batch.detached();
     }
 
-    /// 답을 기다리는 명령 수(시험·로그 — 많아야 둘).
+    /// W9e②: DevTools 가 떨어졌다 — 조건 켬의 답을 기다렸으면 오지 않는다(실패 — 에이전트가 다시 걸 수 있다). 참이면 조건 상태가 바뀌었다.
+    /// `detached` 보다 먼저 부른다(짝 자리를 그것이 비운다).
+    pub fn condDetached(self: *Tab) bool {
+        if (self.cond_waiting == 0) return false;
+        self.cond_waiting = 0;
+        self.cond_failed = true;
+        return true;
+    }
+
+    /// W9e②: 렌더러 쪽 상태를 다시 맞춘다(`Batch.resync` — 조건 켬의 답 셈도 새 차례: 죽음을 맞은 켬의 늦은 답은 세지 않는다, 실패 표시는 남긴다).
+    pub fn resync(self: *Tab, covers_now: bool) Cmds {
+        self.cond_epoch +%= 1;
+        self.cond_waiting = 0;
+        return self.batch.resync(&self.domain, covers_now);
+    }
+
+    /// W9e②: 조건의 상태(흉내 상태의 network 무리) — 렌더러가 죽은 동안·답을 기다리면 `pending`.
+    pub fn condStatus(self: *const Tab) CondStatus {
+        if (!self.domain.cond) return .off;
+        if (self.cond_failed) return .failed;
+        if (self.cond_waiting > 0 or self.life.dead) return .pending;
+        return .on;
+    }
+
+    /// 답을 기다리는 명령 수(시험·로그 — 많아야 넷).
     pub fn inFlight(self: *const Tab) usize {
         var n: usize = 0;
         for (self.slots) |p| n += @intFromBool(p.id != 0);
         return n;
     }
 };
+
+/// W9e②: 네트워크 조건의 상태.
+pub const CondStatus = enum { off, pending, on, failed };
 
 /// 짝지은 답과 그 주인(`answerFrom`).
 pub fn Routed(comptime Owner: type) type {
@@ -946,4 +1116,100 @@ test "W9d③ 12 차 LOW-2 V4: cef_id 가 같은 주인이 둘이면(엄격 표�
     owners[1].?.tab.sent(.disable, 77, true);
     const r = answerFrom(Owner, &owners, 5, 77, true).?;
     try testing.expect(r.owner == &owners[1].?);
+}
+
+test "W9e②: 조건 — 꺼진 도메인은 가볍게 켜고 ByRule, 오프라인은 온라인 여부까지, 같은 조건은 다시 보내지 않는다, 끔은 온라인 되돌림·ByRule 비움·도메인 끔" {
+    var d: Domain = .{};
+    try expectCmds(d.conditionsOn(11, false), &.{ .enable_light, .cond_set });
+    try expectCmds(d.conditionsOn(11, false), &.{}); // 같은 조건
+    try expectCmds(d.conditionsOn(12, false), &.{.cond_set}); // 값이 바뀌면 그것만
+    try expectCmds(d.conditionsOn(13, true), &.{ .cond_set, .online_off }); // 오프라인 = 요청 막기 + navigator.onLine
+    try expectCmds(d.conditionsOn(14, false), &.{ .online_on, .cond_set }); // 오프라인에서 지연으로 — 되돌림이 먼저
+    try expectCmds(d.conditionsOn(15, true), &.{ .cond_set, .online_off });
+    try expectCmds(d.conditionsOff(), &.{ .online_on, .cond_clear, .disable });
+    try expectCmds(d.conditionsOff(), &.{});
+}
+
+test "W9e②: 조건이 있는 동안 disable 은 없다 — 기록 끔·엄격 끔·밸브 모두 도메인을 두고, 조건 끔이 마지막이면 끈다" {
+    var d: Domain = .{};
+    try expectCmds(d.conditionsOn(7, true), &.{ .enable_light, .cond_set, .online_off });
+    try expectCmds(d.recordOn(), &.{.enable_record}); // 조건은 그대로(n1 N4 — enable 다시는 조건을 지우지 않는다)
+    try expectCmds(d.valve(), &.{.enable_light}); // 조건이 쥐고 있다 — 끄지 않는다(끄면 ByRule·오프라인이 사라진다, n1)
+    try expectCmds(d.strictOn(true), &.{.bypass_on});
+    try expectCmds(d.strictOff(), &.{.bypass_off}); // 조건이 도메인을 쓴다
+    try expectCmds(d.conditionsOff(), &.{ .online_on, .cond_clear, .disable });
+    // 엄격이 있으면 조건 끔은 도메인을 둔다.
+    _ = d.strictOn(true);
+    _ = d.conditionsOn(8, false);
+    try expectCmds(d.conditionsOff(), &.{.cond_clear});
+}
+
+test "W9e②: 렌더러 쪽 명령의 가름 — ByRule 둘만 브라우저 쪽" {
+    for ([_]Cmd{ .enable_light, .enable_record, .disable, .bypass_on, .bypass_off, .online_off, .online_on }) |c| try testing.expect(c.rendererSide());
+    try testing.expect(!Cmd.cond_set.rendererSide() and !Cmd.cond_clear.rendererSide());
+}
+
+test "W9e② main 위로 옮김: 렌더러가 죽은 동안의 조건 — 온라인 되돌림·도메인 끔은 죽음에 표시해 첫 답에 다시 맞추고(오프라인 바람을 명시), ByRule 은 표시하지 않는다(브라우저 쪽)" {
+    var t: Tab = .{};
+    var id: i32 = 1;
+    _ = sendAll(&t, t.batch.on(&t.domain, true), &id);
+    const c0 = sendAll(&t, t.domain.conditionsOn(5, true), &id); // cond_set·online_off (도메인은 이미 켜졌다)
+    try testing.expectEqual(@as(u16, 2), t.cond_waiting);
+    try testing.expectEqual(CondStatus.pending, t.condStatus());
+    try testing.expect(!t.answered(c0, true).?.cond);
+    try testing.expect(t.answered(c0 + 1, true).?.cond);
+    try testing.expectEqual(CondStatus.on, t.condStatus());
+    t.gone();
+    try testing.expectEqual(CondStatus.pending, t.condStatus()); // 죽은 동안
+    // 죽은 동안 조건을 끈다 — ByRule 비움(브라우저 쪽)은 표시하지 않고, 온라인 되돌림은 표시한다.
+    const off = sendAll(&t, t.domain.conditionsOff(), &id); // online_on·cond_clear
+    try testing.expect(!t.answered(off + 1, true).?.resync); // ByRule 의 답은 곧 온다 — 다시 맞추기를 일찍 걸지 않는다
+    try testing.expect(t.life.dead);
+    try testing.expect(t.answered(off, false).?.resync); // 되살리는 이동이 시작할 때 실패로 온 온라인 되돌림
+    try expectCmds(t.resync(true), &.{ .enable_light, .bypass_on, .online_on }); // 오프라인을 푼 바람을 명시
+    try testing.expectEqual(CondStatus.off, t.condStatus());
+    // 죽은 동안 오프라인을 건 탭 — 다시 맞추기가 오프라인을 명시하고 그 답이 조건 상태를 정한다.
+    var u: Tab = .{};
+    u.gone();
+    const on = sendAll(&u, u.domain.conditionsOn(6, true), &id); // enable_light·cond_set·online_off
+    try testing.expect(!u.answered(on + 1, true).?.resync); // ByRule
+    try testing.expect(u.answered(on, false).?.resync);
+    try testing.expect(u.answered(on + 2, false).?.state == null); // 같은 묶음의 나머지
+    const again = sendAll(&u, u.resync(false), &id);
+    try testing.expectEqual(@as(u16, 2), u.cond_waiting); // enable_light·online_off(ByRule 은 이미 걸렸다 — 브라우저 쪽)
+    try testing.expectEqual(CondStatus.pending, u.condStatus());
+    _ = u.answered(again + 1, true);
+    try testing.expect(u.answered(again + 2, true).?.cond);
+    try testing.expectEqual(CondStatus.on, u.condStatus());
+    // 답을 기다리던 ByRule 이 렌더러 죽음을 맞아도 표시하지 않는다 — 그 답(브라우저 쪽 — 곧 온다)은 다시 맞추기를 걸지 않고 조건의 셈을 끝낸다.
+    var w: Tab = .{};
+    const w0 = sendAll(&w, w.domain.conditionsOn(8, false), &id); // enable_light·cond_set
+    try testing.expect(!w.answered(w0, true).?.resync);
+    w.gone(); // cond_set 은 아직 답을 기다린다
+    try testing.expect(!w.life.stale); // 렌더러 쪽 명령은 답을 받았다 — 맞출 것이 없다
+    const wa = w.answered(w0 + 1, true).?;
+    try testing.expect(!wa.resync and wa.cond);
+    try testing.expect(w.life.dead); // 렌더러는 아직 서지 않았다
+    // 온라인 여부를 쓴 적 없는 탭은 다시 맞추기에 온라인 명령을 더하지 않는다(W9d③ 의 명령 열 그대로).
+    var v: Tab = .{};
+    _ = v.domain.conditionsOn(7, false);
+    try expectCmds(v.resync(false), &.{ .bypass_off, .enable_light });
+}
+
+test "W9e② main 위로 옮김: 브라우저 쪽 ByRule 은 보내기 전에 짝을 적는다 — 보내는 자리의 곧 온 답이 셈을 끝내고, 보내지 못하면 거둬 실패로" {
+    var t: Tab = .{};
+    const cmds = t.domain.conditionsOn(3, false); // enable_light·cond_set
+    try expectCmds(cmds, &.{ .enable_light, .cond_set });
+    t.sent(.enable_light, 1, true); // 렌더러 쪽 — 보낸 뒤 적는다
+    t.sent(.cond_set, 2, true); // 브라우저 쪽 — 보내기 전에 적는다(`blocking.sendCmd`)
+    try testing.expect(!t.answered(2, true).?.cond); // 보내는 자리에서 곧 온 답
+    try testing.expect(t.answered(1, true).?.cond);
+    try testing.expectEqual(CondStatus.on, t.condStatus());
+    // 보내지 못했다 — 자리를 거두고 실패.
+    _ = t.domain.conditionsOn(4, false);
+    t.sent(.cond_set, 3, true);
+    t.unsent(.cond_set, 3);
+    try testing.expectEqual(@as(usize, 0), t.inFlight());
+    try testing.expectEqual(CondStatus.failed, t.condStatus());
+    try testing.expect(t.answered(3, true) == null);
 }

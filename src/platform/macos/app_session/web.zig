@@ -476,6 +476,10 @@ pub fn tickWebOsr(self: *AppSession) void {
                 if (web_osr.takeMockNotice(sid)) self.showNoticeKey(.web_osr_mock_notice);
                 // W9e①: 에이전트의 기기 흉내(◫)가 이 탭이 서버·페이지에 보이는 정체를 바꾼다(사용자가 흉내 중인 에이전트 탭을 처음 몰았다).
                 if (web_osr.takeEmulationNotice(sid)) self.showNoticeKey(.web_osr_emulation_notice);
+                // W9e②: 사람이 몰아 에이전트의 CPU·네트워크 조건이 풀렸다(PLAN v2 §3 — 한 번).
+                if (web_osr.takeConditionsNotice(sid)) self.showNoticeKey(.web_osr_conditions_released);
+                // W9e②: trace 가 시작·끝났다 — 다시 짓는다(제목의 ◔).
+                if (web_osr.takeTraceRedraw(sid)) self.metal_dirty = true;
                 // W9e①: 흉내가 바뀌었다 — 다시 짓는다(제목의 ◫·맞춤 바깥의 어둡게 — 웹 프레임만으로는 세대만 오른다).
                 if (web_osr.takeEmulationRedraw(sid)) self.metal_dirty = true;
                 // 엔진이 멈췄다 — 이 탭이 있는 창이 한 번 보인다(멈춘 뒤 새로 연 탭도).
@@ -745,7 +749,7 @@ fn clearShown(self: *AppSession, surface_id: u64, token: u64) void {
 pub fn osrDialogReply(self: *AppSession, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool) void {
     // W9c②: 사용자가 sheet 로 답했다 — 그 답이 부른 다음 대화상자는 사용자 것이다(이미 사라진 요청이면 답이 아니다).
     if (web_osr.dialogPending(surface_id, token) != null) web_osr.noteUserAction(surface_id);
-    web_osr.replyDialog(self.allocator, surface_id, token, accept, text, suppress);
+    web_osr.replyDialog(self.allocator, surface_id, token, accept, text, suppress, .human);
     clearShown(self, surface_id, token);
 }
 
@@ -755,7 +759,7 @@ pub fn osrFileDialogPath(self: *AppSession, surface_id: u64, token: u64, path: [
 
 pub fn osrFileDialogReply(self: *AppSession, surface_id: u64, token: u64, accept: bool) void {
     if (web_osr.dialogPending(surface_id, token) != null) web_osr.noteUserAction(surface_id); // W9c②: 위와 같다
-    web_osr.replyFileDialog(self.allocator, surface_id, token, accept);
+    web_osr.replyFileDialog(self.allocator, surface_id, token, accept, .human);
     clearShown(self, surface_id, token);
 }
 
@@ -781,10 +785,12 @@ pub fn osrLocationReply(self: *AppSession, surface_id: u64, token: u64, status: 
         return false;
     };
     const remembered = d.remembered;
+    // W9e② v20c N3: sheet 의 답은 사람이 그 탭을 쓴 것이다(trace 를 버리고 조건을 푼다). 기억된 요청은 sheet 없이 maru 가 답한다.
+    const by: web_osr.ReplyBy = if (remembered) .program else .human;
     const answered = switch (status) {
-        .position => web_osr.replyLocation(self.allocator, surface_id, token, position, .accept),
-        .unavailable => web_osr.replyLocation(self.allocator, surface_id, token, null, .accept),
-        .blocked => web_osr.replyLocation(self.allocator, surface_id, token, null, if (remembered) .accept else .ignore),
+        .position => web_osr.replyLocation(self.allocator, surface_id, token, position, .accept, by),
+        .unavailable => web_osr.replyLocation(self.allocator, surface_id, token, null, .accept, by),
+        .blocked => web_osr.replyLocation(self.allocator, surface_id, token, null, if (remembered) .accept else .ignore, by),
     };
     clearShown(self, surface_id, token);
     return answered;
@@ -792,7 +798,7 @@ pub fn osrLocationReply(self: *AppSession, surface_id: u64, token: u64, status: 
 
 /// 답했으면 true — 요청이 이미 사라졌으면(이동·닫힘) false(Swift 는 그때 macOS 안내를 띄우지 않는다).
 pub fn osrPermissionReply(self: *AppSession, surface_id: u64, token: u64, result: ws.message.PermissionResult) bool {
-    const answered = web_osr.replyPermission(self.allocator, surface_id, token, result);
+    const answered = web_osr.replyPermission(self.allocator, surface_id, token, result, .human);
     clearShown(self, surface_id, token);
     return answered;
 }
@@ -3299,6 +3305,44 @@ pub fn takeWebNavAction(self: *AppSession) ?WebNavAction {
 /// W4d: 설정의 브라우저 엔진이 바뀌었으면(파일 reload·설정 화면) 「재시작하면 적용」을 한 번 알린다.
 pub fn noteBrowserEngineConfig(self: *AppSession) void {
     if (web_osr.engineChangeNeedsNotice(self.loaded_config.config.browser.engine == .chromium)) self.showNoticeKey(.set_browser_engine_restart);
+}
+
+test "W9e② v20c N3: sheet 진입(대화상자·파일·권한·위치)은 답을 사람의 것으로 싣는다 — 기억된 위치 요청은 maru 가 답한다" {
+    const gpa = std.testing.allocator;
+    const tab: u64 = 900_731;
+    try web_osr.testHold(gpa, tab);
+    web_osr.testRunning(tab);
+    defer {
+        web_osr.destroy(gpa, tab);
+        web_osr.testForget(gpa);
+    }
+    // 이 진입들은 세션의 할당자와 띄운 sheet 표시만 쓴다.
+    var app: AppSession = undefined;
+    app.allocator = gpa;
+    app.osr_dialog = null;
+    app.osr_dialog_ready = false;
+    web_osr.testApply(gpa, .{ .js_dialog = .{ .browser = tab, .request = 1, .kind = .prompt, .origin = "", .message = "" } });
+    web_osr.test_last_reply_user = null;
+    osrDialogReply(&app, tab, web_osr.testDialogToken(tab).?, true, "typed", false);
+    try std.testing.expectEqual(@as(?bool, true), web_osr.test_last_reply_user);
+    web_osr.testApply(gpa, .{ .file_dialog = .{ .browser = tab, .request = 2, .mode = .open } });
+    web_osr.test_last_reply_user = null;
+    osrFileDialogReply(&app, tab, web_osr.testDialogToken(tab).?, false);
+    try std.testing.expectEqual(@as(?bool, true), web_osr.test_last_reply_user);
+    web_osr.testApply(gpa, .{ .permission_request = .{ .browser = tab, .request = 3, .origin = "https://meet.example", .media = 0b11 } });
+    web_osr.test_last_reply_user = null;
+    try std.testing.expect(osrPermissionReply(&app, tab, web_osr.testDialogToken(tab).?, .deny));
+    try std.testing.expectEqual(@as(?bool, true), web_osr.test_last_reply_user);
+    web_osr.testApply(gpa, .{ .permission_request = .{ .browser = tab, .request = 4, .origin = "https://map.example", .kinds = ws.message.PermissionKind.geolocation.bit() } });
+    web_osr.test_last_reply_user = null;
+    _ = osrLocationReply(&app, tab, web_osr.testDialogToken(tab).?, .unavailable, .{ .latitude = 0, .longitude = 0, .accuracy = 1 });
+    try std.testing.expectEqual(@as(?bool, true), web_osr.test_last_reply_user);
+    web_osr.testApply(gpa, .{ .permission_request = .{ .browser = tab, .request = 5, .origin = "https://map.example", .kinds = ws.message.PermissionKind.geolocation.bit(), .remembered = true } });
+    if (web_osr.testDialogToken(tab)) |remembered| {
+        web_osr.test_last_reply_user = null;
+        _ = osrLocationReply(&app, tab, remembered, .unavailable, .{ .latitude = 0, .longitude = 0, .accuracy = 1 });
+        try std.testing.expectEqual(@as(?bool, false), web_osr.test_last_reply_user);
+    }
 }
 
 test "permission sheet text lists each asked permission once and notes remembering only for prompts" {

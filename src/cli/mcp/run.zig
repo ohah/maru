@@ -43,6 +43,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *std
     // 컨트롤 소켓이 없는 빌드(Windows) — 도구가 하나도 돌 수 없으니 표준 입력을 읽기 전에 이유를 알리고 끝낸다(W9f 적대 리뷰 5 회차:
     // 그 빌드의 `std.c.read` 는 CRT fd 가 아닌 HANDLE 을 받았다). comptime 이라 아래가 그 빌드에서 분석되지 않는다.
     if (control_client.gate) |reason| return control_client.noInstance(stderr, reason);
+    // W9e②: MCP 서버는 연결 동안 사는 세션 — 흉내의 CPU·네트워크 조건은 이 프로세스(연결)와 그 에이전트가 사는 동안만(사용자 결정 7).
+    browser_run.session_holder = true;
     // 클라이언트가 표준 출력을 닫았다 — 답할 곳이 없으니 조용히 끝낸다(W9f 적대 리뷰 1 회차: 스택 트레이스와 종료 1).
     return serveQuietly(io, allocator, null, stdout, stderr);
 }

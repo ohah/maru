@@ -59,7 +59,8 @@ pub const browser_help =
     \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
     \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ⊘)
     \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site; requests made by iframes or workers of a site your permission does not cover are never mocked); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; needs the network and control permissions first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ▣)
-    \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; asks once per site on your tabs and works only while that site is shown; not on tabs the agent opened; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫)
+    \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; asks once per site on your tabs and works only while that site is shown; not on tabs the agent opened; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on your tabs --network takes a preset and no offline)
+    \\  trace (start [--reload] [--duration 5s] [--no-screenshots] | stop [--out <file.json.gz>] [--json] | status | abort) --surface <id>   record a performance trace of a tab this pane opened (Chromium; 1-30 s, default 5 s; a hidden tab is kept rendering while it records); stop prints a summary, --out also writes the filtered trace (gzip JSON — open it in Chrome DevTools' Performance panel); never overwrites a file. `trace --surface <id> [--duration 5s] [--out f]` does start, wait and stop in one go. (`maru trace` is maru's own terminal trace tool — this is the page's.)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -136,6 +137,9 @@ pub const Request = union(enum) {
     network_mock: NetworkMockCmd,
     /// `browser emulate`(W9e① — Chromium). 응답 {emulation:{…}, site, active, state, not_covered, …}.
     emulate: EmulateCmd,
+    /// `browser trace start|stop|status|abort`(W9e② — Chromium, 에이전트가 연 탭). 한 번의 요청 — `stop --out`·한 번에(`trace --surface`) 는
+    /// `Command.trace` 의 러너가 여러 요청으로 한다.
+    trace: TraceCmd,
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -160,6 +164,7 @@ pub const Request = union(enum) {
             .network_block => .network_block,
             .network_mock => .network_mock,
             .emulate => .emulate,
+            .trace => .trace,
         };
     }
 };
@@ -177,6 +182,11 @@ pub const EmulateCmd = struct {
     geolocation: Change(Geo) = .keep,
     media: Change(Media) = .keep,
     vision: Change([]const u8) = .keep,
+    /// W9e②: CPU 몇 배(1–20 — 1 은 끔, 서버가 범위를 본다)·네트워크 조건.
+    cpu: Change(f64) = .keep,
+    network: Change(Network) = .keep,
+    /// W9e②: 부른 쪽이 오래 사는 세션(MCP·REPL — 러너가 둔다). 그 프로세스도 조건의 주인이 된다(연결이 끊기면 푼다 — 사용자 결정 7).
+    holder: bool = false,
     /// MCP 꼴 — 무리의 JSON 글(그대로 싣는다). 사람의 꼴과 함께 주면 거절.
     json: [group_names.len]?[]const u8 = @splat(null),
 
@@ -188,9 +198,118 @@ pub const EmulateCmd = struct {
     pub const UserAgent = struct { ua: []const u8, platform: ?[]const u8 = null, client_hints: ?[]const u8 = null };
     pub const Geo = struct { unavailable: bool = false, latitude: f64 = 0, longitude: f64 = 0, accuracy: ?f64 = null };
     pub const Media = struct { type: ?[]const u8 = null, color_scheme: ?[]const u8 = null, reduced_motion: ?[]const u8 = null, forced_colors: ?[]const u8 = null, contrast: ?[]const u8 = null };
+    /// W9e②: 프리셋 이름 또는 수치(`--latency` 와 함께만 `--download`·`--upload`).
+    pub const Network = struct { preset: ?[]const u8 = null, latency_ms: u32 = 0, download_kbps: ?u32 = null, upload_kbps: ?u32 = null };
     /// 무리 이름(요청 JSON 의 키·MCP 의 `--<이름>-json` 옵션).
-    pub const group_names = [_][]const u8{ "viewport", "user_agent", "locale", "timezone", "geolocation", "media", "vision" };
+    pub const group_names = [_][]const u8{ "viewport", "user_agent", "locale", "timezone", "geolocation", "media", "vision", "cpu", "network" };
 };
+
+/// W9e②: `browser trace` — `start`·`stop`·`status`·`abort`(한 요청)과 한 번에(`run` — 시작·기다림·멈춤). MCP 꼴은 `--action <a>`. `read` 는
+/// 러너만 쓴다(`stop --out` 의 바이트 — 사람은 치지 않는다).
+pub const TraceCmd = struct {
+    surface_id: u64,
+    action: Action,
+    reload: bool = false,
+    duration_ms: ?u32 = null,
+    screenshots: bool = true,
+    /// 거른 trace(gzip JSON)를 쓸 곳 — 있으면 덮지 않는다(사용자 결정 1).
+    out: ?[]const u8 = null,
+    json: bool = false,
+    offset: u32 = 0,
+
+    pub const Action = enum { start, stop, status, abort, read, run };
+};
+
+/// `5s`·`2.5s`·`5000ms`·`5000`(ms) — 1..30 초.
+pub fn parseTraceDuration(v: []const u8) ParseError!u32 {
+    const ms: f64 = if (std.mem.endsWith(u8, v, "ms"))
+        std.fmt.parseFloat(f64, v[0 .. v.len - 2]) catch return error.InvalidTraceArgs
+    else if (std.mem.endsWith(u8, v, "s"))
+        (std.fmt.parseFloat(f64, v[0 .. v.len - 1]) catch return error.InvalidTraceArgs) * 1000
+    else
+        std.fmt.parseFloat(f64, v) catch return error.InvalidTraceArgs;
+    if (!(ms >= 1000 and ms <= 30_000)) return error.InvalidTraceArgs;
+    return @intFromFloat(@round(ms));
+}
+
+fn parseTraceArgs(rest: []const []const u8) ParseError!TraceCmd {
+    var surface: ?u64 = null;
+    var action: ?TraceCmd.Action = null;
+    var cmd: TraceCmd = .{ .surface_id = 0, .action = .run };
+    var screenshots_given = false;
+    var i: usize = 0;
+    if (rest.len > 0 and !std.mem.startsWith(u8, rest[0], "-")) {
+        action = std.meta.stringToEnum(TraceCmd.Action, rest[0]) orelse return error.UnexpectedArgument;
+        if (action.? == .read or action.? == .run) return error.UnexpectedArgument;
+        i = 1;
+    }
+    while (i < rest.len) {
+        const a = rest[i];
+        if (matchOpt(a, "--surface")) {
+            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+        } else if (matchOpt(a, "--action")) {
+            const want = std.meta.stringToEnum(TraceCmd.Action, try optValue(rest, &i, "--action")) orelse return error.InvalidTraceArgs;
+            if (want == .read or want == .run) return error.InvalidTraceArgs;
+            if (action) |c| if (c != want) return error.InvalidTraceArgs;
+            action = want;
+        } else if (matchOpt(a, "--duration")) {
+            if (cmd.duration_ms != null) return error.InvalidTraceArgs;
+            cmd.duration_ms = try parseTraceDuration(try optValue(rest, &i, "--duration"));
+        } else if (matchOpt(a, "--out")) {
+            if (cmd.out != null) return error.InvalidTraceArgs;
+            const o = try optValue(rest, &i, "--out");
+            if (o.len == 0) return error.InvalidTraceArgs;
+            cmd.out = o;
+        } else if (eq(a, "--reload")) {
+            cmd.reload = true;
+            i += 1;
+        } else if (eq(a, "--screenshots") or eq(a, "--no-screenshots")) {
+            if (screenshots_given) return error.InvalidTraceArgs;
+            screenshots_given = true;
+            cmd.screenshots = eq(a, "--screenshots");
+            i += 1;
+        } else if (eq(a, "--json")) {
+            cmd.json = true;
+            i += 1;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else return error.UnexpectedArgument;
+    }
+    cmd.action = action orelse .run;
+    const start_opts = cmd.reload or cmd.duration_ms != null or screenshots_given;
+    const stop_opts = cmd.out != null or cmd.json;
+    switch (cmd.action) {
+        .start => if (stop_opts) return error.InvalidTraceArgs,
+        .stop => if (start_opts) return error.InvalidTraceArgs,
+        .status, .abort => if (start_opts or stop_opts) return error.InvalidTraceArgs,
+        .run => {},
+        .read => unreachable,
+    }
+    cmd.surface_id = surface orelse return error.MissingSurface;
+    return cmd;
+}
+
+/// W9e②: `browser.trace {id, action, …}`(한 요청 — `run` 은 러너가 start·stop 으로 나눈다).
+pub fn buildTraceRequest(gpa: std.mem.Allocator, t: TraceCmd, id: cp.Id) std.mem.Allocator.Error![]u8 {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(arena, "id", .{ .integer = @intCast(t.surface_id) });
+    const action: TraceCmd.Action = if (t.action == .run) .start else t.action;
+    try obj.put(arena, "action", .{ .string = @tagName(action) });
+    switch (action) {
+        .start => {
+            if (t.reload) try obj.put(arena, "reload", .{ .bool = true });
+            if (t.duration_ms) |d| try obj.put(arena, "duration_ms", .{ .integer = d });
+            if (!t.screenshots) try obj.put(arena, "screenshots", .{ .bool = false });
+        },
+        .stop => if (t.out != null) try obj.put(arena, "file", .{ .bool = true }),
+        .read => try obj.put(arena, "offset", .{ .integer = t.offset }),
+        else => {},
+    }
+    return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.trace", .params = .{ .object = obj } } });
+}
 
 /// `--viewport WxH[@dpr][,mobile][,touch][,landscape]`.
 fn parseViewportSpec(v: []const u8) ParseError!EmulateCmd.Viewport {
@@ -234,6 +353,10 @@ fn parseEmulateArgs(rest: []const []const u8) ParseError!EmulateCmd {
     var ua_text: ?[]const u8 = null;
     var platform: ?[]const u8 = null;
     var hints: ?[]const u8 = null;
+    // W9e②: 수치 네트워크 조건(프리셋과 함께 주지 않는다).
+    var latency: ?u32 = null;
+    var download: ?u32 = null;
+    var upload: ?u32 = null;
     const Set = struct {
         fn change(comptime T: type, field: *EmulateCmd.Change(T), next: EmulateCmd.Change(T)) ParseError!void {
             if (field.* != .keep) return error.InvalidEmulateArgs;
@@ -273,6 +396,23 @@ fn parseEmulateArgs(rest: []const []const u8) ParseError!EmulateCmd {
             if (slot.* != null) return error.InvalidEmulateArgs;
             slot.* = v;
             media_given = true;
+        } else if (matchOpt(a, "--cpu")) {
+            const v = try optValue(rest, &i, "--cpu");
+            try Set.change(f64, &cmd.cpu, .{ .set = std.fmt.parseFloat(f64, v) catch return error.InvalidEmulateArgs });
+        } else if (matchOpt(a, "--network")) {
+            try Set.change(EmulateCmd.Network, &cmd.network, .{ .set = .{ .preset = try optValue(rest, &i, "--network") } });
+        } else if (matchOpt(a, "--latency") or matchOpt(a, "--download") or matchOpt(a, "--upload")) {
+            const name: []const u8 = if (matchOpt(a, "--latency")) "--latency" else if (matchOpt(a, "--download")) "--download" else "--upload";
+            const n = std.fmt.parseInt(u32, try optValue(rest, &i, name), 10) catch return error.InvalidEmulateArgs;
+            const slot: *?u32 = if (eq(name, "--latency")) &latency else if (eq(name, "--download")) &download else &upload;
+            if (slot.* != null) return error.InvalidEmulateArgs;
+            slot.* = n;
+        } else if (eq(a, "--no-cpu")) {
+            try Set.change(f64, &cmd.cpu, .clear);
+            i += 1;
+        } else if (eq(a, "--no-network")) {
+            try Set.change(EmulateCmd.Network, &cmd.network, .clear);
+            i += 1;
         } else if (eq(a, "--no-viewport") or eq(a, "--no-user-agent") or eq(a, "--no-locale") or eq(a, "--no-timezone") or eq(a, "--no-geolocation") or eq(a, "--no-media") or eq(a, "--no-vision")) {
             if (eq(a, "--no-viewport")) try Set.change(EmulateCmd.Viewport, &cmd.viewport, .clear) else if (eq(a, "--no-user-agent")) try Set.change(EmulateCmd.UserAgent, &cmd.user_agent, .clear) else if (eq(a, "--no-locale")) try Set.change([]const u8, &cmd.locale, .clear) else if (eq(a, "--no-timezone")) try Set.change([]const u8, &cmd.timezone, .clear) else if (eq(a, "--no-geolocation")) try Set.change(EmulateCmd.Geo, &cmd.geolocation, .clear) else if (eq(a, "--no-media")) try Set.change(EmulateCmd.Media, &cmd.media, .clear) else try Set.change([]const u8, &cmd.vision, .clear);
             i += 1;
@@ -314,8 +454,12 @@ fn parseEmulateArgs(rest: []const []const u8) ParseError!EmulateCmd {
         try Set.change(EmulateCmd.UserAgent, &cmd.user_agent, .{ .set = .{ .ua = u, .platform = platform, .client_hints = hints } });
     } else if (platform != null or hints != null) return error.InvalidEmulateArgs; // --platform·--client-hints 는 --user-agent 와만
     if (media_given) try Set.change(EmulateCmd.Media, &cmd.media, .{ .set = media });
+    // W9e②: 수치 네트워크 — `--latency` 가 있어야(`--download`·`--upload` 만으로는 어느 지연인지 모른다), 프리셋과 함께는 안 된다.
+    if (latency) |l| {
+        try Set.change(EmulateCmd.Network, &cmd.network, .{ .set = .{ .latency_ms = l, .download_kbps = download, .upload_kbps = upload } });
+    } else if (download != null or upload != null) return error.InvalidEmulateArgs;
     // 사람의 꼴과 JSON 꼴을 한 무리에 함께 주지 않는다.
-    const human = [_]bool{ cmd.viewport != .keep, cmd.user_agent != .keep, cmd.locale != .keep, cmd.timezone != .keep, cmd.geolocation != .keep, cmd.media != .keep, cmd.vision != .keep };
+    const human = [_]bool{ cmd.viewport != .keep, cmd.user_agent != .keep, cmd.locale != .keep, cmd.timezone != .keep, cmd.geolocation != .keep, cmd.media != .keep, cmd.vision != .keep, cmd.cpu != .keep, cmd.network != .keep };
     var any = false;
     for (human, cmd.json) |h, j| {
         if (h and j != null) return error.InvalidEmulateArgs;
@@ -505,6 +649,8 @@ pub const ScreenshotCmd = struct {
 pub const Command = union(enum) {
     request: Request,
     screenshot: ScreenshotCmd,
+    /// `browser trace …`(W9e②) — 러너가 요청 하나 또는 여럿(한 번에·`stop --out`)을 낸다.
+    trace: TraceCmd,
     help,
     /// `browser repl [--surface <id>]`(W9f) — 줄마다 하위 명령을 읽어 돌린다. 고른 탭(`use <id>`·`open`)은 `--surface` 를 생략한다.
     repl: struct { surface: ?u64 },
@@ -570,6 +716,7 @@ pub const ParseError = error{
     InvalidBlockAction, // `network-block` 에 동작이 없거나 둘 이상(W9d③)
     InvalidBlockArgs, // `network-block` 의 동작과 맞지 않는 옵션(패턴 없는 --add·--type 은 --add 와만·--on/--off 는 --strict 와만), 빈 패턴, 상한 넘음
     InvalidMockAction, // `network-mock` 에 동작이 없거나 둘 이상(W9d④)
+    InvalidTraceArgs, // `trace` 의 꼴 — 동작마다 받는 옵션, 길이 1–30 초, 값 둘(W9e②)
     InvalidEmulateArgs, // `emulate` 의 꼴 — 값 둘·`--no-x` 와 값·사람과 JSON 꼴을 한 무리에, --platform·--client-hints 만, 바꿀 것 없는 set, 무리와 함께 준 --clear·--get(W9e①)
     InvalidMockArgs, // `network-mock` 의 동작과 맞지 않는 옵션(응답 옵션은 --add 와만), 패턴 둘, 본문 둘, 잘못된 --header·--status, 상한 넘음
 };
@@ -757,6 +904,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (eq(sub, "network-block")) return .{ .request = .{ .network_block = try parseNetworkBlockArgs(rest) } };
     if (eq(sub, "network-mock")) return .{ .request = .{ .network_mock = try parseNetworkMockArgs(rest) } };
     if (eq(sub, "emulate")) return .{ .request = .{ .emulate = try parseEmulateArgs(rest) } }; // W9e①
+    if (eq(sub, "trace")) return .{ .trace = try parseTraceArgs(rest) }; // W9e②
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -2017,6 +2165,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkMock", .params = .{ .object = obj } } });
         },
         .emulate => |e| return buildEmulateRequest(gpa, e, id),
+        .trace => |t| return buildTraceRequest(gpa, t, id),
         .open => |o| {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
@@ -2160,7 +2309,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock, emulate };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock, emulate, trace };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -2449,6 +2598,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         .network_block => return renderNetworkBlock(gpa, result, w),
         .network_mock => return renderNetworkMock(gpa, result, w),
         .emulate => return renderEmulate(gpa, result, w),
+        .trace => return renderTrace(gpa, result, w),
         .network_request => return renderNetworkRequest(gpa, result, w),
         .network_record => {
             // W9d②: 켬은 곧 답한다 — sidecar 가 켜졌다고 알리기 전이면 starting(`browser network` 의 recording 이 이어 알린다).
@@ -2688,10 +2838,28 @@ fn buildEmulateRequest(gpa: std.mem.Allocator, e: EmulateCmd, id: cp.Id) (std.me
             try obj.put(arena, "media", .{ .object = o });
         },
     }
+    // W9e②: CPU 는 수, 네트워크는 프리셋 이름 또는 수치 객체.
+    switch (e.cpu) {
+        .keep => {},
+        .clear => try obj.put(arena, "cpu", .null),
+        .set => |r| try obj.put(arena, "cpu", .{ .float = r }),
+    }
+    switch (e.network) {
+        .keep => {},
+        .clear => try obj.put(arena, "network", .null),
+        .set => |n| if (n.preset) |pr| try obj.put(arena, "network", .{ .string = pr }) else {
+            var o: std.json.ObjectMap = .empty;
+            try o.put(arena, "latency_ms", .{ .integer = n.latency_ms });
+            if (n.download_kbps) |d| try o.put(arena, "download_kbps", .{ .integer = d });
+            if (n.upload_kbps) |u| try o.put(arena, "upload_kbps", .{ .integer = u });
+            try obj.put(arena, "network", .{ .object = o });
+        },
+    }
     for (e.json, EmulateCmd.group_names) |j, name| if (j) |text| {
         const v = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch return error.InvalidArgs;
         try obj.put(arena, name, v);
     };
+    if (e.holder) try obj.put(arena, "holder", .{ .bool = true });
     return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.emulate", .params = .{ .object = obj } } });
 }
 
@@ -2789,6 +2957,46 @@ fn renderEmulate(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
         };
         try w.writeAll("\n");
     };
+    // W9e②: CPU·네트워크 조건과 그 주인(그 프로세스가 끝나면 풀린다 — 사용자 결정 7).
+    if (emu.get("cpu")) |v| switch (v) {
+        .float => |f| try w.print("  cpu {d}\u{00D7} slower (the whole renderer process: popups this tab opened and other tabs' same-site iframes in it too)\n", .{f}),
+        .integer => |n| try w.print("  cpu {d}\u{00D7} slower (the whole renderer process: popups this tab opened and other tabs' same-site iframes in it too)\n", .{n}),
+        else => {},
+    };
+    if (emu.get("network")) |v| if (v == .object) {
+        const o = v.object;
+        if (boolField(o.get("offline"))) {
+            try w.writeAll("  network offline (this tab's requests fail; navigator.onLine is false also for frames and popups in the same renderer process — their requests are not blocked)\n");
+        } else {
+            try w.writeAll("  network");
+            if (o.get("preset")) |pr| if (pr == .string) {
+                try w.writeAll(" ");
+                try writePageText(gpa, w, pr.string, false);
+            };
+            try w.print(" latency {d} ms, down {d} kbps, up {d} kbps (0 = no limit; this tab's requests only — not popups it opened)\n", .{ intField(o.get("latency_ms")) orelse 0, intField(o.get("download_kbps")) orelse 0, intField(o.get("upload_kbps")) orelse 0 });
+        }
+    };
+    if (result.get("owner")) |ow| if (ow == .object) {
+        var it = ow.object.iterator();
+        while (it.next()) |e| if (e.value_ptr.* == .object) {
+            const o = e.value_ptr.object;
+            try w.print("  {s} lasts while ", .{e.key_ptr.*});
+            if (eq(strField(o.get("kind")), "session")) {
+                try w.print("this session (pid {d}) and its agent (pid {d}) run\n", .{ intField(o.get("holder_pid")) orelse 0, intField(o.get("pid")) orelse 0 });
+            } else if (eq(strField(o.get("kind")), "shell")) {
+                // W9e② 확인 결정 9: 사람이 셸에서 친 명령 — 그 셸이 끝나거나 지우면 풀린다.
+                try w.print("the shell you typed it in (pid {d}) runs — clear it with --no-{s} or --clear\n", .{ intField(o.get("pid")) orelse 0, e.key_ptr.* });
+            } else try w.print("the calling agent (pid {d}) runs\n", .{intField(o.get("pid")) orelse 0});
+        };
+    };
+    if (result.get("released")) |rl| if (rl == .array) for (rl.array.items) |item| if (item == .object) {
+        try w.writeAll("released ");
+        try writePageText(gpa, w, strField(item.object.get("group")), false);
+        try w.writeAll(": ");
+        const why = strField(item.object.get("reason"));
+        try w.writeAll(if (eq(why, "owner_exited")) "the process that set it ended (agent, session or shell)" else if (eq(why, "human_input")) "someone used the tab, answered its dialog, or used a popup sharing its renderer (cpu)" else if (eq(why, "process_shared")) "another tab's frame joined this tab's renderer process" else "released");
+        try w.writeAll("\n");
+    };
     try writeEmulateFailures(gpa, result, w);
     if (boolField(result.get("reloaded"))) try w.writeAll("reloaded — the first request already carries the new headers\n") else try w.writeAll("request headers (user agent, language) apply from the next navigation — pass --reload to reload now\n");
     try w.writeAll("not covered: cross-site iframes, service workers, workers started before, worker Accept-Language (they keep the real values)\n");
@@ -2809,6 +3017,108 @@ fn renderEmulate(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
         try w.writeAll("\n");
     };
     try w.writeAll("the tab title shows \u{25EB} while it emulates\n");
+    return true;
+}
+
+/// W9e②: `browser.trace` 의 결과 — 상태(`recording`·`done`·`discarded`·`failed`·`idle`·…)에 따라. 거른 결과면 요약 줄들. 버림·실패면 이유
+/// (사용자 결정 6 — 늘 공개)와 false(종료 1).
+pub fn renderTrace(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
+    const state = strField(result.get("state"));
+    if (eq(state, "recording") and result.get("summary") == null) {
+        try w.print("recording a performance trace — it stops by itself after {d:.1} s (or run `trace stop`)\n", .{@as(f64, @floatFromInt(intField(result.get("auto_stop_ms")) orelse 0)) / 1000});
+        if (boolField(result.get("focus_emulated"))) try w.writeAll("the tab is hidden: it is kept rendering while it records (focus emulation), but its renderer runs at background CPU priority — main-thread times read higher than on a shown tab\n");
+        if (result.get("conditions")) |c| if (c == .object and c.object.count() > 0) {
+            try w.writeAll("conditions in effect:");
+            var it = c.object.iterator();
+            while (it.next()) |e| {
+                try w.print(" {s}=", .{e.key_ptr.*});
+                switch (e.value_ptr.*) {
+                    .string => |t| try writePageText(gpa, w, t, false),
+                    .integer => |n| try w.print("{d}", .{n}),
+                    .float => |f| try w.print("{d}", .{f}),
+                    else => try w.writeAll("custom"),
+                }
+            }
+            try w.writeAll("\n");
+        };
+        try w.writeAll("the tab title shows \u{25D4} while it records\n");
+        return true;
+    }
+    if (eq(state, "discarded") or eq(state, "failed")) {
+        try w.print("trace {s}: ", .{state});
+        try writePageText(gpa, w, strField(result.get("reason")), false);
+        if (result.get("message")) |m| if (m == .string) {
+            try w.writeAll(" — ");
+            try writePageText(gpa, w, m.string, false);
+        };
+        try w.writeAll("\n");
+        return false;
+    }
+    if (eq(state, "done")) {
+        const sum = switch (result.get("summary") orelse std.json.Value{ .null = {} }) {
+            .object => |o| o,
+            else => {
+                try w.writeAll("error: malformed trace result\n");
+                return false;
+            },
+        };
+        try w.print("trace done — covered {d} ms, {d} events kept, {d} dropped", .{ intField(sum.get("covered_ms")) orelse 0, intField(sum.get("events_kept")) orelse 0, intField(sum.get("events_dropped")) orelse 0 });
+        if (boolField(result.get("data_loss"))) try w.writeAll(" (the trace buffer filled up — later events are missing)");
+        try w.writeAll("\n");
+        if (sum.get("url")) |u| if (u == .string) {
+            try w.writeAll("page ");
+            try writePageText(gpa, w, u.string, true);
+            try w.print(" ({d} navigation(s))\n", .{intField(sum.get("navigations")) orelse 0});
+        };
+        const num = struct {
+            fn f(v: ?std.json.Value) ?f64 {
+                return switch (v orelse return null) {
+                    .float => |x| x,
+                    .integer => |n| @floatFromInt(n),
+                    .number_string => |t| std.fmt.parseFloat(f64, t) catch null,
+                    else => null,
+                };
+            }
+        }.f;
+        if (num(sum.get("fcp_ms"))) |v| try w.print("first contentful paint {d:.0} ms", .{v});
+        if (num(sum.get("lcp_ms"))) |v| try w.print("{s}largest contentful paint candidate {d:.0} ms", .{ if (sum.get("fcp_ms") != null) ", " else "", v });
+        if (sum.get("fcp_ms") != null or sum.get("lcp_ms") != null) try w.writeAll("\n");
+        if (sum.get("long_tasks")) |lt| if (lt == .object) {
+            try w.print("main thread: {d} long task(s) over 50 ms, total {d:.0} ms, blocking {d:.0} ms, busy {d:.1}%\n", .{ intField(lt.object.get("count")) orelse 0, num(lt.object.get("total_ms")) orelse 0, num(lt.object.get("total_blocking_ms")) orelse 0, num(sum.get("main_thread_busy_pct")) orelse 0 });
+        };
+        try w.print("frames drawn {d}, screenshots {d}\n", .{ intField(sum.get("frames_presented")) orelse 0, intField(sum.get("screenshots")) orelse 0 });
+        if (sum.get("requests")) |rq| if (rq == .object) {
+            try w.print("requests {d}, {d} bytes\n", .{ intField(rq.object.get("count")) orelse 0, intField(rq.object.get("bytes")) orelse 0 });
+            if (rq.object.get("slowest")) |sl| if (sl == .array) for (sl.array.items) |x| if (x == .object) {
+                try w.print("  {d} ms ", .{intField(x.object.get("ms")) orelse 0});
+                try writePageText(gpa, w, strField(x.object.get("url")), true);
+                try w.writeAll("\n");
+            };
+        };
+        if (result.get("file")) |f| if (f == .object) {
+            try w.print("trace file {d} bytes gzip (sha256 ", .{intField(f.object.get("gz_bytes")) orelse 0});
+            try writePageText(gpa, w, strField(f.object.get("sha256")), false);
+            try w.writeAll(") — kept in maru for 10 minutes; `trace stop --out <file>` writes it\n");
+        };
+        try w.writeAll("not covered: service workers, cross-site iframes, other renderer processes, this tab's own worker, background compile and raster threads (their tracks are empty in DevTools), browser and GPU threads\n");
+        if (result.get("warnings")) |ws_| if (ws_ == .array and ws_.array.items.len > 0) {
+            try w.writeAll("warnings:");
+            for (ws_.array.items) |x| if (x == .string) {
+                try w.writeAll(" ");
+                try writePageText(gpa, w, x.string, false);
+            };
+            try w.writeAll("\n");
+        };
+        return true;
+    }
+    if (eq(state, "aborted")) {
+        try w.writeAll("trace aborted\n");
+        return true;
+    }
+    try w.writeAll("trace state ");
+    try writePageText(gpa, w, state, false);
+    if (intField(result.get("elapsed_ms"))) |e| try w.print(", {d} ms of {d} ms", .{ e, intField(result.get("auto_stop_ms")) orelse 0 });
+    try w.writeAll("\n");
     return true;
 }
 
@@ -4388,7 +4698,8 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
         \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ⊘)
         \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site; requests made by iframes or workers of a site your permission does not cover are never mocked); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; needs the network and control permissions first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ▣)
-        \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; asks once per site on your tabs and works only while that site is shown; not on tabs the agent opened; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫)
+        \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; asks once per site on your tabs and works only while that site is shown; not on tabs the agent opened; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on your tabs --network takes a preset and no offline)
+        \\  trace (start [--reload] [--duration 5s] [--no-screenshots] | stop [--out <file.json.gz>] [--json] | status | abort) --surface <id>   record a performance trace of a tab this pane opened (Chromium; 1-30 s, default 5 s; a hidden tab is kept rendering while it records); stop prints a summary, --out also writes the filtered trace (gzip JSON — open it in Chrome DevTools' Performance panel); never overwrites a file. `trace --surface <id> [--duration 5s] [--out f]` does start, wait and stop in one go. (`maru trace` is maru's own terminal trace tool — this is the page's.)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -6170,4 +6481,119 @@ test "W9e①: 결과 글 — 무리 줄·맞춤·사이트 밖·실패·덮지 �
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":12,\"url\":\"https://a.test/\",\"title\":\"A\",\"engine\":\"chromium\",\"controllable\":true,\"emulation\":{\"summary\":\"390\u{00D7}844 mobile, off-site\",\"active\":false},\"methods\":[]}]}}", .list, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "\u{25EB} emulating (390\u{00D7}844 mobile, off-site)") != null);
+}
+
+// ── W9e②: trace·CPU·네트워크 ──
+// 시험이 증명하는 것: trace 의 동작 낱말·MCP 꼴(--action)·한 번에, 동작마다 받는 옵션, 길이 꼴(5s·2.5s·5000ms·5000)과 범위, 요청 JSON(동작마다 칸),
+// 결과 렌더(기록 시작·요약·버림의 이유·상태), emulate 의 --cpu·--network·--latency/--download/--upload·--no-cpu·--no-network·MCP 꼴의 JSON,
+// holder 가 요청에 실린다, 결과 렌더(cpu·네트워크·주인·풀림).
+
+fn renderOf(kind: ResponseKind, json: []const u8) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer aw.deinit();
+    _ = try renderResponse(testing.allocator, json, kind, &aw.writer);
+    return aw.toOwnedSlice();
+}
+
+test "W9e②: trace 파서 — 동작 낱말·MCP 꼴·한 번에, 동작마다 옵션, 길이 꼴과 범위" {
+    const start = (try parse(&.{ "trace", "start", "--surface", "4", "--duration", "2.5s", "--reload", "--no-screenshots" })).trace;
+    try testing.expect(start.action == .start and start.duration_ms.? == 2500 and start.reload and !start.screenshots);
+    const mcp_form = (try parse(&.{ "trace", "--action=stop", "--surface=4", "--out=/tmp/t.json.gz" })).trace;
+    try testing.expect(mcp_form.action == .stop and std.mem.eql(u8, mcp_form.out.?, "/tmp/t.json.gz"));
+    const run = (try parse(&.{ "trace", "--surface", "4", "--duration", "5000ms", "--out", "x.gz" })).trace;
+    try testing.expect(run.action == .run and run.duration_ms.? == 5000);
+    try testing.expectEqual(@as(u32, 30000), try parseTraceDuration("30000"));
+    try testing.expectError(error.InvalidTraceArgs, parseTraceDuration("999ms"));
+    try testing.expectError(error.InvalidTraceArgs, parseTraceDuration("31s"));
+    try testing.expectError(error.InvalidTraceArgs, parseTraceDuration("abc"));
+    try testing.expectError(error.InvalidTraceArgs, parse(&.{ "trace", "start", "--surface", "4", "--out", "x" }));
+    try testing.expectError(error.InvalidTraceArgs, parse(&.{ "trace", "stop", "--surface", "4", "--reload" }));
+    try testing.expectError(error.InvalidTraceArgs, parse(&.{ "trace", "status", "--surface", "4", "--json" }));
+    try testing.expectError(error.InvalidTraceArgs, parse(&.{ "trace", "start", "--surface", "4", "--duration", "2s", "--duration", "3s" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "trace", "read", "--surface", "4" })); // read 는 러너만
+    try testing.expectError(error.MissingSurface, parse(&.{ "trace", "start" }));
+    try testing.expectError(error.InvalidTraceArgs, parse(&.{ "trace", "start", "--action", "stop", "--surface", "4" }));
+}
+
+test "W9e②: trace 요청 JSON — start 의 칸(기본은 빼고), stop 의 file, read 의 offset, 한 번에는 start 로" {
+    const a = testing.allocator;
+    const s1 = try buildTraceRequest(a, .{ .surface_id = 4, .action = .start, .duration_ms = 2000, .reload = true, .screenshots = false }, .{ .number = 1 });
+    defer a.free(s1);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.trace\",\"params\":{\"id\":4,\"action\":\"start\",\"reload\":true,\"duration_ms\":2000,\"screenshots\":false}}", s1);
+    const s2 = try buildTraceRequest(a, .{ .surface_id = 4, .action = .stop, .out = "x" }, .{ .number = 1 });
+    defer a.free(s2);
+    try testing.expect(std.mem.indexOf(u8, s2, "\"action\":\"stop\",\"file\":true") != null);
+    const s3 = try buildTraceRequest(a, .{ .surface_id = 4, .action = .read, .offset = 262144 }, .{ .number = 1 });
+    defer a.free(s3);
+    try testing.expect(std.mem.indexOf(u8, s3, "\"action\":\"read\",\"offset\":262144") != null);
+    const s4 = try buildTraceRequest(a, .{ .surface_id = 4, .action = .run }, .{ .number = 1 });
+    defer a.free(s4);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.trace\",\"params\":{\"id\":4,\"action\":\"start\"}}", s4);
+}
+
+test "W9e②: trace 결과 렌더 — 기록 시작(숨은 탭 경고·조건), 요약, 버림은 이유와 실패, 상태" {
+    const rec = try renderOf(.trace, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"recording\",\"auto_stop_ms\":5000,\"hidden\":true,\"focus_emulated\":true,\"conditions\":{\"cpu\":4,\"network\":\"slow-3g\"},\"warnings\":[\"hidden_tab_cpu_background\"]}}");
+    defer testing.allocator.free(rec);
+    for ([_][]const u8{ "stops by itself after 5.0 s", "background CPU priority", "cpu=4", "network=slow-3g", "\u{25D4}" }) |n| try testing.expect(std.mem.indexOf(u8, rec, n) != null);
+    const done = try renderOf(.trace, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"done\",\"data_loss\":false,\"summary\":{\"covered_ms\":5000,\"events_kept\":120,\"events_dropped\":30,\"url\":\"http://a.test/\",\"navigations\":1,\"fcp_ms\":50.5,\"lcp_ms\":80.0,\"long_tasks\":{\"count\":2,\"total_ms\":300.0,\"total_blocking_ms\":200.0},\"main_thread_busy_pct\":12.5,\"frames_presented\":9,\"screenshots\":3,\"requests\":{\"count\":4,\"bytes\":1234,\"slowest\":[{\"url\":\"http://a.test/x\",\"ms\":40}]}},\"file\":{\"gz_bytes\":999,\"sha256\":\"ab\"},\"warnings\":[]}}");
+    defer testing.allocator.free(done);
+    for ([_][]const u8{ "covered 5000 ms, 120 events kept, 30 dropped", "first contentful paint 51 ms", "largest contentful paint candidate 80 ms", "2 long task(s)", "blocking 200 ms", "requests 4, 1234 bytes", "40 ms \"http://a.test/x\"", "999 bytes gzip", "this tab's own worker, background compile and raster threads" }) |n| {
+        if (std.mem.indexOf(u8, done, n) == null) {
+            std.debug.print("missing {s} in {s}\n", .{ n, done });
+            return error.TestUnexpectedResult;
+        }
+    }
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"discarded\",\"reason\":\"mixed_content\",\"message\":\"another tab's frame\"}}", .trace, &aw.writer));
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "trace discarded: mixed_content — another tab's frame") != null);
+    const st = try renderOf(.trace, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"state\":\"recording\",\"elapsed_ms\":1200,\"auto_stop_ms\":5000,\"summary\":null}}");
+    defer testing.allocator.free(st);
+    try testing.expect(std.mem.indexOf(u8, st, "1200 ms of 5000 ms") != null);
+}
+
+test "W9e②: emulate 의 CPU·네트워크 — --cpu·--network·--latency 묶음·--no-x·MCP 꼴, holder, 틀린 꼴" {
+    const a = testing.allocator;
+    const c1 = (try parse(&.{ "emulate", "--surface", "4", "--cpu", "4", "--network", "slow-3g" })).request.emulate;
+    try testing.expect(c1.cpu.set == 4 and std.mem.eql(u8, c1.network.set.preset.?, "slow-3g"));
+    var held = c1;
+    held.holder = true;
+    const r1 = try buildRequestBytes(a, .{ .emulate = held }, .{ .number = 1 });
+    defer a.free(r1);
+    for ([_][]const u8{ "\"cpu\":4", "\"network\":\"slow-3g\"", "\"holder\":true" }) |n| try testing.expect(std.mem.indexOf(u8, r1, n) != null);
+    const c2 = (try parse(&.{ "emulate", "--surface", "4", "--latency", "300", "--download", "800" })).request.emulate;
+    const r2 = try buildRequestBytes(a, .{ .emulate = c2 }, .{ .number = 1 });
+    defer a.free(r2);
+    try testing.expect(std.mem.indexOf(u8, r2, "\"network\":{\"latency_ms\":300,\"download_kbps\":800}") != null);
+    const c3 = (try parse(&.{ "emulate", "--surface", "4", "--no-cpu", "--no-network" })).request.emulate;
+    const r3 = try buildRequestBytes(a, .{ .emulate = c3 }, .{ .number = 1 });
+    defer a.free(r3);
+    try testing.expect(std.mem.indexOf(u8, r3, "\"cpu\":null") != null and std.mem.indexOf(u8, r3, "\"network\":null") != null);
+    const c4 = (try parse(&.{ "emulate", "--surface", "4", "--cpu-json=6", "--network-json={\"latency_ms\":1}" })).request.emulate;
+    try testing.expect(c4.json[7] != null and c4.json[8] != null);
+    try testing.expectError(error.InvalidEmulateArgs, parse(&.{ "emulate", "--surface", "4", "--download", "800" })); // 지연 없이
+    try testing.expectError(error.InvalidEmulateArgs, parse(&.{ "emulate", "--surface", "4", "--network", "slow-3g", "--latency", "5" }));
+    try testing.expectError(error.InvalidEmulateArgs, parse(&.{ "emulate", "--surface", "4", "--cpu", "x" }));
+    try testing.expectError(error.InvalidEmulateArgs, parse(&.{ "emulate", "--surface", "4", "--cpu", "4", "--cpu-json=4" }));
+    try testing.expectError(error.InvalidEmulateArgs, parse(&.{ "emulate", "--surface", "4", "--get", "--cpu", "2" }));
+}
+
+test "W9e② 확인 결정 9: emulate 결과 렌더 — 주인이 셸이면 그 셸이 끝나거나 지울 때까지" {
+    const out = try renderOf(.emulate, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"emulation\":{\"cpu\":4},\"site\":null,\"active\":true,\"state\":\"active\",\"owner\":{\"cpu\":{\"kind\":\"shell\",\"pid\":412}}}}");
+    defer testing.allocator.free(out);
+    if (std.mem.indexOf(u8, out, "cpu lasts while the shell you typed it in (pid 412) runs — clear it with --no-cpu or --clear") == null) {
+        std.debug.print("got {s}\n", .{out});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "W9e②: emulate 결과 렌더 — cpu·네트워크(오프라인 포함)·주인(에이전트·세션)·풀림" {
+    const out = try renderOf(.emulate, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"emulation\":{\"cpu\":4,\"network\":{\"offline\":true}},\"site\":null,\"active\":true,\"state\":\"active\",\"owner\":{\"cpu\":{\"kind\":\"agent\",\"pid\":300},\"network\":{\"kind\":\"session\",\"pid\":300,\"holder_pid\":301}},\"released\":[{\"group\":\"cpu\",\"reason\":\"owner_exited\"}],\"process_shared\":[\"cpu\",\"navigator_online\"]}}");
+    defer testing.allocator.free(out);
+    for ([_][]const u8{ "cpu 4\u{00D7} slower", "network offline", "cpu lasts while the calling agent (pid 300) runs", "network lasts while this session (pid 301) and its agent (pid 300) run", "released cpu: the process that set it ended (agent, session or shell)", "navigator_online" }) |n| {
+        if (std.mem.indexOf(u8, out, n) == null) {
+            std.debug.print("missing {s} in {s}\n", .{ n, out });
+            return error.TestUnexpectedResult;
+        }
+    }
 }

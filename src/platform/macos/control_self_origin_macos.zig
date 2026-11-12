@@ -49,6 +49,8 @@ comptime {
 const proc_pidtbsdinfo: c_int = 3;
 const proc_flag_controlt: u32 = 0x80;
 const nodev: u32 = 0xffff_ffff;
+/// `<sys/proc.h>` 의 `SZOMB` — 끝났고 부모가 아직 거두지 않았다(W9e② 조건의 주인 판정).
+const szomb: u32 = 5;
 const sol_local: c_int = 0;
 const local_peerpid: c_int = 2;
 
@@ -79,6 +81,7 @@ pub fn procInfo(pid: i32) ?so.ProcInfo {
         .has_ctty = has_ctty,
         .tpgid = if (has_ctty) @bitCast(info.e_tpgid) else 0,
         .start_us = info.pbi_start_tvsec *| std.time.us_per_s +| info.pbi_start_tvusec,
+        .zombie = info.pbi_status == szomb,
     };
 }
 

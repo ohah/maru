@@ -1825,12 +1825,19 @@ pub const emulation_mark_utf8 = "\u{25EB}";
 /// 흉내 표식의 청록(빨강 ◉·호박 ⊘·보라 ▣ 와 다른 고정 색 — 테마와 무관하게).
 pub const emulation_mark_color: maru.color.Rgb = .{ .r = 0x20, .g = 0xA3, .b = 0x9E };
 
-/// 이 탭 제목이 셀로 그리는 마커(running `●`, 또는 기록 `◉`·막기 `⊘`·가짜 `▣`·흉내 `◫` 의 그 차례의 1–4 글자 — `◉⊘▣◫`·`◉▣`·`⊘◫` …)로
+/// W9e②: 에이전트가 그 탭의 성능 trace 를 뜨는 동안의 표식 ◔(U+25D4 — 시계 바늘처럼 한 칸이 찬 원). 기록 ◉·막기 ⊘·가짜 ▣·흉내 ◫ 와 함께면
+/// `◉⊘▣◫◔` 의 차례. 셀로 그려 **그 칸만** 파랗게 칠한다(`recolorTraceMarkCells`).
+pub const trace_mark: u21 = 0x25D4;
+pub const trace_mark_utf8 = "\u{25D4}";
+/// trace 표식의 파랑(빨강 ◉·호박 ⊘·보라 ▣·청록 ◫ 와 다른 고정 색 — 테마와 무관하게).
+pub const trace_mark_color: maru.color.Rgb = .{ .r = 0x3D, .g = 0x8B, .b = 0xE8 };
+
+/// 이 탭 제목이 셀로 그리는 마커(running `●`, 또는 기록 `◉`·막기 `⊘`·가짜 `▣`·흉내 `◫`·trace `◔` 의 그 차례의 1–5 글자 — `◉⊘▣◫◔`·`◉▣`·`⊘◫` …)로
 /// 시작하면 그 마커(UTF-8).
 pub fn tabTitleMarker(title: []const u8) ?[]const u8 {
     if (tabTitleRunningMarker(title)) return agentFlagUtf8();
     var n: usize = 0;
-    for ([_][]const u8{ recording_mark_utf8, blocking_mark_utf8, mock_mark_utf8, emulation_mark_utf8 }) |m| {
+    for ([_][]const u8{ recording_mark_utf8, blocking_mark_utf8, mock_mark_utf8, emulation_mark_utf8, trace_mark_utf8 }) |m| {
         if (std.mem.startsWith(u8, title[n..], m)) n += m.len;
     }
     return if (n == 0) null else title[0..n];
@@ -1849,7 +1856,7 @@ pub const title_mark_escape = "\u{2060}";
 
 /// 고른 제목을 탭 제목으로 쓸 때 기록 표식으로 읽히지 않게 할 것인가(`title_mark_escape` 를 앞에 붙인다).
 pub fn titleNeedsMarkEscape(title: []const u8) bool {
-    return std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8) or std.mem.startsWith(u8, title, mock_mark_utf8) or std.mem.startsWith(u8, title, emulation_mark_utf8); // W9d③: ⊘ 도, W9d④: ▣ 도, W9e①: ◫ 도
+    return std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8) or std.mem.startsWith(u8, title, mock_mark_utf8) or std.mem.startsWith(u8, title, emulation_mark_utf8) or std.mem.startsWith(u8, title, trace_mark_utf8); // W9d③: ⊘ 도, W9d④: ▣ 도, W9e①: ◫ 도, W9e②: ◔ 도
 }
 
 /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
@@ -1863,6 +1870,13 @@ pub fn tabTitleBody(title: []const u8) []const u8 {
 pub fn recolorRecordingMarkCells(cells: anytype) void {
     for (cells) |*c| if (c.codepoint == recording_mark) {
         c.style.foreground = .{ .rgb = recording_mark_color };
+    };
+}
+
+/// W9e②: 셀에 그린 trace 표식(◔)만 파랗게.
+pub fn recolorTraceMarkCells(cells: anytype) void {
+    for (cells) |*c| if (c.codepoint == trace_mark) {
+        c.style.foreground = .{ .rgb = trace_mark_color };
     };
 }
 

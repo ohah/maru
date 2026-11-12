@@ -442,7 +442,9 @@ fn r2Bfcache(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     var psb: [64]u8 = undefined;
     const ps_s = std.fmt.bufPrint(&psb, "{s}", .{ps}) catch "?";
     const a = try finishAndFilter(r, g, 40_000, "a2b_back");
-    report(eql(a.outcome, "kept"), "a2-bfcache-back", std.fmt.bufPrint(&dbuf, "기록 중 에이전트 탭의 뒤로(bfcache 되살림 — persisted {s}) → {s}/{s} 거르기 {s} 남김 {d} 남의 프레임 {s}", .{ ps_s, stName(a.st), rsName(a.st), a.outcome, a.kept, a.foreign }) catch "");
+    // 기대는 bfcache 와 무관하게 남김이다: main 은 bfcache 를 꺼 뒤로가 새로 불러온 문서(persisted false — 그 탭 혼자라 남김; 앞 문서의 늦은 layer
+    // tree 보고는 거르기가 기록 시작 앞 시각으로 뺀다 — W9e② 20 회 검증 v2), 켜져 있으면 되살림(A2-2 — 프레임 트리를 다시 받아 남김).
+    report(eql(a.outcome, "kept"), "a2-bfcache-back", std.fmt.bufPrint(&dbuf, "기록 중 에이전트 탭의 뒤로(bfcache 꺼짐이면 새로 불러옴·켜짐이면 되살림 — persisted {s}) → {s}/{s} 거르기 {s} 남김 {d} 남의 프레임 {s}", .{ ps_s, stName(a.st), rsName(a.st), a.outcome, a.kept, a.foreign }) catch "");
 }
 
 /// 프레임 집합의 경주 — 에이전트 페이지가 40 ms 마다 같은 사이트 iframe 을 만들고 지운다(광고 돌리기 꼴). 멈춤 직전에 붙은 프레임의 `frameAttached` 가

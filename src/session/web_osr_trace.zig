@@ -22,7 +22,9 @@
 //!     `frames_presented` 가 그 iframe 의 프레임으로 부풀었다(실측 151 대 5). 첫째 읽기에서 `SetLayerTreeId{frame, layerTreeId}`(DevTools
 //!     timeline 범주만 — 페이지의 user timing 위장은 믿지 않는다)로 **가족 프레임의 layer tree**(프로세스마다)를 모으고, 남길 이벤트가 그 밖의
 //!     `layerTreeId` 를 실으면 F3 처럼 통째로 버린다. 가족 위젯이 주 스레드를 쉬어 `SetLayerTreeId` 를 내지 않는 일은 sidecar 가 기록 시작에 가족
-//!     탭마다 주 스레드 프레임 하나를 불러 막는다(`trace_plan.bind_world_name`).
+//!     탭마다 주 스레드 프레임 하나를 불러 막는다(`trace_plan.bind_world_name`). 기록 시작(브라우저의 `TracingStartedInBrowser`) **앞 시각**의 묶이지
+//!     않은 layer tree 는 그 이벤트만 뺀다(W9e② 20 회 검증 v2 — 같은 사이트로 옮긴 직후 앞 문서의 위젯이 늦게 알린 `DroppedFrame` 이 337–767 ms 앞
+//!     시각으로 실려 그 탭 혼자인 trace 를 통째 버렸다); 덮은 시간·FCP 의 기준 시각도 TSIB 다.
 //!   - **가족 씨앗과 막힌 탭**(적대 검증 v20b V-A1·사용자 결정 12): 가족 집합은 sidecar 의 `trace_frames` 에 브라우저가 낸 `TracingStartedInBrowser` 의
 //!     프레임(그 탭의 프레임 트리)을 더한다 — 둘 다 비면 `renderer_unresponsive`. 그 탭의 렌더러가 기록 내내 답하지 않아(`renderer_silent`) 그 프로세스에
 //!     가족 layer tree 가 없으면 F3′ 은 가를 수 없다: 그 프로세스에 가족 밖의 프레임이 들 수 있었으면(`shared_process`) 주 스레드 밖의 이벤트·묶이지 않은
@@ -34,7 +36,7 @@
 //! 시험이 증명하는 것: 인자 표(동작·길이·모르는 키·까닭 이름), 거르기 fixture — 브라우저 쪽 허용 목록·`process_labels` 뺌, 주 프레임 pid 만·새 pid
 //! 따라감, 워커 스레드·UpdateCounters 뺌, 렌더러 스레드 허용 목록(주·컴포지터·주 isolate 의 ProfileChunk 만 — 워커 isolate 의 표본·이름 모를
 //! 스레드·뺀 스레드의 이름 메타는 뺀다, 페이지의 「Profile」 위장은 번호를 들이지 못한다), 가족 밖 프레임의 워커면 통째 폐기, 가족 밖 프레임 id 하나면 통째 폐기(어느 깊이의 칸이든·대소문자), 가족 안이면 헛폐기 없음, 가족에 묶이지
-//! 않은 layer tree 의 이벤트면 통째 폐기(다른 프로세스의 같은 번호·user timing 위장은 묶지 않는다), 프레임 수는 가족 layer tree 만, TSIB 씨앗(브라우저
+//! 않은 layer tree 의 이벤트면 통째 폐기(다른 프로세스의 같은 번호·user timing 위장은 묶지 않는다 — 기록 시작 앞 시각이면 그 이벤트만 뺀다), 프레임 수는 가족 layer tree 만, TSIB 씨앗(브라우저
 //! pid 만)·차례와 무관한 가름·씨앗이 없으면 `renderer_unresponsive`, 막힌 탭의 나눔 있음(가를 수 없는 것만 뺌·경고)·없음(모두 남김)·남의 프레임이면 버림, 잘린 trace 의
 //! 덮은 시간, 머리 값·사용자
 //! 정보 지움, 요약 셈(긴 작업 50 ms 문턱·TBT·바쁨 %, FCP·LCP, 요청 수·바이트·느린 것), 다시 압축한 gzip 이 풀리고 DevTools 꼴(`traceEvents`),
@@ -300,6 +302,9 @@ const Scan = struct {
     /// 가족 layer tree 가 하나라도 묶인 프로세스.
     family_tree_pids: std.AutoHashMapUnmanaged(i64, void) = .empty,
     start_ts: ?f64 = null,
+    /// 기록의 시작 — 브라우저가 낸 `TracingStartedInBrowser` 의 ts(여럿이면 가장 이른 것). 첫째 읽기 끝에 `start_ts` 를 이것으로 두고(그 앞
+    /// 시각의 늦은 보고가 시작을 당기지 않게), F3′ 은 그 앞 시각의 묶이지 않은 layer tree 를 폐기 사유로 보지 않는다(W9e② 20 회 검증 v2 MED).
+    tsib_ts: ?f64 = null,
     /// 메타데이터(`process_name` 「Browser」)가 정한 브라우저 pid — `TracingStartedInBrowser` 의 프레임을 가족 씨앗으로 받기 전에 맞춰 본다.
     meta_browser_pid: ?i64 = null,
     /// 첫째 읽기 끝에 가족 집합으로 가르는 것(V-A1 — 집합이 읽는 동안 `TracingStartedInBrowser` 로 자라므로, 그 앞에 온 이벤트도 끝에 가른다):
@@ -550,6 +555,9 @@ const ScanSink = struct {
         const from_browser = timeline and (self.scan.meta_browser_pid == null or self.scan.meta_browser_pid.? == pid);
         if (std.mem.eql(u8, name, "TracingStartedInBrowser") and from_browser) {
             self.scan.browser_pid = pid;
+            if (getNum(o, "ts")) |ts| if (self.scan.tsib_ts == null or ts < self.scan.tsib_ts.?) {
+                self.scan.tsib_ts = ts;
+            };
             const data = getObj(args orelse return, "data") orelse return;
             const frames = data.get("frames") orelse return;
             if (frames != .array) return;
@@ -671,6 +679,10 @@ const KeepSink = struct {
             if (blind) {
                 if (self.shared_process) return self.dropUnattributable();
             } else {
+                // W9e② 20 회 검증(v2 MED): 기록 시작(브라우저의 TSIB) 앞 시각이면 앞 문서의 위젯이 늦게 알린 것이다(`DroppedFrame` — 같은 사이트로
+                // 옮기면 RenderDocument 가 옛 LayerTreeHost 를 버리고, 그 묶기는 기록 전이라 trace 에 없다). 그 이벤트만 뺀다 — 남기지 않으니 새지
+                // 않고, 그 탭 혼자인 trace 를 「다른 탭이 렌더러를 나눴다」 는 틀린 이유로 통째 버리지 않는다. 시작 뒤의 것은 그대로 통째 폐기.
+                if (self.beforeStart(o.*)) return self.drop();
                 self.foreign = "layer-tree";
                 return;
             }
@@ -688,6 +700,13 @@ const KeepSink = struct {
 
     fn drop(self: *KeepSink) void {
         self.summary.events_dropped += 1;
+    }
+
+    /// 브라우저가 기록을 시작한 시각(TSIB)보다 앞인가 — 시각이나 TSIB 가 없으면 아니다(폐기 쪽).
+    fn beforeStart(self: *const KeepSink, o: std.json.ObjectMap) bool {
+        const start = self.scan.tsib_ts orelse return false;
+        const ts = getNum(o, "ts") orelse return false;
+        return ts < start;
     }
 
     fn isThreadMeta(name: []const u8) bool {
@@ -860,6 +879,9 @@ pub fn filter(gpa: std.mem.Allocator, gz: []const u8, set: *FrameSet, opts: Opti
         };
     }
     const foreign_worker = try scan.resolve(gpa, set);
+    // 시작은 브라우저가 기록을 시작한 시각 — 그 앞 시각의 늦은 보고(앞 문서의 `DroppedFrame` 등 — 수백 ms 앞)가 덮은 시간·FCP 의 기준을 당기지
+    // 않게(W9e② 20 회 검증 v2). TSIB 가 없으면 가장 이른 이벤트.
+    if (scan.tsib_ts) |t| scan.start_ts = t;
     if (set.count() == 0) {
         // V-A1: sidecar 의 씨앗(렌더러가 답한다)도 브라우저의 씨앗도 없다 — 그 탭의 프레임을 모르니 가를 수 없다.
         result.outcome = .renderer_unresponsive;
@@ -1317,6 +1339,60 @@ test "W9e② A1-1: 가족에 묶이지 않은 layer tree 의 이벤트(컴포지
     var r2 = try filterOf(gpa, fixture(bind ++ ",{\"name\":\"DrawFrame\",\"ph\":\"I\",\"pid\":1,\"tid\":1,\"ts\":4200,\"args\":{\"layerTreeId\":9}}"), &set, .{});
     defer r2.deinit();
     try testing.expectEqual(Outcome.kept, r2.outcome);
+}
+
+test "W9e② 20 회 검증 v2: 기록 시작(브라우저의 TSIB) 앞 시각의 묶이지 않은 layer tree(옮긴 직후 앞 문서의 늦은 DroppedFrame)는 그 이벤트만 빼고 남긴다 — 시작과 같거나 뒤·시각 없음·렌더러의 TSIB 흉내는 그대로 통째 폐기, 시작 시각도 그 앞으로 당겨지지 않는다" {
+    const gpa = testing.allocator;
+    var set = try familySet(gpa);
+    defer set.deinit();
+    const bind = ",{\"name\":\"SetLayerTreeId\",\"cat\":\"devtools.timeline\",\"ph\":\"I\",\"pid\":10,\"tid\":11,\"ts\":3500,\"args\":{\"data\":{\"frame\":\"" ++ A ++ "\",\"layerTreeId\":2}}}";
+    const draw2 = ",{\"name\":\"DrawFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"ts\":4000,\"args\":{\"layerTreeId\":2}}";
+    // 앞 문서의 layer tree 1 — 그 묶기는 기록 전이라 trace 에 없다(실측 a2-bfcache-back·nav-then-trace 의 꼴: TSIB 보다 337–767 ms 앞).
+    const stale = ",{\"name\":\"DroppedFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"ts\":400,\"args\":{\"layerTreeId\":1,\"frameSeqId\":3}}";
+    var base = try filterOf(gpa, fixture(bind ++ draw2), &set, .{});
+    defer base.deinit();
+    try testing.expectEqual(Outcome.kept, base.outcome);
+    {
+        var r = try filterOf(gpa, fixture(bind ++ stale ++ draw2), &set, .{});
+        defer r.deinit();
+        try testing.expectEqual(Outcome.kept, r.outcome);
+        try testing.expectEqual(base.summary.events_kept, r.summary.events_kept);
+        try testing.expectEqual(base.summary.events_dropped + 1, r.summary.events_dropped);
+        try testing.expectEqual(@as(u64, 0), r.summary.compositor_dropped); // 가를 수 없어 뺀 것이 아니다 — 경고를 늘리지 않는다
+        try testing.expectEqual(@as(u32, 1), r.summary.frames);
+        const json = try gunzip(gpa, r.gz);
+        defer gpa.free(json);
+        try testing.expect(std.mem.indexOf(u8, json, "DroppedFrame") == null and std.mem.indexOf(u8, json, "\"layerTreeId\":1") == null);
+    }
+    const still_bad = [_][]const u8{
+        // 시작 뒤 — 같은 프로세스 남의 위젯(A1-1 그대로).
+        bind ++ ",{\"name\":\"DroppedFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"ts\":1500,\"args\":{\"layerTreeId\":1}}" ++ draw2,
+        // 시작과 같은 시각은 앞이 아니다.
+        bind ++ ",{\"name\":\"DroppedFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"ts\":1000,\"args\":{\"layerTreeId\":1}}" ++ draw2,
+        // 시각이 없으면 앞인지 모른다 — 폐기 쪽.
+        bind ++ ",{\"name\":\"DroppedFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"args\":{\"layerTreeId\":1}}" ++ draw2,
+        // 렌더러(pid 10)가 늦은 시각의 TSIB 를 흉내 내도 시작이 옮지 않는다(브라우저 pid 의 것만).
+        bind ++ ",{\"name\":\"TracingStartedInBrowser\",\"cat\":\"disabled-by-default-devtools.timeline\",\"ph\":\"I\",\"pid\":10,\"tid\":11,\"ts\":9000,\"args\":{\"data\":{\"frames\":[]}}}" ++
+            ",{\"name\":\"DroppedFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"ts\":1500,\"args\":{\"layerTreeId\":1}}" ++ draw2,
+        // 브라우저의 TSIB 가 둘이면 가장 이른 것이 시작이다(늦은 것을 쓰면 시작 뒤의 남의 위젯을 빼고 남긴다).
+        bind ++ ",{\"name\":\"TracingStartedInBrowser\",\"cat\":\"disabled-by-default-devtools.timeline\",\"ph\":\"I\",\"pid\":1,\"tid\":1,\"ts\":9000,\"args\":{\"data\":{\"frames\":[]}}}" ++
+            ",{\"name\":\"DroppedFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"ts\":1500,\"args\":{\"layerTreeId\":1}}" ++ draw2,
+    };
+    inline for (still_bad, 0..) |extra, i| {
+        var r = try filterOf(gpa, fixture(extra), &set, .{});
+        defer r.deinit();
+        if (r.outcome != .mixed_content or !std.mem.eql(u8, r.foreign, "layer-tree")) {
+            std.debug.print("pre-start case {d}: {s}\n", .{ i, @tagName(r.outcome) });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // 시작 시각 — 그 앞의 늦은 보고(ts 0)가 잘린 trace 의 덮은 시간을 늘리지 않는다(TSIB 1000 µs 부터 주 스레드 끝 160000 µs 까지 159 ms, 0 부터면 160).
+    const full = fixtureFront(",{\"name\":\"DroppedFrame\",\"ph\":\"I\",\"pid\":10,\"tid\":12,\"ts\":0,\"args\":{\"layerTreeId\":1}},", "");
+    const at = std.mem.indexOf(u8, full, "{\"name\":\"UpdateCounters\"").? + 12;
+    var rt = try filterOf(gpa, full[0..at], &set, .{ .covered_ms = 5000, .truncated = true });
+    defer rt.deinit();
+    try testing.expectEqual(Outcome.kept, rt.outcome);
+    try testing.expectEqual(@as(u32, 159), rt.summary.covered_ms);
 }
 
 test "W9e② A4-1: sidecar 가 자른 trace — 끝나지 않은 마지막 이벤트는 버리고 남김, 덮은 시간은 남은 주 스레드 이벤트의 끝까지, 요약에 truncated" {

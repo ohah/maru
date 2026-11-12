@@ -175,7 +175,8 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   `emu-site-bound-aborted-hop`, main 으로 옮길 때 고침; 사이트 밖 문서에서 묶인 사이트로 가는 이동은 새 문서가 설 때까지 탭에 아무것도 걸지 않고 그 이동의 문서
   요청 하나에만 흉내 UA·client hints 를 머리로 넣는다 — 응답을 기다리는 동안 옛 문서가 흉내 화면·배율을 봤고(옮긴 판 검증), 홉에서 건 UA 는 옛 문서가 그동안 만든
   iframe(같은·다른 사이트)·form 대상·Worker 의 요청에 실려 허락하지 않은 사이트로 갔다(집중 검증 — 기다림의 길이는 밖의 페이지가 정한다; 사용자 결정 2026-11-12
-  「그 한 요청만 머리를 직접 넣기」, 그 문서 요청의 `Accept-Language` 는 CEF 154 가 진짜로 되돌려 한 요청 늦다), 판정 `emu-site-bound-slow-hop`·`-hop-headers`; 뒤로·앞으로의 bfcache 복원은 사이트 갈림을 지나지 않아 복원된 밖의 문서가 pageshow 에서
+  「그 한 요청만 머리를 직접 넣기」, 그 문서 요청 하나의 `Accept-Language` 는 CEF 154 가 진짜로 되돌려 한 요청 늦다; 밖의 문서가 그 사이트의 iframe 을 품었으면
+  새 문서의 첫 스크립트는 흉내 전 값을 수 ms 본다 — 허락한 사이트가 진짜 값을 보는 쪽이라 받아들였다, 사용자 결정 2026-11-12), 판정 `emu-site-bound-slow-hop`·`-hop-headers`·`-reused-renderer`; 뒤로·앞으로의 bfcache 복원은 사이트 갈림을 지나지 않아 복원된 밖의 문서가 pageshow 에서
   흉내를 보고 그 요청이 흉내 UA·언어를 실었다 — maru 의 Chromium 은 bfcache 를 끈다, 사용자 결정 2026-11-12, 판정 `emu-site-bound-bfcache`). 에이전트가 연 탭은 묻지 않는다(birth grant 다섯째 자리 — 흉내는 그 탭에만 가고 에이전트는 그 탭에서 이미 어느 사이트로든 간다).
   `browser` grant 는 요구하지 않는다 — 흉내는 페이지에서 코드를 돌리지 않는다(머리는 eval 로 바꿀 수 없어 peer scope 로 따로 묻는다). 설정 `browser.agent-network-full`
   과 무관하다(읽기가 아니다 — 몰기의 좁히기도 하지 않는다). **한 주인**: 흉내의 CDP 는 sidecar 의 `emulation.zig` 만 낸다 — maru 를 거친 DevTools 호출의 `Emulation.*`·

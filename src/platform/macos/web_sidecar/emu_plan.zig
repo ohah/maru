@@ -87,8 +87,9 @@ pub const Status = enum { idle, pending, ok, failed };
 /// 화면을 홉에서 걸면 옛 문서가 기다림 내내 화면·배율 흉내를 봤고(시간대·언어·터치·미디어는 보지 않았다 — DevTools 가 커밋까지 렌더러 쪽 명령을
 /// 붙잡는 것으로 보인다), UA 호출(`.ua` — UA·client hints·Accept-Language)을 홉에서 걸면 렌더러 쪽(navigator·옛 문서의 fetch)은 붙잡혔지만
 /// 브라우저 쪽에서 만드는 이동 요청 — 옛 문서가 만든 iframe 문서·form 대상·dedicated Worker 스크립트 — 이 곧 흉내 머리를 싣고 허락하지 않은
-/// 사이트로 갔다(집중 검증 1 회차 SEVERE). 그 홉의 문서 요청 하나는 `Tab.injection` 이 머리로 직접 채운다(사용자 결정 2026-11-12). 모두 미뤄도 새
-/// 문서의 첫 스크립트는 모든 무리를 봤다(같은 판정의 `T0` — 커밋 알림 `on_load_start` 가 문서의 스크립트보다 먼저다).
+/// 사이트로 갔다(집중 검증 1 회차 SEVERE). 그 홉의 문서 요청 하나는 `Tab.injection` 이 머리로 직접 채운다(사용자 결정 2026-11-12). 렌더러 쪽 명령은
+/// 홉에서 보내도 Chromium 이 이동 동안 붙잡아 커밋 뒤에 닿으므로 미뤄서 잃는 것은 없다 — 새 문서의 첫 스크립트와는 겨룬다(새로 뜨는 렌더러면 이기고, 밖의
+/// 문서가 그 사이트 iframe 을 품어 렌더러가 이미 떠 있으면 수 ms 진다 — 사용자 결정 2026-11-12 「받아들이고 문서에 적기」, 판정 `emu-site-bound-reused-renderer`).
 pub fn heldUntilCommit(kind: Kind) bool {
     _ = kind;
     return true;
@@ -914,7 +915,7 @@ test "W9e①: 밖의 문서에서 사이트 안으로 가는 홉은 커밋까지
     try testing.expect(t.injection(&inj));
     try testing.expect(!t.resize(320, 200)); // 기다리는 동안 화면 흉내는 없다
     _ = t.resize(640, 400);
-    // 커밋: 모두 건다(UA 도 — 새 문서의 첫 스크립트가 본다), 머리 넣기는 끝.
+    // 커밋: 모두 건다(UA 도), 머리 넣기는 끝.
     try testing.expect(t.navigate("a.test"));
     try testing.expect(!t.hold and !t.injection(&inj));
     t.plan(&c);

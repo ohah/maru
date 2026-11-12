@@ -275,6 +275,12 @@ const wk_js = "fetch('/wks?e='+(navigator.userAgent.indexOf('BoundUA')===0?'ua':
 /// UA 가 흉내 `B`(BoundUA)·`A`(Android)·진짜 `R`; 관측: 탭 전체 흉내는 커밋에서 걸려 이 요청과 겨룬다).
 const slow_html = "<!doctype html><title>slow</title><script>" ++ sg_js ++ "window.T0=SG();" ++ p_js ++
     "var nu=navigator.userAgent;fetch('/aft?'+location.search.slice(1)+'&nu='+(nu.indexOf('BoundUA')===0?'B':nu.indexOf('Android')>0?'A':'R')).catch(function(){});</script>";
+/// 묶인 사이트의 렌더러가 이미 떠 있는 새 문서(`/slowr` — `/slow` 와 같은 느린 응답): 첫 스크립트가 본 것(`T0`)과 그 요청 하나(`/aft?…`), 모든 흉내가 보인
+/// 때(`FULL` — 첫 스크립트로부터 ms, 처음부터면 0, 5 초 안에 못 보면 -1).
+const slowr_html = "<!doctype html><title>slowr</title><script>" ++ sg_js ++
+    "window.T0=SG();var t0=performance.now(),A='tz.il.ua.lang.iw.dpr.mtp.print.fc';window.FULL=T0===A?0:-1;" ++
+    "var nu=navigator.userAgent;fetch('/aft?'+location.search.slice(1)+'&nu='+(nu.indexOf('BoundUA')===0?'B':'R')).catch(function(){});" ++
+    "if(FULL<0)(function q(){if(SG()===A){FULL=Math.round(performance.now()-t0);return}if(performance.now()-t0<5000)setTimeout(q,2)})();</script>";
 /// bfcache 에 들 수 있는 문서(no-store 없음 — `replyCacheable`): 첫 스크립트와 pageshow 가 본 것, pageshow 의 요청.
 const bf_html = "<!doctype html><title>bf</title><script>" ++ sg_js ++
     \\
@@ -343,7 +349,12 @@ fn serveParsed(conn: c_int, r: []const u8) void {
     }
     if (std.mem.eql(u8, path, "/bf")) return replyCacheable(conn, bf_html);
     // 느린 응답(`?ms=N` 동안 잡았다가 문서 — 밖의 문서가 묶인 사이트로 가는 이동을 오래 기다리게).
-    if (std.mem.eql(u8, path, "/slow")) {
+    if (std.mem.eql(u8, path, "/obf")) {
+        // 밖의 문서가 묶인 사이트(127.0.0.1)의 iframe 을 품는다 — 그 사이트의 렌더러가 이 탭(BrowsingInstance)에 떠 있다.
+        const body = std.fmt.bufPrint(&bb, "{s}<iframe src='http://127.0.0.1:{d}/ifr?emb'></iframe>", .{ ob_html, port }) catch return;
+        return reply(conn, "200 OK", html, "", body);
+    }
+    if (std.mem.eql(u8, path, "/slow") or std.mem.eql(u8, path, "/slowr")) {
         var ms: u32 = 3000;
         if (std.mem.indexOf(u8, target, "ms=")) |at| {
             var e = at + 3;
@@ -351,7 +362,7 @@ fn serveParsed(conn: c_int, r: []const u8) void {
             ms = @min(std.fmt.parseInt(u32, target[at + 3 .. e], 10) catch 3000, 8000);
         }
         os.sleepMs(ms);
-        return reply(conn, "200 OK", html, "", slow_html);
+        return reply(conn, "200 OK", html, "", if (path.len == 5) slow_html else slowr_html);
     }
     return reply(conn, "200 OK", "text/plain", "Access-Control-Allow-Origin: *\r\n", "ok");
 }
@@ -1458,6 +1469,57 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     const after_err = r.ev(4, "JSON.stringify([location.host,T0,SG()])", &g3);
     const err_ok = st_err != null and st_err.?.on_site and !st_err.?.pending and e2 != null and !contains(e2.?.uaText(), "BoundUA") and !std.mem.startsWith(u8, e2.?.alText(), "fr") and contains(after_err, "localhost") and !leakText(after_err);
     report(err_ok, "emu-site-bound-error-page", std.fmt.bufPrint(&d, "오류 페이지 2.5 초 on_site={} pending={} active=0x{x} | 밖 이동 문서 {s} 문서 {s}", .{ if (st_err) |x| x.on_site else false, if (st_err) |x| x.pending else true, if (st_err) |x| x.active_mask else 0, headerText(&hb[0], e2), after_err }) catch "");
+
+    // 데워진 렌더러(사용자 결정 2026-11-12 「받아들이고 문서에 적기」): 밖의 문서가 묶인 사이트의 iframe 을 품으면(그 사이트의 렌더러가 이 탭에 떠 있다)
+    // 밖→안 이동의 새 문서가 그 렌더러로 가고, 첫 스크립트가 커밋 뒤에야 닿는 흉내보다 먼저(~3 ms) 돈다 — Chromium 이 이동 동안 탭의 DevTools 세션을 붙잡아
+    // 렌더러 쪽 명령이 커밋 뒤에 간다. 첫 스크립트가 본 것은 관측으로 적고(obs), 동의에 닿는 것만 단언한다: 기다리는 동안 옛 문서·그 문서가 만든 iframe·form·
+    // Worker 의 요청은 진짜, 새 문서는 커밋 뒤 1 초 안에 모든 흉내, 그 뒤 새로고침(`reload:true` 의 길)은 첫 스크립트부터 모든 흉내.
+    // 앞 탭들은 닫는다 — 같은 사이트 렌더러를 나누면 언어가 process_shared 로 실패했다(탭 3 의 de_DE).
+    try r.host.send(.{ .destroy_browser = 3 });
+    try r.host.send(.{ .destroy_browser = 4 });
+    r.pump(800);
+    try r.create(5, uLocal(&u, "/obf?f"));
+    _ = try r.emulate(5, bound_all);
+    r.pump(400);
+    var kid0: Kids = undefined;
+    kidsOf(&kid0);
+    var lo0: Leaks = undefined;
+    leaksOn("/obs?", "localhost", &lo0);
+    var g4: [64]u8 = undefined;
+    const t0_obf = r.ev(5, "T0", &g4);
+    _ = r.ev(5, std.fmt.bufPrint(&js, "GO('http://127.0.0.1:{d}/slowr?ms=1500&f',1)", .{port}) catch unreachable, &g1);
+    r.pump(1100);
+    const st_wait = r.st[5];
+    _ = r.until(Run.loadsAt, 5, r.loads[5] + 1, 8000);
+    r.pump(800);
+    var lo5: Leaks = undefined;
+    leaksOn("/obs?", "localhost", &lo5);
+    var kid5: Kids = undefined;
+    kidsOf(&kid5);
+    const fdoc = firstReqOn("/slowr?ms=1500&f", "127.0.0.1");
+    const faft = firstReqOn("/aft?ms=1500&f", "127.0.0.1");
+    var g5: [300]u8 = undefined;
+    const fnew = r.ev(5, "JSON.stringify([location.host,'T0='+T0,'FULL='+FULL,SG()])", &g5);
+    const st_f = r.st[5];
+    const rend = r.renderers();
+    try r.action(5, .reload);
+    r.pump(300);
+    var g6: [300]u8 = undefined;
+    const freload = r.ev(5, "JSON.stringify([location.host,'T0='+T0,'FULL='+FULL])", &g6);
+    const old_clean = std.mem.eql(u8, t0_obf, "-") and lo5.total >= lo0.total + 8 and lo5.seen == lo0.seen and lo5.header == lo0.header and
+        st_wait != null and !st_wait.?.on_site and st_wait.?.active_mask == 0;
+    const kids_clean = kid5.docs == kid0.docs + 4 and kid5.dirty == kid0.dirty and kid5.inner >= kid0.inner + 3 and kid5.inner_dirty == kid0.inner_dirty;
+    const full_ms: i64 = if (std.mem.indexOf(u8, fnew, "FULL=")) |at| blk: {
+        var e = at + 5;
+        if (e < fnew.len and fnew[e] == '-') break :blk -1;
+        while (e < fnew.len and std.ascii.isDigit(fnew[e])) e += 1;
+        break :blk std.fmt.parseInt(i64, fnew[at + 5 .. e], 10) catch -1;
+    } else -1;
+    const fnew_ok = contains(fnew, "127.0.0.1") and full_ms >= 0 and full_ms <= 1000 and contains(fnew, "," ++ "\"tz.il.ua.lang.iw.dpr.mtp.print.fc\"]") and st_f != null and st_f.?.on_site and
+        fdoc != null and std.mem.eql(u8, fdoc.?.uaText(), "BoundUA/1");
+    const reload_ok = contains(freload, "127.0.0.1") and contains(freload, t0_all);
+    report(old_clean and kids_clean and fnew_ok and reload_ok, "emu-site-bound-reused-renderer", std.fmt.bufPrint(&d, "옛 문서 T0={s} · 기다리는 동안 관찰 +{d}개(흉내 {d}·머리 {d}) {s}· 1.1 초 on_site={} active=0x{x} | 옛 문서가 만든 요청 문서 +{d}개(흉내 머리 {d}) 안의 fetch +{d}개(흉내 {d}) {s}| 새 문서 요청 ua=[{s}] · 새 문서 {s} on_site={} | 새로고침 {s}", .{ t0_obf, lo5.total - lo0.total, lo5.seen - lo0.seen, lo5.header - lo0.header, lo5.buf[0..lo5.len], if (st_wait) |x| x.on_site else true, if (st_wait) |x| x.active_mask else 0, kid5.docs - kid0.docs, kid5.dirty - kid0.dirty, kid5.inner - kid0.inner, kid5.inner_dirty - kid0.inner_dirty, kid5.buf[0..@min(kid5.len, 300)], if (fdoc) |x| x.uaText()[0..@min(x.ua_len, 20)] else "-", fnew, if (st_f) |x| x.on_site else false, freload }) catch "");
+    report(true, "emu-site-bound-reused-renderer-first-script(obs)", std.fmt.bufPrint(&d, "첫 스크립트 {s}(모든 흉내까지 {d} ms — 0 이면 처음부터) · 첫 스크립트의 요청 {s} {s} · 렌더러 {d}", .{ if (std.mem.indexOf(u8, fnew, "T0=")) |at| fnew[at .. std.mem.indexOfScalarPos(u8, fnew, at, '"') orelse fnew.len] else "-", full_ms, if (faft) |x| x.targetText() else "-", headerText(&hb[1], faft), rend }) catch "");
 }
 
 /// 기다리는 동안 옛 문서가 만든 요청들(`ob_html` 의 `KID`): iframe 문서 셋·Worker 스크립트(`docs` — 흉내 UA·Accept-Language 를 실은 수 `dirty`)와 그

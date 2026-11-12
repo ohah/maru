@@ -8,6 +8,7 @@ const message_mod = @import("message.zig");
 const fields = @import("fields.zig");
 const net_fields = @import("net_fields.zig");
 const emu_fields = @import("emu_fields.zig"); // W9e①: 기기 흉내
+const trace_fields = @import("trace_fields.zig"); // W9e②: 성능 trace
 
 const Cursor = wire.Cursor;
 const ReadCursor = wire.ReadCursor;
@@ -110,6 +111,10 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .net_mock_hits => |value| try net_fields.writeMockHits(&cursor, value),
         .emulation => |value| try emu_fields.writeEmulation(&cursor, value), // W9e①
         .emulation_state => |value| try emu_fields.writeState(&cursor, value),
+        .trace => |value| try trace_fields.writeTrace(&cursor, value), // W9e②
+        .trace_state => |value| try trace_fields.writeState(&cursor, value),
+        .trace_data => |value| try trace_fields.writeData(&cursor, value),
+        .trace_frames => |value| try trace_fields.writeFrames(&cursor, value),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -201,6 +206,8 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeRequest(&cursor, value.browser, value.request);
             try cursor.writeByte(@intFromBool(value.accept));
             try cursor.writeByte(@intFromBool(value.suppress));
+            // W9e② v20c N3 — 세 답의 `user` 는 출시 전 wire 26 안에서 넓혔다(`wire.version` 주석: 26 은 W9e② 안에서 확정, 개발 빌드끼리 섞지 않는다).
+            try cursor.writeByte(@intFromBool(value.user));
             try writeDialogText(&cursor, value.text);
         },
         .file_dialog_path => |value| {
@@ -210,6 +217,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .file_dialog_reply => |value| {
             try writeRequest(&cursor, value.browser, value.request);
             try cursor.writeByte(@intFromBool(value.accept));
+            try cursor.writeByte(@intFromBool(value.user));
         },
         .js_dialog => |value| {
             try writeRequest(&cursor, value.browser, value.request);
@@ -238,6 +246,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .permission_reply => |value| {
             try writeRequest(&cursor, value.browser, value.request);
             try cursor.writeByte(@backingInt(value.result));
+            try cursor.writeByte(@intFromBool(value.user));
         },
         .web_notification => |value| {
             try writeBrowser(&cursor, value.browser);
@@ -498,6 +507,10 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .net_mock_hits => .{ .net_mock_hits = try net_fields.readMockHits(&cursor) },
         .emulation => .{ .emulation = try emu_fields.readEmulation(&cursor) }, // W9e①
         .emulation_state => .{ .emulation_state = try emu_fields.readState(&cursor) },
+        .trace => .{ .trace = try trace_fields.readTrace(&cursor) }, // W9e②
+        .trace_state => .{ .trace_state = try trace_fields.readState(&cursor) },
+        .trace_data => .{ .trace_data = try trace_fields.readData(&cursor) },
+        .trace_frames => .{ .trace_frames = try trace_fields.readFrames(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
         .set_hidden => .{ .set_hidden = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
@@ -580,6 +593,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
                 .request = request.request,
                 .accept = try readBool(&cursor),
                 .suppress = try readBool(&cursor),
+                .user = try readBool(&cursor),
                 .text = try readDialogText(&cursor),
             } };
         },
@@ -589,7 +603,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         },
         .file_dialog_reply => blk: {
             const request = try readRequest(&cursor);
-            break :blk .{ .file_dialog_reply = .{ .browser = request.browser, .request = request.request, .accept = try readBool(&cursor) } };
+            break :blk .{ .file_dialog_reply = .{ .browser = request.browser, .request = request.request, .accept = try readBool(&cursor), .user = try readBool(&cursor) } };
         },
         .js_dialog => blk: {
             const request = try readRequest(&cursor);
@@ -636,6 +650,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
                 .browser = request.browser,
                 .request = request.request,
                 .result = std.enums.fromInt(message_mod.PermissionResult, try cursor.readByte()) orelse return error.UnknownPermissionResult,
+                .user = try readBool(&cursor),
             } };
         },
         .web_notification => blk: {
@@ -902,6 +917,9 @@ comptime {
     std.debug.assert(largest <= max_frame_bytes);
     // W9e①: 가장 큰 흉내 frame(UA 512·client hints 상한·출처 여덟 — 약 3.3 KiB)도 frame 상한 안이다.
     std.debug.assert(prefix_len + common_len + emu_fields.max_emulation_body_bytes <= max_frame_bytes);
+    // W9e②: trace 조각(16 KiB)·프레임 id 64 개도 frame 상한 안이다.
+    std.debug.assert(prefix_len + common_len + trace_fields.max_data_body_bytes <= max_frame_bytes);
+    std.debug.assert(prefix_len + common_len + trace_fields.max_frames_body_bytes <= max_frame_bytes);
     std.debug.assert(prefix_len + common_len + 8 + 1 + 4 + max_text_bytes <= max_frame_bytes);
     // W9c①: 가장 긴 콘솔 줄(머리·수준·`docs_back`·버린 수 둘·앞 문서의 버린 수와 그 `docs_back`·항목 표시·길이 + 글 상한).
     std.debug.assert(prefix_len + common_len + 8 + 1 + 1 + 4 + 4 + 4 + 1 + 1 + 4 + wire.max_console_text_bytes <= max_frame_bytes);
@@ -927,7 +945,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  25, 0, // v25, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  26, 0, // v26, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -1013,9 +1031,9 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 83; // 정의되지 않은 tag(sidecar → maru 는 W9e① 의 `emulation_state` 82 까지)
+    bad[10] = 86; // 정의되지 않은 tag(sidecar → maru 는 W9e② 의 `trace_frames` 85 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
-    bad[10] = 141; // 둘째 구간(maru → sidecar)도 W9e① 의 `emulation` 140 뒤는 비었다
+    bad[10] = 142; // 둘째 구간(maru → sidecar)도 W9e② 의 `trace` 141 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
@@ -1740,8 +1758,15 @@ test "dialog messages round trip — multi-line text, Korean, empty origin" {
     try std.testing.expectEqual(message_mod.Request{ .browser = 7, .request = 4 }, (try roundTrip(.{ .dialog_closed = .{ .browser = 7, .request = 4 } })).dialog_closed);
 
     const reply = (try roundTrip(.{ .dialog_reply = .{ .browser = 7, .request = 3, .accept = true, .text = "한글\n입력", .suppress = true } })).dialog_reply;
-    try std.testing.expect(reply.accept and reply.suppress);
+    try std.testing.expect(reply.accept and reply.suppress and !reply.user);
     try std.testing.expectEqualStrings("한글\n입력", reply.text);
+    // W9e② v20c N3: 사람의 sheet 답 표시(다른 칸과 섞이지 않는다).
+    const human = (try roundTrip(.{ .dialog_reply = .{ .browser = 7, .request = 3, .accept = false, .text = "x", .user = true } })).dialog_reply;
+    try std.testing.expect(human.user and !human.accept and !human.suppress);
+    try std.testing.expectEqualStrings("x", human.text);
+    const human_file = (try roundTrip(.{ .file_dialog_reply = .{ .browser = 7, .request = 4, .accept = false, .user = true } })).file_dialog_reply;
+    try std.testing.expect(human_file.user and !human_file.accept);
+    try std.testing.expect(!(try roundTrip(.{ .file_dialog_reply = .{ .browser = 7, .request = 4, .accept = true } })).file_dialog_reply.user);
     // (roundTrip 이 돌려준 글은 공용 버퍼를 빌린다 — 다음 roundTrip 전에 본다.)
     try std.testing.expect((try roundTrip(.{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "", .offer_suppress = true } })).js_dialog.offer_suppress);
     try std.testing.expectEqualStrings("/Users/me/사진 1.png", (try roundTrip(.{ .file_dialog_path = .{ .browser = 7, .request = 4, .path = "/Users/me/사진 1.png" } })).file_dialog_path.path);
@@ -1820,6 +1845,8 @@ test "permission messages round trip and go the right way" {
     try std.testing.expectEqual(@as(u32, 0), media.kinds);
     inline for (.{ message_mod.PermissionResult.accept, .deny, .dismiss, .ignore }) |result| {
         try std.testing.expectEqual(result, (try roundTrip(.{ .permission_reply = .{ .browser = 7, .request = 3, .result = result } })).permission_reply.result);
+        const by_human = (try roundTrip(.{ .permission_reply = .{ .browser = 7, .request = 3, .result = result, .user = true } })).permission_reply;
+        try std.testing.expect(by_human.user and by_human.result == result); // W9e② v20c N3
     }
     try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.permission_request.direction());
     try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.permission_reply.direction());
@@ -2388,13 +2415,13 @@ test "W9d②: 본문 기록 넷이 왕복하고 방향이 맞다 — net_begin �
     inline for (.{ Tag.net_body_data, Tag.net_body_end, Tag.net_record_state }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d②: 본문 frame 의 바이트 배치 골든(버전 25 — W9e① 이 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
+test "W9d②: 본문 frame 의 바이트 배치 골든(버전 26 — W9e② 가 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
     var buf: [128]u8 = undefined;
     var len = try encode(.{ .net_record = .{ .browser = 0x0102, .on = true, .session = 0x0a0b0c0d } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 25, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 26, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
     len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 2, .request = 3, .state = .captured, .flags = .{ .redecoded = true, .credentialed = true }, .size = 0x0100, .decoded = 0x0200 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 25, 75, // 머리
+        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 26, 75, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, // session
         0, 0, 0, 0, 0, 0, 0, 3, // request
@@ -2403,9 +2430,9 @@ test "W9d②: 본문 frame 의 바이트 배치 골든(버전 25 — W9e① 이 
         0, 0, 0, 0, 0, 0, 2, 0, // decoded
     }, buf[0..len]);
     len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 2, .request = 3, .offset = 4, .bytes = "hi" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 25, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 26, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
     len = try encode(.{ .net_record_state = .{ .browser = 1, .session = 2, .status = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 25, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 26, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
 }
 
 test "W9d②: 본문의 닫힌 칸은 양쪽에서 거절한다 — 세션·요청 0, 빈·큰 조각, 본문 상한 넘는 끝, 잡지 않은 본문의 크기·글 표시, 켬과 세션 어긋남" {
@@ -2510,7 +2537,7 @@ test "W9d②: 본문 frame 을 무작위로 망가뜨려도 풀기는 무너지�
 
 // ── 요청 막기(W9d③) ─────────────────────────────────────────────────────────────────────────────────────
 // 시험이 증명하는 것: 막기 셋(`net_block`·`net_block_state`·`net_block_hits`)과 바뀐 칸(`net_end` 의 막기 표시·규칙 번호, `error_page` 의 오류 번호·
-// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 25 — 배치는 23 과 같다), 닫힌 칸(규칙 수·번호 0·중복·종류
+// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 26 — 배치는 23 과 같다), 닫힌 칸(규칙 수·번호 0·중복·종류
 // 마스크·호스트·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 막기 frame(규칙 32 개·사이트·패턴 상한)이
 // frame 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 막기 규칙이 사용자 탭의 요청을 막는다
 // (maru 와 sidecar 가 같은 규칙을 봐야 하고, sidecar 가 보낸 수는 공격 입력으로 다룬다).
@@ -2554,13 +2581,13 @@ test "W9d③: 막기 셋과 바뀐 칸이 왕복하고 방향이 맞다 — 규�
     inline for (.{ Tag.net_block_state, Tag.net_block_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d③: 막기 frame 의 바이트 배치 골든(버전 25 — W9e① 이 올렸다, 배치는 23 과 같다) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
+test "W9d③: 막기 frame 의 바이트 배치 골든(버전 26 — W9e② 가 올렸다, 배치는 23 과 같다) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
     var buf: [256]u8 = undefined;
     var v: message_mod.NetBlock = .{ .browser = 1, .generation = 0x0102, .strict_site = "a.t", .count = 1 };
     v.rules[0] = .{ .id = 5, .types = 0x10, .site = "a.t", .pattern = "https://a.t/x" };
     var len = try encode(.{ .net_block = v }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 25, 136, // 머리
+        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 26, 136, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         3, 'a', '.', 't', // 엄격 사이트
@@ -2571,12 +2598,12 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 25 — W9e① 이 
         0, 13, 'h', 't', 't', 'p', 's', ':', '/', '/', 'a', '.', 't', '/', 'x', // 패턴
     }, buf[0..len]);
     len = try encode(.{ .net_block_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 25, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 26, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
     var hits: message_mod.NetBlockHits = .{ .browser = 1, .generation = 9, .unrecorded = 2, .skipped_unknown_page = 3, .strict_redirect_missed = 4, .strict_redirect_bypassed = 5, .sw_shared_with_unruled_tab = true, .count = 1 };
     hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_hits = 7, .sw_not_applied = 8 };
     len = try encode(.{ .net_block_hits = hits }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 25, 78, // 머리
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 26, 78, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 9, // 세대
         0, 0, 0, 2, 0, 0, 0, 3, // 기록 없이 막음·페이지 모름
@@ -2586,7 +2613,7 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 25 — W9e① 이 
     }, buf[0..len]);
     len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .received = 0, .time_ms = 3, .flags = .{ .blocked = true }, .rule_id = 5 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 25, 72, // 머리
+        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 26, 72, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 0, 0, 0, 0, 2, // request
         2, // failed
@@ -2597,11 +2624,11 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 25 — W9e① 이 
         0, 0, 0, 5, // 규칙
     }, buf[0..len]);
     len = try encode(.{ .error_page = .{ .browser = 1, .error_code = -20, .blocked_rule = 5 } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 25, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 26, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5 }, buf[0..len]);
     len = try encode(.{ .navigate = .{ .browser = 1, .url = "a:", .user = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 25, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 26, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
     len = try encode(.{ .nav_action = .{ .browser = 1, .action = .reload, .user = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 25, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 26, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
 }
 
 test "W9d③: 막기의 닫힌 칸은 양쪽에서 거절한다 — 규칙 33 개·번호 0·중복·모르는 종류 비트·서비스 워커 종류·대문자 사이트·풀리지 않는 패턴·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝, 양수 오류" {
@@ -2722,7 +2749,7 @@ test "W9d③: 막기 frame 을 무작위로 망가뜨려도 풀기는 무너지�
 
 // ── 가짜 응답(W9d④) ─────────────────────────────────────────────────────────────────────────────────────
 // 시험이 증명하는 것: 가짜 여섯(`net_mock_rule`·`net_mock_body`·`net_mock_commit`·`net_mock_state`·`net_mock_ack`·`net_mock_hits`)과 바뀐 칸(`net_end`
-// 의 `mocked`·`mock_redirected`, `net_begin` 둘째 표시의 `mocked`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 25 — 배치는 24 와 같다), 닫힌 칸(번호 0·
+// 의 `mocked`·`mock_redirected`, `net_begin` 둘째 표시의 `mocked`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 26 — 배치는 24 와 같다), 닫힌 칸(번호 0·
 // 차례·종류·메서드·표시와 실행 사이트의 짝·정규형 패턴·상태·본문 번호와 길이·본문 금지 상태·content_type·그려지는 종류·Location·허용 목록 밖
 // 머리·Location 머리, 조각 범위, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 규칙 frame(머리 32 개·8 KiB·Location 2 KiB·패턴 512)이 frame
 // 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 가짜 응답은 그 사이트로서 페이지에 들어간다
@@ -2791,11 +2818,11 @@ test "W9d④: 가짜 여섯과 바뀐 칸이 왕복하고 방향이 맞다 — �
     inline for (.{ Tag.net_mock_state, Tag.net_mock_ack, Tag.net_mock_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 25 — W9e① 이 올렸다, 배치는 24 와 같다) — net_mock_rule·net_mock_body·net_mock_commit·net_mock_state·net_mock_ack·net_mock_hits·net_end" {
+test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 26 — W9e② 가 올렸다, 배치는 24 와 같다) — net_mock_rule·net_mock_body·net_mock_commit·net_mock_state·net_mock_ack·net_mock_hits·net_end" {
     var buf: [256]u8 = undefined;
     var len = try encode(.{ .net_mock_rule = .{ .browser = 1, .generation = 0x0102, .index = 0, .id = 5, .types = 0, .methods = 1, .flags = .{ .exec_site_bound = true }, .site = "a.t", .exec_site = "a.t", .pattern = "https://a.t/x", .status = 302, .body_id = 0, .body_len = 0, .content_type = "text/html", .location = "/y" } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 81, 'M', 'W', 'E', 'B', 0, 25, 137, // 머리
+        0, 0, 0, 81, 'M', 'W', 'E', 'B', 0, 26, 137, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         0, // index
@@ -2813,25 +2840,25 @@ test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 25 — W9e① 이 
         0, 0, 0, // 머리 없음
     }, buf[0..len]);
     len = try encode(.{ .net_mock_body = .{ .browser = 1, .body_id = 2, .offset = 3, .total = 9, .bytes = "ab" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 25, 138, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 9, 0, 2, 'a', 'b' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 26, 138, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 9, 0, 2, 'a', 'b' }, buf[0..len]);
     len = try encode(.{ .net_mock_commit = .{ .browser = 1, .generation = 2, .count = 3, .strict_site = "a.t" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 24, 'M', 'W', 'E', 'B', 0, 25, 139, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3, 3, 'a', '.', 't' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 24, 'M', 'W', 'E', 'B', 0, 26, 139, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3, 3, 'a', '.', 't' }, buf[0..len]);
     len = try encode(.{ .net_mock_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .on } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 25, 79, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 26, 79, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 1 }, buf[0..len]);
     len = try encode(.{ .net_mock_ack = .{ .browser = 1, .body_id = 2, .received = 0x010000 } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 25, 80, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 0, 0 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 26, 80, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 0, 0 }, buf[0..len]);
     var hits: message_mod.NetMockHits = .{ .browser = 1, .unrecorded = 2, .busy = 3, .skipped_unknown_page = 4, .page_controlled = true, .count = 1 };
     hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_not_mocked = 7, .frame_not_mocked = 8 };
     len = try encode(.{ .net_mock_hits = hits }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 45, 'M', 'W', 'E', 'B', 0, 25, 81, // 머리
+        0, 0, 0, 45, 'M', 'W', 'E', 'B', 0, 26, 81, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 1, 1, // 기록 없이·줄 수 없음·페이지 모름·서비스 워커·항목 수
         0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, // 규칙 5 의 수(맞음·서비스 워커·허락 밖 프레임 — v1 SEVERE-1)
     }, buf[0..len]);
     len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .success, .received = 0, .time_ms = 3, .flags = .{ .mocked = true, .mock_redirected = true }, .rule_id = 5, .mock_body_id = 0x0607 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 25, 72, // 머리
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 26, 72, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 0, 0, 0, 0, 2, // request
         0, // success
@@ -3073,11 +3100,11 @@ test "W9e①: 흉내 둘이 왕복하고 방향이 맞다 — 무리 모두·cli
     try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.emulation_state.direction());
 }
 
-test "W9e①: 흉내 frame 의 바이트 배치 골든(버전 25) — emulation·emulation_state" {
+test "W9e①: 흉내 frame 의 바이트 배치 골든(버전 26 — W9e② 가 CPU·네트워크 칸 넷과 풀림 셋을 끝에 더했다) — emulation·emulation_state" {
     var buf: [256]u8 = undefined;
     var len = try encode(.{ .emulation = .{ .browser = 1, .generation = 0x0102, .flags = .{ .viewport = true, .timezone = true }, .width = 390, .height = 844, .dsf = 2, .timezone = "UTC" } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 78, 'M', 'W', 'E', 'B', 0, 25, 140, // 머리
+        0, 0, 0, 94, 'M', 'W', 'E', 'B', 0, 26, 140, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         0x00, 0x82, // 표시(viewport·timezone)
@@ -3095,10 +3122,12 @@ test "W9e①: 흉내 frame 의 바이트 배치 골든(버전 25) — emulation�
         0, 0, 0, 0, 0, 0, 0, 0, // 정확도
         0, 0, 0, 0, 0, 0, // 미디어 다섯·색각
         0, // 되돌릴 출처
+        0, 0, 0, 0, // W9e② cpu_rate
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 지연·내려받기·올리기
     }, buf[0..len]);
     len = try encode(.{ .emulation_state = .{ .browser = 1, .generation = 2, .on_site = true, .alive = true, .fit_scale = 0.5, .active_mask = 0x0009, .failed_mask = 0x0002, .reason = .cdp_error } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 32, 'M', 'W', 'E', 'B', 0, 25, 82, // 머리
+        0, 0, 0, 36, 'M', 'W', 'E', 'B', 0, 26, 82, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, // generation
         1, 1, 0, // 사이트 안·살아 있음·기다림 없음
@@ -3106,6 +3135,7 @@ test "W9e①: 흉내 frame 의 바이트 배치 골든(버전 25) — emulation�
         0, 0x09, 0, 0x02, // 걸림·실패
         3, // cdp_error
         0, // 출처
+        0, 0, 0, 0, // W9e② 풀린 무리·cpu·network 까닭
     }, buf[0..len]);
 }
 
@@ -3114,7 +3144,7 @@ test "W9e①: 흉내의 닫힌 칸은 양쪽에서 거절한다 — 표시와 �
     const good = testEmulation();
     _ = try encode(.{ .emulation = good }, &buf);
     var bads: [34]message_mod.Emulation = @splat(good);
-    bads[0].flags._reserved = 1;
+    bads[0].flags.offline = true; // W9e②: 네트워크 표시 없는 오프라인
     bads[1].site = ""; // 묶였는데 사이트 없음
     bads[2].flags.site_bound = false; // 사이트가 있는데 묶이지 않음
     bads[3].width = 0;
@@ -3160,7 +3190,7 @@ test "W9e①: 흉내의 닫힌 칸은 양쪽에서 거절한다 — 표시와 �
     try std.testing.expectError(error.InvalidEmulation, encode(.{ .emulation = .{ .browser = 1, .flags = .{ .geo_unavailable = true } } }, &buf));
     try std.testing.expectError(error.InvalidEmulation, encode(.{ .emulation = .{ .browser = 1, .latitude = -0.0 } }, &buf));
     const bad_states = [_]message_mod.EmulationState{
-        .{ .browser = 1, .active_mask = 1 << 7 },
+        .{ .browser = 1, .active_mask = 1 << 9 }, // W9e②: 무리는 cpu·network(7·8)까지
         .{ .browser = 1, .active_mask = 1, .failed_mask = 1, .reason = .cdp_error },
         .{ .browser = 1, .failed_mask = 1 }, // 까닭 없는 실패
         .{ .browser = 1, .reason = .cdp_error }, // 실패 없는 까닭
@@ -3175,14 +3205,14 @@ test "W9e①: 흉내의 닫힌 칸은 양쪽에서 거절한다 — 표시와 �
     const body = prefix_len + common_len;
     const len = try encode(.{ .emulation = .{ .browser = 1, .flags = .{ .vision = true }, .vision = .protanopia } }, &buf);
     var b = buf;
-    b[len - 2] = 7; // 색각 7 은 없다
+    b[len - 18] = 7; // 색각 7 은 없다(W9e② 의 16 바이트가 뒤에 붙었다)
     try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
     b = buf;
-    b[len - 3] = 4; // 대비 4 는 없다
+    b[len - 19] = 4; // 대비 4 는 없다
     try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
     const slen = try encode(.{ .emulation_state = .{ .browser = 1, .failed_mask = 1, .reason = .cdp_error } }, &buf);
     b = buf;
-    b[slen - 2] = 4; // 까닭 4 는 없다
+    b[slen - 6] = 5; // 까닭 5 는 없다(W9e② 가 4 = process_shared 를 더했다, 뒤에 풀림 넷)
     try std.testing.expect(std.meta.isError(decodeExact(b[0..slen])));
     b = buf;
     b[body + 12] = 2; // on_site 가 bool 이 아니다
@@ -3310,4 +3340,236 @@ test "W9e① 변이: 흉내 닫힌 칸의 경계 — DEL·`;`·앞 쉼표·ICU �
     try std.testing.expectError(error.InvalidEmulation, encode(.{ .emulation_state = st }, &buf));
     try std.testing.expectEqual(@as(f32, 1), emu_fields.fitScale(640, 0, 390, 844)); // 세로를 모르면 1
     try std.testing.expectEqual(@as(f32, 0.6666), emu_fields.fitScale(200, 200, 300, 300)); // 만분의 일로 내린다(반올림하면 pane 을 넘는다)
+}
+
+// ── 성능 trace·CPU·네트워크 조건(W9e②) ───────────────────────────────────────────────────────────────────
+// 시험이 증명하는 것: 흉내의 새 칸(CPU 배수·네트워크 지연·처리량·오프라인)과 상태의 풀림(무리·까닭)이 왕복하고, trace 넷(`trace`·`trace_state`·
+// `trace_data`·`trace_frames`)이 왕복하며 방향이 맞다, 바이트 배치가 골든과 같다(버전 26), 닫힌 칸(CPU 1 이하·20 넘음·NaN·-0·표시 없는 값,
+// 오프라인의 수치·네트워크 표시 없는 오프라인, 처리량 1..15·상한 넘음, 지연 상한 넘음, 풀림의 무리 밖·까닭 짝·걸린 무리와 겹침·네트워크를
+// 「CPU 나눔」 으로 풂, trace 세대 0·길이 범위·`start` 밖의 표시, 상태마다 까닭·시작 전 바이트, 조각 크기·16 MiB 끝, 프레임 id 수·글자·남은 칸)
+// 은 양쪽에서 거절한다, 가장 큰 trace frame 이 frame 상한 안이다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 —
+// CPU·네트워크 값은 sidecar 가 CDP JSON 에 글로 이어 붙이고, trace 바이트와 프레임 id 는 신뢰할 수 없는 쪽(sidecar)에서 와서 maru 가 풀고
+// 거른다.
+
+test "W9e②: 흉내의 CPU·네트워크·오프라인과 상태의 풀림이 왕복한다, trace 넷이 왕복하고 방향이 맞다" {
+    const e = (try roundTrip(.{ .emulation = .{ .browser = 7, .generation = 2, .flags = .{ .cpu = true, .network = true }, .cpu_rate = 4, .latency_ms = 2000, .download_kbps = 400, .upload_kbps = 0 } })).emulation;
+    try std.testing.expect(e.flags.cpu and e.flags.network and !e.flags.offline and e.cpu_rate == 4 and e.latency_ms == 2000 and e.download_kbps == 400 and e.upload_kbps == 0);
+    const off = (try roundTrip(.{ .emulation = .{ .browser = 7, .generation = 3, .flags = .{ .network = true, .offline = true } } })).emulation;
+    try std.testing.expect(off.flags.offline and off.latency_ms == 0);
+    const st = (try roundTrip(.{ .emulation_state = .{ .browser = 7, .generation = 3, .active_mask = 1, .released_mask = 0b1_1000_0000, .cpu_release = .process_shared, .network_release = .human_input } })).emulation_state;
+    try std.testing.expectEqual(@as(u16, 0b1_1000_0000), st.released_mask);
+    try std.testing.expectEqual(message_mod.EmuReleaseReason.process_shared, st.cpu_release);
+    try std.testing.expectEqual(message_mod.EmuReleaseReason.human_input, st.network_release);
+    const t = (try roundTrip(.{ .trace = .{ .browser = 7, .generation = 1, .action = .start, .duration_ms = 5000, .screenshots = true, .reload = true } })).trace;
+    try std.testing.expect(t.action == .start and t.duration_ms == 5000 and t.screenshots and t.reload);
+    const ts = (try roundTrip(.{ .trace_state = .{ .browser = 7, .generation = 1, .state = .done, .reason = .buffer_full, .focus_emulated = true, .data_loss = true, .truncated = true, .covered_ms = 1800, .gz_bytes = 9_650_000, .frames = 918 } })).trace_state;
+    try std.testing.expect(ts.state == .done and ts.reason == .buffer_full and ts.focus_emulated and ts.data_loss and ts.truncated and ts.covered_ms == 1800 and ts.gz_bytes == 9_650_000 and ts.frames == 918);
+    try std.testing.expect(!(try roundTrip(.{ .trace_state = .{ .browser = 7, .generation = 1, .state = .done, .reason = .duration } })).trace_state.truncated);
+    const td = (try roundTrip(.{ .trace_data = .{ .browser = 7, .generation = 1, .offset = 16384, .bytes = "\x1f\x8b\x08" } })).trace_data;
+    try std.testing.expect(td.offset == 16384);
+    try std.testing.expectEqualSlices(u8, "\x1f\x8b\x08", td.bytes);
+    var fr: message_mod.TraceFrames = .{ .browser = 7, .generation = 1, .count = 2 };
+    fr.ids[0] = "9B1A4C3E2D7F6A5B8C9D0E1F2A3B4C5D";
+    fr.ids[1] = "abc";
+    const tf = (try roundTrip(.{ .trace_frames = fr })).trace_frames;
+    try std.testing.expectEqual(@as(u8, 2), tf.count);
+    try std.testing.expectEqualStrings("abc", tf.ids[1]);
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.trace.direction());
+    inline for (.{ Tag.trace_state, Tag.trace_data, Tag.trace_frames }) |tag| try std.testing.expectEqual(message_mod.Direction.to_maru, tag.direction());
+}
+
+test "W9e②: trace frame 의 바이트 배치 골든(버전 26) — trace·trace_state·trace_data·trace_frames" {
+    var buf: [256]u8 = undefined;
+    var len = try encode(.{ .trace = .{ .browser = 1, .generation = 2, .action = .start, .duration_ms = 5000, .screenshots = true } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 26, 'M', 'W', 'E', 'B', 0, 26, 141, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 0, 0, 0x13, 0x88, 1, 0 }, buf[0..len]);
+    len = try encode(.{ .trace_state = .{ .browser = 1, .generation = 2, .state = .done, .reason = .duration, .focus_emulated = true, .covered_ms = 5000, .gz_bytes = 0x010203, .frames = 3 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 34, 'M', 'W', 'E', 'B', 0, 26, 83, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 0, 2, // generation
+        4, 2, 1, // done·duration·focus 흉내(잃은 자료 없음)
+        0, 0, 0x13, 0x88, // 덮은 시간
+        0, 1, 2, 3, // gzip 바이트
+        0, 0, 0, 3, // 프레임 수
+    }, buf[0..len]);
+    // 자름(A4-1)은 표시의 셋째 비트.
+    len = try encode(.{ .trace_state = .{ .browser = 1, .generation = 2, .state = .done, .reason = .buffer_full, .data_loss = true, .truncated = true, .covered_ms = 1, .gz_bytes = 5, .frames = 1 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 4, 3, 6 }, buf[prefix_len + common_len + 12 .. prefix_len + common_len + 15]);
+    // 프로세스 나눔(결정 12)은 넷째 비트.
+    len = try encode(.{ .trace_state = .{ .browser = 1, .generation = 2, .state = .done, .reason = .duration, .shared_process = true, .covered_ms = 1, .gz_bytes = 5, .frames = 1 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 4, 2, 8 }, buf[prefix_len + common_len + 12 .. prefix_len + common_len + 15]);
+    try std.testing.expect((try decodeExact(buf[0..len])).trace_state.shared_process);
+    // 그 밖의 비트(다섯째)는 받는 쪽이 거절한다.
+    buf[prefix_len + common_len + 14] = 0x10 | 8;
+    try std.testing.expectError(error.InvalidTrace, decodeExact(buf[0..len]));
+    len = try encode(.{ .trace_data = .{ .browser = 1, .generation = 2, .offset = 7, .bytes = "ab" } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 27, 'M', 'W', 'E', 'B', 0, 26, 84, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 7, 0, 2, 'a', 'b' }, buf[0..len]);
+    var fr: message_mod.TraceFrames = .{ .browser = 1, .generation = 2, .count = 1 };
+    fr.ids[0] = "A1";
+    len = try encode(.{ .trace_frames = fr }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 26, 85, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2, 'A', '1' }, buf[0..len]);
+}
+
+test "W9e②: CPU·네트워크·풀림·trace 의 닫힌 칸은 양쪽에서 거절한다" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    const bad_emus = [_]message_mod.Emulation{
+        .{ .browser = 1, .flags = .{ .cpu = true }, .cpu_rate = 1 }, // 1 은 끔 — 표시 없이 보낸다
+        .{ .browser = 1, .flags = .{ .cpu = true }, .cpu_rate = 20.5 },
+        .{ .browser = 1, .flags = .{ .cpu = true }, .cpu_rate = std.math.nan(f32) },
+        .{ .browser = 1, .cpu_rate = 4 }, // 표시 없는 값
+        .{ .browser = 1, .cpu_rate = -0.0 },
+        .{ .browser = 1, .flags = .{ .network = true }, .latency_ms = 10_001 },
+        .{ .browser = 1, .flags = .{ .network = true }, .download_kbps = 15 },
+        .{ .browser = 1, .flags = .{ .network = true }, .upload_kbps = 1_000_001 },
+        .{ .browser = 1, .flags = .{ .network = true, .offline = true }, .latency_ms = 1 }, // 오프라인에 수치
+        .{ .browser = 1, .flags = .{ .offline = true } }, // 네트워크 표시 없는 오프라인
+        .{ .browser = 1, .latency_ms = 5 }, // 표시 없는 지연
+        .{ .browser = 1, .download_kbps = 400 },
+    };
+    for (bad_emus, 0..) |v, i| if (!std.meta.isError(encode(.{ .emulation = v }, &buf))) {
+        std.debug.print("bad W9e② emulation {d} encoded\n", .{i});
+        return error.TestUnexpectedResult;
+    };
+    const cpu_bit: u16 = 1 << 7;
+    const net_bit: u16 = 1 << 8;
+    const bad_states = [_]message_mod.EmulationState{
+        .{ .browser = 1, .released_mask = 1, .cpu_release = .human_input }, // 풀 수 있는 무리는 cpu·network 만
+        .{ .browser = 1, .released_mask = cpu_bit }, // 까닭 없는 풀림
+        .{ .browser = 1, .cpu_release = .human_input }, // 풀림 없는 까닭
+        .{ .browser = 1, .released_mask = net_bit, .network_release = .process_shared }, // 네트워크는 탭 단위
+        .{ .browser = 1, .active_mask = cpu_bit, .released_mask = cpu_bit, .cpu_release = .human_input }, // 걸렸는데 풀렸다
+    };
+    for (bad_states, 0..) |v, i| if (!std.meta.isError(encode(.{ .emulation_state = v }, &buf))) {
+        std.debug.print("bad W9e② state {d} encoded\n", .{i});
+        return error.TestUnexpectedResult;
+    };
+    const bad_traces = [_]message_mod.Trace{
+        .{ .browser = 1, .generation = 0, .action = .stop },
+        .{ .browser = 1, .generation = 1, .action = .start, .duration_ms = 999 },
+        .{ .browser = 1, .generation = 1, .action = .start, .duration_ms = 30_001 },
+        .{ .browser = 1, .generation = 1, .action = .stop, .duration_ms = 5000 },
+        .{ .browser = 1, .generation = 1, .action = .abort, .screenshots = true },
+        .{ .browser = 1, .generation = 1, .action = .stop, .reload = true },
+    };
+    for (bad_traces) |v| try std.testing.expectError(error.InvalidTrace, encode(.{ .trace = v }, &buf));
+    const bad_tstates = [_]message_mod.TraceState{
+        .{ .browser = 1, .generation = 0, .state = .recording },
+        .{ .browser = 1, .generation = 1, .state = .recording, .reason = .duration },
+        .{ .browser = 1, .generation = 1, .state = .done }, // 끝은 왜 멈췄는지 싣는다
+        .{ .browser = 1, .generation = 1, .state = .done, .reason = .human_input },
+        .{ .browser = 1, .generation = 1, .state = .discarded, .reason = .busy },
+        .{ .browser = 1, .generation = 1, .state = .discarded, .reason = .cdp_error }, // 실패의 까닭은 버림에 싣지 않는다(변이 P4)
+        .{ .browser = 1, .generation = 1, .state = .failed, .reason = .requested },
+        .{ .browser = 1, .generation = 1, .state = .recording, .gz_bytes = 1 }, // 시작 전 바이트
+        .{ .browser = 1, .generation = 1, .state = .starting, .data_loss = true },
+        .{ .browser = 1, .generation = 1, .state = .done, .reason = .requested, .gz_bytes = message_mod.max_trace_gz_bytes + 1 },
+        .{ .browser = 1, .generation = 1, .state = .done, .reason = .requested, .covered_ms = 2 * message_mod.max_trace_duration_ms + 1 }, // 덮은 시간이 길이의 두 배를 넘음
+        .{ .browser = 1, .generation = 1, .state = .done, .reason = .requested, .frames = message_mod.max_trace_frames_total + 1 },
+        .{ .browser = 1, .generation = 1, .state = .discarded, .reason = .aborted, .truncated = true }, // 자름은 끝에만(A4-1)
+        .{ .browser = 1, .generation = 1, .state = .receiving, .truncated = true },
+        .{ .browser = 1, .generation = 1, .state = .failed, .reason = .too_large, .truncated = true },
+        .{ .browser = 1, .generation = 1, .state = .recording, .shared_process = true }, // 프로세스 나눔은 끝에만(결정 12)
+        .{ .browser = 1, .generation = 1, .state = .discarded, .reason = .aborted, .shared_process = true },
+    };
+    for (bad_tstates) |v| try std.testing.expectError(error.InvalidTrace, encode(.{ .trace_state = v }, &buf));
+    const big = array_repeat.repeat("z", message_mod.trace_chunk_bytes + 1);
+    const bad_data = [_]message_mod.TraceData{
+        .{ .browser = 1, .generation = 1, .offset = 0, .bytes = "" },
+        .{ .browser = 1, .generation = 0, .offset = 0, .bytes = "a" },
+        .{ .browser = 1, .generation = 1, .offset = 0, .bytes = big },
+        .{ .browser = 1, .generation = 1, .offset = message_mod.max_trace_gz_bytes, .bytes = "a" }, // 16 MiB 를 넘는 끝
+    };
+    for (bad_data) |v| try std.testing.expectError(error.InvalidTrace, encode(.{ .trace_data = v }, &buf));
+    var fr: message_mod.TraceFrames = .{ .browser = 1, .generation = 1, .count = 1 };
+    fr.ids[0] = "ABC";
+    var bad_frames: [5]message_mod.TraceFrames = @splat(fr);
+    bad_frames[0].count = 0;
+    bad_frames[1].ids[0] = "AB\"C"; // 16 진이 아니다(JSON 을 깰 수 있다)
+    bad_frames[2].ids[0] = "";
+    bad_frames[3].ids[1] = "DEF"; // 수 밖의 칸
+    bad_frames[4].ids[0] = array_repeat.repeat("A", message_mod.max_trace_frame_id_bytes + 1);
+    for (bad_frames) |v| try std.testing.expectError(error.InvalidTrace, encode(.{ .trace_frames = v }, &buf));
+    // decode 쪽: 모르는 동작·상태·까닭, 쓰지 않는 표시 비트, 65 개.
+    var len = try encode(.{ .trace = .{ .browser = 1, .generation = 1, .action = .stop } }, &buf);
+    var b = buf;
+    b[prefix_len + common_len + 12] = 4; // 동작 4 는 없다
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    len = try encode(.{ .trace_state = .{ .browser = 1, .generation = 1, .state = .recording } }, &buf);
+    b = buf;
+    b[prefix_len + common_len + 12] = 7; // 상태 7 은 없다
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    b = buf;
+    b[prefix_len + common_len + 14] = 8; // 표시의 쓰지 않는 비트
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    b = buf;
+    b[prefix_len + common_len + 14] = 4; // 자름 비트는 기록 중에 실리지 않는다(A4-1)
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    len = try encode(.{ .trace_frames = fr }, &buf);
+    b = buf;
+    b[prefix_len + common_len + 12] = 65;
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+}
+
+test "W9e②: 가장 큰 trace_frames(64 × 64 자)·trace_data(16 KiB)와 CPU·네트워크를 더한 가장 큰 emulation 도 frame 상한 안에서 왕복한다" {
+    var fr: message_mod.TraceFrames = .{ .browser = 1, .generation = std.math.maxInt(u32), .count = message_mod.max_trace_frame_ids };
+    for (&fr.ids) |*id| id.* = array_repeat.repeat("F", message_mod.max_trace_frame_id_bytes);
+    var buf: [max_frame_bytes]u8 = undefined;
+    var len = try encode(.{ .trace_frames = fr }, &buf);
+    try std.testing.expectEqual(prefix_len + common_len + trace_fields.max_frames_body_bytes, len);
+    const got = (try roundTrip(.{ .trace_frames = fr })).trace_frames;
+    try std.testing.expectEqual(@as(u8, 64), got.count);
+    const chunk = array_repeat.repeat("\x00", message_mod.trace_chunk_bytes);
+    len = try encode(.{ .trace_data = .{ .browser = 1, .generation = 1, .offset = message_mod.max_trace_gz_bytes - message_mod.trace_chunk_bytes, .bytes = chunk } }, &buf);
+    try std.testing.expectEqual(prefix_len + common_len + trace_fields.max_data_body_bytes, len);
+    try std.testing.expect(len <= max_frame_bytes);
+}
+
+test "W9e②: 흉내(CPU·네트워크)·상태(풀림)·trace frame 을 무작위로 망가뜨려도 풀기는 무너지지 않고 풀린 값은 닫힌 칸 규칙을 지킨다" {
+    var prng = std.Random.DefaultPrng.init(0x9e2);
+    const r = prng.random();
+    var fr: message_mod.TraceFrames = .{ .browser = 3, .generation = 2, .count = 3 };
+    fr.ids[0] = "9B1A4C3E2D7F6A5B8C9D0E1F2A3B4C5D";
+    fr.ids[1] = "0";
+    fr.ids[2] = "fe";
+    const seeds = [_]Message{
+        .{ .emulation = .{ .browser = 3, .generation = 1, .flags = .{ .cpu = true, .network = true }, .cpu_rate = 6, .latency_ms = 563, .download_kbps = 1440, .upload_kbps = 675 } },
+        .{ .emulation = .{ .browser = 3, .generation = 1, .flags = .{ .network = true, .offline = true } } },
+        .{ .emulation_state = .{ .browser = 3, .generation = 2, .released_mask = 1 << 7, .cpu_release = .process_shared } },
+        .{ .trace = .{ .browser = 3, .generation = 2, .action = .start, .duration_ms = 30_000, .screenshots = true } },
+        .{ .trace_state = .{ .browser = 3, .generation = 2, .state = .failed, .reason = .too_large, .gz_bytes = 16_000_000 } },
+        .{ .trace_data = .{ .browser = 3, .generation = 2, .offset = 32, .bytes = "\x1f\x8b\x08\x00abc" } },
+        .{ .trace_frames = fr },
+    };
+    var buf: [max_frame_bytes]u8 = undefined;
+    var ok: usize = 0;
+    for (0..200_000) |i| {
+        const seed = seeds[i % seeds.len];
+        const len = try encode(seed, &buf);
+        var frame: [1024]u8 = undefined;
+        @memcpy(frame[0..len], buf[0..len]);
+        var n = len;
+        for (0..r.intRangeAtMost(usize, 1, 6)) |_| {
+            switch (r.intRangeLessThan(u8, 0, 3)) {
+                0 => frame[r.intRangeLessThan(usize, 0, n)] = r.int(u8),
+                1 => n = r.intRangeAtMost(usize, 1, n),
+                else => if (n < frame.len) {
+                    frame[n] = r.int(u8);
+                    n += 1;
+                },
+            }
+        }
+        if (r.boolean() and n >= 4) std.mem.writeInt(u32, frame[0..4], @intCast(n - 4), .big);
+        const m = decodeExact(frame[0..n]) catch continue;
+        ok += 1;
+        switch (m) {
+            .emulation => |v| try emu_fields.checkEmulation(v),
+            .emulation_state => |v| try emu_fields.checkState(v),
+            .trace => |v| try trace_fields.checkTrace(v),
+            .trace_state => |v| try trace_fields.checkState(v),
+            .trace_data => |v| try trace_fields.checkData(v),
+            .trace_frames => |v| try trace_fields.checkFrames(v),
+            else => {},
+        }
+    }
+    try std.testing.expect(ok > 0);
 }

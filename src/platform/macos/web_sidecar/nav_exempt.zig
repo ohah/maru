@@ -23,6 +23,11 @@ const protocol = @import("web_sidecar_protocol");
 const msg = protocol.message;
 const BrowserId = msg.BrowserId;
 
+/// maru 가 보낸 사람 입력 중 **몸짓**·**그 탭을 쓴 것** — 규칙은 maru 와 함께 쓰는 `protocol.human_use` 하나다(W9e② 적대 검증 12 회차: maru 도
+/// 보내는 순간 같은 가름으로 조건을 푼다). 몸짓은 그 뒤 창 안의 렌더러 이동을 사람의 것으로 묶는 데만 쓴다.
+pub const gestureOf = protocol.human_use.gestureOf;
+pub const humanUseOf = protocol.human_use.useOf;
+
 /// 탭 자리 — sidecar 의 브라우저 상한과 같다.
 pub const capacity = @import("registry.zig").capacity;
 /// 묶인 주소의 시한 — 보통 수 ms 안에 쓰인다. 넉넉히 두되 남지 않게(막기 표의 `url_token_ms` 와 같다).
@@ -172,4 +177,78 @@ test "W9d④ 변이: 묶음의 시한, 소비한 묶음은 다음 요청에 다�
     t.humanInput(7, 70, 5000);
     t.forget(70);
     try testing.expect(!t.beforeBrowse(7, 70, false, true, false, 7, 5001));
+}
+
+test "W9e② A3-1: 몸짓은 누름·뗌·키(뗌 제외)·IME 확정만, 탭을 쓴 것은 굴림·IME 조합·끝내기·편집 명령·놓음까지 — 옮김·떠남·끌기 들어옴/위/나감·키 뗌은 아니다" {
+    const p: msg.Point = .{ .x = 1, .y = 1 };
+    const both = [_]msg.Message{
+        .{ .mouse = .{ .browser = 3, .kind = .down, .point = p } },
+        .{ .mouse = .{ .browser = 3, .kind = .up, .point = p } },
+        .{ .key = .{ .browser = 3, .kind = .raw_down } },
+        .{ .key = .{ .browser = 3, .kind = .char, .character = 'a' } },
+        .{ .ime_commit_text = .{ .browser = 3, .text = "한" } },
+    };
+    for (both) |m| {
+        try std.testing.expectEqual(@as(?BrowserId, 3), gestureOf(m));
+        try std.testing.expectEqual(@as(?BrowserId, 3), humanUseOf(m));
+    }
+    const use_only = [_]msg.Message{
+        .{ .wheel = .{ .browser = 4, .point = p, .delta_x = 0, .delta_y = -120 } },
+        .{ .ime_set_composition = .{ .browser = 4, .text = "한" } },
+        .{ .ime_finish_composing = .{ .browser = 4, .value = true } },
+        .{ .edit_command = .{ .browser = 4, .command = .paste } },
+        .{ .drag_target = .{ .browser = 4, .kind = .drop, .point = p } },
+    };
+    for (use_only) |m| {
+        try std.testing.expectEqual(@as(?BrowserId, null), gestureOf(m));
+        try std.testing.expectEqual(@as(?BrowserId, 4), humanUseOf(m));
+    }
+    const neither = [_]msg.Message{
+        .{ .mouse = .{ .browser = 5, .kind = .move, .point = p } },
+        .{ .mouse = .{ .browser = 5, .kind = .leave, .point = p } },
+        .{ .key = .{ .browser = 5, .kind = .up } },
+        .{ .drag_target = .{ .browser = 5, .kind = .enter, .point = p } },
+        .{ .drag_target = .{ .browser = 5, .kind = .over, .point = p } },
+        .{ .drag_target = .{ .browser = 5, .kind = .leave } },
+        .{ .set_focus = .{ .browser = 5, .value = true } },
+        .{ .capture_lost = 5 },
+    };
+    for (neither) |m| {
+        try std.testing.expectEqual(@as(?BrowserId, null), gestureOf(m));
+        try std.testing.expectEqual(@as(?BrowserId, null), humanUseOf(m));
+    }
+}
+
+test "W9e②: 사람이 건드린 것 — 쓴 것에 더해 사람의 이동(멈춤·에이전트 이동은 아니다)·사람의 답(v20c N3 — 에이전트·자동 답은 아니다), 쓴 것은 몸짓을 품는다" {
+    const touched = [_]msg.Message{
+        .{ .mouse = .{ .browser = 3, .kind = .down, .point = .{ .x = 1, .y = 1 } } },
+        .{ .key = .{ .browser = 3, .kind = .raw_down, .native_key_code = 0 } },
+        .{ .wheel = .{ .browser = 3, .point = .{ .x = 1, .y = 1 }, .delta_x = 0, .delta_y = 3 } },
+        .{ .edit_command = .{ .browser = 3, .command = .paste } },
+        .{ .navigate = .{ .browser = 3, .url = "https://a.test/", .user = true } },
+        .{ .nav_action = .{ .browser = 3, .action = .back, .user = true } },
+        .{ .nav_action = .{ .browser = 3, .action = .reload, .user = true } },
+        .{ .dialog_reply = .{ .browser = 3, .request = 1, .accept = true, .text = "typed", .user = true } },
+        .{ .file_dialog_reply = .{ .browser = 3, .request = 1, .accept = true, .user = true } },
+        .{ .permission_reply = .{ .browser = 3, .request = 1, .result = .accept, .user = true } },
+        .{ .datalist_pick = .{ .browser = 3, .list = 1, .index = 0 } },
+        .{ .web_notification_click = .{ .browser = 3, .notification = 1 } },
+    };
+    for (touched) |m| try std.testing.expectEqual(@as(?BrowserId, 3), protocol.human_use.touchOf(m));
+    const not_touched = [_]msg.Message{
+        .{ .mouse = .{ .browser = 3, .kind = .move, .point = .{ .x = 1, .y = 1 } } },
+        .{ .key = .{ .browser = 3, .kind = .up, .native_key_code = 0 } },
+        .{ .navigate = .{ .browser = 3, .url = "https://a.test/", .user = false } },
+        .{ .nav_action = .{ .browser = 3, .action = .stop, .user = true } },
+        .{ .nav_action = .{ .browser = 3, .action = .back, .user = false } },
+        .{ .capture_lost = 3 },
+        .{ .dialog_reply = .{ .browser = 3, .request = 1, .accept = true, .text = "agent" } },
+        .{ .file_dialog_reply = .{ .browser = 3, .request = 1, .accept = false } },
+        .{ .permission_reply = .{ .browser = 3, .request = 1, .result = .ignore } },
+    };
+    for (not_touched) |m| try std.testing.expectEqual(@as(?BrowserId, null), protocol.human_use.touchOf(m));
+    // 이동은 trace·조건의 「건드림」 이지만 몸짓·쓴 것은 아니다(nav_exempt 의 사람 창은 이동을 몸짓으로 치지 않는다).
+    try std.testing.expectEqual(@as(?BrowserId, null), protocol.human_use.useOf(.{ .navigate = .{ .browser = 3, .url = "https://a.test/", .user = true } }));
+    // 사람의 답도 trace·조건의 「건드림」 일 뿐 몸짓이 아니다(그 뒤 창 안 이동의 사람 묶기는 예전 그대로 — W9d④).
+    try std.testing.expectEqual(@as(?BrowserId, null), gestureOf(.{ .dialog_reply = .{ .browser = 3, .request = 1, .accept = true, .user = true } }));
 }

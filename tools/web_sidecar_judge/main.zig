@@ -24,7 +24,8 @@
 //! 들지 않는다)만, `--review-block-v20a2` 는 2 차 검증 1–10 회차(`network_block_v20a2_check.zig` — 2 차 11–20 회차는 `runV20b` 에 더했다)만,
 //! `--review-block-v20a3`·`--review-block-v20c` 는 3 차 검증 1–10 회차(`network_block_v20a3_check.zig`)·11–20 회차(`network_block_check.zig` 의
 //! `runV20c`)만. `--network-mock` 은 W9d④ 가짜 응답(`network_mock_check.zig` — 탭 길·사람의 누름·서비스 워커·풀과 본문 창·재시작·비용)만 본다.
-//! `--emulation` 은 W9e① 기기 흉내(`emulation_check.zig` — 화면 맞춤·입력 좌표·정체·죽은 탭·위치·사이트 묶기·팝업·재시작)만 본다.
+//! `--emulation` 은 W9e① 기기 흉내(`emulation_check.zig` — 화면 맞춤·입력 좌표·정체·죽은 탭·위치·사이트 묶기·팝업·재시작)와 W9e② CPU·네트워크
+//! 조건(`perf_check.zig` 의 `emu-cpu*`·`emu-net-*`·`emu-cond-*`)만, `--trace` 는 W9e② 성능 trace(`perf_check.zig` 의 `tr-*`)만 본다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -71,6 +72,7 @@ const network_block_v20a2_check = @import("network_block_v20a2_check.zig"); // W
 const network_block_v20a3_check = @import("network_block_v20a3_check.zig"); // W9d③ 3 차 20 회 적대 검증 1–10 회차
 const network_mock_check = @import("network_mock_check.zig"); // W9d④ 가짜 응답
 const emulation_check = @import("emulation_check.zig"); // W9e① 기기 흉내
+const perf_check = @import("perf_check.zig"); // W9e② 성능 trace·CPU·네트워크 조건
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -295,6 +297,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         var host_buf: [1024]u8 = undefined;
         const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
+        // W9e② v20c L2: 이 판이 띄우는 host 마다 stderr 를 프로필 뿌리에 남긴다(끝의 재진입 판정이 센다 — 예열 host 는 빼고).
+        @import("host.zig").log_root = std.mem.span(argv[3]);
+        @import("host.zig").log_name = "net";
         var profile_buf: [1024]u8 = undefined;
         const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/net", .{std.mem.span(argv[3])}, 0) catch return 2;
         network_check.run(&reportText, host, profile) catch |err| report(false, "network", "{s}", .{@errorName(err)});
@@ -310,6 +315,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         bodyR3Checks(host, std.mem.span(argv[3]));
         bodyR4Checks(host, std.mem.span(argv[3]));
         bodyR5Checks(host, std.mem.span(argv[3]));
+        // W9e② v20c L2: 이 판의 host 로그(위 `log_root`)에 관찰자 재진입 경고가 없는가(쏟아짐 밸브 — `net_body.runActions` — 가 도는 판이다).
+        @import("probe_select.zig").noReentrancy(&reportText, std.mem.span(argv[3]), "network-no-observer-reentrancy");
         return if (failures == 0) 0 else 1;
     }
     // W9d③: 요청 막기 판정만(`block-*` — 탭 길·서비스 워커 길·엄격 모드·재시작·비용, 시나리오마다 따로 띄운 sidecar·프로필).
@@ -444,6 +451,43 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         emulation_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "emulation", "{s}", .{@errorName(err)});
+        perf_check.runConditions(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "emulation-conditions", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9e②: 성능 trace 판정만(`tr-*` — 기록·숨은 탭 focus 흉내·섞임 폐기·사람 폐기·닫힘·하나만·막은 도메인).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--trace")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        perf_check.runTrace(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "trace", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // v20a 탐침(W9e② 적대 검증 1–10 회차 — `w9e2_probe_a.zig`, 환경 W9E2A_ONLY 로 고른다).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--w9e2a")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        @import("w9e2_probe_a.zig").run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "w9e2a", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // v20b 탐침(W9e② 적대 검증 — 1–10 고침 재확인·11–20 회차, `w9e2_probe_b.zig`, 환경 W9E2B_ONLY 로 고른다).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--w9e2b")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        @import("w9e2_probe_b.zig").run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "w9e2b", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // v20c 탐침(W9e② 적대 검증 — 11–20 회차 고침 재검증, `w9e2_probe_c.zig`, 환경 W9E2C_ONLY 로 고른다).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--w9e2c")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        @import("w9e2_probe_c.zig").run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "w9e2c", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--closeask")) {

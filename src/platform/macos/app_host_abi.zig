@@ -204,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 259), abi_version);
+    try std.testing.expectEqual(@as(u32, 260), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -6795,6 +6795,8 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .network_mock => false,
         // W9e①: 기기 흉내도 곧 답한다(sidecar 에 전체 상태를 보내고 `state:"sent"` — 확인은 `get`).
         .emulate => false,
+        // W9e②: trace 는 web_osr 가 그 답(기록 시작·거른 결과)을 쥐었다가 `pollTraceAnswers` 로 끝낸다(실행 자리 없음 — 시한만 늘린다).
+        .trace => false,
     };
 }
 
@@ -6844,6 +6846,7 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .network_block => "browser.networkBlock",
         .network_mock => "browser.networkMock",
         .emulate => "browser.emulate",
+        .trace => "browser.trace",
     };
 }
 
@@ -7270,6 +7273,8 @@ const control_hello_caps = [_][]const u8{
     "browser.networkMock",
     // W9e①: 기기 흉내(`browser_emulation` grant — 사이트에 묶인다, 사용자 탭은 그 사이트에서만, 에이전트가 연 탭은 묻지 않는다).
     "browser.emulate",
+    // W9e②: 성능 trace(에이전트가 연 탭만 — 탭과 함께 생긴 `browser_network` grant 와 `browser` grant).
+    "browser.trace",
 };
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
@@ -7809,7 +7814,7 @@ fn pushBrowserOp(
         return;
     }
     // W9d①: 네트워크 목록·자세히는 sidecar 가 보낸 기록을 web_osr 가 쥔다 — 곧 답한다(대화상자로 멈춘 탭에서도, 확인 모달 뒤 재처리도 같은 자리).
-    if (op.method == .network or op.method == .network_request or op.method == .network_record or op.method == .network_block or op.method == .network_mock or op.method == .emulate) {
+    if (op.method == .network or op.method == .network_request or op.method == .network_record or op.method == .network_block or op.method == .network_mock or op.method == .emulate or op.method == .trace) {
         if (chromium) return answerNetworkOp(server, async_id, op);
         server.cross_gpa.free(op.arg);
         const pending = server.inFlightPending(async_id) orelse return;
@@ -7973,6 +7978,7 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
     if (op.method == .network_block) return answerNetworkBlock(async_id, op, g);
     if (op.method == .network_mock) return answerNetworkMock(async_id, op, g);
     if (op.method == .emulate) return answerEmulate(async_id, op, g);
+    if (op.method == .trace) return answerTrace(async_id, op, g);
     const who = consoleAuthorizer(.{ .pane_grant = g });
     // grant 호스트는 표의 지금 값으로(좁혀졌으면 좁힌 사이트 — F5). 어느 호스트든 grant(에이전트 탭)는 묶이지 않는다. 묶인 grant 는 그
     // 사이트가 아닐 때의 요청을 숨긴다(F2 — `web_osr.netView`).
@@ -8217,12 +8223,20 @@ fn answerEmulate(async_id: u64, op: control_browser.BrowserOp, g: control_browse
     const params = maru.session.web_osr_emulate.parseParams(parsed.value, &why) catch return completeTabStatus(async_id, .failed, "invalid arguments");
     // emulation grant 의 지금 값(그 사이 철회됐으면 바꾸지 않는다 — 모달 뒤 재처리·철회 경주). `get` 도 grant 가 있어야 한다(모달 전에 봤다).
     const now = control_pane_grant_store.get(g.pane, op.surface_id, .browser_emulation) orelse return completeTabStatus(async_id, .failed, "{\"reason\":\"needs_grant\",\"message\":\"the permission to emulate a device on this tab is gone — ask again\"}");
+    // W9e②: CPU·네트워크 조건의 주인 — 이 요청을 낸 연결의 출처에서(1g 의 foreground 작업 맨 위 + MCP·REPL 이면 그 프로세스, 사용자 결정 7).
+    // 출처를 모르면(cap 인가·출처 없음) 주인이 없다 — 그 둘은 `no_agent_process` 로 거절된다.
+    const owner: ?maru.session.control_self_origin.Owner = blk: {
+        const pending = control_server_storage.inFlightPending(async_id) orelse break :blk null;
+        const origin = pending.peer_origin orelse break :blk null;
+        break :blk maru.session.control_self_origin.ownerOf(origin, params.holder);
+    };
     const answer = session_mod.web_osr.browserEmulate(allocator, op.surface_id, .{
         .pane = g.pane,
         .any_host = now.any_host,
         .grant_host = now.host.slice(),
         .birth = now.birth,
         .params = &params,
+        .owner = owner,
     }) catch return completeTabStatus(async_id, .failed, "out of memory");
     switch (answer) {
         .ok => |json| {
@@ -8235,6 +8249,59 @@ fn answerEmulate(async_id: u64, op: control_browser.BrowserOp, g: control_browse
             completeTabStatus(async_id, .failed, payload);
         },
     }
+}
+
+// ── W9e②: 성능 trace(`browser.trace`) ─────────────────────────────────────────────────────────────────────────
+
+/// trace 를 기다리는 op 의 시한(시작 — sidecar 의 5 s, 멈춤 — 길이 30 s + 읽기 30 s + 거르기, 넉넉히).
+const trace_wait_ns: i128 = 150 * std.time.ns_per_s;
+
+/// W9e②: `browser.trace` — 에이전트가 연 탭만(L2 가 모달 전에 갈랐다 — 여기서는 그 grant 가 지금도 탭과 함께 생긴 것인지 다시 본다). 곧 답하거나
+/// (status·abort·read·끝난 결과의 stop) web_osr 가 답을 쥐었다가(start 는 기록이 시작되면, stop 은 거른 결과가 나오면) `pollTraceAnswers` 로 끝낸다.
+fn answerTrace(async_id: u64, op: control_browser.BrowserOp, g: control_browser.GrantProvenance) void {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
+    defer parsed.deinit();
+    var why: ?maru.session.web_osr_trace.Why = null;
+    const params = maru.session.web_osr_trace.parseParams(parsed.value, &why) catch return completeTabStatus(async_id, .failed, "invalid arguments");
+    const now = control_pane_grant_store.get(g.pane, op.surface_id, .browser_network) orelse return completeTabStatus(async_id, .failed, "{\"reason\":\"needs_grant\",\"message\":\"the permission for this tab is gone\"}");
+    if (!now.birth) return completeTabStatus(async_id, .failed, "{\"reason\":\"left_agent_control\",\"message\":\"this tab is no longer a tab this pane opened\"}");
+    const answer = session_mod.web_osr.browserTrace(allocator, op.surface_id, .{ .pane = g.pane, .params = &params, .async_id = async_id }) catch return completeTabStatus(async_id, .failed, "out of memory");
+    switch (answer) {
+        .ok => |json| {
+            defer allocator.free(json);
+            completeTabStatus(async_id, .success, json);
+        },
+        .fail => |f| {
+            var buf: [768]u8 = undefined;
+            const payload = (if (f.retry_after_ms) |ms|
+                std.fmt.bufPrint(&buf, "{{\"reason\":\"{s}\",\"message\":\"{s}\",\"retry_after_ms\":{d}}}", .{ f.reason, f.message, ms })
+            else
+                std.fmt.bufPrint(&buf, "{{\"reason\":\"{s}\",\"message\":\"{s}\"}}", .{ f.reason, f.message })) catch return completeTabStatus(async_id, .failed, "out of memory");
+            completeTabStatus(async_id, .failed, payload);
+        },
+        .pending => {
+            const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+            _ = control_server_storage.updateInFlightDeadline(async_id, now_ns + trace_wait_ns);
+        },
+    }
+}
+
+/// web_osr 가 끝낸 trace op 들을 끝낸다(drain 마다).
+fn pollTraceAnswers() void {
+    const gpa = session_mod.web_osr.gpaRef() orelse return;
+    while (session_mod.web_osr.takeTraceAnswer()) |a| {
+        defer gpa.free(a.json);
+        completeTabStatus(a.async_id, if (a.ok) .success else .failed, a.json);
+    }
+}
+
+/// W9e②: 그 pane 의 그 탭 trace 상태(Browser Grants 줄 「performance trace (recording|finishing|ready)」 — 없으면 0). 메인 스레드 전용.
+pub export fn maru_macos_control_browser_trace_summary(pane: u64, target: u64, out: ?[*]u8, out_cap: usize) usize {
+    const dst = out orelse return 0;
+    const text = session_mod.web_osr.traceSummary(target, pane);
+    const n = @min(text.len, out_cap);
+    @memcpy(dst[0..n], text[0..n]);
+    return n;
 }
 
 /// W9e①: 그 pane 이 주인인 그 탭의 흉내 요약(UTF-8, NUL 없이 `out` 에 — 쓴 바이트 수, 없으면 0) — Swift 의 Browser Grants 줄 「device emulation
@@ -8316,6 +8383,17 @@ fn syncNetworkWatch() void {
     session_mod.web_osr.networkBlockSync(block_list[0..nk]);
     session_mod.web_osr.networkMockSync(mock_list[0..nm], browser_list[0..nbr]);
     session_mod.web_osr.emulationSync(emu_list[0..ne]);
+    // W9e②: trace 권한 — 탭과 함께 생긴 `browser_network` grant 와 그 탭의 `browser` grant 를 함께 쥔 (pane, 탭). 잃으면 진행 중 trace 를 버리고
+    // 결과 칸을 지운다(PLAN v2 §6.3 — grant 철회·pane 닫힘).
+    var trace_tabs: [control_pane_grant.capacity]session_mod.web_osr.TraceTab = undefined;
+    var nt: usize = 0;
+    for (control_pane_grant_store.grants[0..control_pane_grant_store.len]) |*g| {
+        if (g.scope != .browser_network or !g.birth) continue;
+        if (control_pane_grant_store.get(g.pane, g.target, .browser) == null) continue;
+        trace_tabs[nt] = .{ .pane = g.pane, .tab = g.target };
+        nt += 1;
+    }
+    session_mod.web_osr.traceSync(trace_tabs[0..nt]);
 }
 
 /// W9d① 적대 리뷰 1 회차 F5(설정 `browser.agent-network-full` 이 꺼졌을 때): 사용자가 몬 에이전트 탭의 어느 호스트든 `browser_network` grant 를
@@ -9950,6 +10028,7 @@ pub export fn maru_macos_control_server_has_pending() u32 {
     if (tab_runs.items.len > 0) return 1; // W9b③: 연 탭의 첫 불러오기·물은 닫기를 매 drain 본다
     if (upload_runs.items.len > 0) return 1; // W9c③: 모달·파일 작업을 기다리는 업로드를 매 drain 본다
     if (grant_prompt_queue.items.items.len > 0) return 1; // held grant 확인 대기 — server_drain(drainGrantPrompts) 계속 돌게
+    if (session_mod.web_osr.hasTraceAnswer()) return 1; // W9e②: 끝난 trace op
     return if (control_server_storage.hasPendingRequest()) 1 else 0;
 }
 
@@ -9972,6 +10051,7 @@ pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSession
     drainGrantPrompts(server, refs, now);
     pollTabRuns(refs);
     pollUploadRuns(refs);
+    pollTraceAnswers(); // W9e②
 }
 
 fn expireActiveBrowserExecutions(server: *control_server_mod.ControlServer, now_ns: i128) void {
@@ -13740,7 +13820,7 @@ test "W9b③ 적대 리뷰 1 회차: 탭 op 이 있으면 has_pending 이 1, dra
     try std.testing.expectEqual(@as(u32, 1), maru_macos_control_server_has_pending());
     // 창의 tick 이 「머물렀다」 를 꺼내 갔다(사람이 답했다) — 탭은 남았다.
     session_mod.web_osr.testApply(ta, .{ .js_dialog = .{ .browser = tab, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
-    session_mod.web_osr.replyDialog(ta, tab, session_mod.web_osr.testDialogToken(tab) orelse return error.NoDialog, false, "", false);
+    session_mod.web_osr.replyDialog(ta, tab, session_mod.web_osr.testDialogToken(tab) orelse return error.NoDialog, false, "", false, .program);
     _ = session_mod.web_osr.takeCloseAsk(tab, 0);
     // drain 이 요청 큐를 읽는다 — 빈 큐를 준다(W9b①b 시험과 같다).
     control_server_storage.queue = try control_server_mod.ControlRequestQueue.init(std.testing.io, std.testing.allocator, 1);
@@ -13978,7 +14058,7 @@ test "W9a: getUrl 은 maru 가 아는 주소, 한 번도 보이지 않은 탭은
         defer r.deinit();
         try std.testing.expectEqualStrings("https://a.test/x", r.value.object.get("result").?.object.get("url").?.string);
     }
-    session_mod.web_osr.replyDialog(ta, 72, session_mod.web_osr.testDialogToken(72) orelse return error.NoDialog, true, "", false);
+    session_mod.web_osr.replyDialog(ta, 72, session_mod.web_osr.testDialogToken(72) orelse return error.NoDialog, true, "", false, .program);
     // 앞선 op 이 있으면 기다린다(그 뒤에 답한다).
     const first = try allocator.create(CdpRun);
     first.* = .{ .async_id = 1, .surface_id = 72, .op = try web_cdp_ops.Op.init(allocator, .reload, "", 1), .started = true };
@@ -14252,7 +14332,7 @@ test "W9a 변이 생존 재현: evaluate 가 다른 호스트 가족 탭의 대�
     };
     for (cases, 0..) |cs, n| {
         session_mod.web_osr.testApply(ta, .{ .js_dialog = .{ .browser = 81, .request = @intCast(n + 1), .kind = .alert, .origin = cs.origin, .message = "" } });
-        defer session_mod.web_osr.replyDialog(ta, 81, session_mod.web_osr.testDialogToken(81) orelse 0, true, "", false);
+        defer session_mod.web_osr.replyDialog(ta, 81, session_mod.web_osr.testDialogToken(81) orelse 0, true, "", false, .program);
         const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.executeScript\",\"params\":{\"id\":80,\"script\":\"1\"}}";
         var p: control_server_mod.PendingRequest = undefined;
         const id = try w9aExecRequest(&p, req, 80, 1024);

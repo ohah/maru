@@ -52,6 +52,7 @@ poison reason은 싣지 않는다. 구현 전 현재 serializer/parser가 이 �
 
 - workload: 정상적인 agent workflow의 결과가 반복적으로 12/16 MiB 논리 상한을 초과한다.
 - workload: download, trace archive, video처럼 처음부터 file/stream인 제품 기능이 생긴다.
+  - **trace archive 평가(W9e② `browser.trace`, 2026-10-29)**: 트리거로 보지 않았다 — 거른 trace 는 gzip ≤ 16 MiB(적대 페이지 실측 9.65 MB)이고, maru 가 pane 마다 10 분 쥔 결과를 CLI 가 `browser.trace{action:"read", offset}` 로 **당겨** 256 KiB 씩(base64 ≈ 342 KiB — 1 MiB frame 안) 받아 쓴다(요청마다 인가를 다시 거친다, 새 bulk 경로 없음). 파일은 에이전트가 경로를 줄 때만이라(사용자 결정) 정상 흐름은 요약만 오간다.
 - performance: base64 encode/decode 또는 JSON string copy가 단순 최적화 후에도 측정 예산을 위반한다.
 - performance: 반복 screenshot이 bounded pump로도 필요한 처리량을 내지 못한다.
 

@@ -35,6 +35,8 @@ pub const ProcInfo = struct {
     tpgid: i32,
     /// 시작 시각(벽시계 µs). pid 재사용을 가른다.
     start_us: u64,
+    /// W9e②: 끝났지만 부모가 아직 거두지 않았다(macOS `SZOMB`) — 주인 판정에서는 끝난 것이다(구현 적대 리뷰 LOW).
+    zombie: bool = false,
 };
 
 pub const Provider = struct {
@@ -49,7 +51,97 @@ pub const Origin = struct {
     ctty_pid: i32,
     ctty_start_us: u64,
     sid: i32,
+    /// W9e②: 그 foreground 작업의 **맨 위 프로세스** — 첫 조상에서 같은 세션·같은 uid·같은 process group 인 동안 부모로 올라간 끝(`jobTop`).
+    /// Claude Code 면 `claude`(Bash 도구 셸은 setsid — 실측 PHASE0_v3 c), Codex 면 `codex`, `npx` 처럼 감싼 것이면 감싼 쪽. CPU·네트워크 조건의
+    /// 주인이다(사용자 결정 7 — 그 프로세스가 끝나면 푼다). 0 이면 모른다(시험의 손으로 만든 출처).
+    job_pid: i32 = 0,
+    job_start_us: u64 = 0,
+    /// W9e②: 붙은 프로세스 자신(MCP·REPL 의 `holder` — 연결이 끊기면 끝나는 프로세스).
+    peer_pid: i32 = 0,
+    peer_start_us: u64 = 0,
+    /// W9e② 확인 결정 9: 그 foreground 작업을 띄운 **셸** — 맨 위(`job`)의 부모가 같은 uid·같은 세션·제어 터미널이 있고 다른 process group 이며
+    /// 자식보다 늦게 시작하지 않았으면 그 부모(`shellOf`). pane 에서 사람이 친 명령이면 그 pane 의 셸(login 의 자식)이다. 0 이면 없다.
+    shell_pid: i32 = 0,
+    shell_start_us: u64 = 0,
 };
+
+/// W9e②: 한 프로세스(pid 와 시작 시각 — pid 재사용을 가른다).
+pub const Proc = struct { pid: i32, start_us: u64 };
+
+/// W9e②: CPU·네트워크 조건의 주인. `job` 은 에이전트 프로세스(1g foreground 작업의 맨 위), `holder` 는 MCP·REPL 처럼 요청을 낸 오래 사는
+/// 프로세스(있으면 둘 중 하나라도 끝나면 푼다 — 「연결이 끊기면」).
+pub const Owner = struct {
+    job: Proc,
+    holder: ?Proc = null,
+    /// W9e② 확인 결정 9: `job` 이 에이전트가 아니라 사람이 그 명령을 친 셸이다(셸이 끝나거나 `clear` 하면 푼다).
+    shell: bool = false,
+
+    pub fn kind(self: Owner) []const u8 {
+        if (self.shell) return "shell";
+        return if (self.holder != null) "session" else "agent";
+    }
+};
+
+/// W9e②: 출처와 `holder` 주장으로 주인을 정한다. `holder` 주장은 주인을 **더할** 뿐이다(수명을 줄인다).
+/// 한 번짜리 CLI 가 곧 그 작업의 맨 위면(사람이 셸에서 직접 쳤다 — 앞에 에이전트가 없다) 그 명령은 곧 끝나므로 주인으로 삼지 않고, **그 명령을 띄운
+/// 셸**(`shell_pid` — 보통 그 pane 의 셸)을 주인으로 삼는다(사용자 확인 결정 9 2026-10-29 — 셸이 끝나거나 `clear` 하면 푼다). 셸을 못 찾으면(셸이
+/// `exec` 로 그 명령이 됐다 — 부모가 root 의 login) 주인이 없다(`no_agent_process`).
+pub fn ownerOf(origin: Origin, holder: bool) ?Owner {
+    if (origin.job_pid <= 1 or origin.peer_pid <= 1) return null;
+    const job: Proc = .{ .pid = origin.job_pid, .start_us = origin.job_start_us };
+    const peer: Proc = .{ .pid = origin.peer_pid, .start_us = origin.peer_start_us };
+    if (holder) return .{ .job = job, .holder = peer };
+    if (job.pid == peer.pid and job.start_us == peer.start_us) {
+        if (origin.shell_pid <= 1) return null;
+        return .{ .job = .{ .pid = origin.shell_pid, .start_us = origin.shell_start_us }, .shell = true };
+    }
+    return .{ .job = job };
+}
+
+/// W9e②: 그 프로세스가 아직 그 프로세스인가(같은 pid·같은 시작 시각 — 끝났거나 pid 를 물려받은 다른 프로세스면 거짓).
+pub fn alive(provider: Provider, p: Proc) bool {
+    const info = provider.lookup(provider.ctx, p.pid) orelse return false;
+    return info.pid == p.pid and info.start_us == p.start_us and !info.zombie;
+}
+
+/// W9e②: 주인이 모두 살아 있는가.
+pub fn ownerAlive(provider: Provider, o: Owner) bool {
+    if (!alive(provider, o.job)) return false;
+    if (o.holder) |h| if (!alive(provider, h)) return false;
+    return true;
+}
+
+/// W9e②: foreground 작업의 맨 위 — 같은 세션·같은 uid·같은 process group·부모가 자식보다 늦게 시작하지 않은 동안 부모로(깊이 `max_depth`).
+fn jobTop(provider: Provider, start_pid: i32, start_info: ProcInfo, sid: i32, server_uid: u32) struct { Proc, ProcInfo } {
+    var cur = start_pid;
+    var cur_info = start_info;
+    var depth: usize = 0;
+    while (depth < max_depth) : (depth += 1) {
+        if (cur_info.ppid <= 1 or cur_info.ppid == cur) break;
+        const parent = provider.lookup(provider.ctx, cur_info.ppid) orelse break;
+        if (parent.pid != cur_info.ppid or parent.uid != server_uid or !parent.has_ctty) break;
+        if (parent.pgid != cur_info.pgid) break;
+        if (parent.start_us > cur_info.start_us) break;
+        const psid = provider.session_of(provider.ctx, parent.pid) orelse break;
+        if (psid != sid) break;
+        cur = parent.pid;
+        cur_info = parent;
+    }
+    return .{ .{ .pid = cur, .start_us = cur_info.start_us }, cur_info };
+}
+
+/// W9e② 확인 결정 9: 그 작업을 띄운 셸 — 맨 위의 부모가 같은 uid·같은 세션·제어 터미널이 있고 다른 process group(셸은 작업마다 새 그룹을
+/// 만든다)이며 자식보다 늦게 시작하지 않았고 끝나지 않았으면 그 부모. 못 찾으면 null.
+fn shellOf(provider: Provider, top: Proc, top_info: ProcInfo, sid: i32, server_uid: u32) ?Proc {
+    if (top_info.ppid <= 1 or top_info.ppid == top.pid) return null;
+    const parent = provider.lookup(provider.ctx, top_info.ppid) orelse return null;
+    if (parent.pid != top_info.ppid or parent.uid != server_uid or !parent.has_ctty or parent.zombie) return null;
+    if (parent.pgid == top_info.pgid) return null;
+    if (parent.start_us > top.start_us) return null;
+    const psid = provider.session_of(provider.ctx, parent.pid) orelse return null;
+    if (psid != sid) return null;
+    return .{ .pid = parent.pid, .start_us = parent.start_us };
+}
 
 pub const Reject = enum {
     /// peer 정보를 못 읽었다(이미 끝났다 등).
@@ -88,6 +180,7 @@ pub fn findOrigin(provider: Provider, peer_pid: i32, server_uid: u32, accept_us:
     // 처음 만난 제어 터미널 프로세스의 세션 — 그 세션 안에서만 foreground 조상을 찾는다. 그 뒤로 끊기면(foreground 조상
     // 없이 root `login` 등에 닿음) 「백그라운드」다.
     var first_sid: ?i32 = null;
+    var peer_start: u64 = 0;
     var depth: usize = 0;
     while (depth < max_depth) : (depth += 1) {
         const saw_ctty = first_sid != null;
@@ -99,6 +192,7 @@ pub fn findOrigin(provider: Provider, peer_pid: i32, server_uid: u32, accept_us:
             .lookup_failed };
         if (info.pid != pid) return .{ .reject = .lookup_failed };
         if (depth == 0 and info.start_us > accept_us) return .{ .reject = .peer_newer_than_accept };
+        if (depth == 0) peer_start = info.start_us;
         if (info.start_us > child_start) return .{ .reject = .ancestor_replaced };
         if (info.uid != server_uid) return .{ .reject = if (saw_ctty) .background else .uid_mismatch };
         if (info.has_ctty) {
@@ -107,8 +201,11 @@ pub fn findOrigin(provider: Provider, peer_pid: i32, server_uid: u32, accept_us:
             if (first_sid) |first| {
                 if (sid != first) return .{ .reject = .terminal_changed };
             } else first_sid = sid;
-            if (info.pgid > 0 and info.pgid == info.tpgid)
-                return .{ .origin = .{ .ctty_pid = pid, .ctty_start_us = info.start_us, .sid = sid } };
+            if (info.pgid > 0 and info.pgid == info.tpgid) {
+                const top, const top_info = jobTop(provider, pid, info, sid, server_uid);
+                const sh: Proc = shellOf(provider, top, top_info, sid, server_uid) orelse .{ .pid = 0, .start_us = 0 };
+                return .{ .origin = .{ .ctty_pid = pid, .ctty_start_us = info.start_us, .sid = sid, .job_pid = top.pid, .job_start_us = top.start_us, .peer_pid = peer_pid, .peer_start_us = peer_start, .shell_pid = sh.pid, .shell_start_us = sh.start_us } };
+            }
         }
         if (info.ppid <= 1 or info.ppid == pid) return .{ .reject = if (saw_ctty) .background else .no_ctty_ancestor };
         child_start = info.start_us;
@@ -376,4 +473,172 @@ test "요청마다: 같은 프로세스가 여전히 foreground 일 때만 출�
     // 같은 프로세스·foreground 인데 세션만 바뀌었다(다른 세션으로 옮겨 갔다).
     var moved_session: Fake = .{ .procs = &.{ login, shell(101) }, .sessions = &.{.{ 101, 300 }} };
     try std.testing.expect(!stillForeground(moved_session.provider(), origin));
+}
+
+// ── W9e②: 조건의 주인(에이전트 프로세스) ─────────────────────────────────────────────────────────────────────
+
+fn expectJob(result: Result, job: i32, peer: i32) !Origin {
+    switch (result) {
+        .origin => |o| {
+            try std.testing.expectEqual(job, o.job_pid);
+            try std.testing.expectEqual(peer, o.peer_pid);
+            return o;
+        },
+        .reject => return error.TestUnexpectedResult,
+    }
+}
+
+test "W9e②: 작업의 맨 위 — 셸에서 친 CLI 는 자신(주인은 그 셸 — 확인 결정 9), claude 의 setsid 명령은 claude, npx 로 감싼 에이전트는 감싼 쪽, 셸은 넘지 않는다" {
+    var direct: Fake = .{
+        .procs = &.{ login, shell(102), .{ .pid = 102, .ppid = 101, .pgid = 102, .uid = uid, .has_ctty = true, .tpgid = 102, .start_us = 30 } },
+        .sessions = &.{ .{ 102, 100 }, .{ 101, 100 } },
+    };
+    const o1 = try expectJob(findOrigin(direct.provider(), 102, uid, accepted), 102, 102);
+    // 한 번짜리 CLI 가 곧 맨 위 — 그 명령은 곧 끝나므로 그 명령을 띄운 pane 의 셸(101)이 주인(확인 결정 9).
+    const sh = ownerOf(o1, false).?;
+    try std.testing.expectEqual(@as(i32, 101), sh.job.pid);
+    try std.testing.expectEqual(@as(u64, 20), sh.job.start_us);
+    try std.testing.expect(sh.shell and sh.holder == null);
+    try std.testing.expectEqualStrings("shell", sh.kind());
+    try std.testing.expectEqual(@as(i32, 102), ownerOf(o1, true).?.job.pid); // REPL 이 셸의 foreground 면 그 REPL 이 주인
+    var agent: Fake = .{
+        .procs = &.{
+            login,
+            shell(103),
+            .{ .pid = 103, .ppid = 101, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 30 },
+            .{ .pid = 104, .ppid = 103, .pgid = 104, .uid = uid, .has_ctty = false, .tpgid = 0, .start_us = 40 },
+            .{ .pid = 105, .ppid = 104, .pgid = 104, .uid = uid, .has_ctty = false, .tpgid = 0, .start_us = 50 },
+        },
+        .sessions = &.{ .{ 103, 100 }, .{ 101, 100 } },
+    };
+    const o2 = try expectJob(findOrigin(agent.provider(), 105, uid, accepted), 103, 105);
+    const own = ownerOf(o2, false).?;
+    try std.testing.expectEqual(@as(i32, 103), own.job.pid);
+    try std.testing.expect(own.holder == null);
+    try std.testing.expectEqualStrings("agent", own.kind());
+    const mcp = ownerOf(o2, true).?;
+    try std.testing.expectEqual(@as(i32, 105), mcp.holder.?.pid);
+    try std.testing.expectEqualStrings("session", mcp.kind());
+    // npx(103) → node claude(106, 같은 그룹) → setsid 셸(107) → CLI(108).
+    var wrapped: Fake = .{
+        .procs = &.{
+            login,
+            shell(103),
+            .{ .pid = 103, .ppid = 101, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 30 },
+            .{ .pid = 106, .ppid = 103, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 35 },
+            .{ .pid = 107, .ppid = 106, .pgid = 107, .uid = uid, .has_ctty = false, .tpgid = 0, .start_us = 40 },
+            .{ .pid = 108, .ppid = 107, .pgid = 107, .uid = uid, .has_ctty = false, .tpgid = 0, .start_us = 50 },
+        },
+        .sessions = &.{ .{ 103, 100 }, .{ 106, 100 }, .{ 101, 100 } },
+    };
+    _ = try expectJob(findOrigin(wrapped.provider(), 108, uid, accepted), 103, 108);
+}
+
+test "W9e②: 맨 위를 오르다 멈추는 곳 — 늦게 시작한 부모(pid 재사용)·다른 세션·다른 uid 는 넘지 않는다, 주인의 생존은 pid 와 시작 시각으로" {
+    // 106 의 부모 103 이 106 보다 늦게 시작했다(물려받은 pid) — 106 에서 멈춘다.
+    var late: Fake = .{
+        .procs = &.{
+            login,
+            shell(103),
+            .{ .pid = 103, .ppid = 101, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 60 },
+            .{ .pid = 106, .ppid = 103, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 35 },
+        },
+        .sessions = &.{ .{ 103, 100 }, .{ 106, 100 } },
+    };
+    _ = try expectJob(findOrigin(late.provider(), 106, uid, accepted), 106, 106);
+    var other_sid: Fake = .{
+        .procs = &.{
+            login,
+            shell(103),
+            .{ .pid = 103, .ppid = 101, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 30 },
+            .{ .pid = 106, .ppid = 103, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 35 },
+        },
+        .sessions = &.{ .{ 103, 999 }, .{ 106, 100 } },
+    };
+    _ = try expectJob(findOrigin(other_sid.provider(), 106, uid, accepted), 106, 106);
+    // 생존: 같은 pid 라도 시작 시각이 다르면 끝난 것이다.
+    var procs: Fake = .{ .procs = &.{.{ .pid = 103, .ppid = 1, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 30 }}, .sessions = &.{} };
+    try std.testing.expect(alive(procs.provider(), .{ .pid = 103, .start_us = 30 }));
+    try std.testing.expect(!alive(procs.provider(), .{ .pid = 103, .start_us = 31 })); // pid 재사용
+    try std.testing.expect(!alive(procs.provider(), .{ .pid = 104, .start_us = 30 })); // 끝남
+    var zombie: Fake = .{ .procs = &.{.{ .pid = 103, .ppid = 1, .pgid = 103, .uid = uid, .has_ctty = false, .tpgid = 0, .start_us = 30, .zombie = true }}, .sessions = &.{} };
+    try std.testing.expect(!alive(zombie.provider(), .{ .pid = 103, .start_us = 30 })); // 끝났고 아직 거두지 않았다
+    try std.testing.expect(ownerAlive(procs.provider(), .{ .job = .{ .pid = 103, .start_us = 30 } }));
+    try std.testing.expect(!ownerAlive(procs.provider(), .{ .job = .{ .pid = 103, .start_us = 30 }, .holder = .{ .pid = 104, .start_us = 1 } })); // MCP 연결이 끊겼다
+    // 손으로 만든 출처(주인 모름)는 주인이 없다.
+    try std.testing.expect(ownerOf(.{ .ctty_pid = 1, .ctty_start_us = 0, .sid = 2 }, true) == null);
+}
+
+test "W9e② 확인 결정 9: 사람이 친 CLI 의 주인은 그 명령을 띄운 셸 — exec 로 셸이 그 명령이 됐으면 없다, 셸이 아닌 부모는 넘지 않는다" {
+    const cli: ProcInfo = .{ .pid = 102, .ppid = 101, .pgid = 102, .uid = uid, .has_ctty = true, .tpgid = 102, .start_us = 30 };
+    // 셸이 `exec maru …` — 그 명령이 곧 pane 의 셸 자리(부모는 root 의 login): 주인 없음.
+    var execd: Fake = .{
+        .procs = &.{ login, .{ .pid = 101, .ppid = 100, .pgid = 101, .uid = uid, .has_ctty = true, .tpgid = 101, .start_us = 20 } },
+        .sessions = &.{ .{ 101, 100 }, .{ 100, 100 } },
+    };
+    const oe = try expectJob(findOrigin(execd.provider(), 101, uid, accepted), 101, 101);
+    try std.testing.expect(ownerOf(oe, false) == null);
+    try std.testing.expectEqual(@as(i32, 0), oe.shell_pid);
+    // 셸 안에서 띄운 bash(103) 에서 친 CLI(104): 주인은 가장 안쪽 셸 bash(그 bash 가 끝나면 푼다).
+    var nested: Fake = .{
+        .procs = &.{
+            login,
+            shell(104),
+            .{ .pid = 103, .ppid = 101, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 104, .start_us = 25 },
+            .{ .pid = 104, .ppid = 103, .pgid = 104, .uid = uid, .has_ctty = true, .tpgid = 104, .start_us = 30 },
+        },
+        .sessions = &.{ .{ 101, 100 }, .{ 103, 100 }, .{ 104, 100 } },
+    };
+    const on = try expectJob(findOrigin(nested.provider(), 104, uid, accepted), 104, 104);
+    try std.testing.expectEqual(@as(i32, 103), ownerOf(on, false).?.job.pid);
+    // 에이전트(codex 103 — 같은 세션)의 자식이 SIGTTOU 를 무시하고 tcsetpgrp 로 스스로 foreground 가 됐다: 「셸」 은 그 부모 codex —
+    // 사람인 척해도 주인은 에이전트 자신이라 수명이 늘지 않는다.
+    var codex: Fake = .{
+        .procs = &.{
+            login,
+            shell(105),
+            .{ .pid = 103, .ppid = 101, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 105, .start_us = 25 },
+            .{ .pid = 105, .ppid = 103, .pgid = 105, .uid = uid, .has_ctty = true, .tpgid = 105, .start_us = 30 },
+        },
+        .sessions = &.{ .{ 101, 100 }, .{ 103, 100 }, .{ 105, 100 } },
+    };
+    const oc = try expectJob(findOrigin(codex.provider(), 105, uid, accepted), 105, 105);
+    try std.testing.expectEqual(@as(i32, 103), ownerOf(oc, false).?.job.pid);
+    // 부모가 셸 자격이 없으면 주인 없음: 끝났고 거두지 않음(좀비)·늦게 시작(pid 재사용)·다른 세션·제어 터미널 없음·다른 uid.
+    const bad_parents = [_]ProcInfo{
+        .{ .pid = 101, .ppid = 100, .pgid = 101, .uid = uid, .has_ctty = true, .tpgid = 102, .start_us = 20, .zombie = true },
+        .{ .pid = 101, .ppid = 100, .pgid = 101, .uid = uid, .has_ctty = true, .tpgid = 102, .start_us = 40 },
+        .{ .pid = 101, .ppid = 100, .pgid = 101, .uid = uid, .has_ctty = false, .tpgid = 0, .start_us = 20 },
+        .{ .pid = 101, .ppid = 100, .pgid = 101, .uid = 0, .has_ctty = true, .tpgid = 102, .start_us = 20 },
+    };
+    for (bad_parents) |bp| {
+        var f: Fake = .{ .procs = &.{ login, bp, cli }, .sessions = &.{ .{ 101, 100 }, .{ 102, 100 } } };
+        const o = try expectJob(findOrigin(f.provider(), 102, uid, accepted), 102, 102);
+        try std.testing.expect(ownerOf(o, false) == null);
+    }
+    // 공급자가 부모 자리에 다른 pid 의 정보를 돌려준다 — 셸로 삼지 않는다(변이 S11).
+    var lying: Fake = .{ .procs = &.{ login, shell(102), cli }, .sessions = &.{ .{ 101, 100 }, .{ 102, 100 }, .{ 1101, 100 } }, .lie_about = 101 };
+    try std.testing.expect(ownerOf(try expectJob(findOrigin(lying.provider(), 102, uid, accepted), 102, 102), false) == null);
+    // 같은 그룹의 사슬이 깊이 상한(16)을 넘어 맨 위 오르기가 멈췄다 — 그 부모는 같은 작업이라 셸이 아니다(변이 S4).
+    var deep_procs: [max_depth + 3]ProcInfo = undefined;
+    var deep_sessions: [max_depth + 3][2]i32 = undefined;
+    for (0..max_depth + 3) |i| {
+        const pid: i32 = 200 + @as(i32, @intCast(i));
+        deep_procs[i] = .{ .pid = pid, .ppid = if (i == max_depth + 2) 101 else pid + 1, .pgid = 300, .uid = uid, .has_ctty = true, .tpgid = 300, .start_us = 100 - i };
+        deep_sessions[i] = .{ pid, 100 };
+    }
+    var deep: Fake = .{ .procs = &deep_procs, .sessions = &deep_sessions };
+    const od = findOrigin(deep.provider(), 200, uid, accepted).origin;
+    try std.testing.expectEqual(@as(i32, 200 + @as(i32, @intCast(max_depth))), od.job_pid);
+    try std.testing.expectEqual(@as(i32, 0), od.shell_pid);
+    var other_session: Fake = .{ .procs = &.{ login, shell(102), cli }, .sessions = &.{ .{ 101, 999 }, .{ 102, 100 } } };
+    try std.testing.expect(ownerOf(try expectJob(findOrigin(other_session.provider(), 102, uid, accepted), 102, 102), false) == null);
+    // 주인 셸의 생존 — 셸이 끝나면(없음·좀비·같은 pid 의 다른 프로세스) 거짓. `exec zsh` 는 pid·시작 시각이 그대로라 산다.
+    var alive_shell: Fake = .{ .procs = &.{shell(102)}, .sessions = &.{} };
+    const own: Owner = .{ .job = .{ .pid = 101, .start_us = 20 }, .shell = true };
+    try std.testing.expect(ownerAlive(alive_shell.provider(), own));
+    var gone: Fake = .{ .procs = &.{}, .sessions = &.{} };
+    try std.testing.expect(!ownerAlive(gone.provider(), own));
+    var reused: Fake = .{ .procs = &.{.{ .pid = 101, .ppid = 1, .pgid = 101, .uid = uid, .has_ctty = true, .tpgid = 101, .start_us = 77 }}, .sessions = &.{} };
+    try std.testing.expect(!ownerAlive(reused.provider(), own));
 }

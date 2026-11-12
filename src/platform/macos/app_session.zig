@@ -368,7 +368,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // v257: W9d③ maru_macos_control_browser_block_summary (Browser Grants request-blocking line).
 // v258: W9d④ maru_macos_control_browser_mock_summary (Browser Grants response-mocking line) and grant scope wire 5 (browser_network_mock).
 // v259: W9e① maru_macos_control_browser_emulation_summary (Browser Grants device-emulation line) and grant scope wire 6 (browser_emulation).
-pub const abi_version: u32 = 259;
+// v260: W9e② maru_macos_control_browser_trace_summary (Browser Grants performance-trace line).
+pub const abi_version: u32 = 260;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -22531,6 +22532,7 @@ pub const AppSession = struct {
                     tab_ops.recolorBlockingMarkCells(dl.cells); // W9d③ 막기 ⊘ → 호박색(그 칸만)
                     tab_ops.recolorMockMarkCells(dl.cells); // W9d④ 가짜 ▣ → 보라(그 칸만)
                     tab_ops.recolorEmulationMarkCells(dl.cells); // W9e① 흉내 ◫ → 청록(그 칸만)
+                    tab_ops.recolorTraceMarkCells(dl.cells); // W9e② trace ◔ → 파랑(그 칸만)
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                     pane_ops.appendPaneTabTitles(self, &tab_title_batch, lr.leaf, pb, titles.items, editing_tab, pb.full);
 
@@ -23928,11 +23930,14 @@ pub const AppSession = struct {
             const mck = web_osr.networkMocking(term.surface.id) != null;
             var eb: [160]u8 = undefined;
             const emu = web_osr.emulation(term.surface.id, &eb) != null;
-            if (rec or blk or mck or emu) return std.fmt.allocPrint(allocator, "{s}{s}{s}{s} {s}", .{
+            // W9e②: 에이전트가 그 탭의 trace 를 뜨는 동안 — ◔(파랑 — `recolorTraceMarkCells`), `◉⊘▣◫◔` 의 차례.
+            const trc = web_osr.tracing(term.surface.id);
+            if (rec or blk or mck or emu or trc) return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}{s} {s}", .{
                 if (rec) tab_ops.recording_mark_utf8 else "",
                 if (blk) tab_ops.blocking_mark_utf8 else "",
                 if (mck) tab_ops.mock_mark_utf8 else "",
                 if (emu) tab_ops.emulation_mark_utf8 else "",
+                if (trc) tab_ops.trace_mark_utf8 else "",
                 base,
             });
         }

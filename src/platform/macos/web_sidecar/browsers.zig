@@ -85,9 +85,12 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .net_mock_body => |value| @import("mocking.zig").applyBody(value),
         .net_mock_commit => |value| @import("mocking.zig").applyCommit(value),
         .emulation => |value| @import("emulation.zig").apply(value), // W9e①
+        .trace => |value| @import("tracing.zig").apply(value), // W9e②
         .resize => |value| resize(value, writer),
         .set_hidden => |value| if (hostFor(value.browser, writer)) |host| {
             defer object.release(host);
+            if (state.registry.byId(value.browser)) |e| e.hidden = value.value; // W9e②: trace 의 focus 흉내
+            @import("tracing.zig").hiddenChanged(value.browser, value.value); // W9e② A6-1: 기록 중 숨으면 그때 흉내를 켠다
             host.*.was_hidden.?(host, @intFromBool(value.value));
         },
         .set_focus => |value| if (hostFor(value.browser, writer)) |host| {
@@ -107,15 +110,19 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
 }
 
 /// W9d④ Q2(사용자 결정 2026-10-21 「사용자 탭은 진짜로」): maru 가 보낸 사람 입력 — 누름·뗌·키·IME 확정(옮김·휠·떠남은 몸짓을 만들지 않는다).
-/// 그 뒤 창 안에서 렌더러가 시작한 몸짓 이동은 사람의 링크·폼 이동으로 묶인다(`nav_exempt`).
+/// 그 뒤 창 안에서 렌더러가 시작한 몸짓 이동은 사람의 링크·폼 이동으로 묶인다(`nav_exempt`). W9e②: 그 탭을 쓴 입력(몸짓 + 굴림·IME 조합·끝내기·
+/// 편집 명령·놓음 — `nav_exempt.humanUseOf`, 적대 검증 3 회차 A3-1)은 trace 를 버리고 조건을 푼다.
 fn noteHumanInput(message: Message) void {
-    const browser: protocol.message.BrowserId = switch (message) {
-        .mouse => |v| if (v.kind == .down or v.kind == .up) v.browser else return,
-        .key => |v| if (v.kind != .up) v.browser else return,
-        .ime_commit_text => |v| v.browser,
-        else => return,
-    };
-    @import("blocking.zig").humanInput(browser);
+    const nav_exempt = @import("nav_exempt.zig");
+    if (nav_exempt.gestureOf(message)) |browser| @import("blocking.zig").humanInput(browser);
+    // 사람의 이동(`navigate{user}`·`nav_action{user}` — 멈춤 빼고)도 — maru 가 보내는 쪽에서 쓰는 가름과 같은 것(`human_use.touchOf`).
+    if (protocol.human_use.touchOf(message)) |browser| humanTouched(browser);
+}
+
+/// W9e②: 사람이 그 탭을 몸(입력·사람의 이동) — 그 가족의 trace 는 버리고(사용자 결정 Q2), CPU·네트워크 조건은 푼다(PLAN v2 §8 — 사람이 몰면 풂).
+pub fn humanTouched(browser: protocol.message.BrowserId) void {
+    @import("tracing.zig").humanInput(browser);
+    @import("emulation.zig").humanInput(browser);
 }
 
 fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
@@ -148,6 +155,7 @@ fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
         const host = browser.*.get_host.?(browser);
         defer object.release(host);
         host.*.was_hidden.?(host, 1);
+        if (state.registry.byId(value.browser)) |e| e.hidden = true; // W9e②
     }
     writer.send(.{ .browser_created = value.browser }) catch {};
 }
@@ -172,6 +180,8 @@ pub fn register(browser: [*c]c.cef_browser_t, id: BrowserId, size: protocol.mess
     permissions.installGeolocationShim(browser);
     // W5c: 웹 알림 대리 스크립트(Page 도메인은 바로 위가 켠다).
     notifications.install(browser);
+    // W9e② A2-1: trace 중 가족이 연 팝업이면 가족에 더한다(opener 사슬).
+    @import("tracing.zig").browserAdded(cef_id);
 }
 
 /// 이어 받지 않는 팝업 브라우저를 닫고 넘겨받은 참조를 푼다(W6f — 쥘 곳이 없다).
@@ -234,7 +244,7 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
     // W9d③ D2: 사용자가 친 이동 — 그 주소의 이동 한 번은 막기 규칙이 막지 않는다(토큰은 `on_before_browse` 가 그 이동에 묶는다).
     // 사용자 것이 아닌 이동은 남은 토큰을 거둔다 — 친 주소와 같은 주소면 다툼으로 남긴다(둘 다 진짜 — W9d④ v1 SEVERE-2).
     if (value.user) @import("blocking.zig").userNavigate(value.browser, value.url) else @import("blocking.zig").agentNavigateTo(value.browser, value.url);
-    frame.*.load_url.?(frame, &url);
+    frame.*.load_url.?(frame, &url); // W9e②: 사람의 이동은 `noteHumanInput` 이 이미 셌다(`human_use.touchOf`)
 }
 
 /// 뒤로·앞으로·새로고침·멈춤(W3b — 주소창 버튼). 갈 곳이 없으면 CEF 가 무시한다.

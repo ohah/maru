@@ -100,9 +100,16 @@ pub fn forbiddenMethod(method: []const u8) bool {
     if (std.mem.eql(u8, method, "Browser.executeBrowserCommand")) return true;
     // W9e①: 기기 흉내의 한 주인은 sidecar 의 `emulation.zig` 다(계획 §2·§7) — maru 를 거친 호출이 흉내를 scope·◫ 없이 바꾸거나(UA·언어·위치),
     // 렌더러가 죽은 탭에 `setDeviceMetricsOverride` 를 보내 sidecar 를 통째로 죽이거나(실측 E11), context 전체에 위치 권한을 주지(E15) 못하게.
-    // 네트워크 조건의 다른 둘(`ByRule` — 위 목록에 이미 있다 — 과 `overrideNetworkState`)도 막는다(W9e② 성능 몫 — 지금은 아무도 쓰지 않는다).
+    // 네트워크 조건의 다른 둘(`ByRule` — 위 목록에 이미 있다 — 과 `overrideNetworkState`)도 막는다 — W9e② 의 CPU·네트워크 조건은 sidecar 만 건다
+    // (`net_domain` 의 `cond_*`·`online_*`, CPU 는 `Emulation.setCPUThrottlingRate` — `Emulation.*` 로 막힌다).
     for ([_][]const u8{ "Network.setUserAgentOverride", "Network.overrideNetworkState", "Browser.grantPermissions", "Browser.setPermission", "Browser.resetPermissions" }) |m| {
         if (std.mem.eql(u8, method, m)) return true;
+    }
+    // W9e②: 성능 trace 의 한 주인은 sidecar 의 `tracing.zig` 다 — maru 를 거친 호출이 trace 를 시작·끝내거나 그 스트림을 읽거나(`IO.*` 는 같은
+    // 세션이면 작은 수 핸들로 남의 스트림을 읽는다 — ATTACK_3 a3_io), isolate 전체를 담는 힙 스냅숏·프로필(사용자 iframe 의 비밀 — h1·o1)·
+    // 프로세스 전체 지표(m1)를 얻지 못하게.
+    for ([_][]const u8{ "Tracing.", "IO.", "HeapProfiler.", "Profiler.", "Performance.", "Memory.", "SystemInfo." }) |prefix| {
+        if (std.mem.startsWith(u8, method, prefix)) return true;
     }
     return std.mem.startsWith(u8, method, "Fetch.") or std.mem.startsWith(u8, method, "Emulation.");
 }
@@ -556,4 +563,9 @@ test "W9e①: 흉내의 한 주인 — maru 를 거친 Emulation.*·Network.setU
         try std.testing.expectError(error.Forbidden, t.begin(.{ .browser = 1, .call = 1, .method = m, .params_size = 0 }, 0));
     }
     for ([_][]const u8{ "Browser.getVersion", "Page.captureScreenshot", "EmulationX.setTimezoneOverride", "Network.getCookies", "Browser.grantPermissionsX" }) |m| try std.testing.expect(!forbiddenMethod(m));
+}
+
+test "W9e②: 성능 trace·힙·프로필·지표는 maru 를 거친 호출이 부를 수 없다 — Tracing·IO·HeapProfiler·Profiler·Performance·Memory·SystemInfo, 비슷한 이름은 된다" {
+    for ([_][]const u8{ "Tracing.start", "Tracing.end", "IO.read", "IO.close", "HeapProfiler.takeHeapSnapshot", "Profiler.start", "Performance.getMetrics", "Memory.getDOMCounters", "SystemInfo.getProcessInfo" }) |m| try std.testing.expect(forbiddenMethod(m));
+    for ([_][]const u8{ "TracingX.start", "IOX.read", "Page.getLayoutMetrics", "DOM.getDocument" }) |m| try std.testing.expect(!forbiddenMethod(m));
 }

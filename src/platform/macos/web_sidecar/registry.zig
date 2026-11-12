@@ -23,6 +23,8 @@ pub const Entry = struct {
     closing: bool = false,
     /// 받은 그리기 콜백 수(관측점).
     paints: u64 = 0,
+    /// maru 가 숨겼다(`create_browser.hidden`·`set_hidden` — W9e②: 숨은 탭의 trace 는 측정하는 동안만 focus 흉내를 켠다).
+    hidden: bool = false,
     title: TitleGate = .{},
     /// 콘솔 줄 조절과 방금 떠난 출처들(W9c① — `console_gate`).
     console: ConsoleGate = .{},

@@ -6,6 +6,16 @@ const os = @import("os.zig");
 
 const Message = protocol.message.Message;
 
+/// v20c 탐침(W9e② 적대 검증): host 명령줄 끝에 더할 스위치 하나(판정용 — 기본 null 이면 argv 는 예전과 같다).
+pub var extra_arg: ?[*:0]const u8 = null;
+pub var extra_arg2: ?[*:0]const u8 = null;
+
+/// W9e② v20c L2: 이름 없이 띄우는 host(`Host.spawn`)의 stderr 를 남길 뿌리 — 판(`--network` 등)이 정하면 `<뿌리>/<log_name>-<차례>.host.log`
+/// (`probe_select.noReentrancy` 가 그 뿌리의 `*.host.log` 를 센다). null 이면 예전처럼 남기지 않는다.
+pub var log_root: ?[]const u8 = null;
+pub var log_name: []const u8 = "host";
+var log_seq: u32 = 0;
+
 pub const Host = struct {
     pid: c_int,
     commands: c_int,
@@ -27,7 +37,14 @@ pub const Host = struct {
     }
 
     /// 환경 변수(`KEY=VALUE`)를 주어 띄운다 — 판정자 전용 훅(`MARU_WEB_TEST_*`)을 켤 때.
-    pub fn spawnWith(host_path: [:0]const u8, profile_arg: [:0]const u8, stderr_path: ?[:0]const u8, env: []const [*:0]const u8) !Host {
+    pub fn spawnWith(host_path: [:0]const u8, profile_arg: [:0]const u8, stderr_path_arg: ?[:0]const u8, env: []const [*:0]const u8) !Host {
+        // W9e② v20c L2: 판이 로그 자리를 정했으면(`log_root`) 로그 자리를 받지 않은 host 도 그 뿌리에 `<이름>-<차례>.host.log` 로 남긴다(재진입 판정이
+        // 센다). 경로가 버퍼를 넘으면 로그 없이 띄운다 — 그 판의 재진입 판정은 로그 수로 그것을 드러낸다.
+        var pb: [1100]u8 = undefined;
+        const stderr_path: ?[:0]const u8 = stderr_path_arg orelse if (log_root) |root| blk: {
+            log_seq += 1;
+            break :blk std.fmt.bufPrintSentinel(&pb, "{s}/{s}-{d}.host.log", .{ root, log_name, log_seq }, 0) catch null;
+        } else null;
         var to_host: [2]c_int = undefined;
         var from_host: [2]c_int = undefined;
         if (std.c.pipe(&to_host) != 0 or std.c.pipe(&from_host) != 0) return error.PipeFailed;
@@ -41,7 +58,8 @@ pub const Host = struct {
                 if (log >= 0) _ = std.c.dup2(log, 2);
             }
             for ([_]c_int{ to_host[0], to_host[1], from_host[0], from_host[1] }) |fd| _ = std.c.close(fd);
-            const argv = [_:null]?[*:0]const u8{ host_path, profile_arg };
+            // v20c 탐침: 판정용 host 스위치 하나(`extra_arg` — 없으면 예전과 같다).
+            const argv = [_:null]?[*:0]const u8{ host_path, profile_arg, extra_arg, if (extra_arg != null) extra_arg2 else null };
             var envp: [12:null]?[*:0]const u8 = @splat(null);
             for (env, 0..) |entry, i| envp[i] = entry;
             _ = std.c.execve(host_path, &argv, &envp);

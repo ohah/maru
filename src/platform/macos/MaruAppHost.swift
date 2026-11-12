@@ -14024,7 +14024,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let scopeDesc: String
         switch scope {
         case 1: scopeDesc = "cookies & storage"
-        case 2: scopeDesc = "network requests"
+        // W9e②: 2 = browser_network — 그 탭을 trace 중이거나 거른 결과가 남았으면 「performance trace (recording|finishing|ready)」 를 덧붙인다(철회하면
+        // trace 를 버리고 결과도 지운다).
+        case 2:
+            var tbuf = [UInt8](repeating: 0, count: 32)
+            let tn = tbuf.withUnsafeMutableBufferPointer { maru_macos_control_browser_trace_summary(pane, target, $0.baseAddress, $0.count) }
+            let trace = String(decoding: tbuf[0..<Int(tn)], as: UTF8.self)
+            scopeDesc = trace.isEmpty ? "network requests" : "network requests · performance trace (\(trace))"
         case 3: scopeDesc = "response bodies"
         case 4:
             var strict: UInt8 = 0

@@ -155,6 +155,10 @@ pub const Op = struct {
     context_id: i64 = 0,
     x: f64 = 0,
     y: f64 = 0,
+    /// W9e①: 그 탭의 흉내 화면을 pane 에 맞춘 줄임(사용자 결정 Q3 — Chromium 의 `scale`). CDP 입력 좌표는 그 scale 로 나뉘므로(실측 E3 — 곱하지
+    /// 않으면 scale 0.45 에서 #b 의 가운데를 눌러 HTML (755,1764) 를 눌렀다) 누름·옮김의 x,y 에만 곱한다. 덮였는지 보는 `elementFromPoint` 와
+    /// 상자(`DOM.getContentQuads`)는 CSS px 그대로다. 부른 쪽(`app_host_abi`)이 차례마다 지금 값으로 둔다(흉내가 없으면 1).
+    input_scale: f64 = 1,
     /// 덮였는지 본 결과의 실패 이유(놓기 뒤에 답한다). null = 맞았다.
     miss: ?[]const u8 = null,
     /// 누름·떼기의 답이 시한을 넘겼다 — 그래도 떼기·놓기를 보내고 끝에 timeout 으로 답한다.
@@ -1434,7 +1438,7 @@ pub const Op = struct {
     /// hover 의 포인터 이동(+kick — 숨은 탭에서 5 초 걸렸다, W9b②-3 계획 공격 3 회차).
     fn hoverMove(self: *Op, gpa: std.mem.Allocator) !Step {
         self.stage = .hover_move;
-        var step = try call(gpa, "Input.dispatchMouseEvent", "{{\"type\":\"mouseMoved\",\"x\":{d},\"y\":{d}}}", .{ self.x, self.y });
+        var step = try call(gpa, "Input.dispatchMouseEvent", "{{\"type\":\"mouseMoved\",\"x\":{d},\"y\":{d}}}", .{ self.x * self.input_scale, self.y * self.input_scale });
         step.call.kick = .required;
         return step;
     }
@@ -1586,7 +1590,7 @@ pub const Op = struct {
     }
 
     fn mouse(self: *Op, gpa: std.mem.Allocator, comptime kind: []const u8) !Step {
-        return call(gpa, "Input.dispatchMouseEvent", "{{\"type\":\"" ++ kind ++ "\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ self.x, self.y });
+        return call(gpa, "Input.dispatchMouseEvent", "{{\"type\":\"" ++ kind ++ "\",\"x\":{d},\"y\":{d},\"button\":\"left\",\"clickCount\":1}}", .{ self.x * self.input_scale, self.y * self.input_scale });
     }
 
     /// CDP 가 오류로 답했다 — selector 문법이면 invalid_params, 노드가 사라졌으면(문서가 바뀌었다) 없는 요소(`{ok:false}`). 누른 뒤의
@@ -4598,4 +4602,55 @@ test "W9c③ 적대 리뷰 5 회차 변이 OPbusypre: 모달 전에 자리가 �
         try testing.expectEqualStrings(busy_reason, end.done.result);
         try testing.expectEqual(@as(usize, 1), trail.count(busy_method));
     }
+}
+
+// ── W9e①: 흉내 화면을 줄여 보일 때의 입력 좌표 ──
+// 시험이 증명하는 것: 누름·떼기·옮김의 x,y 는 `input_scale` 을 곱한다(실측 E3 — CDP 입력은 Chromium 의 scale 로 나뉜다), 덮였는지 보는 검사의 좌표는
+// CSS 그대로다, 줄임이 1 이면 좌표가 그대로다(흉내가 없는 탭은 바뀌지 않는다).
+
+test "W9e①: 누름·옮김 좌표 × input_scale — 덮였는지 보는 검사는 CSS 그대로, 1 이면 그대로" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .click, "{\"selector\":\"#b\"}", 31);
+    defer op.deinit(testing.allocator);
+    op.input_scale = 0.5;
+    const r = try drive(&op, &happyPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqualStrings("true", r.result);
+    var presses: usize = 0;
+    for (trail.methods.items, trail.params.items) |m, p| {
+        if (std.mem.eql(u8, m, "Input.dispatchMouseEvent")) {
+            try testing.expect(std.mem.indexOf(u8, p, "\"x\":11.5,\"y\":5") != null); // 가운데 (23,10) × 0.5
+            presses += 1;
+        }
+        if (std.mem.eql(u8, m, "Runtime.callFunctionOn") and std.mem.indexOf(u8, p, "elementFromPoint") != null) {
+            try testing.expect(std.mem.indexOf(u8, p, "{\"value\":23},{\"value\":10}") != null); // CSS 그대로
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), presses);
+    trail.reset();
+    var plain = try Op.init(testing.allocator, .hover, "{\"selector\":\"#b\"}", 32);
+    defer plain.deinit(testing.allocator);
+    const h = try drive(&plain, &happyPage, &trail);
+    defer testing.allocator.free(h.result);
+    for (trail.methods.items, trail.params.items) |m, p| if (std.mem.eql(u8, m, "Input.dispatchMouseEvent")) {
+        try testing.expect(std.mem.indexOf(u8, p, "\"x\":23,\"y\":10") != null);
+    };
+}
+
+// W9e① 변이 시험: hover 의 옮김(mouseMoved)도 `input_scale` 을 곱한다 — 줄여 보이는 흉내 화면에서 다른 요소 위에 올리지 않게(실측 E3).
+test "W9e① 변이: hover 의 옮김 좌표도 × input_scale" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .hover, "{\"selector\":\"#b\"}", 33);
+    defer op.deinit(testing.allocator);
+    op.input_scale = 0.5;
+    const h = try drive(&op, &happyPage, &trail);
+    defer testing.allocator.free(h.result);
+    var moves: usize = 0;
+    for (trail.methods.items, trail.params.items) |m, p| if (std.mem.eql(u8, m, "Input.dispatchMouseEvent")) {
+        try testing.expect(std.mem.indexOf(u8, p, "\"x\":11.5,\"y\":5") != null);
+        moves += 1;
+    };
+    try testing.expect(moves >= 1);
 }

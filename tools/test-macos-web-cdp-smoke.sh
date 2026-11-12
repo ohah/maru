@@ -109,6 +109,13 @@
 #                   제어 권한을 받은 뒤(확인 모달, 자동 승인) 가짜 grant 를 물어(자동 승인) 규칙을 두고 그 fetch 가 가짜를 받는다 · 모든 grant 를
 #                   철회하면(앱 대본 `revokegrants`) ▣ 가 두 탭에서 사라진다. 서비스 워커·sidecar 재시작·본문 32 MiB·사람의 누름(Q2)은 판정자
 #                   (`--network-mock`)가 본다
+#   w9e-emulate     (W9e①) 기기 흉내: 에이전트가 연 탭은 묻지 않고 건다(`emulate --viewport 390x844@3,mobile --user-agent … --locale fr-FR
+#                   --timezone Asia/Kolkata --geolocation … --reload`) — 서버가 받은 문서 요청이 그 UA·Accept-Language, 페이지는 390 폭·fr-FR·
+#                   Kolkata, 위치는 숨은 에이전트 탭에선 보일 때까지 붙잡히고(Chromium) 보이는 사용자 탭은 묻지 않고 에이전트 좌표,
+#                   `--get` 의 fit_scale(줄여 보임), 목록의 ◫ emulating, `browser click` 이 줄인 화면의 맞는 요소(#b — 좌표 × fit) · sidecar 를 죽이면 재생 이동 앞에 흉내가 다시 선다(다시 받은 문서 요청이 그 UA) · 둘째 pane(사용자의
+#                   탭과 같다)은 사이트마다 묻고(자동 승인) 걸고, 다른 사이트로 가면 목록에 `off-site`(걸려 있지 않다 — 그 pane 의 `--get` 은 그
+#                   사이트의 grant 가 없어 거절) · 모든 grant 를 철회하면 ◫ 가 사라진다.
+#                   렌더러가 죽은 탭·사이트 묶기의 리다이렉트 홉·팝업·화면 픽셀은 판정자(`--emulation`)가 본다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -421,6 +428,9 @@ class H(http.server.SimpleHTTPRequestHandler):
             body = ("var bc=%s;" % repr(self.headers.get("Cookie") or "")).encode()
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
             self.send_response(200); self.send_header("Content-Type", "application/javascript"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/emu"):
+            # W9e①: 흉내 — 문서·자원 요청의 UA·Accept-Language 를 적는다(서버가 받은 정체).
+            sys.stderr.write("EMU %s ua=[%s] al=[%s]\n" % (self.path, self.headers.get("User-Agent") or "", self.headers.get("Accept-Language") or "")); sys.stderr.flush()
         if self.path.startswith("/nocontent"):
             # W9a①: 문서가 없는 응답 — navigate 는 곧 loaded:false 로 끝나야 한다.
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
@@ -475,6 +485,12 @@ printf 'real-api' > "$root/www/mk/api.txt"
 printf '<!doctype html><title>realdoc</title>realdoc' > "$root/www/mk/doc.html"
 printf 'real-user' > "$root/www/mku/x.txt"
 printf '<!doctype html><title>mocked-doc</title>mocked document' > "$root/mockdoc.html"
+# W9e①: 기기 흉내 — 폰 화면에서 왼쪽 위(#g)·오른쪽 아래(#b) 버튼(누르면 서버에 신호), 시간대·언어·폭을 읽는 함수.
+cat > "$root/www/emu.html" <<'HTML'
+<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>emu</title><style>html,body{margin:0;height:100%;background:#ffe9e9}#g{position:fixed;left:0;top:0;width:100px;height:100px;background:#0a0}#b{position:fixed;right:0;bottom:0;width:100px;height:100px;background:#00a}</style>
+<button id=g onclick="fetch('/emu-hit?g')">g</button><button id=b onclick="fetch('/emu-hit?b')">b</button>
+<script>window.EM=function(){return JSON.stringify({iw:innerWidth,lang:navigator.language,tz:Intl.DateTimeFormat().resolvedOptions().timeZone})}</script>
+HTML
 # W9d②: 응답 본문 — chunked JSON·2 MiB JSON·PNG·잘못된 UTF-8 JSON·다른 사이트(localhost)에서 쿠키가 실린 스크립트(서버가 만든다). fetch 는 본문을
 # 읽는다 — Chromium 은 페이지가 읽기 전에는 그 요청을 끝내지 않는다(판정자 실측 — 그러면 본문도 없다).
 printf '<!doctype html><title>body</title><img src="/bodypic.png"><script src="http://localhost:%s/bodycred.js"></script><script>function F(u){return fetch(u).then(function(r){return r.text()})}F("/bodyc.json");F("/bodybig.json");F("/bodybin.json")</script>body' "$port" > "$root/www/body.html"
@@ -577,6 +593,18 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     madd > "\$out/mku-add2" 2>&1; echo "rc=\$?" >> "\$out/mku-add2"
     "\$cli" browser exec --surface "\$mu" 'fetch("/mku/x.txt?u1").then(function(r){return r.text().then(function(t){return r.status+" "+t})},function(e){return "reject "+e.name})' > "\$out/mku-fetch" 2>&1
     touch "\$out/p2-mock-done"
+    # W9e①: 둘째 pane — 첫 pane 이 연 탭(사용자의 탭과 같다). 흉내는 사이트마다 묻고(자동 승인) 그 사이트에서만 걸린다.
+    n=0; while [ ! -f "\$out/p2-emu-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
+    [ -f "\$out/p2-emu-go" ] || exec sleep 600
+    eu=\$(cat "\$out/p2-emu-go")
+    "\$cli" browser emulate --surface "\$eu" --timezone Asia/Tokyo > "\$out/eu-set" 2>&1; echo "rc=\$?" >> "\$out/eu-set"
+    "\$cli" browser exec --surface "\$eu" 'EM()' > "\$out/eu-page" 2>&1
+    "\$cli" browser emulate --surface "\$eu" --get > "\$out/eu-get" 2>&1; echo "rc=\$?" >> "\$out/eu-get"
+    "\$cli" browser navigate --surface "\$eu" "http://localhost:$port/emu.html?off" > "\$out/eu-nav" 2>&1; echo "rc=\$?" >> "\$out/eu-nav"
+    "\$cli" browser exec --surface "\$eu" 'EM()' > "\$out/eu-page-off" 2>&1
+    "\$cli" browser emulate --surface "\$eu" --get > "\$out/eu-get-off" 2>&1; echo "rc=\$?" >> "\$out/eu-get-off"
+    "\$cli" browser list > "\$out/eu-list-off" 2>&1
+    touch "\$out/p2-emu-done"
     exec sleep 600
 fi
 # 주소가 \$1 로 끝날 때까지(최대 10 초) — 목록 줄의 주소 칸으로 본다.
@@ -628,6 +656,11 @@ run click-ref-real click --ref "\$ref"
 hit_seen rb-true && echo yes > "\$out/ref-hit" || echo no > "\$out/ref-hit"
 run type type --selector '#in' --text '새 값'
 hit_seen 'in-true-%EC%83%88%20%EA%B0%92' && echo yes > "\$out/type-hit" || echo no > "\$out/type-hit"
+# W9e①(검사는 w9e-emulate): 보이는 사용자 탭의 위치 흉내 — 사이트마다 묻고(자동 승인) 걸면 위치는 묻지 않고 에이전트 좌표다. 곧 지운다(대신
+# 허용한 출처도 되돌린다). 끝의 W9e 칸에서는 이 탭의 가족에 대화상자가 남아 있고, 에이전트가 연 탭은 숨어 있어 위치 요청이 붙잡힌다.
+"\$cli" browser emulate --surface "\$sid" --geolocation 48.8584,2.2945,10 > "\$out/em-vgeo-set" 2>&1; echo "rc=\$?" >> "\$out/em-vgeo-set"
+"\$cli" browser exec --surface "\$sid" 'new Promise(function(res){navigator.geolocation.getCurrentPosition(function(p){res("ok "+p.coords.latitude+","+p.coords.longitude)},function(e){res("err "+e.code)},{timeout:6000})})' > "\$out/em-geo" 2>&1
+"\$cli" browser emulate --surface "\$sid" --clear > "\$out/em-vgeo-clear" 2>&1; echo "rc=\$?" >> "\$out/em-vgeo-clear"
 run wait wait --selector '#late' --timeout 5000
 run wait-never wait --selector '#never-there' --timeout 300
 run scroll scroll --selector '#far'
@@ -1394,6 +1427,43 @@ n=0; while [ ! -f "\$out/p2-mock-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$
 touch "\$out/mock-revoke-now"
 sleep 1.5
 "\$cli" browser list > "\$out/mk-list5" 2>&1
+# ── W9e①: 기기 흉내 ──
+# 에이전트가 연 탭 — 묻지 않고 건다. 새로고침까지(첫 문서 요청부터 그 UA·언어).
+android_ua='Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36'
+"\$cli" browser open --url "http://127.0.0.1:$port/emu.html?o" > "\$out/em-open" 2>&1
+et=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/em-open")
+"\$cli" browser emulate --surface "\$et" --viewport 390x844@3,mobile --user-agent "\$android_ua" --locale fr-FR --timezone Asia/Kolkata --geolocation 48.8584,2.2945,10 --reload > "\$out/em-set" 2>&1; echo "rc=\$?" >> "\$out/em-set"
+sleep 1.5
+"\$cli" browser emulate --surface "\$et" --get > "\$out/em-get" 2>&1; echo "rc=\$?" >> "\$out/em-get"
+"\$cli" browser list > "\$out/em-list" 2>&1
+"\$cli" browser exec --surface "\$et" 'EM()' > "\$out/em-page" 2>&1
+# 에이전트가 연 탭은 숨은 채 열린다 — Chromium 은 숨은 탭의 위치 요청을(프롬프트까지) 보일 때까지 붙잡는다(판정자 emu-geo-hidden-held).
+"\$cli" browser exec --surface "\$et" '(window.HG="pending", navigator.geolocation.getCurrentPosition(function(p){window.HG="ok"},function(e){window.HG="err "+e.code},{timeout:6000}), 1)' > "\$out/em-geo-start" 2>&1
+sleep 2.5
+"\$cli" browser exec --surface "\$et" 'window.HG' > "\$out/em-geo-held" 2>&1
+# 줄인 화면(fit < 1)의 오른쪽 아래 버튼 — maru 가 좌표를 × fit 로 보내야 #b 다.
+"\$cli" browser click --surface "\$et" --selector '#b' > "\$out/em-click" 2>&1; echo "rc=\$?" >> "\$out/em-click"
+sleep 0.5
+# sidecar 를 죽인다(대본 밖의 기다림이 그 앱의 maru-web-host 를 SIGKILL) — 다시 뜬 sidecar 의 재생 이동 앞에 흉내가 선다.
+before=\$(grep -c 'EMU /emu.html?o ' "$root/http.log")
+touch "\$out/emu-killsidecar"
+n=0; while [ \$n -lt 120 ]; do
+    now=\$(grep -c 'EMU /emu.html?o ' "$root/http.log")
+    [ "\$now" -gt "\$before" ] && [ -f "\$out/emu-killed" ] && break
+    sleep 0.25; n=\$((n + 1))
+done
+sleep 1
+"\$cli" browser emulate --surface "\$et" --get > "\$out/em-get2" 2>&1; echo "rc=\$?" >> "\$out/em-get2"
+# 둘째 pane 에게 사용자의 탭과 같은 탭을 넘긴다.
+"\$cli" browser open --url "http://127.0.0.1:$port/emu.html?u" > "\$out/eu-open" 2>&1
+eu=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/eu-open")
+echo "\$eu" > "\$out/p2-emu-go.tmp" && mv "\$out/p2-emu-go.tmp" "\$out/p2-emu-go"
+n=0; while [ ! -f "\$out/p2-emu-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser list > "\$out/em-list2" 2>&1
+# 모든 grant 를 철회한다(앱 대본 「revokegrants」) — ◫ 가 사라진다.
+touch "\$out/emu-revoke-now"
+sleep 1.5
+"\$cli" browser list > "\$out/em-list3" 2>&1
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -1407,7 +1477,7 @@ up_bid=$(grep -a -A1 '<key>CFBundleIdentifier</key>' "$app" | sed -n 's/.*<strin
 up_stale="$root/home/Library/Application Support/maru/web/${up_bid:-dev.maru.apphost}/profile/upload-staging/424242"
 (umask 077 && mkdir -p "$up_stale/1/0" && printf 'stale\n' > "$up_stale/1/0/old.txt")
 # 숨은 탭 경우(W9b②-3) — pane 대본이 hide-now 를 만들면 새 탭으로 Chromium 탭을 숨기고, show-now 면 돌아온다.
-printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" "$out/body-revoke-now" "$out/block-revoke-now" "$out/mock-revoke-now" > "$root/hide.txt"
+printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" "$out/body-revoke-now" "$out/block-revoke-now" "$out/mock-revoke-now" "$out/emu-revoke-now" > "$root/hide.txt"
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
@@ -1416,7 +1486,15 @@ env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/
     "$app" > "$root/app.log" 2>&1 &
 app_pid=$!
 i=0
-while [ ! -f "$out/done" ] && [ $i -lt 510 ]; do sleep 1; i=$((i + 1)); done
+while [ ! -f "$out/done" ] && [ $i -lt 1200 ]; do
+    # W9e①: pane 대본이 청하면 이 앱의 maru-web-host 를 SIGKILL 한다(재생 이동 앞의 흉내를 보려고) — 이 대본이 띄운 앱의 자식만.
+    if [ -f "$out/emu-killsidecar" ] && [ ! -f "$out/emu-killed" ]; then
+        hp=$(ps -ax -o pid=,ppid=,comm= | awk -v a="$app_pid" '$2==a && $3 ~ /maru-web-host$/ {print $1}' | head -1)
+        [ -n "$hp" ] && kill -9 "$hp" 2>/dev/null
+        echo "${hp:-none}" > "$out/emu-killed"
+    fi
+    sleep 0.5; i=$((i + 1))
+done
 [ -f "$out/done" ] || { sed -n '1,40p' "$root/app.log" >&2; fail "the pane script did not finish ($(cat "$out/list" 2>/dev/null | tr '\n' ' '))"; }
 kill "$app_pid" 2>/dev/null || true
 wait "$app_pid" 2>/dev/null || true
@@ -1808,6 +1886,37 @@ grep -q '/mku/x.txt?u1' "$root/http.log" && mbad "the server saw the fetch the s
 grep -q "^surface $mt_id .*▣ mocking (1 rule)" "$out/mk-list4" && grep -q "^surface $mu_id .*▣ mocking (1 rule)" "$out/mk-list4" || mbad "the list did not show ▣ on both tabs ($(mshow mk-list4))"
 grep -q '▣' "$out/mk-list5" && mbad "the list still showed ▣ after revoking all grants ($(mshow mk-list5))"
 [ -z "$mock_bad" ] || fail "w9d-mock:$mock_bad"
+# W9e①: 기기 흉내.
+emu_bad=""
+ebad() { emu_bad="$emu_bad · $1"; }
+eshow() { tr '\n' ' ' < "$out/$1" 2>/dev/null | cut -c1-400; }
+et_id=$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "$out/em-open")
+eu_id=$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "$out/eu-open")
+android='Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36'
+grep -q '^rc=0$' "$out/em-set" && grep -q '^emulating on this tab — state' "$out/em-set" && grep -q '^reloaded' "$out/em-set" || ebad "emulating the agent's tab failed or asked ($(eshow em-set))"
+grep -qF "EMU /emu.html?o ua=[$android] al=[fr-FR,fr;q=0.9]" "$root/http.log" || ebad "the server did not get the emulated user agent and Accept-Language on the reloaded document ($(grep 'EMU /emu.html?o' "$root/http.log" | tail -2 | tr '\n' ' '))"
+epage() { tr -d '\\' < "$out/$1" 2>/dev/null; }
+epage em-page | grep -q '"iw":390' && epage em-page | grep -q '"lang":"fr-FR"' && epage em-page | grep -qE '"tz":"Asia/(Kolkata|Calcutta)"' || ebad "the page did not see the phone width, language and time zone ($(eshow em-page))"
+epage em-geo-held | grep -q '"pending"' || ebad "the hidden agent tab's location request was not held until shown ($(eshow em-geo-held))"
+grep -q '^rc=0$' "$out/em-vgeo-set" && grep -q '^rc=0$' "$out/em-vgeo-clear" || ebad "emulating the location of the shown user tab failed ($(eshow em-vgeo-set) · $(eshow em-vgeo-clear))"
+epage em-geo | grep -q 'ok 48.8584,2.2945' || ebad "the shown page did not get the agent's location without a prompt ($(eshow em-geo))"
+grep -q 'state active' "$out/em-get" && grep -q 'viewport 390×844 @3 mobile — the user sees it scaled to fit the pane' "$out/em-get" || ebad "get did not show the active, scaled phone viewport ($(eshow em-get))"
+grep -qF "surface $et_id " "$out/em-list" && grep -qF '◫ emulating (390×844@3 mobile, user agent, fr-FR, Asia/Kolkata, location (agent))' "$out/em-list" || ebad "the list did not show ◫ emulating on the agent's tab ($(eshow em-list))"
+grep -q '^rc=0$' "$out/em-click" && grep -q 'GET /emu-hit?b' "$root/http.log" || ebad "click on the scaled phone screen did not hit #b ($(eshow em-click) · $(grep 'emu-hit' "$root/http.log" | tr '\n' ' '))"
+grep -q 'GET /emu-hit?g' "$root/http.log" && ebad "click on the scaled phone screen hit #g instead"
+[ -s "$out/emu-killed" ] && [ "$(cat "$out/emu-killed")" != none ] || ebad "the sidecar was not killed ($(cat "$out/emu-killed" 2>/dev/null))"
+[ "$(grep 'EMU /emu.html?o ' "$root/http.log" | wc -l)" -ge 3 ] && grep 'EMU /emu.html?o ' "$root/http.log" | tail -1 | grep -qF "ua=[$android]" || ebad "after the sidecar restart the replayed document request did not carry the emulated user agent ($(grep 'EMU /emu.html?o' "$root/http.log" | tr '\n' ' '))"
+grep -q '^rc=0$' "$out/em-get2" && grep -q 'state active' "$out/em-get2" || ebad "after the restart get did not show the emulation active ($(eshow em-get2))"
+[ -f "$out/p2-emu-done" ] || ebad "the second pane did not finish its emulation steps ($(ls "$out" | grep -E '^(eu-|p2-emu)' | tr '\n' ' '))"
+grep -q '^rc=0$' "$out/eu-set" && grep -q 'only on 127.0.0.1' "$out/eu-set" || ebad "the second pane could not emulate the user's tab after the dialog ($(eshow eu-set))"
+epage eu-page | grep -q '"tz":"Asia/Tokyo"' || ebad "the user's tab did not get the time zone on its site ($(eshow eu-page))"
+grep -q '^rc=0$' "$out/eu-get-off" && ebad "on another site get answered without a grant for that site ($(eshow eu-get-off))"
+epage eu-page-off | grep -q '"tz":"Asia/Tokyo"' && ebad "the emulation stayed on another site ($(eshow eu-page-off))"
+grep -qF "surface $eu_id " "$out/eu-list-off" && grep -qF '◫ emulating (Asia/Tokyo, off-site)' "$out/eu-list-off" || ebad "the list did not show the user's tab as emulating off-site ($(eshow eu-list-off))"
+[ "$(grep -c '◫ emulating' "$out/em-list2")" -ge 2 ] || ebad "the list did not show ◫ on both tabs ($(eshow em-list2))"
+grep -q '◫' "$out/em-list3" && ebad "the list still showed ◫ after revoking all grants ($(eshow em-list3))"
+[ -z "$emu_bad" ] || fail "w9e-emulate:$emu_bad"
+echo "PASS w9e-emulate: the agent's tab took a phone viewport, user agent, language, time zone and location without asking (◫ emulating in the list), the reloaded document request carried the emulated user agent and Accept-Language, the page saw 390 px, fr-FR and Asia/Kolkata a hidden agent tab's location request was held (Chromium) while a shown tab got the agent's coordinates without a prompt, a click on the scaled screen hit #b, after killing the sidecar the replayed document request was emulated again, a second pane emulated the user's tab only on its site (asked once, approved; off-site elsewhere), and revoking all grants removed ◫"
 echo "PASS w9d-mock: the agent's tab took a mock rule without asking (▣ mocking in the list), a matching fetch got the given body and the server never saw it, network --mocked listed it with its rule, a document mock from --body-file became the page and navigate said mocked, clear brought the server's answers back and removed ▣, a second pane needed the network then the control permission before its own mock rule (asked once, approved) answered a fetch, and revoking all grants removed ▣ from both tabs"
 echo "PASS w9d-block: the agent's tab took a rule without asking (⊘ blocking in the list), a blocked fetch was a TypeError the server never saw, network --blocked listed it with its rule and pattern and nothing else, a blocked navigation said blocked, a service-worker page's fetch was handled as the shared-worker rule says, strict on blocked the same fetch (strict in the list), clear brought the requests back and removed ⊘, and revoking all grants removed ⊘"
 echo "PASS w9d-body: the agent's tab recorded bodies without asking (◉ recording in the list), a chunked JSON body came back as sent, a 2 MiB JSON was over_cap, a PNG not_text, a binary JSON body was refused without --out and written with it, --out wrote a 0600 file, a script sent with another site's cookies stayed hidden until get-cookies allowed that site, a pane without the body permission saw needs_body_permission and after its own permission only later bodies, and revoking all grants cleared the mark and the bodies"

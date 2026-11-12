@@ -1817,12 +1817,20 @@ pub const mock_mark_utf8 = "\u{25A3}";
 /// 가짜 표식의 보라(기록의 빨강·막기의 호박색과 다른 고정 색 — 테마와 무관하게).
 pub const mock_mark_color: maru.color.Rgb = .{ .r = 0x8E, .g = 0x6C, .b = 0xEF };
 
-/// 이 탭 제목이 셀로 그리는 마커(running `●`, 또는 기록 `◉`·막기 `⊘`·가짜 `▣` 의 그 차례의 1–3 글자 — `◉⊘▣`·`◉▣`·`⊘▣` …)로 시작하면 그
-/// 마커(UTF-8).
+/// W9e①: 기기 흉내가 설정된 Chromium 탭의 표식 ◫(U+25EB) — 흉내 무리가 하나라도 있으면(사용자 탭이 사이트 밖이라 걸려 있지 않아도 —
+/// 「이 탭에 흉내가 설정됨」, 계획 §11·P3-7). 기록 ◉·막기 ⊘·가짜 ▣ 와 함께면 `◉⊘▣◫` 의 차례. 셀로 그려 **그 칸만** 청록으로 칠한다
+/// (`recolorEmulationMarkCells`).
+pub const emulation_mark: u21 = 0x25EB;
+pub const emulation_mark_utf8 = "\u{25EB}";
+/// 흉내 표식의 청록(빨강 ◉·호박 ⊘·보라 ▣ 와 다른 고정 색 — 테마와 무관하게).
+pub const emulation_mark_color: maru.color.Rgb = .{ .r = 0x20, .g = 0xA3, .b = 0x9E };
+
+/// 이 탭 제목이 셀로 그리는 마커(running `●`, 또는 기록 `◉`·막기 `⊘`·가짜 `▣`·흉내 `◫` 의 그 차례의 1–4 글자 — `◉⊘▣◫`·`◉▣`·`⊘◫` …)로
+/// 시작하면 그 마커(UTF-8).
 pub fn tabTitleMarker(title: []const u8) ?[]const u8 {
     if (tabTitleRunningMarker(title)) return agentFlagUtf8();
     var n: usize = 0;
-    for ([_][]const u8{ recording_mark_utf8, blocking_mark_utf8, mock_mark_utf8 }) |m| {
+    for ([_][]const u8{ recording_mark_utf8, blocking_mark_utf8, mock_mark_utf8, emulation_mark_utf8 }) |m| {
         if (std.mem.startsWith(u8, title[n..], m)) n += m.len;
     }
     return if (n == 0) null else title[0..n];
@@ -1841,7 +1849,7 @@ pub const title_mark_escape = "\u{2060}";
 
 /// 고른 제목을 탭 제목으로 쓸 때 기록 표식으로 읽히지 않게 할 것인가(`title_mark_escape` 를 앞에 붙인다).
 pub fn titleNeedsMarkEscape(title: []const u8) bool {
-    return std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8) or std.mem.startsWith(u8, title, mock_mark_utf8); // W9d③: ⊘ 도, W9d④: ▣ 도
+    return std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8) or std.mem.startsWith(u8, title, mock_mark_utf8) or std.mem.startsWith(u8, title, emulation_mark_utf8); // W9d③: ⊘ 도, W9d④: ▣ 도, W9e①: ◫ 도
 }
 
 /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
@@ -1855,6 +1863,13 @@ pub fn tabTitleBody(title: []const u8) []const u8 {
 pub fn recolorRecordingMarkCells(cells: anytype) void {
     for (cells) |*c| if (c.codepoint == recording_mark) {
         c.style.foreground = .{ .rgb = recording_mark_color };
+    };
+}
+
+/// W9e①: 셀에 그린 흉내 표식(◫)만 청록으로(제목 안의 ◫ 는 칠하지 않는다 — 제목 글은 measured 라 셀에 없다).
+pub fn recolorEmulationMarkCells(cells: anytype) void {
+    for (cells) |*c| if (c.codepoint == emulation_mark) {
+        c.style.foreground = .{ .rgb = emulation_mark_color };
     };
 }
 

@@ -137,8 +137,8 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   그 세션에서 우회하거나 흉내 낼 수 있다). `Browser.executeBrowserCommand` 도 보내지 않는다(CEF 154 에서 답하지 않고 그 탭의 DevTools 를 모두 멈췄다 — 3 차 검증
   N-B3-f, 막기와 무관한 방어). `Target.*` 도 인자 없는 `getTargetInfo`(읽기 — 저장소 op 가 쓴다; `targetId` 를 준 꼴은 다른 탭을 보므로 막는다 — W9d② 재검증 6 차 F11) 말고는 보내지 않는다 — 지킴은 바깥 메서드 이름만
   보는데 `Target.attachToTarget`·`attachToBrowserTarget`·`setAutoAttach`·`sendMessageToTarget`·`exposeDevToolsProtocol` 은 그 안에 다른 CDP 를 실어 보낸다(2 차
-  검증 NEW-1 실측: `sendMessageToTarget` 이 실은 `Network.setBlockedURLs` 가 fetch 를 막았다). 남긴 것과 까닭(`overrideNetworkState` 는 `navigator.onLine` 만 — 실측 fetch 그대로, `setCacheDisabled` — HTTP 캐시
-  응답도 막기가 본다, 헤더·쿠키 바꾸기 — 패턴은 주소만 본다)은 `devtools_table.forbiddenMethod` 주석이 단일 출처다.
+  검증 NEW-1 실측: `sendMessageToTarget` 이 실은 `Network.setBlockedURLs` 가 fetch 를 막았다). 남긴 것과 까닭(`setCacheDisabled` — HTTP 캐시 응답도
+  막기가 본다, 헤더·쿠키 바꾸기 — 패턴은 주소만 본다; `overrideNetworkState` 는 막기와 무관하나 W9e① 흉내의 한 주인 몫으로 막는다 — 아래)은 `devtools_table.forbiddenMethod` 주석이 단일 출처다.
   상세는 [웹 OSR 계획 「W9d③ 결정·실측」](plans/web-osr-backend.md).
 - **`browser_network_mock`(W9d④ — `browser.networkMock`)은 `browser`·`browser_network`·`browser_network_body`·`browser_network_block` 과 따로 묻는 peer scope 다** —
   가짜 응답은 **사용자의 페이지를 에이전트가 만든 것으로 바꾸는 쓰기**이고, 문서·스크립트를 바꾸면 에이전트가 **그 사이트로서 코드를 돌린다**(그 사이트의 로그인·저장소·
@@ -167,6 +167,25 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   `Network.setRequestInterception` 은 이미 보내지 않는다(scope·▣ 없는 가짜 길). **남는 흔적**: 가짜 문서·스크립트가 그 출처로 쓴 localStorage·IndexedDB·Cache Storage
   (페이지 스크립트의 `caches.put`)·`document.cookie`(HttpOnly 아님)는 규칙을 지워도 남는다 — `browser`(eval)와 같은 힘의 흔적이고 사이트 데이터 지우기로 지운다. 상세는
   [웹 OSR 계획 「W9d④ 결정·실측」](plans/web-osr-backend.md).
+- **`browser_emulation`(W9e① — `browser.emulate`)은 `browser`·`browser_storage`·`browser_network*` 와 따로 묻는 peer scope 다** — 기기 흉내는 페이지를 바꾸지 않지만
+  **사이트가 사용자를 누구로 보는지**를 바꾼다(화면·UA·client hints·언어·시간대·위치가 서버에 그렇게 전해진다 — 로그인된 사이트는 「새 기기」 로 보거나 다른 값을 저장할 수
+  있다). 상속 fd 로 발급하지 않고, 확인 grant 는 모달이 보인 호스트와 그 하위 도메인에 묶인다(다른 호스트로 다시 허용하면 새 동의 — 흉내가 지워진다). 사용자 탭은 사이트마다
+  한 번 묻고 **그 사이트를 맨 위 페이지가 보일 때만** 걸린다(사용자 결정 Q1 2026-10-22 — 사용자가 은행으로 가면 풀린다; 리다이렉트로 떠나는 홉 요청 하나는 흉내 UA·언어를
+  새 사이트에 싣는다 — 실측 E12, 문서화; 문서 없이 끊긴 이동(204·다운로드·멈춤)은 남은 옛 문서의 사이트로 되돌린다 — 판정
+  `emu-site-bound-aborted-hop`, main 으로 옮길 때 고침). 에이전트가 연 탭은 묻지 않는다(birth grant 다섯째 자리 — 흉내는 그 탭에만 가고 에이전트는 그 탭에서 이미 어느 사이트로든 간다).
+  `browser` grant 는 요구하지 않는다 — 흉내는 페이지에서 코드를 돌리지 않는다(머리는 eval 로 바꿀 수 없어 peer scope 로 따로 묻는다). 설정 `browser.agent-network-full`
+  과 무관하다(읽기가 아니다 — 몰기의 좁히기도 하지 않는다). **한 주인**: 흉내의 CDP 는 sidecar 의 `emulation.zig` 만 낸다 — maru 를 거친 DevTools 호출의 `Emulation.*`·
+  `Network.setUserAgentOverride`·`Network.emulateNetworkConditionsByRule`·`Network.overrideNetworkState`·`Browser.grantPermissions`·`Browser.setPermission`·
+  `Browser.resetPermissions` 는 보내지 않는다: 렌더러가 죽은 탭에 `setDeviceMetricsOverride` 를 보내면 sidecar 가 통째로 죽어 **모든 Chromium 탭이 다시 떴다**(실측 E11 —
+  흉내 바꾸기는 렌더러가 없는 동안 쌓았다가 새 렌더러에서 낸다), `Browser.grantPermissions` 는 context 전체라 사용자의 같은 출처 탭도 granted 가 됐다(E15). **위치**(사용자
+  결정 Q2 2026-10-22): 위치 덮어쓰기는 W5b2 와 한 칸이다 — 에이전트 좌표가 걸린 탭에서는 maru 의 CoreLocation 좌표·「없음」 을 걸지 않고(지금 코드는 허용 순간 에이전트
+  좌표를 지웠다 — E14), 그 탭의 위치**만** 묻는 프롬프트는 묻지 않고 허용으로 답한다 — 좌표는 에이전트 것이라 진짜 위치는 나가지 않는다. Chromium 은 그 허용을 출처에
+  저장하므로 그때 설정이 기본이었으면 출처를 적어 두고(탭마다 8 — 넘치면 가장 오래된 것부터 되돌린다) 흉내가 끝나면(지움·철회·사이트 떠남·탭 닫힘·종료) 기본으로 되돌린다
+  (sidecar 가 다시 뜨면 maru 가 기억한 목록으로). 저장된 허용이 남은 동안 같은 출처의 다른 탭이 위치를 물으면 maru 에 묻는다(에이전트 좌표를 받지 않는다). **정직**: 다른 사이트
+  iframe·서비스 워커·흉내 전에 시작한 worker 는 진짜 정체를 낸다(실측 E8–E10) — 결과의 `not_covered` 가 늘 말한다, 시간대·언어는 같은 렌더러 프로세스의 팝업에도
+  걸린다(`process_shared` — E13). 사용자에게 보이는 신호: 탭 제목 앞의 청록 ◫(`◉⊘▣◫`), 흉내 화면을 줄여 보이면 그 밖을 어둡게·테두리, Browser Grants 의 「device emulation
+  (…)」 줄(거기서 철회하면 곧 풀린다), 사용자가 흉내 중인 에이전트 탭을 처음 몰 때 알림. **남는 흔적**: 서버가 흉내를 보고 한 일(언어 쿠키·「새 기기」 메일), 페이지
+  스크립트가 흉내 값으로 쓴 저장소. 상세는 [웹 OSR 계획 「W9e① 결정·실측」](plans/web-osr-backend.md).
 - `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. `capture`가 처음 노출되는 Phase 1 안에서 capability fd 발급·auth·거부 테스트까지 함께 구현한다. "read-only라 토큰은 나중"으로 미루지 않는다.
 
 ### 8.4 self-origin metadata 증명(일반 login shell)

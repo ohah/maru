@@ -14036,6 +14036,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let rules = maru_macos_control_browser_mock_summary(pane, target, &strict)
             let noun = rules == 1 ? "rule" : "rules"
             scopeDesc = strict != 0 ? "response mocking (\(rules) \(noun), strict)" : "response mocking (\(rules) \(noun))"
+        // W9e①: 6 = browser_emulation(기기 흉내 — 그 pane 이 건 흉내의 요약, 예: 「390×844 mobile, fr-FR, Asia/Kolkata, location (agent)」. 철회하면
+        // 흉내가 곧 풀리고 탭의 ◫ 도 사라진다).
+        case 6:
+            var buf = [UInt8](repeating: 0, count: 160)
+            let n = buf.withUnsafeMutableBufferPointer { maru_macos_control_browser_emulation_summary(pane, target, $0.baseAddress, $0.count) }
+            let summary = String(decoding: buf[0..<Int(n)], as: UTF8.self)
+            scopeDesc = summary.isEmpty ? "device emulation" : "device emulation (\(summary))"
         default: scopeDesc = "control"
         }
         return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"

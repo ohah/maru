@@ -62,7 +62,7 @@ pub fn hashNonce(nonce: Nonce) Hash {
 // ── scope 모델(§8.3) ──────────────────────────────────────────────────────────────────────────────────────
 /// capability scope 분류(§8.3). method↔scope 매핑(§6 line 111)이 이 category로 판정한다. metadata의 sub-scope
 /// (self|window|all)는 `Scope.metadata`가 `wm.MetadataScope`로 실어 나른다(1c/1d가 소비하는 그 타입).
-pub const ScopeClass = enum { metadata, bind, read_output, write, lifecycle, browser, browser_storage, browser_network, browser_network_body, browser_network_block, browser_network_mock };
+pub const ScopeClass = enum { metadata, bind, read_output, write, lifecycle, browser, browser_storage, browser_network, browser_network_body, browser_network_block, browser_network_mock, browser_emulation };
 
 /// 단일 capability scope(§8.5 **single-scope 강제**: capability는 정확히 하나의 scope만 싣는다 — 이 union은 한
 /// 값이라 write+lifecycle 같은 복합 grant를 타입 수준에서 만들 수 없다). metadata는 `wm.MetadataScope`를 실어
@@ -98,6 +98,11 @@ pub const Scope = union(enum) {
     /// 저장소·권한으로) 화면에 진짜처럼 보일 수 있다 — 사이트에 묶이고(사용자 탭은 사이트마다 한 번 묻는다), 상속 fd 로 발급하지 않는다. 그 탭의
     /// `browser`(eval) grant 위에 선다(`executeScript` 보다 큰 힘이 되지 않게 — 계획 §13 P1-4).
     browser_network_mock,
+    /// `browser-emulation`(W9e① — `browser.emulate` — **기기 흉내**). 그 탭이 서버·페이지에 보이는 정체(화면·UA·언어·시간대·위치)를 바꾼다 —
+    /// 로그인된 사이트가 「새 기기」 로 보거나 다른 값을 저장할 수 있다. 사이트에 묶이고(사용자 탭은 사이트마다 한 번 묻고 그 사이트를 보일
+    /// 때만 걸린다 — 사용자 결정 Q1), 상속 fd 로 발급하지 않는다. `browser` grant 는 요구하지 않는다(흉내는 페이지에서 코드를 돌리지 않는다 —
+    /// 계획 §13 P1-9). `browser`·`browser_network*`·`browser_storage` 가 함의하지 않는 peer scope 다.
+    browser_emulation,
 
     pub fn class(self: Scope) ScopeClass {
         return switch (self) {
@@ -112,6 +117,7 @@ pub const Scope = union(enum) {
             .browser_network_body => .browser_network_body,
             .browser_network_block => .browser_network_block,
             .browser_network_mock => .browser_network_mock,
+            .browser_emulation => .browser_emulation,
         };
     }
 
@@ -122,7 +128,7 @@ pub const Scope = union(enum) {
     /// 쿠키=인증 토큰이라 상속 fd로 새면 same-uid untrusted 코드가 세션 자격증명을 탈취(write/lifecycle과 동급 위험).
     pub fn allowedViaInheritedFd(self: Scope) bool {
         return switch (self.class()) {
-            .write, .lifecycle, .browser_storage, .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock => false,
+            .write, .lifecycle, .browser_storage, .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock, .browser_emulation => false,
             .metadata, .read_output, .bind, .browser => true,
         };
     }
@@ -168,6 +174,8 @@ pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     if (m.core == .browser and eq(rest, "networkBlock")) return .browser_network_block;
     // browser-network-mock(W9d④): 가짜 응답 — 페이지가 받는 응답을 바꾼다. generic `browser.*` 보다 먼저.
     if (m.core == .browser and eq(rest, "networkMock")) return .browser_network_mock;
+    // browser-emulation(W9e①): 기기 흉내 — 서버·페이지가 보는 정체를 바꾼다. generic `browser.*` 보다 먼저.
+    if (m.core == .browser and eq(rest, "emulate")) return .browser_emulation;
     // browser.*(§6 line 111 와일드카드) — 나머지 페이지 조작/관찰.
     if (m.core == .browser) return .browser;
     return null;
@@ -568,6 +576,13 @@ test "fd 발급 정책: browser_storage는 상속 fd로 발급 금지(D5 쿠키=
     try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_storage, null));
 }
 
+test "W9e①: browser_emulation 도 상속 fd 로 발급하지 않는다(사용자 탭이 서버에 보이는 정체를 바꾼다)" {
+    try testing.expect(!Scope.allowedViaInheritedFd(.browser_emulation));
+    try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_emulation, null));
+    try testing.expectEqual(ScopeClass.browser_emulation, (Scope{ .browser_emulation = {} }).class());
+    try testing.expectEqual(ScopeClass.browser_emulation, methodRequiredScope("browser.emulate").?);
+}
+
 test "W9d④: browser_network_mock 도 상속 fd 로 발급하지 않는다(사용자 탭의 응답을 바꾼다)" {
     try testing.expect(!Scope.allowedViaInheritedFd(.browser_network_mock));
     try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_network_mock, null));
@@ -631,6 +646,8 @@ test "method↔scope 매핑: §6 line 111의 모든 메서드가 올바른 categ
         .{ .m = "browser.networkRecord", .want = .browser_network_body }, // W9d②
         .{ .m = "browser.networkBlock", .want = .browser_network_block }, // W9d③
         .{ .m = "browser.networkMock", .want = .browser_network_mock }, // W9d④
+        .{ .m = "browser.emulate", .want = .browser_emulation }, // W9e①
+        .{ .m = "browser.emulateX", .want = .browser },
         // localStorage는 eval 백엔드=base browser(exec와 동일 도달, D5 laundering-hole 불변)
         .{ .m = "browser.getLocalStorage", .want = .browser },
         .{ .m = "browser.setLocalStorage", .want = .browser },

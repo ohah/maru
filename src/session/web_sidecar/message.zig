@@ -194,6 +194,11 @@ pub const Tag = enum(u8) {
     /// 그 세대의 규칙을 맺는다(W9d④) — `count` 개가 모두 왔으면 sidecar 가 규칙 묶음을 바꾸고(아니면 `net_mock_state.ok` 거짓) 가짜 엄격
     /// 모드(`strict_site`)를 맞춘다. 답은 `net_mock_state`.
     net_mock_commit = 139,
+    /// 그 탭의 기기 흉내(W9e① — maru 가 `browser.emulate` 로 바꿀 때마다·브라우저가 새로 만들어질 때 **전체 상태**를 한 frame 으로 — 덧쓰기는
+    /// maru 가 합쳤다). sidecar 의 `emulation.zig` 가 한 주인으로 CDP 를 스스로 낸다(렌더러가 없는 동안은 쌓는다 — 실측 E11). `site` 가 비지
+    /// 않으면 그 호스트(와 하위 도메인)를 맨 위 페이지가 보일 때만 건다(사용자 탭 — 사용자 결정 Q1). `geo_restore` 는 옛 sidecar 가 대신 허용한
+    /// 위치 출처(재생 때만 — 새 sidecar 가 저장된 허용을 기본으로 되돌린다, 사용자 결정 Q2). 답은 `emulation_state`.
+    emulation = 140,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
@@ -240,6 +245,9 @@ pub const Tag = enum(u8) {
     /// 가짜의 수(W9d④ — 보내는 task 가 모아 **차이만**): 규칙마다 맞음·서비스 워커 길에서 맞았지만 가짜로 바꾸지 않은 수, 문을 지나지 못해 기록
     /// 없이 가짜를 준 수, 가짜를 줄 수 없어(풀이 참·본문 시한) `-12` 로 끝낸 수, 페이지를 몰라 맞추지 않은 수, 서비스 워커가 다스리는 페이지였는가.
     net_mock_hits = 81,
+    /// 흉내의 지금 상태(W9e①) — 그 세대를 걸었는가(무리마다 걸림·실패와 까닭), 사이트 안인가, 렌더러가 살아 있는가(죽은 동안은 쌓았다),
+    /// 사용자가 보는 줄임(`fit_scale` — W9b 입력 좌표에도), 위치를 대신 허용한 출처(maru 가 기억해 재시작 때 되돌린다).
+    emulation_state = 82,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -1683,6 +1691,142 @@ pub const NetMockHits = struct {
     entries: [max_net_mock_rules]NetMockHit = @splat(.{}),
 };
 
+// ── 기기 흉내(W9e①) ────────────────────────────────────────────────────────────────────────────────────────
+
+/// 흉내 화면의 가로·세로 상한(CSS px — 계획 §4).
+pub const max_emu_dimension: u16 = 4096;
+/// 흉내 화면의 픽셀 상한(width × height × dsf² — W9a 스크린샷 상한 `max_snapshot_pixels` 와 같다: 넘으면 흉내 화면을 찍지 못한다).
+pub const max_emu_pixels: f64 = 64 * 1024 * 1024;
+pub const min_emu_dsf: f32 = 0.5;
+pub const max_emu_dsf: f32 = 4;
+pub const max_emu_ua_bytes: usize = 512;
+pub const max_emu_platform_bytes: usize = 64;
+/// client hints 의 글 하나(브랜드·버전·플랫폼·모델 …) 상한.
+pub const max_emu_hint_bytes: usize = 64;
+pub const max_emu_brands: usize = 4;
+pub const max_emu_accept_language_bytes: usize = 128;
+pub const max_emu_icu_locale_bytes: usize = 40;
+pub const max_emu_timezone_bytes: usize = 64;
+pub const max_emu_accuracy: f64 = 100_000;
+/// 탭 하나가 대신 허용한 위치 출처의 상한(가득 차면 가장 오래된 것을 먼저 되돌린다 — sidecar `permissions.zig`).
+pub const max_emu_geo_origins: usize = 8;
+
+pub const EmuFlags = packed struct(u16) {
+    /// `site` 에 묶였다(사용자 탭 — 그 사이트를 맨 위 페이지가 보일 때만).
+    site_bound: bool = false,
+    viewport: bool = false,
+    touch: bool = false,
+    mobile: bool = false,
+    landscape: bool = false,
+    ua: bool = false,
+    locale: bool = false,
+    timezone: bool = false,
+    geo: bool = false,
+    /// 위치를 「없음」 으로(좌표 없이 — 페이지는 POSITION_UNAVAILABLE).
+    geo_unavailable: bool = false,
+    media: bool = false,
+    vision: bool = false,
+    /// client hints 를 싣는다(`hints` — 주거나 추정한 것). 없으면 UA 만(진짜 Safari·Firefox 처럼 Sec-CH-UA 가 없다).
+    hints: bool = false,
+    _reserved: u3 = 0,
+};
+
+pub const EmuBrand = struct { brand: []const u8 = "", version: []const u8 = "" };
+
+/// `Emulation.setUserAgentOverride` 의 `userAgentMetadata`(W9e① — 계획 §4). 글은 인쇄 가능한 ASCII 64 B.
+pub const EmuHints = struct {
+    brand_count: u8 = 0,
+    brands: [max_emu_brands]EmuBrand = @splat(.{}),
+    full_count: u8 = 0,
+    full_list: [max_emu_brands]EmuBrand = @splat(.{}),
+    platform: []const u8 = "",
+    platform_version: []const u8 = "",
+    architecture: []const u8 = "",
+    model: []const u8 = "",
+    bitness: []const u8 = "",
+    mobile: bool = false,
+};
+
+pub const EmuMediaType = enum(u8) { none = 0, screen = 1, print = 2 };
+pub const EmuColorScheme = enum(u8) { none = 0, light = 1, dark = 2 };
+pub const EmuReducedMotion = enum(u8) { none = 0, reduce = 1, no_preference = 2 };
+pub const EmuForcedColors = enum(u8) { none = 0, active = 1, off = 2 };
+pub const EmuContrast = enum(u8) { none = 0, more = 1, less = 2, no_preference = 3 };
+
+/// 미디어 흉내(W9e①) — `none` 은 그 칸을 흉내 내지 않는다(sidecar 는 늘 다섯 이름을 다 보낸다 — 실측 E17).
+pub const EmuMedia = struct {
+    type: EmuMediaType = .none,
+    color_scheme: EmuColorScheme = .none,
+    reduced_motion: EmuReducedMotion = .none,
+    forced_colors: EmuForcedColors = .none,
+    contrast: EmuContrast = .none,
+
+    pub fn any(self: EmuMedia) bool {
+        return self.type != .none or self.color_scheme != .none or self.reduced_motion != .none or self.forced_colors != .none or self.contrast != .none;
+    }
+};
+
+pub const EmuVision = enum(u8) { none = 0, blurred_vision = 1, reduced_contrast = 2, achromatopsia = 3, deuteranopia = 4, protanopia = 5, tritanopia = 6 };
+
+/// `emulation`(W9e①) — 그 탭의 흉내 **전체 상태**(무리가 없으면 그 무리를 지운다). 무리의 칸은 그 표시가 있을 때만 값을 갖는다(닫힌 칸 —
+/// `emu_fields.checkEmulation`).
+pub const Emulation = struct {
+    browser: BrowserId,
+    /// maru 가 바꿀 때마다 올리는 세대(답이 싣는다).
+    generation: u32 = 0,
+    flags: EmuFlags = .{},
+    /// `flags.site_bound` 일 때의 grant 호스트(덮는 호스트 규칙은 `net_policy.hostCovers`).
+    site: []const u8 = "",
+    /// CSS px(1..4096)와 기기 배율.
+    width: u16 = 0,
+    height: u16 = 0,
+    dsf: f32 = 0,
+    ua: []const u8 = "",
+    /// `navigator.platform`(빈 글 = 그대로).
+    platform: []const u8 = "",
+    hints: EmuHints = .{},
+    /// `Accept-Language`·`navigator.language` 의 목록(maru 가 만든 것 — q 값 없이, Chromium 이 붙인다: 실측 E7).
+    accept_language: []const u8 = "",
+    /// ICU 이름(`fr_FR`) — `Emulation.setLocaleOverride`.
+    icu_locale: []const u8 = "",
+    /// IANA 이름(Chromium 이 모르면 그 무리만 실패).
+    timezone: []const u8 = "",
+    latitude: f64 = 0,
+    longitude: f64 = 0,
+    accuracy: f64 = 0,
+    media: EmuMedia = .{},
+    vision: EmuVision = .none,
+    /// 옛 sidecar 가 대신 허용한 위치 출처(재생 때만 — 새 sidecar 가 기본으로 되돌린다).
+    restore_count: u8 = 0,
+    restore: [max_emu_geo_origins][]const u8 = @splat(""),
+};
+
+/// 흉내 무리(마스크의 비트 차례 — `emulation_state` 의 `active_mask`·`failed_mask`).
+pub const EmuGroup = enum(u4) { viewport = 0, user_agent = 1, locale = 2, timezone = 3, geolocation = 4, media = 5, vision = 6 };
+pub const emu_group_mask_valid: u16 = (1 << 7) - 1;
+
+pub const EmuFailReason = enum(u8) { none = 0, timezone_unknown = 1, process_shared_conflict = 2, cdp_error = 3 };
+
+pub const EmulationState = struct {
+    browser: BrowserId,
+    generation: u32 = 0,
+    /// 맨 위 페이지가 grant 사이트 안이다(사이트에 묶이지 않았으면 늘 참).
+    on_site: bool = true,
+    /// 렌더러가 살아 있다(거짓 — 죽은 동안의 바뀜은 쌓아 두었다: 실측 E11).
+    alive: bool = true,
+    /// 아직 답을 받지 못한 흉내 명령이 있다(보냈다 — `state:"sent"`).
+    pending: bool = false,
+    /// 사용자가 보는 줄임(0 < f ≤ 1 — viewport 흉내가 없으면 1).
+    fit_scale: f32 = 1,
+    /// 걸려 있는 무리(답이 `ok` 였다)·마지막 명령이 실패한 무리.
+    active_mask: u16 = 0,
+    failed_mask: u16 = 0,
+    reason: EmuFailReason = .none,
+    /// 이 탭에서 대신 허용한 위치 출처(흉내가 끝나면 sidecar 가 되돌린다 — maru 는 재시작 때 쓰려고 기억한다).
+    auto_count: u8 = 0,
+    auto_allowed: [max_emu_geo_origins][]const u8 = @splat(""),
+};
+
 pub const DownloadAction = enum(u8) {
     cancel = 0,
     resume_download = 1,
@@ -1780,6 +1924,7 @@ pub const Message = union(Tag) {
     net_mock_rule: NetMockRule,
     net_mock_body: NetMockBody,
     net_mock_commit: NetMockCommit,
+    emulation: Emulation,
     main_frame_navigating: BrowserId,
     console_message: ConsoleMessage,
     error_page: ErrorPage,
@@ -1796,6 +1941,7 @@ pub const Message = union(Tag) {
     net_mock_state: NetMockState,
     net_mock_ack: NetMockAck,
     net_mock_hits: NetMockHits,
+    emulation_state: EmulationState,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

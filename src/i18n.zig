@@ -1505,6 +1505,11 @@ const Table = struct {
     // W9d④: 에이전트의 가짜 응답이 이 탭의 내용을 바꾼다는 알림 — 사용자가 마지막으로 몬 탭의 주 프레임 문서가 가짜였거나 규칙이 있는 탭을 처음
     // 몰 때(가짜 문서는 주소창에 진짜 주소를 보인다).
     web_osr_mock_notice: [:0]const u8,
+    // W9e①: 기기 흉내(`browser_emulation`)를 묻는 동의문 — 사이트마다 한 번(사용자 탭, 사용자 결정 Q1). 이 사이트에 다른 기기처럼 보인다는 것,
+    // 이 탭이 연 창도 시간대·언어가 따라갈 수 있다는 것(실측 E13), 이 사이트에서만이라는 것, 탭 제목 앞에 ◫.
+    grant_scope_emulation: [:0]const u8,
+    // W9e①: 사용자가 흉내 중인 에이전트 탭을 처음 몰 때의 알림(탭·세대마다 한 번 — 계획 §9).
+    web_osr_emulation_notice: [:0]const u8,
     web_osr_gpu_unavailable: [:0]const u8,
     web_osr_profile_in_use: [:0]const u8,
     web_osr_start_failed: [:0]const u8,
@@ -2517,6 +2522,8 @@ const en: Table = .{
     .web_osr_block_notice = "Agent rules (⊘) are blocking requests in this tab — manage them in Browser Grants.",
     .grant_scope_network_mock = "fake this site's responses in this tab, pages and scripts too: it can run code with this site's login and look real (▣ on the tab)",
     .web_osr_mock_notice = "Agent mock responses (▣) are changing this tab — the page you see may not be real. Manage them in Browser Grants.",
+    .grant_scope_emulation = "make this tab look like another device to this site (screen, language, time zone, location; popups too; this site only, ◫)",
+    .web_osr_emulation_notice = "The agent made this tab look like another device (◫) — screen size, language, time zone or location may differ from yours. Turn it off in Browser Grants.",
     .web_osr_gpu_unavailable = "The Chromium engine can't draw on this Mac (no GPU path). Use the built-in engine for this page.",
     .web_osr_profile_in_use = "Another maru is using the Chromium browser profile. Chromium tabs stay empty in this window.",
     .web_osr_start_failed = "The Chromium engine could not start. Reinstall it with brew reinstall ohah/maru/maru-chromium, then restart maru.",
@@ -3812,6 +3819,8 @@ const ko: Table = .{
     .web_osr_block_notice = "에이전트 규칙(⊘)이 이 탭의 요청을 막고 있습니다 — Browser Grants 에서 관리하세요.",
     .grant_scope_network_mock = "이 탭의 이 사이트 응답을 가짜로 바꾸려(스크립트도 — 로그인된 채 코드 실행, 탭에 ▣)",
     .web_osr_mock_notice = "에이전트의 가짜 응답(▣)이 이 탭의 내용을 바꾸고 있습니다 — 보이는 페이지가 진짜가 아닐 수 있습니다. Browser Grants 에서 관리하세요.",
+    .grant_scope_emulation = "이 사이트에 이 탭을 다른 기기로 보이려(화면·언어·시간대·위치, 연 창도, 이 사이트만, ◫)",
+    .web_osr_emulation_notice = "에이전트가 이 탭을 다른 기기처럼 보이게 했습니다(◫) — 화면 크기·언어·시간대·위치가 실제와 다를 수 있습니다. Browser Grants 에서 끕니다.",
     .web_osr_gpu_unavailable = "이 Mac 에서는 Chromium 엔진으로 그릴 수 없습니다(GPU 경로 없음). 이 페이지는 내장 엔진을 쓰세요.",
     .web_osr_profile_in_use = "다른 maru 가 Chromium 브라우저 프로필을 쓰고 있습니다. 이 창의 Chromium 탭은 비어 있습니다.",
     .web_osr_start_failed = "Chromium 엔진을 시작하지 못했습니다. brew reinstall ohah/maru/maru-chromium 으로 다시 설치한 뒤 maru 를 다시 켜 주세요.",

@@ -474,6 +474,10 @@ pub fn tickWebOsr(self: *AppSession) void {
                 if (web_osr.takeBlockNotice(sid)) self.showNoticeKey(.web_osr_block_notice);
                 // W9d④: 에이전트의 가짜 응답(▣)이 이 탭의 내용을 바꾼다(사용자가 몬 탭의 주 프레임 문서가 가짜였다·규칙이 있는 탭을 처음 몰았다).
                 if (web_osr.takeMockNotice(sid)) self.showNoticeKey(.web_osr_mock_notice);
+                // W9e①: 에이전트의 기기 흉내(◫)가 이 탭이 서버·페이지에 보이는 정체를 바꾼다(사용자가 흉내 중인 에이전트 탭을 처음 몰았다).
+                if (web_osr.takeEmulationNotice(sid)) self.showNoticeKey(.web_osr_emulation_notice);
+                // W9e①: 흉내가 바뀌었다 — 다시 짓는다(제목의 ◫·맞춤 바깥의 어둡게 — 웹 프레임만으로는 세대만 오른다).
+                if (web_osr.takeEmulationRedraw(sid)) self.metal_dirty = true;
                 // 엔진이 멈췄다 — 이 탭이 있는 창이 한 번 보인다(멈춘 뒤 새로 연 탭도).
                 if (web_osr.takeStoppedNotice(sid)) |notice| self.showNoticeKey(osrNoticeKey(notice));
                 // W3c: 새 웹 프레임이면 이 창을 다시 그린다 — 재투영 없이 세대만 올린다(커서 페이드와 같은 길).
@@ -893,6 +897,108 @@ pub fn osrQuads(self: *AppSession, frame_generation: u64, out: []OsrQuad) usize 
         };
     }
     return n;
+}
+
+// ── W9e①: 줄여 보이는 흉내 화면의 테두리(계획 §11 — 사용자 결정 Q3) ──────────────────────────────────────────
+// 흉내 화면을 pane 에 맞춰 줄이면(Chromium 의 `scale`) 그 사각형(pane 왼쪽 위, 흉내 폭·높이 × fit)만 페이지다 — 그 밖은 Chromium 이 뿌리 배경으로
+// 칠해 페이지처럼 보였다(실측 E1). maru 가 그 밖을 어둡게 하고 1 pt 테두리를 그어 「여기까지가 흉내 화면」 을 보인다. 흉내 화면이 pane 보다 작아도
+// 같다(맞춤 1 — 남는 자리). 사이트 밖(사용자 탭 — 걸려 있지 않다)이나 흉내 화면이 없으면 그리지 않는다(`web_osr.emulationShown`).
+
+const metal_frame = maru.renderer.metal_frame;
+/// 바깥의 어둡게(검정 60 %)·테두리 청록(◫ 와 같은 색).
+pub const emulation_dim_color: u32 = 0x99000000;
+pub const emulation_outline_color: u32 = 0xFF20A39E;
+
+/// 본문 rect(backing px)와 사용자가 보는 흉내 화면 크기(backing px)로 그릴 사각형들 — 오른쪽 띠·아래 띠(어둡게)와 테두리. 흉내 화면이 pane 을
+/// 다 덮으면 띠는 없고 테두리만(가장자리에 겹친다 — 보이지 않을 만큼 얇다)도 그리지 않는다.
+pub fn emulationFrameQuads(rect: osr_input.Rect, shown_w: f32, shown_h: f32, line: f32, out: *[3]metal_frame.GpuQuad) []metal_frame.GpuQuad {
+    const x: f32 = @floatFromInt(rect.x);
+    const y: f32 = @floatFromInt(rect.y);
+    const w: f32 = @floatFromInt(rect.w);
+    const h: f32 = @floatFromInt(rect.h);
+    if (!(shown_w > 0) or !(shown_h > 0) or w <= 0 or h <= 0) return out[0..0];
+    const ew = @min(@round(shown_w), w);
+    const eh = @min(@round(shown_h), h);
+    if (ew >= w and eh >= h) return out[0..0];
+    var n: usize = 0;
+    const base: metal_frame.GpuQuad = .{ .x = 0, .y = 0, .w = 0, .h = 0, .corner_radii = .{ 0, 0, 0, 0 }, .border_widths = .{ 0, 0, 0, 0 }, .fill_color0 = emulation_dim_color, .fill_color1 = emulation_dim_color, .border_color = 0, .gradient_kind = 0, .layer = metal_frame.quad_layer.image_backdrop, .clip_x = x, .clip_y = y, .clip_w = w, .clip_h = h };
+    if (ew < w) {
+        out[n] = base;
+        out[n].x = x + ew;
+        out[n].y = y;
+        out[n].w = w - ew;
+        out[n].h = h;
+        n += 1;
+    }
+    if (eh < h) {
+        out[n] = base;
+        out[n].x = x;
+        out[n].y = y + eh;
+        out[n].w = ew;
+        out[n].h = h - eh;
+        n += 1;
+    }
+    out[n] = base;
+    out[n].x = x;
+    out[n].y = y;
+    out[n].w = ew;
+    out[n].h = eh;
+    out[n].fill_color0 = 0;
+    out[n].fill_color1 = 0;
+    out[n].border_widths = .{ line, line, line, line };
+    out[n].border_color = emulation_outline_color;
+    n += 1;
+    return out[0..n];
+}
+
+/// 이 창이 그리는 OSR 본문마다 흉내 화면의 테두리를 뒤판 자리에 붙인다(per-frame — 부른 쪽이 그 자리를 먼저 비웠다).
+pub fn appendEmulationFrames(self: *AppSession) void {
+    if (!web_osr.enabled()) return;
+    const scale: f32 = if (self.scale_milli == 0) 1.0 else @as(f32, @floatFromInt(self.scale_milli)) / 1000.0;
+    for (self.osr_layouts.items) |layout| {
+        const shown = web_osr.emulationShown(layout.surface_id) orelse continue;
+        var quads: [3]metal_frame.GpuQuad = undefined;
+        for (emulationFrameQuads(layout.rect, shown.w * scale, shown.h * scale, @max(1, @round(scale)), &quads)) |q| self.gpu_quads.append(self.allocator, q) catch {};
+    }
+}
+
+// 이 테스트가 증명하는 것(W9e①): 줄여 보이는 흉내 화면은 오른쪽·아래 띠를 어둡게 하고 테두리를 긋는다(본문 rect 로 잘린다), 흉내 화면이 pane 을
+// 다 덮으면 아무것도 그리지 않는다, 크기를 모르면 그리지 않는다. 사용자가 「그 밖도 페이지」 로 오해하지 않게 하는 신호다(실측 E1).
+test "W9e①: 흉내 화면 테두리 — 오른쪽·아래 띠는 어둡게, 테두리는 흉내 화면을 두르고 본문 rect 로 잘린다, pane 을 다 덮으면 없다" {
+    var quads: [3]metal_frame.GpuQuad = undefined;
+    const rect: osr_input.Rect = .{ .x = 100, .y = 50, .w = 1280, .h = 800 };
+    // 390×844 @fit 0.4739 (DIP 184.8×400) × 창 배율 2 = 369.6×800 px — 오른쪽 띠만.
+    const q = emulationFrameQuads(rect, 369.6, 800, 2, &quads);
+    try std.testing.expectEqual(@as(usize, 2), q.len);
+    try std.testing.expectEqual(@as(f32, 470), q[0].x);
+    try std.testing.expectEqual(@as(f32, 910), q[0].w);
+    try std.testing.expectEqual(emulation_dim_color, q[0].fill_color0);
+    try std.testing.expectEqual(@as(f32, 370), q[1].w); // 테두리 — 흉내 화면
+    try std.testing.expectEqual(emulation_outline_color, q[1].border_color);
+    try std.testing.expectEqual(@as(u32, 0), q[1].fill_color0);
+    try std.testing.expectEqual(@as(f32, 1280), q[1].clip_w);
+    try std.testing.expectEqual(metal_frame.quad_layer.image_backdrop, q[0].layer);
+    // pane 보다 작은 흉내 화면 — 오른쪽·아래 띠 둘.
+    const small = emulationFrameQuads(rect, 640, 400, 2, &quads);
+    try std.testing.expectEqual(@as(usize, 3), small.len);
+    try std.testing.expectEqual(@as(f32, 450), small[1].y);
+    try std.testing.expectEqual(@as(f32, 640), small[1].w);
+    try std.testing.expectEqual(@as(usize, 0), emulationFrameQuads(rect, 1280, 800, 2, &quads).len); // 다 덮는다
+    try std.testing.expectEqual(@as(usize, 0), emulationFrameQuads(rect, 0, 0, 2, &quads).len);
+}
+
+// W9e① 변이 시험: 테두리는 선 굵기를 싣는다(굵기 0 이면 보이지 않는다), 흉내 화면이 본문보다 넓으면 본문 폭으로 자른다(아래 띠·테두리가
+// 본문 밖으로 넘지 않는다 — 오른쪽 띠는 없다).
+test "W9e① 변이: 흉내 화면 테두리의 굵기와 넓은 흉내 화면의 자르기" {
+    var quads: [3]metal_frame.GpuQuad = undefined;
+    const rect: osr_input.Rect = .{ .x = 100, .y = 50, .w = 1280, .h = 800 };
+    const q = emulationFrameQuads(rect, 369.6, 800, 2, &quads);
+    try std.testing.expectEqual(@as(f32, 2), q[q.len - 1].border_widths[0]);
+    try std.testing.expectEqual(@as(f32, 2), q[q.len - 1].border_widths[3]);
+    const wide = emulationFrameQuads(rect, 1500, 400, 2, &quads);
+    try std.testing.expectEqual(@as(usize, 2), wide.len); // 아래 띠·테두리
+    try std.testing.expectEqual(@as(f32, 1280), wide[0].w);
+    try std.testing.expectEqual(@as(f32, 1280), wide[1].w);
 }
 
 // ── W4b: 포인터(C5 — 마우스 게이트·제스처 주인·포커스 주인·창) ─────────────────────────────────────────────

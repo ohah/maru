@@ -72,8 +72,8 @@ pub fn forbiddenMethod(method: []const u8) bool {
     //   - `emulateNetworkConditionsByRule` — 주소 패턴마다 offline(실측 CEF 154: fetch TypeError, 서버 0 — 규칙 없는 막기).
     //   - `continueInterceptedRequest` — 가로챈 요청을 바꿔 보낸다(가로채기는 이미 막지만 짝을 함께 막는다).
     //   - `loadNetworkResource` — 프로필의 쿠키로 탭 길 밖에서 주소를 받아 온다(막힌 주소를 규칙 밖에서 받는 길 — 재지 않았다, 방어).
-    //   남긴 것: `overrideNetworkState`(navigator.onLine 만 — 실측 fetch 는 그대로), `setCacheDisabled`(HTTP 캐시 응답도 막기가 본다),
-    //   `setExtraHTTPHeaders`·`setUserAgentOverride`·쿠키(패턴은 주소만 본다), `replayXHR`(탭 길로 다시 가 막힌다), Emulation 의 요청 관련 없음.
+    //   남긴 것: `setCacheDisabled`(HTTP 캐시 응답도 막기가 본다), `setExtraHTTPHeaders`·쿠키(패턴은 주소만 본다), `replayXHR`(탭 길로 다시
+    //   가 막힌다). `overrideNetworkState`·`setUserAgentOverride`·`Emulation.*` 는 막기와 무관하나 W9e① 의 흉내 한 주인 몫으로 아래에서 막는다.
     for ([_][]const u8{
         "Network.setBypassServiceWorker",
         "Network.setBlockedURLs",
@@ -92,13 +92,19 @@ pub fn forbiddenMethod(method: []const u8) bool {
     // 브라우저 — 규칙이 없다)·`closeTarget`·`activateTarget`·`detachFromTarget`·`setDiscoverTargets`·`setRemoteLocations`. 그래서 `Target.*` 를 모두
     // 막고 maru 가 쓰는 읽기 하나(`getTargetInfo` — 저장소 op 의 출처 확인)만 둔다. 다른 도메인에는 세션을 여는 메서드가 없다(`ServiceWorker.*` 는
     // 워커 상태만 — 그 요청은 서비스 워커 길로 와 막기가 본다, `Runtime.addBinding` 은 페이지 JS 에 함수만, `Browser.*`·`Tethering.*` 는 브라우저
-    // 세션 것이라 탭 세션에서 듣지 않는다).
+    // 세션 것이라 세션을 열지 않는다 — 다만 `Browser.grantPermissions` 류는 탭 세션에서도 context 전체에 듣는다(W9e① E15 — 아래에서 막는다)).
     // 재검증 6 차 F11(W9d②): 그 읽기도 인자 없는 꼴만 — `targetId` 를 준 `getTargetInfo` 는 다른 탭을 본다(`targetParamsAllowed`).
     if (std.mem.startsWith(u8, method, "Target.")) return !std.mem.eql(u8, method, target_info_method);
     // 3 차 검증 N-B3-f: `Browser.executeBrowserCommand`(예: openTabSearch)는 CEF 154 에서 답하지 않고 그 탭의 뒤 DevTools 호출·`Runtime.evaluate` 를
     // 모두 멈추게 했다(실측 — 첫 훑기에서 남은 29 호출이 함께 멈췄다). maru 는 쓰지 않는다 — 막기와 무관한 방어.
     if (std.mem.eql(u8, method, "Browser.executeBrowserCommand")) return true;
-    return std.mem.startsWith(u8, method, "Fetch.");
+    // W9e①: 기기 흉내의 한 주인은 sidecar 의 `emulation.zig` 다(계획 §2·§7) — maru 를 거친 호출이 흉내를 scope·◫ 없이 바꾸거나(UA·언어·위치),
+    // 렌더러가 죽은 탭에 `setDeviceMetricsOverride` 를 보내 sidecar 를 통째로 죽이거나(실측 E11), context 전체에 위치 권한을 주지(E15) 못하게.
+    // 네트워크 조건의 다른 둘(`ByRule` — 위 목록에 이미 있다 — 과 `overrideNetworkState`)도 막는다(W9e② 성능 몫 — 지금은 아무도 쓰지 않는다).
+    for ([_][]const u8{ "Network.setUserAgentOverride", "Network.overrideNetworkState", "Browser.grantPermissions", "Browser.setPermission", "Browser.resetPermissions" }) |m| {
+        if (std.mem.eql(u8, method, m)) return true;
+    }
+    return std.mem.startsWith(u8, method, "Fetch.") or std.mem.startsWith(u8, method, "Emulation.");
 }
 
 const target_info_method = "Target.getTargetInfo";
@@ -463,7 +469,8 @@ test "W9d②: Network.enable·Network.disable·Fetch.* 는 보내지 않는다(�
     try std.testing.expect(!forbiddenMethod("Network.enableX"));
     // W9d③ 20 회 검증 B DEF-4: 주소 패턴의 offline 흉내(규칙 없는 막기)와 그 짝들. 남긴 것은 막기를 피하지도 흉내 내지도 않는다.
     for ([_][]const u8{ "Network.emulateNetworkConditionsByRule", "Network.continueInterceptedRequest", "Network.loadNetworkResource", "Network.setBlockedURLs", "Network.setBypassServiceWorker" }) |m| try std.testing.expect(forbiddenMethod(m));
-    for ([_][]const u8{ "Network.overrideNetworkState", "Network.setCacheDisabled", "Network.setExtraHTTPHeaders", "Network.replayXHR", "Network.getCookies" }) |m| try std.testing.expect(!forbiddenMethod(m));
+    for ([_][]const u8{ "Network.setCacheDisabled", "Network.setExtraHTTPHeaders", "Network.replayXHR", "Network.getCookies" }) |m| try std.testing.expect(!forbiddenMethod(m));
+    try std.testing.expect(forbiddenMethod("Network.overrideNetworkState")); // W9e① 흉내 한 주인(아래 W9e① 시험)
     try std.testing.expect(!forbiddenMethod("NetworkX.enable"));
     // W9d③ 2 차 검증 NEW-1: Target 은 maru 가 쓰는 읽기 하나만 — 둘째 세션·메시지 옮기기·페이지 JS 의 CDP 는 막는다.
     for ([_][]const u8{ "Target.attachToTarget", "Target.attachToBrowserTarget", "Target.sendMessageToTarget", "Target.setAutoAttach", "Target.autoAttachRelated", "Target.exposeDevToolsProtocol", "Target.createTarget", "Target.createBrowserContext", "Target.getTargets" }) |m| try std.testing.expect(forbiddenMethod(m));
@@ -540,4 +547,13 @@ test "W9d② 재검증 5 차 S1·6 차 F11: Target.* 는 보내지 않는다(서
     const json = try t.buildMessage(std.testing.allocator, ok);
     defer std.testing.allocator.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"method\":\"Target.getTargetInfo\",\"params\":{}") != null);
+}
+
+test "W9e①: 흉내의 한 주인 — maru 를 거친 Emulation.*·Network.setUserAgentOverride·네트워크 조건·Browser.*Permission* 은 보내지 않는다, 비슷한 이름은 받는다" {
+    var t: Table = .{};
+    defer t.deinit(std.testing.allocator);
+    for ([_][]const u8{ "Emulation.setDeviceMetricsOverride", "Emulation.setUserAgentOverride", "Emulation.setGeolocationOverride", "Emulation.clearDeviceMetricsOverride", "Emulation.setEmitTouchEventsForMouse", "Network.setUserAgentOverride", "Network.emulateNetworkConditionsByRule", "Network.overrideNetworkState", "Browser.grantPermissions", "Browser.setPermission", "Browser.resetPermissions" }) |m| {
+        try std.testing.expectError(error.Forbidden, t.begin(.{ .browser = 1, .call = 1, .method = m, .params_size = 0 }, 0));
+    }
+    for ([_][]const u8{ "Browser.getVersion", "Page.captureScreenshot", "EmulationX.setTimezoneOverride", "Network.getCookies", "Browser.grantPermissionsX" }) |m| try std.testing.expect(!forbiddenMethod(m));
 }

@@ -84,6 +84,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .net_mock_rule => |value| @import("mocking.zig").applyRule(value), // W9d④
         .net_mock_body => |value| @import("mocking.zig").applyBody(value),
         .net_mock_commit => |value| @import("mocking.zig").applyCommit(value),
+        .emulation => |value| @import("emulation.zig").apply(value), // W9e①
         .resize => |value| resize(value, writer),
         .set_hidden => |value| if (hostFor(value.browser, writer)) |host| {
             defer object.release(host);
@@ -216,6 +217,7 @@ fn resize(value: protocol.message.Resize, writer: *events.Writer) void {
     defer object.release(host);
     if (scale_changed) host.*.notify_screen_info_changed.?(host);
     host.*.was_resized.?(host);
+    @import("emulation.zig").resized(entry); // W9e①: 흉내 화면을 pane 에 맞춘 줄임을 다시 셈한다(Chromium 은 셈하지 않는다 — E2)
 }
 
 fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {

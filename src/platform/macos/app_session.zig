@@ -367,7 +367,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // v255: copied code action edits own their response position encoding.
 // v257: W9d③ maru_macos_control_browser_block_summary (Browser Grants request-blocking line).
 // v258: W9d④ maru_macos_control_browser_mock_summary (Browser Grants response-mocking line) and grant scope wire 5 (browser_network_mock).
-pub const abi_version: u32 = 258;
+// v259: W9e① maru_macos_control_browser_emulation_summary (Browser Grants device-emulation line) and grant scope wire 6 (browser_emulation).
+pub const abi_version: u32 = 259;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -19709,6 +19710,12 @@ pub const AppSession = struct {
                                     .blocking = if (!web_ops.isOsrTerm(term)) null else if (web_osr.networkBlocking(term.surface.id)) |b| .{ .rules = @intCast(@min(b.rules, 255)), .strict = b.strict } else null,
                                     // W9d④: 가짜 응답 규칙·엄격(탭 제목의 ▣ 와 같은 신호).
                                     .mocking = if (!web_ops.isOsrTerm(term)) null else if (web_osr.networkMocking(term.surface.id)) |m| .{ .rules = @intCast(@min(m.rules, 255)), .strict = m.strict } else null,
+                                    // W9e①: 기기 흉내(탭 제목의 ◫ 와 같은 신호 — 요약과 지금 걸려 있는가).
+                                    .emulation = if (!web_ops.isOsrTerm(term)) null else blk: {
+                                        var eb: [160]u8 = undefined;
+                                        const e = web_osr.emulation(term.surface.id, &eb) orelse break :blk null;
+                                        break :blk control_surface.WebMeta.Emulating.init(e.summary, e.active);
+                                    },
                                 },
                             },
                         });
@@ -22103,6 +22110,9 @@ pub const AppSession = struct {
             // 그려서 당장 눈에 안 띄는 것이 더 나쁘다: 옛 좌표의 판이 남아 마커가 움직이면 **지나온
             // 자리마다 사각형이 남고**, 정점 버퍼는 끝없이 자란다. drop 과 append 는 **짝지어 둔다**.
             self.dropQuadsByLayer(renderer.metal_frame.quad_layer.image_backdrop);
+            // W9e①: 줄여 보이는 흉내 화면(사용자 결정 Q3)의 바깥을 어둡게·테두리 — OSR 본문 **바로 위**(같은 뒤판 자리 — 셀 앞·텍스트-앞 이미지
+            // 뒤). drop 과 짝지어 per-frame 이다(위 뒤판과 같은 버킷).
+            web_ops.appendEmulationFrames(self);
             // 위 layer2 drop과 값이 같아 지금은 중복이지만, status_bar_layer가 바뀌어도 짝이 남도록 둔다.
             // 모달·스크롤바가 상태바를 덮는 것은 **버킷이 정한다**(bottom이 over 아래) — 배열 순서가 아니다.
             // 배열 순서가 painter 순서인 것은 **같은 버킷 안**(탭 밴드·상태바 배경·호버)에서만이다.
@@ -22520,6 +22530,7 @@ pub const AppSession = struct {
                     tab_ops.recolorRecordingMarkCells(dl.cells); // W9d② 기록 ◉ → 빨강(그 칸만)
                     tab_ops.recolorBlockingMarkCells(dl.cells); // W9d③ 막기 ⊘ → 호박색(그 칸만)
                     tab_ops.recolorMockMarkCells(dl.cells); // W9d④ 가짜 ▣ → 보라(그 칸만)
+                    tab_ops.recolorEmulationMarkCells(dl.cells); // W9e① 흉내 ◫ → 청록(그 칸만)
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                     pane_ops.appendPaneTabTitles(self, &tab_title_batch, lr.leaf, pb, titles.items, editing_tab, pb.full);
 
@@ -23910,14 +23921,18 @@ pub const AppSession = struct {
         // W9d②: 응답 본문을 기록하는 Chromium 탭 — 제목 앞에 ◉(셀로 그려 빨갛게 — `tab_ops.recolorRecordingMarkCells`).
         // W9d③: 요청 막기 규칙·엄격이 있는 탭 — ⊘(호박색 — `recolorBlockingMarkCells`), 둘 다면 `◉⊘`.
         // W9d④: 가짜 응답 규칙·엄격이 있는 탭 — ▣(보라 — `recolorMockMarkCells`), 함께면 `◉⊘▣` 의 차례로(`◉▣`·`⊘▣`).
+        // W9e①: 기기 흉내가 설정된 탭 — ◫(청록 — `recolorEmulationMarkCells`), 함께면 `◉⊘▣◫` 의 차례로.
         if (term.kind == .web) {
             const rec = web_osr.networkRecording(term.surface.id);
             const blk = web_osr.networkBlocking(term.surface.id) != null;
             const mck = web_osr.networkMocking(term.surface.id) != null;
-            if (rec or blk or mck) return std.fmt.allocPrint(allocator, "{s}{s}{s} {s}", .{
+            var eb: [160]u8 = undefined;
+            const emu = web_osr.emulation(term.surface.id, &eb) != null;
+            if (rec or blk or mck or emu) return std.fmt.allocPrint(allocator, "{s}{s}{s}{s} {s}", .{
                 if (rec) tab_ops.recording_mark_utf8 else "",
                 if (blk) tab_ops.blocking_mark_utf8 else "",
                 if (mck) tab_ops.mock_mark_utf8 else "",
+                if (emu) tab_ops.emulation_mark_utf8 else "",
                 base,
             });
         }
@@ -105038,4 +105053,25 @@ test "W9d④: 가짜 표식 ▣ 는 탭 제목에서 마커로 갈리고(◉⊘�
     try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.mock_mark_color }, cells[2].style.foreground);
     try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.blocking_mark_color }, cells[1].style.foreground);
     try std.testing.expectEqual(terminal.Color.default, cells[3].style.foreground);
+}
+
+// 이 테스트가 증명하는 것(W9e①): 흉내 표식 ◫ 도 셀로 가르고 그 칸만 청록이다 — 기록 ◉·막기 ⊘·가짜 ▣ 와 함께면 `◉⊘▣◫`(넷)·`◉◫`·`▣◫` 의 차례로
+// 마커가 되고 본문 자리는 마커 칸 수만큼 밀린다, 차례가 다른 꼴(`◫◉`)은 앞 글자만 마커다, 고른 제목이 ◫ 로 시작하면 표식이 아니다.
+test "W9e①: 흉내 표식 ◫ 는 탭 제목에서 마커로 갈리고(◉⊘▣◫ 는 네 칸) 셀에서 그 칸만 청록이다 — 고른 제목의 ◫ 는 표식이 아니다" {
+    try std.testing.expectEqualStrings("\u{25EB}", tab_ops.tabTitleMarker("\u{25EB} Example").?);
+    try std.testing.expectEqualStrings("Example", tab_ops.tabTitleBody("\u{25EB} Example"));
+    try std.testing.expectEqualStrings("\u{25C9}\u{2298}\u{25A3}\u{25EB}", tab_ops.tabTitleMarker("\u{25C9}\u{2298}\u{25A3}\u{25EB} Example").?);
+    try std.testing.expectEqual(@as(u32, 4), tab_ops.tabTitleMarkerCols("\u{25C9}\u{2298}\u{25A3}\u{25EB}"));
+    try std.testing.expectEqualStrings("\u{25C9}\u{25EB}", tab_ops.tabTitleMarker("\u{25C9}\u{25EB} Example").?);
+    try std.testing.expectEqualStrings("\u{25A3}\u{25EB}", tab_ops.tabTitleMarker("\u{25A3}\u{25EB} Example").?);
+    try std.testing.expectEqualStrings("\u{25EB}", tab_ops.tabTitleMarker("\u{25EB}\u{25C9} Example").?); // 차례 밖 — 앞 글자만
+    try std.testing.expect(tab_ops.titleNeedsMarkEscape("\u{25EB} Phone"));
+    try std.testing.expect(tab_ops.tabTitleMarker(tab_ops.title_mark_escape ++ "\u{25EB} Phone") == null);
+    const C = struct { codepoint: u21, style: struct { foreground: terminal.Color = .default } = .{} };
+    var cells = [_]C{ .{ .codepoint = tab_ops.mock_mark }, .{ .codepoint = tab_ops.emulation_mark }, .{ .codepoint = 'x' } };
+    tab_ops.recolorMockMarkCells(&cells);
+    tab_ops.recolorEmulationMarkCells(&cells);
+    try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.emulation_mark_color }, cells[1].style.foreground);
+    try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.mock_mark_color }, cells[0].style.foreground);
+    try std.testing.expectEqual(terminal.Color.default, cells[2].style.foreground);
 }

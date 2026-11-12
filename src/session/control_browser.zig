@@ -183,6 +183,14 @@ pub const BrowserMethod = enum {
     /// needs_browser_permission`: 가짜 문서·스크립트는 그 사이트로서 코드를 돌린다). mock grant 가 없으면 `remove`·`clear`·`list`·`strict off`
     /// 는 모달 없이 `-32002`. 곧 답한다(op 줄 없음). op.arg=정규형 인자 JSON(본문은 base64). **op_kind=32 고정**(W9e 33–36).
     network_mock,
+    /// `browser.emulate {id, action:"set"|"clear"|"get", reload?, viewport?, user_agent?, locale?, timezone?, geolocation?, media?, vision?}`(W9e① —
+    /// Chromium 전용) → `{emulation:{…}, site, active, state, failed?, applies, headers_from, reloaded?, not_covered, process_shared?, warnings?}`. 그 탭이
+    /// 페이지·서버에 보이는 기기(화면·UA·client hints·언어·시간대·위치·미디어·색각)를 바꾼다 — `set` 은 덧쓰기(준 무리만, `null` 은 그 무리를
+    /// 지운다), `clear` 는 모두, `get` 은 지금 상태. **`browser_emulation` scope**(사이트에 묶인 grant — 사용자 탭은 사이트마다 확인 모달이고 그
+    /// 사이트를 보일 때만 걸린다, 에이전트가 연 탭은 묻지 않는다 — 사용자 결정 Q1). `browser` grant 는 요구하지 않는다. 인자는 모달 **전에** 본다
+    /// (`-32602` + `data.reason` — 계획 §4 의 차례). grant 가 없으면 `set` 은 모달, `clear`·`get` 은 모달 없이 `-32002`. 처음 건 pane 이 주인 —
+    /// 다른 pane 의 `set`·`clear` 는 `-32603 emulated_by_other_pane`. 곧 답한다(op 줄 없음). op.arg=정규형 인자 JSON. **op_kind=33 고정**(W9e② 34–36).
+    emulate,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -222,6 +230,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "networkRecord")) return .network_record;
     if (eq(rest, "networkBlock")) return .network_block;
     if (eq(rest, "networkMock")) return .network_mock;
+    if (eq(rest, "emulate")) return .emulate; // W9e①
     return null;
 }
 
@@ -261,6 +270,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .network_record => "networkRecord",
         .network_block => "networkBlock",
         .network_mock => "networkMock",
+        .emulate => "emulate",
     };
 }
 
@@ -271,7 +281,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
@@ -280,7 +290,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
         // W9d①: 네트워크 목록·자세히(CEF 자원 요청 처리기 — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate => true,
             else => false,
         },
     };
@@ -1159,13 +1169,27 @@ fn serializeBlockFailure(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
     };
     defer parsed.deinit();
     const r = parsed.value.reason;
-    const code: cp.ErrorCode = if (eq(r, "needs_network_permission") or eq(r, "needs_browser_permission") or eq(r, "needs_grant")) .unauthorized else if (eq(r, "resource_busy")) .internal_error else .invalid_params;
+    // W9e①: 흉내의 주인이 다른 pane(`emulated_by_other_pane`)은 바꾸기 상한과 같은 -32603(계획 §4).
+    const code: cp.ErrorCode = if (eq(r, "needs_network_permission") or eq(r, "needs_browser_permission") or eq(r, "needs_grant")) .unauthorized else if (eq(r, "resource_busy") or eq(r, "emulated_by_other_pane")) .internal_error else .invalid_params;
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = r });
     if (parsed.value.index) |i| try data.put(gpa, "index", .{ .integer = i });
     if (parsed.value.resource) |res| try data.put(gpa, "resource", .{ .string = res }); // W9d④: 앱 본문 상한(`browser-mock-bytes`)
     return cp.serializeError(gpa, id, code, parsed.value.message, .{ .object = data });
+}
+
+// ── W9e①: browser.emulate ──────────────────────────────────────────────────────────────────────────────────
+
+const web_osr_emulate = @import("web_osr_emulate.zig");
+
+/// `-32602` + `data.reason`(계획 §4 의 까닭 이름). 까닭 없는 형식 오류(params 가 객체가 아니다)는 균일 invalid_params.
+fn emulateParamError(gpa: std.mem.Allocator, id: cp.Id, why: ?web_osr_emulate.Why) std.mem.Allocator.Error![]u8 {
+    const w = why orelse return errorResponse(gpa, id, .invalid_params);
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "reason", .{ .string = @tagName(w) });
+    return cp.serializeError(gpa, id, .invalid_params, web_osr_emulate.whyMessage(w), .{ .object = data });
 }
 
 // ── W9d④: browser.networkMock ──────────────────────────────────────────────────────────────────────────────
@@ -2748,6 +2772,16 @@ fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.Collec
                     try s.write(m.strict);
                     try s.endObject();
                 }
+                // W9e①: 흉내가 설정됐을 때만(탭 제목의 ◫ 와 같은 신호) — 요약과 지금 걸려 있는가(사용자 탭이 사이트 밖이면 거짓).
+                if (w.emulation) |e| {
+                    try s.objectField("emulation");
+                    try s.beginObject();
+                    try s.objectField("summary");
+                    try s.write(e.summary());
+                    try s.objectField("active");
+                    try s.write(e.active);
+                    try s.endObject();
+                }
                 try s.objectField("methods");
                 try s.beginArray();
                 inline for (@import("type_info_fields").fields(BrowserMethod)) |f| {
@@ -2832,8 +2866,8 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else if (bmethod == .network_record and result.len > 0 and result[0] == '{')
                 // W9d② 적대 리뷰 3 회차 D6: 실행 단계에서 지켜보기가 없다(네트워크 grant 만 철회됐다) — 모달 전 검사와 같은 -32002·`needs_network_permission`.
                 serializeReasonError(gpa, req.id, .unauthorized, result)
-            else if ((bmethod == .network_block or bmethod == .network_mock) and result.len > 0 and result[0] == '{')
-                serializeBlockFailure(gpa, req.id, result) // W9d③·④: 까닭마다 코드
+            else if ((bmethod == .network_block or bmethod == .network_mock or bmethod == .emulate) and result.len > 0 and result[0] == '{')
+                serializeBlockFailure(gpa, req.id, result) // W9d③·④·W9e①: 까닭마다 코드
             else
                 cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
         };
@@ -2886,7 +2920,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid dialog payload", null),
         },
         // W9d①: 앱이 준 결과 객체(링이 만든 JSON)를 그대로 싣는다 — 객체가 아니면 내부 오류.
-        .network, .network_request, .network_record, .network_block, .network_mock => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
+        .network, .network_request, .network_record, .network_block, .network_mock, .emulate => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid network payload", null),
         },
@@ -3518,6 +3552,16 @@ pub fn browserOpFromRequest(
             }
         }
     }
+    // W9e①: 흉내는 인자를 모달 **전에** 본다(계획 §4 — 틀린 인자로 사용자에게 묻지 않는다). 대상이 있는 Chromium 탭이고 부른 pane 을 찾은
+    // 뒤라(존재·엔진은 위에서 답했다) 스키마를 엿보는 길이 아니다. grant 가 없는 caller 의 `clear`·`get` 은 모달 없이 거절한다(바꿀 흉내가 없다
+    // — 묻지 않는다).
+    if (bmethod == .emulate) {
+        if (pane_selector != null) {
+            var why: ?web_osr_emulate.Why = null;
+            const p = web_osr_emulate.parseParams(req.params, &why) catch return .{ .err = try emulateParamError(gpa, req.id, why) };
+            if (!authorized and p.action != .set) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        }
+    }
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
 
     // ── 7. execute_script params 사전 검증(id 길이·args wire). 이제 authorized만 도달하므로 invalid_params가 oracle 아님. ──
@@ -3589,6 +3633,12 @@ pub fn browserOpFromRequest(
             var norm_buf: [ws_net_block.max_rules][ws_net_block.max_pattern_bytes]u8 = undefined;
             const p = parseNetworkBlockParams(req.params, &why, &norm_buf) catch return .{ .err = try blockParamError(gpa, req.id, &why) };
             break :blk try serializeNetworkBlockArg(gpa, &p);
+        },
+        // W9e①: 흉내 — 정규형 인자(앱이 같은 파서로 다시 푼다). cap 으로 인가된 caller(부른 pane 없음)는 여기서 처음 푼다.
+        .emulate => blk: {
+            var why: ?web_osr_emulate.Why = null;
+            const p = web_osr_emulate.parseParams(req.params, &why) catch return .{ .err = try emulateParamError(gpa, req.id, why) };
+            break :blk try web_osr_emulate.serializeArg(gpa, &p);
         },
         // W9d④: 가짜 — 패턴은 정규형, 응답은 허용 목록·상태·content_type·본문 검사(거절은 `-32602` + `data.reason`·`data.index`·`data.header`).
         .network_mock => blk: {
@@ -4804,7 +4854,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
     // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 15), webkit.get("methods").?.array.items.len);
+    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 16), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
@@ -4812,7 +4862,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
     // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console. W9c③: upload.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock", "networkMock" };
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock", "networkMock", "emulate" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -7222,4 +7272,109 @@ test "W9d④ 변이: networkMock 인자 — 빈 methods 배열은 거절(0 은 �
     try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
     try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_mock, .host = cpg.GrantHost.init("example") });
     try expectMockErr(mockReq("\"action\":\"add\",\"pattern\":\"https://a.test/\",\"methods\":[]"), &grants, .invalid_params, null, null);
+}
+
+// ── W9e①: browser.emulate ──
+// 시험이 증명하는 것: 메서드 번호(op_kind 33 — Swift·앱의 wire)·이름·엔진(Chromium 만), 모달 전 검사의 차례(WebKit -32008 → 인자 -32602 + 까닭 →
+// grant 없는 clear·get 은 모달 없이 -32002 → set 은 needs_grant{browser_emulation}), browser grant 는 요구하지 않는다, op.arg 의 정규형, 앱의 거절
+// 까닭마다 코드(emulated_by_other_pane·resource_busy 는 -32603, needs_grant 는 -32002), browser.list 의 emulation 요약.
+
+fn emuReq(comptime params: []const u8) []const u8 {
+    return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.emulate\",\"params\":{\"id\":12," ++ params ++ "}}";
+}
+
+fn expectEmuErr(bytes: []const u8, grants: *const cpg.PaneGrantStore, code: cp.ErrorCode, reason: ?[]const u8) !void {
+    switch (try dispatchEngine(bytes, grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(code)), try errCode(e));
+            if (reason) |r| {
+                const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, e, .{});
+                defer parsed.deinit();
+                try testing.expectEqualStrings(r, parsed.value.object.get("error").?.object.get("data").?.object.get("reason").?.string);
+            }
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedErr;
+        },
+        else => return error.ExpectedErr,
+    }
+}
+
+test "W9e①: emulate 는 33 — Chromium 만, 모달 전 검사의 차례(-32008 → 인자 -32602 + 까닭 → grant 없는 clear·get 은 -32002 → set 은 모달), browser grant 없이도 묻는다" {
+    try testing.expectEqual(@as(u8, 33), @as(u8, @backingInt(BrowserMethod.emulate)));
+    try testing.expectEqual(BrowserMethod.emulate, parseBrowserMethod("emulate").?);
+    try testing.expectEqualStrings("emulate", browserMethodWireName(.emulate));
+    try testing.expect(!engineSupports(.webkit, .emulate) and engineSupports(.chromium, .emulate));
+    var grants: cpg.PaneGrantStore = .{};
+    // WebKit 탭 — 모달 전 -32008(인자가 틀려도).
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.emulate\",\"params\":{\"id\":11,\"action\":\"nope\"}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        else => return error.ExpectedErr,
+    }
+    // 인자 — 모달 전에 까닭.
+    try expectEmuErr(emuReq("\"action\":\"set\",\"viewport\":{\"width\":0,\"height\":1}"), &grants, .invalid_params, "viewport_invalid");
+    try expectEmuErr(emuReq("\"action\":\"set\",\"bogus\":1"), &grants, .invalid_params, "unknown_key");
+    try expectEmuErr(emuReq("\"action\":\"set\",\"timezone\":\"Asia/Kolkata;\""), &grants, .invalid_params, "timezone_invalid");
+    // grant 가 없다 — clear·get 은 모달 없이, set 은 모달(browser grant 가 없어도 — peer scope).
+    try expectEmuErr(emuReq("\"action\":\"get\""), &grants, .unauthorized, null);
+    try expectEmuErr(emuReq("\"action\":\"clear\""), &grants, .unauthorized, null);
+    try expectEngineNeedsGrant(emuReq("\"action\":\"set\",\"timezone\":\"UTC\""), &grants, .browser_emulation);
+    // browser·network grant 는 흉내를 함의하지 않는다.
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try expectEngineNeedsGrant(emuReq("\"action\":\"set\",\"timezone\":\"UTC\""), &grants, .browser_emulation);
+    // emulation grant — op(정규형 인자).
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_emulation, .host = cpg.GrantHost.init("example") });
+    switch (try dispatchEngine(emuReq("\"action\":\"set\",\"locale\":\"fr-FR\",\"vision\":null,\"reload\":false"), &grants)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.emulate, op.method);
+            try testing.expectEqual(capmod.ScopeClass.browser_emulation, op.pane_grant.?.scope);
+            try testing.expectEqualStrings("{\"action\":\"set\",\"locale\":\"fr-FR\",\"vision\":null}", op.arg);
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+    // 다른 사이트로 묶인 grant(지금 문서 https://example/ 를 덮지 않는다) — set 은 다시 묻는다, get 은 모달 없이 거절.
+    var other: cpg.PaneGrantStore = .{};
+    try other.grant(.{ .pane = 10, .target = 12, .scope = .browser_emulation, .host = cpg.GrantHost.init("bank.test") });
+    try expectEngineNeedsGrant(emuReq("\"action\":\"set\",\"timezone\":\"UTC\""), &other, .browser_emulation);
+    try expectEmuErr(emuReq("\"action\":\"get\""), &other, .unauthorized, null);
+}
+
+test "W9e①: 앱의 거절 까닭은 까닭마다 코드 — 다른 pane 의 흉내·바꾸기 상한은 -32603, 권한은 -32002" {
+    const req = emuReq("\"action\":\"set\",\"timezone\":\"UTC\"");
+    const Case = struct { payload: []const u8, code: cp.ErrorCode, reason: []const u8 };
+    for ([_]Case{
+        .{ .payload = "{\"reason\":\"emulated_by_other_pane\",\"message\":\"m\"}", .code = .internal_error, .reason = "emulated_by_other_pane" },
+        .{ .payload = "{\"reason\":\"resource_busy\",\"message\":\"m\"}", .code = .internal_error, .reason = "resource_busy" },
+        .{ .payload = "{\"reason\":\"needs_grant\",\"message\":\"m\"}", .code = .unauthorized, .reason = "needs_grant" },
+    }) |c| {
+        const out = try serializeBrowserResponseStatus(testing.allocator, req, .failed, c.payload);
+        defer testing.allocator.free(out);
+        try testing.expectEqual(@as(i64, @backingInt(c.code)), try errCode(out));
+        try testing.expect(std.mem.indexOf(u8, out, c.reason) != null);
+    }
+    const ok = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"emulation\":{},\"active\":false}");
+    defer testing.allocator.free(ok);
+    try testing.expect(std.mem.indexOf(u8, ok, "\"result\":{\"emulation\":{},\"active\":false}") != null);
+}
+
+test "W9e①: browser.list 는 흉내가 설정된 탭에 emulation{summary, active} 를 싣는다" {
+    const surfaces = [_]cs.SurfaceDto{
+        .{ .surface_id = 12, .title = "chromium", .window = 1, .detail = .{ .web = .{ .url = "https://example/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true, .emulation = cs.WebMeta.Emulating.init("390\u{00D7}844 mobile, fr-FR, off-site", false) } } },
+    };
+    const ids = [_]u64{12};
+    const windows = [_]wm.WindowMembershipSnapshot{.{ .window_id = 1, .window_kind = .normal, .surface_ids = &ids }};
+    const w = try serializeBrowserListResult(testing.allocator, .{ .number = 1 }, .{ .surfaces = &surfaces, .windows = &windows });
+    defer testing.allocator.free(w);
+    try testing.expect(std.mem.indexOf(u8, w, "\"emulation\":{\"summary\":\"390\u{00D7}844 mobile, fr-FR, off-site\",\"active\":false}") != null);
 }

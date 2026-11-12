@@ -193,8 +193,26 @@ pub const WebMeta = struct {
     /// W9d④: 이 탭에 가짜 응답 규칙이 있다(탭 제목 앞의 ▣ 와 같은 신호 — `web_osr.networkMocking`; 잠든 규칙만 있어도) — 규칙 수(모든 pane)와
     /// 엄격 모드. 없으면 null.
     mocking: ?Blocking = null,
+    /// W9e①: 이 탭에 기기 흉내가 설정됐다(탭 제목 앞의 ◫ 와 같은 신호 — `web_osr.emulation`; 사용자 탭이 사이트 밖이라 걸려 있지 않아도) —
+    /// 요약 글(`390×844 mobile, fr-FR, Asia/Kolkata[, off-site]`)과 지금 걸려 있는가. 없으면 null.
+    emulation: ?Emulating = null,
 
     pub const Blocking = struct { rules: u8 = 0, strict: bool = false };
+    pub const Emulating = struct {
+        summary_buf: [128]u8 = @splat(0),
+        summary_len: u8 = 0,
+        active: bool = false,
+
+        pub fn init(text: []const u8, active: bool) Emulating {
+            var e: Emulating = .{ .active = active, .summary_len = @intCast(@min(text.len, 128)) };
+            @memcpy(e.summary_buf[0..e.summary_len], text[0..e.summary_len]);
+            return e;
+        }
+
+        pub fn summary(self: *const Emulating) []const u8 {
+            return self.summary_buf[0..self.summary_len];
+        }
+    };
 };
 
 /// kind에 따라 분기하는 전용 메타(tagged). terminal이면 web 필드를, web이면 terminal 필드를 **타입 수준에서**

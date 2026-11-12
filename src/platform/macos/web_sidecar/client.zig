@@ -353,6 +353,7 @@ fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, 
     defer object.releaseArg(frame);
     defer object.releaseArg(req);
     blocking.beforeBrowse(browser, frame, req, is_redirect, user_gesture); // W9d④: 몸짓 — 사람의 링크·폼 이동(Q2)
+    @import("emulation.zig").beforeBrowse(browser, frame, req); // W9e①: 사용자 탭의 흉내는 grant 사이트에서만(Q1 — 홉마다)
     if (frame == null or frame.*.is_main.?(frame) == 0) return 0;
     const id = (entryOf(browser) orelse return 0).id;
     browsers.state.writer.send(.{ .main_frame_navigating = id }) catch {};
@@ -363,6 +364,7 @@ fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, 
 /// 쪽 처리로 넘긴다(그쪽이 인자 참조를 놓는다).
 fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, transition: c.cef_transition_type_t) callconv(.c) void {
     blocking.loadStart(browser, frame); // W9d③: 그 프레임의 진행 중 이동이 끝났다(인자는 아래 `dialogs` 가 푼다)
+    @import("emulation.zig").loadStart(browser, frame); // W9e①: 새 렌더러 — 죽은 동안 쌓은 흉내 바뀜을 낸다(E11)
     if (frame != null and frame.*.is_main.?(frame) != 0) {
         if (entryOf(browser)) |entry| {
             tooltip.reset(entry.id);
@@ -412,6 +414,7 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
     @import("devtools.zig").rendererGone(entry.id); // W9-0b: 기다리던 호출은 `detached` 로(detach 가 오지 않을 수 있다)
     @import("net_body.zig").rendererGone(entry.id); // W9d②: 보낸 본문 호출은 답이 없다(J5) — `detached`
     @import("blocking.zig").rendererGone(entry.id, entry.cef_id); // W9d③ 9 차: 죽은 동안 보낸 Network 도메인 바꾸기를 새 렌더러에 다시
+    @import("emulation.zig").rendererGone(entry.cef_id); // W9e①: 새 렌더러까지 흉내 명령을 쌓는다(죽은 탭의 metrics 는 sidecar 를 죽였다 — E11)
     const reason: protocol.message.RendererGoneReason = switch (status) {
         c.TS_PROCESS_WAS_KILLED => .killed,
         c.TS_PROCESS_CRASHED => .crashed,
@@ -466,6 +469,7 @@ fn onBeforeClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t)
     defer object.releaseArg(browser);
     if (browser == null) return;
     @import("mocking.zig").browserClosed(browser.*.get_identifier.?(browser)); // W9d④: 가짜 규칙·붙잡은 처리기
+    @import("emulation.zig").browserClosed(browser.*.get_identifier.?(browser)); // W9e①: 흉내 표·관찰자(대신 허용한 위치는 `permissions` 가 되돌린다)
     blocking.browserClosed(browser.*.get_identifier.?(browser)); // W9d③: 서비스 워커 길의 브라우저 목록·규칙·엄격
     browsers.onClosed(browser.*.get_identifier.?(browser));
 }

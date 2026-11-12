@@ -28,3 +28,6 @@ pub const url_canon = @import("url_canon.zig");
 /// 가짜 응답의 응답 규칙(W9d④ — 상태·Location·content_type·머리 허용 목록·본문 상한·메서드·실행 출처) — maru 는 인자 검사에, sidecar 는 규칙
 /// frame 의 닫힌 칸과 응답 만들기에.
 pub const net_mock_rules = @import("net_mock_rules.zig");
+/// 기기 흉내(W9e① — wire 25 `emulation`·`emulation_state`)의 닫힌 필드와 몸통 — maru 는 인자로 만든 상태를 보내기 전에, sidecar 는 CDP 글을 만들기
+/// 전에 같은 검사를 지난다.
+pub const emu_fields = @import("emu_fields.zig");

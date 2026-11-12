@@ -47,6 +47,8 @@ pub const Entry = struct {
     kinds: u32 = 0,
     /// 위치 요청에 좌표(또는 「없음」)를 걸었다 — 허용으로 답하기 전에 건다(W5b2).
     geo_set: bool = false,
+    /// W9e①: 위치 요청 출처의 해시(0 = 모름) — 사용자가 허용하면 대신 허용 표에서 그 출처를 뺀다(`permissions.forgetAutoOrigin`).
+    origin_hash: u64 = 0,
 };
 
 pub const Table = struct {

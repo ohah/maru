@@ -34,6 +34,7 @@ const console_ring = maru.session.web_osr_console;
 const net_ring = maru.session.web_osr_network;
 const block_mod = maru.session.web_osr_block; // W9d③: 요청 막기 규칙·엄격 모드
 const mock_mod = maru.session.web_osr_mock; // W9d④: 가짜 응답 규칙·본문·엄격 모드
+const emu_mod = maru.session.web_osr_emulate; // W9e①: 기기 흉내(탭에 하나 — 주인 pane·사이트·세대)
 const mock_pump_mod = maru.session.web_osr_mock_pump; // W9d④: 본문을 sidecar 로 보내는 창
 
 /// 링 하나(W3c): 받은 IOSurface 셋·제어 페이지와, View 가 보는 세대·mailbox 워드.
@@ -270,6 +271,13 @@ const Surface = struct {
     mock: mock_mod.Tab = .{},
     /// W9d④: 사용자에게 알릴 것이 있다(사용자가 마지막으로 몬 탭의 주 프레임 문서가 가짜였다·규칙이 있는 탭을 처음 몰았다).
     mock_notice_pending: bool = false,
+    /// W9e①: 기기 흉내(탭에 하나 — `web_osr_emulate`). 세대가 바뀌면 sidecar 에 전체 상태를 보낸다(`sendEmulation`).
+    emu: emu_mod.Tab = .{},
+    /// W9e①: 사용자가 흉내 중인 에이전트 탭을 처음 몰았다(탭·세대마다 한 번) — 창이 꺼내 보인다.
+    emu_notice_pending: bool = false,
+    /// W9e①: 흉내가 바뀌었다(설정·지움·sidecar 의 상태) — 그 탭이 있는 창이 다시 짓는다(제목의 ◫·맞춤 바깥의 어둡게). 웹 프레임만으로는
+    /// 세대만 올라 탭 줄·덧그림을 다시 짓지 않는다(실제 앱 스크린샷이 잡았다 — ◫ 도 어둡게도 없었다).
+    emu_redraw: bool = false,
 };
 
 /// W9d①: 보낸 `net_watch` 의 값 — 켬·설정·어느 호스트든·grant 호스트(넷까지).
@@ -735,6 +743,7 @@ fn testTeardown(gpa: std.mem.Allocator) void {
     block_grant_count = 0; // W9d③
     mock_grant_count = 0; // W9d④
     browser_grant_count = 0;
+    emu_grant_count = 0; // W9e①
     mock_budget = .{};
     mock_pump.deinit(gpa);
     net_full = true;
@@ -1211,6 +1220,8 @@ test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every en
         @embedFile("web_sidecar/devtools.zig"),
         @embedFile("web_sidecar/blocking.zig"), // W9d③ — `MARU_WEB_TEST_BLOCK_LOG`(판정자의 막기 사건 줄), W9d④ — `MARU_WEB_TEST_MOCK_LOG`(몸짓·예외 줄)
         @embedFile("web_sidecar/mocking.zig"), // W9d④ — `MARU_WEB_TEST_MOCK_LOG`·`MARU_WEB_TEST_MOCK_INJECT_SET_COOKIE`(판정자의 쿠키 필터 훅)
+        @embedFile("web_sidecar/emulation.zig"), // W9e① — `MARU_WEB_TEST_EMU_LOG`(판정자의 흉내 CDP·사이트 갈림 줄)
+        @embedFile("web_sidecar/permissions.zig"), // W9e① — `MARU_WEB_TEST_EMU_LOG`(위치 대신 허용·되돌림 줄)
     };
     var names: usize = 0;
     for (sources) |src| {
@@ -1234,10 +1245,11 @@ test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every en
             }
         }
     }
-    // 오늘 이 일곱 파일이 `getenv` 로 읽는 자리는 스물둘이다(이름 열일곱 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳, W9d③ 의 `MARU_WEB_TEST_BLOCK_LOG` 가
-    // 네 곳, W9d④ 의 `MARU_WEB_TEST_MOCK_LOG` 가 두 곳(blocking·mocking)과 `MARU_WEB_TEST_MOCK_INJECT_SET_COOKIE` 한 곳; 제품 코드에서 `getenv` 를
-    // 부르는 sidecar 파일은 이 일곱뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈 손잡이). 줄면 훑기가 소스를 못 읽은 것이다.
-    try std.testing.expect(names >= 22);
+    // 오늘 이 아홉 파일이 `getenv` 로 읽는 자리는 스물다섯이다(이름 열여덟 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳, W9d③ 의 `MARU_WEB_TEST_BLOCK_LOG` 가
+    // 네 곳, W9d④ 의 `MARU_WEB_TEST_MOCK_LOG` 가 두 곳(blocking·mocking)과 `MARU_WEB_TEST_MOCK_INJECT_SET_COOKIE` 한 곳, W9e① 의 `MARU_WEB_TEST_EMU_LOG`
+    // 가 세 곳(emulation 하나·permissions 둘); 제품 코드에서 `getenv` 를 부르는 sidecar 파일은 이 아홉뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈
+    // 손잡이). 줄면 훑기가 소스를 못 읽은 것이다.
+    try std.testing.expect(names >= 25);
 }
 
 test "a hardened (release) build ignores the development env overrides" {
@@ -3648,6 +3660,118 @@ pub fn takeMockNotice(surface_id: u64) bool {
     return s.mock_notice_pending;
 }
 
+// ── W9e①: 기기 흉내(`browser.emulate`) ─────────────────────────────────────────────────────────────────
+
+/// W9e①: app 이 마지막으로 알린 `browser_emulation` grant 들(`emulationSync`).
+var emu_grants: [maru.session.control_pane_grant.capacity]NetGrantCopy = undefined;
+var emu_grant_count: usize = 0;
+
+/// W9e①: grant 가 바뀔 때마다 app 이 `browser_emulation` grant 전체 목록을 알린다 — 주인의 grant 가 사라지거나 다른 호스트로 바뀐 흉내를 지우고
+/// sidecar 에 다시 보낸다(계획 §3 — 철회·다른 호스트로 다시 허용하면 곧 풀린다).
+pub fn emulationSync(grants: []const NetworkGrant) void {
+    emu_grant_count = 0;
+    for (grants) |g| {
+        if (emu_grant_count == emu_grants.len) break;
+        emu_grants[emu_grant_count] = .{ .tab = g.tab, .who = g.who, .host = if (g.any_host) .{} else .init(g.host), .birth = g.birth, .any_host = g.any_host, .pane = g.pane };
+        emu_grant_count += 1;
+    }
+    const gpa = gpa_ref orelse return;
+    var it = surfaces.iterator();
+    while (it.next()) |e| reconcileEmulation(gpa, e.key_ptr.*, e.value_ptr);
+}
+
+fn reconcileEmulation(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    if (!s.emu.active()) return;
+    var owners: [maru.session.control_pane_grant.capacity]emu_mod.OwnerGrant = undefined;
+    var no: usize = 0;
+    for (emu_grants[0..emu_grant_count]) |*g| if (g.tab == id) {
+        owners[no] = .{ .pane = g.pane, .any_host = g.any_host, .host = g.host.slice() };
+        no += 1;
+    };
+    if (s.emu.sync(owners[0..no])) sendEmulation(gpa, id, s);
+}
+
+/// 지금의 흉내를 sidecar 에 알린다(브라우저가 있을 때만 — 없으면 `browser_created` 가 부른다). 흉내가 없고 되돌릴 출처도 없으면 처음 브라우저에는
+/// 보내지 않는다(빈 상태는 sidecar 의 처음 상태다).
+fn sendEmulation(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    if (!s.created or !s.emu.needsSend()) return;
+    s.emu_redraw = true;
+    if (s.emu.sent_gen == 0 and !s.emu.active() and !s.emu.restore_next) {
+        s.emu.sent(); // 새 브라우저는 흉내가 없다 — 보낼 것이 없다(지운 뒤 다시 뜬 sidecar 포함)
+        return;
+    }
+    send(gpa, .{ .emulation = s.emu.toWire(id) });
+    s.emu.sent();
+    if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test emulation {d} gen={d} active={}\n", .{ id, s.emu.gen, s.emu.active() });
+}
+
+/// W9e①: `browser.emulate` 한 번(인자는 L2 가 이미 풀었다 — 앱이 같은 파서로 다시 풀었다). `grant_host` 는 그 pane 의 emulation grant 호스트(사용자
+/// 탭 — 흉내의 사이트), `any_host` 면 어느 호스트든(에이전트 탭 — 사이트에 묶이지 않는다).
+pub const EmulateRequest = struct {
+    pane: u64,
+    any_host: bool,
+    grant_host: []const u8 = "",
+    birth: bool = false,
+    params: *const emu_mod.Params,
+};
+
+pub const EmulateAnswer = union(enum) { ok: []u8, fail: emu_mod.Failure };
+
+pub fn browserEmulate(out: std.mem.Allocator, surface_id: u64, req: EmulateRequest) std.mem.Allocator.Error!EmulateAnswer {
+    const s = surfaces.getPtr(surface_id) orelse return .{ .fail = .{ .reason = "needs_grant", .message = "this tab is not a Chromium tab" } };
+    const gpa = gpa_ref orelse return .{ .fail = .{ .reason = "needs_grant", .message = "the Chromium engine is not running" } };
+    var why: emu_mod.Failure = undefined;
+    const outcome = s.emu.apply(.{ .pane = req.pane, .params = req.params, .any_host = req.any_host, .grant_host = req.grant_host, .birth = req.birth, .now_ms = monotonicNow() }, &why) catch return .{ .fail = why };
+    if (outcome.changed) sendEmulation(gpa, surface_id, s);
+    // `reload:true` — 걸고 나서 새로고침(첫 문서의 머리·터치 이벤트까지 — 실측 E5·E6). 에이전트의 새로고침이다(사용자 이동이 아니다 — D2 예외 없음).
+    const reloaded = req.params.reload and req.params.action != .get and s.created;
+    if (reloaded) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = .reload } });
+    return .{ .ok = try s.emu.resultJson(out, s.record.size.width, s.record.size.height, reloaded, outcome.touch_added) };
+}
+
+/// W9e①: 그 탭에 흉내가 설정됐는가(탭 제목 앞 ◫·`browser.list` 의 `emulation` — 사용자 탭이 사이트 밖이라 걸려 있지 않아도). 요약 글은
+/// `buf` 에.
+pub fn emulation(surface_id: u64, buf: []u8) ?struct { summary: []const u8, active: bool } {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (!s.emu.active()) return null;
+    return .{ .summary = s.emu.summary(buf), .active = s.emu.onSite() };
+}
+
+/// W9e①: 그 pane 이 주인인 흉내의 요약(Browser Grants 줄 「device emulation (…)」 — 주인이 아니면 빈 글).
+pub fn emulationSummary(surface_id: u64, pane: u64, buf: []u8) []const u8 {
+    const s = surfaces.getPtr(surface_id) orelse return buf[0..0];
+    if (!s.emu.active() or s.emu.owner != pane) return buf[0..0];
+    return s.emu.summary(buf);
+}
+
+/// W9e①: W9b 입력 좌표에 곱할 줄임(실측 E3 — CDP 입력 좌표는 Chromium 의 scale 로 나뉜다). 흉내 화면이 걸려 있지 않으면 1.
+pub fn emulationInputScale(surface_id: u64) f32 {
+    const s = surfaces.getPtr(surface_id) orelse return 1;
+    return s.emu.inputScale(s.record.size.width, s.record.size.height);
+}
+
+/// W9e①: 사용자가 보는 흉내 화면의 크기(DIP — pane 왼쪽 위). 그 밖을 어둡게 테두리(계획 §11 — 그 밖은 페이지가 아니다, 실측 E1).
+pub fn emulationShown(surface_id: u64) ?struct { w: f32, h: f32 } {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (!s.emu.onSite()) return null;
+    const v = s.emu.shownSize(s.record.size.width, s.record.size.height) orelse return null;
+    return .{ .w = v.w, .h = v.h };
+}
+
+/// W9e①: 흉내가 바뀌어 다시 지어야 하는가(한 번 — 그 탭이 있는 창이 `metal_dirty` 를 세운다).
+pub fn takeEmulationRedraw(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    defer s.emu_redraw = false;
+    return s.emu_redraw;
+}
+
+/// W9e①: 걸린 흉내 알림(한 번 — 그 탭이 있는 창이 꺼내 보인다).
+pub fn takeEmulationNotice(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    defer s.emu_notice_pending = false;
+    return s.emu_notice_pending;
+}
+
 /// W9d④: 그 pane 의 가짜 규칙(번호·패턴·지금 본문·번호) — 네트워크 기록의 `mock_pattern`·`body_state:"mocked"` 의 본문.
 fn mockRulesOf(s: *const Surface, pane: u64, out: []net_ring.MockRule) []net_ring.MockRule {
     var n: usize = 0;
@@ -3843,6 +3967,8 @@ fn networkUserDrove(id: u64, s: *Surface) void {
     _ = s.block.wantsNotice();
     // W9d④: 가짜 규칙이 있는 탭도(▣ — 보이는 페이지가 진짜가 아닐 수 있다).
     if (s.mock.wantsNotice()) s.mock_notice_pending = true;
+    // W9e①: 흉내 중인 에이전트 탭(◫ — 화면 크기·언어·시간대·위치가 실제와 다를 수 있다). 사용자 탭은 모달이 이미 말했다.
+    if (s.emu.wantsNotice()) s.emu_notice_pending = true;
     const any_host = for (net_grants[0..net_grant_count]) |g| {
         if (g.tab == id and g.any_host) break true;
     } else false;
@@ -5681,6 +5807,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             mock_pump.dropTab(id);
             s.mock.resendAll(&mock_budget);
             sendNetMock(gpa, id, s);
+            // W9e①: 기기 흉내도 재생 이동보다 **먼저**(about:blank → 흉내 → navigate — 실측 E5: 그래야 문서 요청부터 흉내다). 옛 sidecar 가 대신
+            // 허용한 위치 출처의 되돌림도 같은 frame 에(계획 §13 P2-6).
+            s.emu.browserRecreated();
+            sendEmulation(gpa, id, s);
             if (s.last_url) |u| {
                 send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
                 s.nav_pending = true;
@@ -5878,6 +6008,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         // W9d④: 가짜의 답·수·본문 확인(확인은 탭과 무관하게 창을 연다 — 지운 탭의 본문도 보낸 만큼은 확인이 온다).
         .net_mock_state => |v| if (surfaces.getPtr(v.browser)) |s| s.mock.onState(v),
         .net_mock_hits => |v| if (surfaces.getPtr(v.browser)) |s| s.mock.onHits(v, net_full),
+        // W9e①: 흉내의 상태(걸림·실패·사이트 안팎·렌더러·줄임·대신 허용한 위치 출처).
+        .emulation_state => |v| if (surfaces.getPtr(v.browser)) |s| {
+            s.emu.onState(v);
+            s.emu_redraw = true;
+        },
         .net_mock_ack => |v| mock_pump.ack(v.body_id, v.received),
         // W9d①: 지켜보는 탭의 요청 기록 — 지켜보기를 끈 뒤에 늦게 온 것은 버린다(끌 때 지웠다).
         .net_begin => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) {
@@ -6048,7 +6183,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .emulation, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 
@@ -11458,4 +11593,198 @@ test "W9d④ 변이: Grants 줄의 수·엄격은 그 pane 의 것만, 바꾼 �
     try add(5, "https://agent.test/a", "aaaa");
     networkMockSync(&mocks, &.{ .{ .tab = 999, .who = 0, .pane = 5 }, .{ .tab = 999, .who = 0, .pane = 6 } });
     try std.testing.expect(networkMocking(193) == null);
+}
+
+// ── W9e①: 기기 흉내 — maru 쪽 배선 ──
+// 시험이 증명하는 것: 브라우저가 새로 만들어지면 net_mock 뒤·재생 이동 앞에 `emulation`(전체 상태 + 옛 sidecar 가 대신 허용한 위치 출처의 되돌림 —
+// 재생 한 번), 흉내가 없는 새 브라우저에는 보내지 않는다, `reload:true` 는 새로고침을 보낸다(사용자 이동이 아니다), `emulation_state` 가 줄임·
+// 상태를 바꾼다(W9b 입력 줄임·테두리 크기), 탭 제목의 ◫(sidecar 확인 전에도), grant 동기화가 주인을 잃은 흉내를 지우고 보낸다, 다른 pane 은 바꾸지
+// 못한다.
+
+fn emuFrames(out: []Message) []Message {
+    var all: [64]Message = undefined;
+    const n = sentFrames(&all);
+    var k: usize = 0;
+    for (all[0..n]) |m| switch (m) {
+        .net_watch, .net_block, .net_mock_commit, .emulation, .navigate, .nav_action => {
+            if (k == out.len) break;
+            out[k] = m;
+            k += 1;
+        },
+        else => {},
+    };
+    return out[0..k];
+}
+
+fn emuParams(json: []const u8) !emu_mod.Params {
+    const v = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer v.deinit();
+    var why: ?emu_mod.Why = null;
+    return emu_mod.parseParams(v.value, &why);
+}
+
+test "W9e①: 보내기 차례 — browser_created 면 net_mock 뒤·navigate 앞에 emulation(되돌릴 출처는 재생 한 번), 흉내 없는 새 브라우저에는 보내지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{291});
+    const s = surfaces.getPtr(291).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 291, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 291, .who = 7, .any_host = true, .pane = 5, .birth = true }});
+    emulationSync(&.{.{ .tab = 291, .who = 0, .any_host = true, .pane = 5, .birth = true }});
+    const p = try emuParams("{\"action\":\"set\",\"viewport\":{\"width\":390,\"height\":844,\"device_scale_factor\":3,\"mobile\":true},\"timezone\":\"Asia/Kolkata\"}");
+    switch (try browserEmulate(gpa, 291, .{ .pane = 5, .any_host = true, .birth = true, .params = &p })) {
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"state\":\"sent\"") != null);
+        },
+        .fail => return error.TestUnexpectedResult,
+    }
+    var eb: [160]u8 = undefined;
+    try std.testing.expect(emulation(291, &eb) != null); // ◫ — sidecar 확인 전에도
+    try std.testing.expect(takeEmulationRedraw(291) and !takeEmulationRedraw(291)); // 창이 한 번 다시 짓는다(◫·어둡게 — 웹 프레임만으로는 안 지었다)
+    try std.testing.expectEqual(@as(f32, 0.2369), emulationInputScale(291)); // 답을 기다리지 않고 pane(300×200)에 맞춘 줄임 — sidecar 와 같은 셈
+    // sidecar 의 답 — 대신 허용한 출처 하나·줄임.
+    var st: ws.message.EmulationState = .{ .browser = 291, .generation = s.emu.gen, .fit_scale = 0.4739, .active_mask = 0b1001, .auto_count = 1 };
+    st.auto_allowed[0] = "https://agent.test";
+    apply(gpa, .{ .emulation_state = st }, 0);
+    try std.testing.expect(takeEmulationRedraw(291)); // 상태(사이트 안팎·줄임)가 바뀌면 다시 짓는다
+    try std.testing.expectEqual(@as(f32, 0.2369), emulationInputScale(291));
+    try std.testing.expect(emulationShown(291) != null);
+    const last = try gpa.dupe(u8, "https://agent.test/page");
+    if (s.last_url) |u| gpa.free(u);
+    s.last_url = last;
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 291 }, 0);
+    var buf: [16]Message = undefined;
+    const got = emuFrames(&buf);
+    try std.testing.expect(got.len >= 3);
+    try std.testing.expect(got[0] == .net_watch);
+    try std.testing.expect(got[got.len - 2] == .emulation and got[got.len - 1] == .navigate); // 재생 이동 바로 앞(E5)
+    const e = got[got.len - 2].emulation;
+    try std.testing.expect(e.flags.viewport and e.flags.timezone and !e.flags.site_bound);
+    try std.testing.expectEqual(@as(u8, 1), e.restore_count);
+    try std.testing.expectEqualStrings("https://agent.test", e.restore[0]);
+    // 한 번 더 만들어져도(이번에는 답이 출처를 비웠다) 되돌림은 없다.
+    apply(gpa, .{ .emulation_state = .{ .browser = 291, .generation = s.emu.gen, .fit_scale = 1 } }, 0);
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 291 }, 0);
+    const again = emuFrames(&buf);
+    try std.testing.expectEqual(@as(u8, 0), again[again.len - 2].emulation.restore_count);
+    // reload:true — 새로고침을 보낸다(에이전트의 것 — user 거짓).
+    outbox_pending.clearRetainingCapacity();
+    const r = try emuParams("{\"action\":\"set\",\"locale\":\"fr-FR\",\"reload\":true}");
+    switch (try browserEmulate(gpa, 291, .{ .pane = 5, .any_host = true, .birth = true, .params = &r })) {
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"reloaded\":true") != null);
+        },
+        .fail => return error.TestUnexpectedResult,
+    }
+    const rl = emuFrames(&buf);
+    try std.testing.expect(rl.len == 2 and rl[0] == .emulation and rl[1] == .nav_action and rl[1].nav_action.action == .reload and !rl[1].nav_action.user);
+    // 흉내가 없는 탭의 새 브라우저에는 보내지 않는다.
+    try testSurfaces(gpa, &.{292});
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 292 }, 0);
+    for (emuFrames(&buf)) |m| try std.testing.expect(m != .emulation);
+}
+
+test "W9e①: 다른 pane 은 바꾸지 못하고(get 은 된다), grant 동기화가 주인을 잃은 흉내를 지우고 보낸다 — ◫ 가 사라지고 사용자 탭은 사이트에 묶인다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{293});
+    const s = surfaces.getPtr(293).?;
+    s.created = true;
+    apply(gpa, .{ .url_changed = .{ .browser = 293, .url = "https://a.test/" } }, 0);
+    emulationSync(&.{ .{ .tab = 293, .who = 0, .host = "a.test", .pane = 5 }, .{ .tab = 293, .who = 0, .host = "a.test", .pane = 6 } });
+    const p = try emuParams("{\"action\":\"set\",\"timezone\":\"UTC\"}");
+    outbox_pending.clearRetainingCapacity();
+    switch (try browserEmulate(gpa, 293, .{ .pane = 5, .any_host = false, .grant_host = "a.test", .params = &p })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    var buf: [16]Message = undefined;
+    const sent = emuFrames(&buf);
+    try std.testing.expect(sent.len == 1 and sent[0].emulation.flags.site_bound);
+    try std.testing.expectEqualStrings("a.test", sent[0].emulation.site);
+    switch (try browserEmulate(gpa, 293, .{ .pane = 6, .any_host = false, .grant_host = "a.test", .params = &p })) {
+        .ok => |json| {
+            gpa.free(json);
+            return error.TestUnexpectedResult;
+        },
+        .fail => |f| try std.testing.expectEqualStrings("emulated_by_other_pane", f.reason),
+    }
+    const get = try emuParams("{\"action\":\"get\"}");
+    switch (try browserEmulate(gpa, 293, .{ .pane = 6, .any_host = false, .grant_host = "a.test", .params = &get })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    var sb: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("UTC", emulationSummary(293, 5, &sb));
+    try std.testing.expectEqual(@as(usize, 0), emulationSummary(293, 6, &sb).len); // 주인이 아니면 Grants 줄이 비었다
+    // 주인의 grant 철회 — 지우고 곧 보낸다(◫ 도 사라진다).
+    outbox_pending.clearRetainingCapacity();
+    emulationSync(&.{.{ .tab = 293, .who = 0, .host = "a.test", .pane = 6 }});
+    var eb: [160]u8 = undefined;
+    try std.testing.expect(emulation(293, &eb) == null);
+    const cleared = emuFrames(&buf);
+    try std.testing.expect(cleared.len == 1 and @as(u16, @bitCast(cleared[0].emulation.flags)) == 0);
+}
+
+// W9e① 변이 시험: 브라우저가 아직 없으면 흉내 frame 도 새로고침도 보내지 않는다(결과도 reloaded 를 말하지 않는다), 사용자가 흉내 중인
+// 에이전트 탭을 몰면 한 번 알린다, 지운 흉내는 다시 뜬 브라우저에 빈 frame 으로도 보내지 않는다, 사용자 탭이 사이트 밖이면 목록의
+// `emulation.active` 는 거짓이다(◫ 는 남는다).
+test "W9e① 변이: 브라우저 전에는 보내지 않음·처음 몬 에이전트 탭 알림·지운 흉내의 재생 없음·사이트 밖의 active" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 294, 295 });
+    surfaces.getPtr(294).?.created = false; // 브라우저가 아직 없다(sidecar 가 browser_created 를 보내기 전)
+    apply(gpa, .{ .url_changed = .{ .browser = 294, .url = "https://agent.test/" } }, 0);
+    emulationSync(&.{ .{ .tab = 294, .who = 0, .any_host = true, .pane = 5, .birth = true }, .{ .tab = 295, .who = 0, .host = "a.test", .pane = 6 } });
+    outbox_pending.clearRetainingCapacity();
+    const p = try emuParams("{\"action\":\"set\",\"timezone\":\"UTC\",\"reload\":true}");
+    switch (try browserEmulate(gpa, 294, .{ .pane = 5, .any_host = true, .birth = true, .params = &p })) {
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"reloaded\":true") == null);
+        },
+        .fail => return error.TestUnexpectedResult,
+    }
+    var buf: [16]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 0), emuFrames(&buf).len); // 브라우저가 아직 없다 — browser_created 가 보낸다
+    noteUserNavigation(294);
+    try std.testing.expect(takeEmulationNotice(294));
+    try std.testing.expect(!takeEmulationNotice(294));
+    apply(gpa, .{ .browser_created = 294 }, 0);
+    const clear = try emuParams("{\"action\":\"clear\"}");
+    switch (try browserEmulate(gpa, 294, .{ .pane = 5, .any_host = true, .birth = true, .params = &clear })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 294 }, 0);
+    for (emuFrames(&buf)) |m| try std.testing.expect(m != .emulation);
+    // 사용자 탭 — 사이트 밖.
+    const u = surfaces.getPtr(295).?;
+    u.created = true;
+    apply(gpa, .{ .url_changed = .{ .browser = 295, .url = "https://a.test/" } }, 0);
+    const tz = try emuParams("{\"action\":\"set\",\"timezone\":\"UTC\"}");
+    switch (try browserEmulate(gpa, 295, .{ .pane = 6, .any_host = false, .grant_host = "a.test", .params = &tz })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    apply(gpa, .{ .emulation_state = .{ .browser = 295, .generation = u.emu.gen, .on_site = false, .fit_scale = 1 } }, 0);
+    var eb: [160]u8 = undefined;
+    const e = emulation(295, &eb).?;
+    try std.testing.expect(!e.active);
+    try std.testing.expect(std.mem.indexOf(u8, e.summary, "off-site") != null);
 }

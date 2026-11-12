@@ -124,6 +124,7 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.InvalidBlockAction => "network-block needs exactly one of --add <pattern>, --remove <pattern>, --rule <n>, --clear, --list or --strict on|off",
         error.InvalidBlockArgs => "network-block: --add/--remove take a pattern (scheme://host[:port]/path, * wildcards), --rule a rule number, --type goes with --add, --strict takes on or off; at most 32 patterns or rules",
         error.InvalidMockAction => "network-mock needs exactly one of --add <pattern>, --remove <pattern>, --rule <n>, --clear, --list or --strict on|off",
+        error.InvalidEmulateArgs => "emulate: give each setting once (a value or --no-<setting>, not both); --platform and --client-hints go with --user-agent; --viewport is WxH[@dpr][,mobile][,touch][,landscape], --geolocation lat,lon[,acc] or unavailable; --clear and --get take no settings, and set needs at least one",
         error.InvalidMockArgs => "network-mock: --add/--remove take one pattern, --rule a rule number, --status a number, --header 'Name: value' (up to 32), one of --body/--body-file/--body-base64; response options and --type/--method go with --add, --strict takes on or off",
     };
 }

@@ -7,6 +7,7 @@ const wire = @import("wire.zig");
 const message_mod = @import("message.zig");
 const fields = @import("fields.zig");
 const net_fields = @import("net_fields.zig");
+const emu_fields = @import("emu_fields.zig"); // W9e①: 기기 흉내
 
 const Cursor = wire.Cursor;
 const ReadCursor = wire.ReadCursor;
@@ -107,6 +108,8 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .net_mock_state => |value| try net_fields.writeMockState(&cursor, value),
         .net_mock_ack => |value| try net_fields.writeMockAck(&cursor, value),
         .net_mock_hits => |value| try net_fields.writeMockHits(&cursor, value),
+        .emulation => |value| try emu_fields.writeEmulation(&cursor, value), // W9e①
+        .emulation_state => |value| try emu_fields.writeState(&cursor, value),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -493,6 +496,8 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .net_mock_state => .{ .net_mock_state = try net_fields.readMockState(&cursor) },
         .net_mock_ack => .{ .net_mock_ack = try net_fields.readMockAck(&cursor) },
         .net_mock_hits => .{ .net_mock_hits = try net_fields.readMockHits(&cursor) },
+        .emulation => .{ .emulation = try emu_fields.readEmulation(&cursor) }, // W9e①
+        .emulation_state => .{ .emulation_state = try emu_fields.readState(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
         .set_hidden => .{ .set_hidden = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
@@ -895,6 +900,8 @@ comptime {
     std.debug.assert(message_mod.max_devtools_calls_per_browser <= message_mod.max_devtools_calls);
     const largest = prefix_len + common_len + 8 + 12 + 1 + 4 + max_url_bytes;
     std.debug.assert(largest <= max_frame_bytes);
+    // W9e①: 가장 큰 흉내 frame(UA 512·client hints 상한·출처 여덟 — 약 3.3 KiB)도 frame 상한 안이다.
+    std.debug.assert(prefix_len + common_len + emu_fields.max_emulation_body_bytes <= max_frame_bytes);
     std.debug.assert(prefix_len + common_len + 8 + 1 + 4 + max_text_bytes <= max_frame_bytes);
     // W9c①: 가장 긴 콘솔 줄(머리·수준·`docs_back`·버린 수 둘·앞 문서의 버린 수와 그 `docs_back`·항목 표시·길이 + 글 상한).
     std.debug.assert(prefix_len + common_len + 8 + 1 + 1 + 4 + 4 + 4 + 1 + 1 + 4 + wire.max_console_text_bytes <= max_frame_bytes);
@@ -920,7 +927,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  24, 0, // v24, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  25, 0, // v25, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -1006,9 +1013,9 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 82; // 정의되지 않은 tag(sidecar → maru 는 W9d④ 의 `net_mock_hits` 81 까지)
+    bad[10] = 83; // 정의되지 않은 tag(sidecar → maru 는 W9e① 의 `emulation_state` 82 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
-    bad[10] = 140; // 둘째 구간(maru → sidecar)도 W9d④ 의 `net_mock_commit` 139 뒤는 비었다
+    bad[10] = 141; // 둘째 구간(maru → sidecar)도 W9e① 의 `emulation` 140 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
@@ -2381,13 +2388,13 @@ test "W9d②: 본문 기록 넷이 왕복하고 방향이 맞다 — net_begin �
     inline for (.{ Tag.net_body_data, Tag.net_body_end, Tag.net_record_state }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d②: 본문 frame 의 바이트 배치 골든(버전 24 — W9d④ 가 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
+test "W9d②: 본문 frame 의 바이트 배치 골든(버전 25 — W9e① 이 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
     var buf: [128]u8 = undefined;
     var len = try encode(.{ .net_record = .{ .browser = 0x0102, .on = true, .session = 0x0a0b0c0d } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 24, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 25, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
     len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 2, .request = 3, .state = .captured, .flags = .{ .redecoded = true, .credentialed = true }, .size = 0x0100, .decoded = 0x0200 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 24, 75, // 머리
+        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 25, 75, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, // session
         0, 0, 0, 0, 0, 0, 0, 3, // request
@@ -2396,9 +2403,9 @@ test "W9d②: 본문 frame 의 바이트 배치 골든(버전 24 — W9d④ 가 
         0, 0, 0, 0, 0, 0, 2, 0, // decoded
     }, buf[0..len]);
     len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 2, .request = 3, .offset = 4, .bytes = "hi" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 24, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 25, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
     len = try encode(.{ .net_record_state = .{ .browser = 1, .session = 2, .status = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 24, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 25, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
 }
 
 test "W9d②: 본문의 닫힌 칸은 양쪽에서 거절한다 — 세션·요청 0, 빈·큰 조각, 본문 상한 넘는 끝, 잡지 않은 본문의 크기·글 표시, 켬과 세션 어긋남" {
@@ -2503,7 +2510,7 @@ test "W9d②: 본문 frame 을 무작위로 망가뜨려도 풀기는 무너지�
 
 // ── 요청 막기(W9d③) ─────────────────────────────────────────────────────────────────────────────────────
 // 시험이 증명하는 것: 막기 셋(`net_block`·`net_block_state`·`net_block_hits`)과 바뀐 칸(`net_end` 의 막기 표시·규칙 번호, `error_page` 의 오류 번호·
-// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 24 — 배치는 23 과 같다), 닫힌 칸(규칙 수·번호 0·중복·종류
+// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 25 — 배치는 23 과 같다), 닫힌 칸(규칙 수·번호 0·중복·종류
 // 마스크·호스트·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 막기 frame(규칙 32 개·사이트·패턴 상한)이
 // frame 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 막기 규칙이 사용자 탭의 요청을 막는다
 // (maru 와 sidecar 가 같은 규칙을 봐야 하고, sidecar 가 보낸 수는 공격 입력으로 다룬다).
@@ -2547,13 +2554,13 @@ test "W9d③: 막기 셋과 바뀐 칸이 왕복하고 방향이 맞다 — 규�
     inline for (.{ Tag.net_block_state, Tag.net_block_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d③: 막기 frame 의 바이트 배치 골든(버전 24 — W9d④ 가 올렸다, 배치는 23 과 같다) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
+test "W9d③: 막기 frame 의 바이트 배치 골든(버전 25 — W9e① 이 올렸다, 배치는 23 과 같다) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
     var buf: [256]u8 = undefined;
     var v: message_mod.NetBlock = .{ .browser = 1, .generation = 0x0102, .strict_site = "a.t", .count = 1 };
     v.rules[0] = .{ .id = 5, .types = 0x10, .site = "a.t", .pattern = "https://a.t/x" };
     var len = try encode(.{ .net_block = v }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 24, 136, // 머리
+        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 25, 136, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         3, 'a', '.', 't', // 엄격 사이트
@@ -2564,12 +2571,12 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 24 — W9d④ 가 
         0, 13, 'h', 't', 't', 'p', 's', ':', '/', '/', 'a', '.', 't', '/', 'x', // 패턴
     }, buf[0..len]);
     len = try encode(.{ .net_block_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 24, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 25, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
     var hits: message_mod.NetBlockHits = .{ .browser = 1, .generation = 9, .unrecorded = 2, .skipped_unknown_page = 3, .strict_redirect_missed = 4, .strict_redirect_bypassed = 5, .sw_shared_with_unruled_tab = true, .count = 1 };
     hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_hits = 7, .sw_not_applied = 8 };
     len = try encode(.{ .net_block_hits = hits }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 24, 78, // 머리
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 25, 78, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 9, // 세대
         0, 0, 0, 2, 0, 0, 0, 3, // 기록 없이 막음·페이지 모름
@@ -2579,7 +2586,7 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 24 — W9d④ 가 
     }, buf[0..len]);
     len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .received = 0, .time_ms = 3, .flags = .{ .blocked = true }, .rule_id = 5 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 24, 72, // 머리
+        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 25, 72, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 0, 0, 0, 0, 2, // request
         2, // failed
@@ -2590,11 +2597,11 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 24 — W9d④ 가 
         0, 0, 0, 5, // 규칙
     }, buf[0..len]);
     len = try encode(.{ .error_page = .{ .browser = 1, .error_code = -20, .blocked_rule = 5 } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 24, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 25, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5 }, buf[0..len]);
     len = try encode(.{ .navigate = .{ .browser = 1, .url = "a:", .user = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 24, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 25, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
     len = try encode(.{ .nav_action = .{ .browser = 1, .action = .reload, .user = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 24, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 25, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
 }
 
 test "W9d③: 막기의 닫힌 칸은 양쪽에서 거절한다 — 규칙 33 개·번호 0·중복·모르는 종류 비트·서비스 워커 종류·대문자 사이트·풀리지 않는 패턴·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝, 양수 오류" {
@@ -2715,7 +2722,7 @@ test "W9d③: 막기 frame 을 무작위로 망가뜨려도 풀기는 무너지�
 
 // ── 가짜 응답(W9d④) ─────────────────────────────────────────────────────────────────────────────────────
 // 시험이 증명하는 것: 가짜 여섯(`net_mock_rule`·`net_mock_body`·`net_mock_commit`·`net_mock_state`·`net_mock_ack`·`net_mock_hits`)과 바뀐 칸(`net_end`
-// 의 `mocked`·`mock_redirected`, `net_begin` 둘째 표시의 `mocked`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 24), 닫힌 칸(번호 0·
+// 의 `mocked`·`mock_redirected`, `net_begin` 둘째 표시의 `mocked`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 25 — 배치는 24 와 같다), 닫힌 칸(번호 0·
 // 차례·종류·메서드·표시와 실행 사이트의 짝·정규형 패턴·상태·본문 번호와 길이·본문 금지 상태·content_type·그려지는 종류·Location·허용 목록 밖
 // 머리·Location 머리, 조각 범위, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 규칙 frame(머리 32 개·8 KiB·Location 2 KiB·패턴 512)이 frame
 // 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 가짜 응답은 그 사이트로서 페이지에 들어간다
@@ -2784,11 +2791,11 @@ test "W9d④: 가짜 여섯과 바뀐 칸이 왕복하고 방향이 맞다 — �
     inline for (.{ Tag.net_mock_state, Tag.net_mock_ack, Tag.net_mock_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 24) — net_mock_rule·net_mock_body·net_mock_commit·net_mock_state·net_mock_ack·net_mock_hits·net_end" {
+test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 25 — W9e① 이 올렸다, 배치는 24 와 같다) — net_mock_rule·net_mock_body·net_mock_commit·net_mock_state·net_mock_ack·net_mock_hits·net_end" {
     var buf: [256]u8 = undefined;
     var len = try encode(.{ .net_mock_rule = .{ .browser = 1, .generation = 0x0102, .index = 0, .id = 5, .types = 0, .methods = 1, .flags = .{ .exec_site_bound = true }, .site = "a.t", .exec_site = "a.t", .pattern = "https://a.t/x", .status = 302, .body_id = 0, .body_len = 0, .content_type = "text/html", .location = "/y" } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 81, 'M', 'W', 'E', 'B', 0, 24, 137, // 머리
+        0, 0, 0, 81, 'M', 'W', 'E', 'B', 0, 25, 137, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         0, // index
@@ -2806,25 +2813,25 @@ test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 24) — net_mock_r
         0, 0, 0, // 머리 없음
     }, buf[0..len]);
     len = try encode(.{ .net_mock_body = .{ .browser = 1, .body_id = 2, .offset = 3, .total = 9, .bytes = "ab" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 24, 138, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 9, 0, 2, 'a', 'b' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 25, 138, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 9, 0, 2, 'a', 'b' }, buf[0..len]);
     len = try encode(.{ .net_mock_commit = .{ .browser = 1, .generation = 2, .count = 3, .strict_site = "a.t" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 24, 'M', 'W', 'E', 'B', 0, 24, 139, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3, 3, 'a', '.', 't' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 24, 'M', 'W', 'E', 'B', 0, 25, 139, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3, 3, 'a', '.', 't' }, buf[0..len]);
     len = try encode(.{ .net_mock_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .on } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 24, 79, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 25, 79, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 1 }, buf[0..len]);
     len = try encode(.{ .net_mock_ack = .{ .browser = 1, .body_id = 2, .received = 0x010000 } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 24, 80, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 0, 0 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 25, 80, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 0, 0 }, buf[0..len]);
     var hits: message_mod.NetMockHits = .{ .browser = 1, .unrecorded = 2, .busy = 3, .skipped_unknown_page = 4, .page_controlled = true, .count = 1 };
     hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_not_mocked = 7, .frame_not_mocked = 8 };
     len = try encode(.{ .net_mock_hits = hits }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 45, 'M', 'W', 'E', 'B', 0, 24, 81, // 머리
+        0, 0, 0, 45, 'M', 'W', 'E', 'B', 0, 25, 81, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 1, 1, // 기록 없이·줄 수 없음·페이지 모름·서비스 워커·항목 수
         0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, // 규칙 5 의 수(맞음·서비스 워커·허락 밖 프레임 — v1 SEVERE-1)
     }, buf[0..len]);
     len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .success, .received = 0, .time_ms = 3, .flags = .{ .mocked = true, .mock_redirected = true }, .rule_id = 5, .mock_body_id = 0x0607 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 24, 72, // 머리
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 25, 72, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 0, 0, 0, 0, 2, // request
         0, // success
@@ -3001,4 +3008,306 @@ test "W9d④: 가짜 frame 을 무작위로 망가뜨려도 풀기는 무너지�
         }
     }
     try std.testing.expect(ok > 0);
+}
+
+// ── 기기 흉내(W9e①) ─────────────────────────────────────────────────────────────────────────────────────
+// 시험이 증명하는 것: 흉내 둘(`emulation`·`emulation_state`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 25), 닫힌 칸(표시와 값의
+// 짝 — 표시 없는 무리의 값·값 없는 표시, 범위 — 가로·세로·배율·64 Mpx·위·경도·정확도·NaN·-0, 글 모양 — UA 의 줄바꿈·비 ASCII, 언어·ICU·
+// 시간대 글자, client hints 브랜드, 모르는 enum, 쓰지 않는 비트, 출처 목록, 상태의 마스크·까닭·줄임)은 양쪽에서 거절한다, 가장 큰 흉내 frame 이
+// frame 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 흉내 값은 sidecar 가 CDP JSON 에 글로
+// 이어 붙이고 서버에 머리로 나간다(받는 쪽이 모양을 믿으면 머리·JSON 끼워 넣기가 된다).
+
+fn testEmulation() message_mod.Emulation {
+    var v: message_mod.Emulation = .{
+        .browser = 7,
+        .generation = 3,
+        .flags = .{ .site_bound = true, .viewport = true, .touch = true, .mobile = true, .ua = true, .hints = true, .locale = true, .timezone = true, .geo = true, .media = true, .vision = true },
+        .site = "a.test",
+        .width = 390,
+        .height = 844,
+        .dsf = 3,
+        .ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36",
+        .platform = "Linux armv8l",
+        .accept_language = "fr-FR,fr",
+        .icu_locale = "fr_FR",
+        .timezone = "Asia/Kolkata",
+        .latitude = 48.8566,
+        .longitude = 2.3522,
+        .accuracy = 50,
+        .media = .{ .color_scheme = .light, .forced_colors = .active },
+        .vision = .deuteranopia,
+        .restore_count = 1,
+    };
+    v.hints.brand_count = 2;
+    v.hints.brands[0] = .{ .brand = "Chromium", .version = "154" };
+    v.hints.brands[1] = .{ .brand = "Not A(Brand", .version = "99" };
+    v.hints.platform = "Android";
+    v.hints.mobile = true;
+    v.restore[0] = "https://a.test";
+    return v;
+}
+
+test "W9e①: 흉내 둘이 왕복하고 방향이 맞다 — 무리 모두·client hints·위치·미디어·색각·되돌릴 출처, 상태의 마스크·줄임·대신 허용한 출처" {
+    const e = (try roundTrip(.{ .emulation = testEmulation() })).emulation;
+    try std.testing.expect(e.flags.viewport and e.flags.touch and e.flags.mobile and !e.flags.landscape and e.width == 390 and e.height == 844 and e.dsf == 3);
+    try std.testing.expectEqualStrings("Chromium", e.hints.brands[0].brand);
+    try std.testing.expectEqual(@as(u8, 2), e.hints.brand_count);
+    try std.testing.expect(e.hints.mobile);
+    try std.testing.expectEqualStrings("fr_FR", e.icu_locale);
+    try std.testing.expectEqualStrings("Asia/Kolkata", e.timezone);
+    try std.testing.expectEqual(@as(f64, 48.8566), e.latitude);
+    try std.testing.expectEqual(message_mod.EmuForcedColors.active, e.media.forced_colors);
+    try std.testing.expectEqual(message_mod.EmuVision.deuteranopia, e.vision);
+    try std.testing.expectEqualStrings("https://a.test", e.restore[0]);
+    const off = (try roundTrip(.{ .emulation = .{ .browser = 7, .generation = 4 } })).emulation; // 모두 지움
+    try std.testing.expect(@as(u16, @bitCast(off.flags)) == 0 and off.restore_count == 0);
+    const unavailable = (try roundTrip(.{ .emulation = .{ .browser = 7, .generation = 5, .flags = .{ .geo = true, .geo_unavailable = true } } })).emulation;
+    try std.testing.expect(unavailable.flags.geo_unavailable and unavailable.latitude == 0);
+    var st: message_mod.EmulationState = .{ .browser = 7, .generation = 3, .on_site = false, .alive = false, .pending = true, .fit_scale = 0.45, .active_mask = 0b101, .failed_mask = 0b1000, .reason = .timezone_unknown, .auto_count = 1 };
+    st.auto_allowed[0] = "http://127.0.0.1:5555";
+    const s = (try roundTrip(.{ .emulation_state = st })).emulation_state;
+    try std.testing.expect(!s.on_site and !s.alive and s.pending and s.fit_scale == 0.45 and s.active_mask == 0b101 and s.failed_mask == 0b1000);
+    try std.testing.expectEqual(message_mod.EmuFailReason.timezone_unknown, s.reason);
+    try std.testing.expectEqualStrings("http://127.0.0.1:5555", s.auto_allowed[0]);
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.emulation.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.emulation_state.direction());
+}
+
+test "W9e①: 흉내 frame 의 바이트 배치 골든(버전 25) — emulation·emulation_state" {
+    var buf: [256]u8 = undefined;
+    var len = try encode(.{ .emulation = .{ .browser = 1, .generation = 0x0102, .flags = .{ .viewport = true, .timezone = true }, .width = 390, .height = 844, .dsf = 2, .timezone = "UTC" } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 78, 'M', 'W', 'E', 'B', 0, 25, 140, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 1, 2, // generation
+        0x00, 0x82, // 표시(viewport·timezone)
+        0, // 사이트
+        0x01, 0x86, 0x03, 0x4c, // 390 × 844
+        0x40, 0x00, 0x00, 0x00, // dsf 2.0
+        0, 0, // ua
+        0, // platform
+        0, 0, // 브랜드·전체 목록
+        0, 0, 0, 0, 0, 0, // hints 글 다섯·mobile
+        0, 0, // accept_language·icu
+        3, 'U', 'T', 'C', // 시간대
+        0, 0, 0, 0, 0, 0, 0, 0, // 위도
+        0, 0, 0, 0, 0, 0, 0, 0, // 경도
+        0, 0, 0, 0, 0, 0, 0, 0, // 정확도
+        0, 0, 0, 0, 0, 0, // 미디어 다섯·색각
+        0, // 되돌릴 출처
+    }, buf[0..len]);
+    len = try encode(.{ .emulation_state = .{ .browser = 1, .generation = 2, .on_site = true, .alive = true, .fit_scale = 0.5, .active_mask = 0x0009, .failed_mask = 0x0002, .reason = .cdp_error } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 32, 'M', 'W', 'E', 'B', 0, 25, 82, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 0, 2, // generation
+        1, 1, 0, // 사이트 안·살아 있음·기다림 없음
+        0x3f, 0x00, 0x00, 0x00, // 0.5
+        0, 0x09, 0, 0x02, // 걸림·실패
+        3, // cdp_error
+        0, // 출처
+    }, buf[0..len]);
+}
+
+test "W9e①: 흉내의 닫힌 칸은 양쪽에서 거절한다 — 표시와 값의 짝·범위·글 모양·enum·쓰지 않는 비트·출처, 상태의 마스크·까닭·줄임" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    const good = testEmulation();
+    _ = try encode(.{ .emulation = good }, &buf);
+    var bads: [34]message_mod.Emulation = @splat(good);
+    bads[0].flags._reserved = 1;
+    bads[1].site = ""; // 묶였는데 사이트 없음
+    bads[2].flags.site_bound = false; // 사이트가 있는데 묶이지 않음
+    bads[3].width = 0;
+    bads[4].height = 4097;
+    bads[5].dsf = 0.25;
+    bads[6].dsf = std.math.nan(f32);
+    bads[7].width = 4096; // 4096 × 4096 × 3² > 64 Mpx
+    bads[7].height = 4096;
+    bads[8].ua = "Mozilla\r\nX-Evil: 1";
+    bads[9].ua = "Mozilla 한";
+    bads[10].ua = "";
+    bads[11].platform = "a\x00b";
+    bads[12].hints.brand_count = 0; // hints 표시가 있는데 브랜드가 없다
+    bads[13].hints.brands[0].version = "";
+    bads[14].flags.hints = false; // 표시가 없는데 hints 값
+    bads[15].accept_language = "fr-FR;q=0.9";
+    bads[16].icu_locale = "fr-FR";
+    bads[17].timezone = "Asia/Kolkata\"";
+    bads[18].timezone = "";
+    bads[19].latitude = 91;
+    bads[20].longitude = -181;
+    bads[21].accuracy = 100_001;
+    bads[22].latitude = std.math.inf(f64);
+    bads[23].media = .{}; // 미디어 표시인데 칸이 없다
+    bads[24].vision = .none; // 색각 표시인데 값이 없다
+    bads[25].restore[0] = "file://x";
+    bads[26].restore_count = 9;
+    bads[27].restore[1] = "https://b.test"; // 수 밖의 출처
+    bads[28].flags.viewport = false; // 가로·세로가 남았다
+    bads[29].flags.ua = false; // UA 가 남았다
+    bads[30].flags.geo_unavailable = true; // 「없음」 인데 좌표
+    bads[31].flags.locale = false;
+    bads[32].flags.timezone = false;
+    bads[33].restore[0] = "https://a.test/path";
+    for (bads, 0..) |b, i| {
+        if (!std.meta.isError(encode(.{ .emulation = b }, &buf))) {
+            std.debug.print("bad emulation {d} encoded\n", .{i});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // 표시 없는 터치·모바일·가로.
+    try std.testing.expectError(error.InvalidEmulation, encode(.{ .emulation = .{ .browser = 1, .flags = .{ .touch = true } } }, &buf));
+    try std.testing.expectError(error.InvalidEmulation, encode(.{ .emulation = .{ .browser = 1, .flags = .{ .geo_unavailable = true } } }, &buf));
+    try std.testing.expectError(error.InvalidEmulation, encode(.{ .emulation = .{ .browser = 1, .latitude = -0.0 } }, &buf));
+    const bad_states = [_]message_mod.EmulationState{
+        .{ .browser = 1, .active_mask = 1 << 7 },
+        .{ .browser = 1, .active_mask = 1, .failed_mask = 1, .reason = .cdp_error },
+        .{ .browser = 1, .failed_mask = 1 }, // 까닭 없는 실패
+        .{ .browser = 1, .reason = .cdp_error }, // 실패 없는 까닭
+        .{ .browser = 1, .fit_scale = 0 },
+        .{ .browser = 1, .fit_scale = 1.5 },
+        .{ .browser = 1, .fit_scale = std.math.nan(f32) },
+        .{ .browser = 1, .auto_count = 9 },
+        .{ .browser = 1, .auto_count = 1 }, // 빈 출처
+    };
+    for (bad_states) |v| try std.testing.expectError(error.InvalidEmulation, encode(.{ .emulation_state = v }, &buf));
+    // decode 쪽: 모르는 미디어·색각·까닭, bool 아닌 칸.
+    const body = prefix_len + common_len;
+    const len = try encode(.{ .emulation = .{ .browser = 1, .flags = .{ .vision = true }, .vision = .protanopia } }, &buf);
+    var b = buf;
+    b[len - 2] = 7; // 색각 7 은 없다
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    b = buf;
+    b[len - 3] = 4; // 대비 4 는 없다
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    const slen = try encode(.{ .emulation_state = .{ .browser = 1, .failed_mask = 1, .reason = .cdp_error } }, &buf);
+    b = buf;
+    b[slen - 2] = 4; // 까닭 4 는 없다
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..slen])));
+    b = buf;
+    b[body + 12] = 2; // on_site 가 bool 이 아니다
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..slen])));
+}
+
+test "W9e①: 가장 큰 emulation(UA 512·client hints 상한·언어·시간대·출처 여덟)도 frame 상한 안에서 왕복한다" {
+    const host = array_repeat.repeat("h", message_mod.max_net_host_bytes);
+    const ua = array_repeat.repeat("u", message_mod.max_emu_ua_bytes);
+    const hint = array_repeat.repeat("x", message_mod.max_emu_hint_bytes);
+    const origin = "https://" ++ array_repeat.repeat("o", @import("fields.zig").max_origin_bytes - 8);
+    var v: message_mod.Emulation = .{
+        .browser = 1,
+        .generation = std.math.maxInt(u32),
+        .flags = .{ .site_bound = true, .viewport = true, .touch = true, .mobile = true, .landscape = true, .ua = true, .hints = true, .locale = true, .timezone = true, .geo = true, .media = true, .vision = true },
+        .site = host,
+        .width = 4096,
+        .height = 4096,
+        .dsf = 1,
+        .ua = ua,
+        .platform = array_repeat.repeat("p", message_mod.max_emu_platform_bytes),
+        .accept_language = array_repeat.repeat("a", message_mod.max_emu_accept_language_bytes),
+        .icu_locale = array_repeat.repeat("i", message_mod.max_emu_icu_locale_bytes),
+        .timezone = array_repeat.repeat("t", message_mod.max_emu_timezone_bytes),
+        .latitude = -90,
+        .longitude = 180,
+        .accuracy = message_mod.max_emu_accuracy,
+        .media = .{ .type = .print, .color_scheme = .dark, .reduced_motion = .reduce, .forced_colors = .off, .contrast = .no_preference },
+        .vision = .tritanopia,
+        .restore_count = message_mod.max_emu_geo_origins,
+    };
+    v.hints = .{ .brand_count = 4, .full_count = 4, .platform = hint, .platform_version = hint, .architecture = hint, .model = hint, .bitness = hint, .mobile = true };
+    for (0..4) |i| {
+        v.hints.brands[i] = .{ .brand = hint, .version = hint };
+        v.hints.full_list[i] = .{ .brand = hint, .version = hint };
+    }
+    for (&v.restore) |*o| o.* = origin;
+    const got = (try roundTrip(.{ .emulation = v })).emulation;
+    try std.testing.expectEqual(message_mod.max_emu_ua_bytes, got.ua.len);
+    try std.testing.expectEqual(@as(u8, 8), got.restore_count);
+    var buf: [max_frame_bytes]u8 = undefined;
+    const len = try encode(.{ .emulation = v }, &buf);
+    try std.testing.expectEqual(prefix_len + common_len + emu_fields.max_emulation_body_bytes, len); // 상한 셈이 실제와 같다
+    try std.testing.expect(len > 3 * 1024 and len <= max_frame_bytes); // 계획 §8 의 어림(≈2.2 KiB)에 출처 여덟이 더해졌다
+}
+
+test "W9e①: 흉내 frame 을 무작위로 망가뜨려도 풀기는 무너지지 않고 풀린 값은 닫힌 칸 규칙을 지킨다" {
+    var prng = std.Random.DefaultPrng.init(0x9e1);
+    const r = prng.random();
+    var st: message_mod.EmulationState = .{ .browser = 3, .generation = 2, .fit_scale = 0.45, .active_mask = 3, .failed_mask = 4, .reason = .process_shared_conflict, .auto_count = 1 };
+    st.auto_allowed[0] = "https://a.test";
+    const seeds = [_]Message{
+        .{ .emulation = testEmulation() },
+        .{ .emulation = .{ .browser = 3, .generation = 1, .flags = .{ .geo = true, .geo_unavailable = true, .timezone = true }, .timezone = "Etc/GMT+5" } },
+        .{ .emulation_state = st },
+        .{ .emulation_state = .{ .browser = 3, .generation = 9 } },
+    };
+    var buf: [max_frame_bytes]u8 = undefined;
+    var ok: usize = 0;
+    for (0..200_000) |i| {
+        const seed = seeds[i % seeds.len];
+        const len = try encode(seed, &buf);
+        var frame: [1024]u8 = undefined;
+        @memcpy(frame[0..len], buf[0..len]);
+        var n = len;
+        for (0..r.intRangeAtMost(usize, 1, 6)) |_| {
+            switch (r.intRangeLessThan(u8, 0, 3)) {
+                0 => frame[r.intRangeLessThan(usize, 0, n)] = r.int(u8),
+                1 => n = r.intRangeAtMost(usize, 1, n),
+                else => if (n < frame.len) {
+                    frame[n] = r.int(u8);
+                    n += 1;
+                },
+            }
+        }
+        if (r.boolean() and n >= 4) std.mem.writeInt(u32, frame[0..4], @intCast(n - 4), .big);
+        const m = decodeExact(frame[0..n]) catch continue;
+        ok += 1;
+        switch (m) {
+            .emulation => |v| try emu_fields.checkEmulation(v),
+            .emulation_state => |v| try emu_fields.checkState(v),
+            else => {},
+        }
+    }
+    try std.testing.expect(ok > 0);
+}
+
+// W9e① 변이 시험: 닫힌 칸의 경계 — 머리 값으로 나가는 글의 DEL, 언어 목록의 `;`, ICU 의 첫 글자, 시간대의 끝 `/`·빈칸, 가로 4097(세로가
+// 아니어도), 정확히 64 Mpx 는 받는다, 위도·정확도의 아래 경계, http(s) 아닌 출처, 수 밖의 브랜드·전체 목록 다섯, client hints 의 제어 문자,
+// 표시 없는 가로·미디어·색각, 상태의 출처 모양, 줄임의 세로 0·만분의 일 내림.
+test "W9e① 변이: 흉내 닫힌 칸의 경계 — DEL·`;`·앞 쉼표·ICU 첫 글자·시간대 끝 `/`·빈칸·가로 4097·64 Mpx 정확히·위도/정확도 아래·출처 모양·브랜드 수 밖·hints 제어 문자·표시 없는 가로/미디어/색각·상태 출처·줄임" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    const good = testEmulation();
+    var bads: [20]message_mod.Emulation = @splat(good);
+    bads[0].ua = "Mozilla\x7f";
+    bads[1].accept_language = "fr;FR";
+    bads[2].icu_locale = "1fr";
+    bads[3].timezone = "Asia/";
+    bads[4].timezone = "Asia/Kol kata";
+    bads[5].width = 4097;
+    bads[6].accuracy = -0.5;
+    bads[7].latitude = -90.5;
+    bads[8].restore[0] = "ftp://a.test";
+    bads[9].hints.full_count = 5;
+    bads[10].hints.brands[3] = .{ .brand = "X", .version = "1" }; // brand_count 2 밖
+    bads[11].hints.model = "a\x01";
+    bads[12] = .{ .browser = 7, .flags = .{ .landscape = true } };
+    bads[13].flags.media = false; // 미디어 값이 남았다
+    bads[14].flags.vision = false; // 색각 값이 남았다
+    bads[15].platform = "p\x7f";
+    bads[16].hints.full_count = 1; // 전체 목록 칸이 비었다
+    bads[17].hints.brands[0].brand = "B\x7f";
+    bads[18].hints = .{ .platform = "Android" }; // hints 표시인데 브랜드가 하나도 없다(칸은 모두 비었다)
+    bads[19].accept_language = ",fr"; // 목록이 쉼표로 시작한다
+    for (bads, 0..) |b, i| {
+        if (!std.meta.isError(encode(.{ .emulation = b }, &buf))) {
+            std.debug.print("bad emulation {d} encoded\n", .{i});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // 정확히 64 Mpx(4096 × 4096 × 2²)는 받는다.
+    _ = try encode(.{ .emulation = .{ .browser = 1, .flags = .{ .viewport = true }, .width = 4096, .height = 4096, .dsf = 2 } }, &buf);
+    var st: message_mod.EmulationState = .{ .browser = 1, .auto_count = 1 };
+    st.auto_allowed[0] = "file://x";
+    try std.testing.expectError(error.InvalidEmulation, encode(.{ .emulation_state = st }, &buf));
+    try std.testing.expectEqual(@as(f32, 1), emu_fields.fitScale(640, 0, 390, 844)); // 세로를 모르면 1
+    try std.testing.expectEqual(@as(f32, 0.6666), emu_fields.fitScale(200, 200, 300, 300)); // 만분의 일로 내린다(반올림하면 pane 을 넘는다)
 }

@@ -59,6 +59,7 @@ pub const browser_help =
     \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
     \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ⊘)
     \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site; requests made by iframes or workers of a site your permission does not cover are never mocked); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; needs the network and control permissions first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ▣)
+    \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; asks once per site on your tabs and works only while that site is shown; not on tabs the agent opened; the tab title shows ◫)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -133,6 +134,8 @@ pub const Request = union(enum) {
     network_block: NetworkBlockCmd,
     /// `browser network-mock`(W9d④ — Chromium). 응답 {rules:[…], other_rules, total, bytes, state, strict, …}.
     network_mock: NetworkMockCmd,
+    /// `browser emulate`(W9e① — Chromium). 응답 {emulation:{…}, site, active, state, not_covered, …}.
+    emulate: EmulateCmd,
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -156,9 +159,177 @@ pub const Request = union(enum) {
             .network_record => .network_record,
             .network_block => .network_block,
             .network_mock => .network_mock,
+            .emulate => .emulate,
         };
     }
 };
+
+/// W9e①: `browser emulate` — 사람의 꼴(`--viewport 390x844@3,mobile,touch`·`--user-agent S`·`--locale L`·`--no-x` …)과 MCP 의 꼴(`--action a`·
+/// 무리마다 JSON 한 토큰 `--viewport-json=<객체|null>` …)을 함께 받는다. 값의 범위·모양은 서버가 본다(`-32602` + `data.reason`) — 여기서는 꼴만.
+pub const EmulateCmd = struct {
+    surface_id: u64,
+    action: Action = .set,
+    reload: bool = false,
+    viewport: Change(Viewport) = .keep,
+    user_agent: Change(UserAgent) = .keep,
+    locale: Change([]const u8) = .keep,
+    timezone: Change([]const u8) = .keep,
+    geolocation: Change(Geo) = .keep,
+    media: Change(Media) = .keep,
+    vision: Change([]const u8) = .keep,
+    /// MCP 꼴 — 무리의 JSON 글(그대로 싣는다). 사람의 꼴과 함께 주면 거절.
+    json: [group_names.len]?[]const u8 = @splat(null),
+
+    pub const Action = enum { set, clear, get };
+    pub fn Change(comptime T: type) type {
+        return union(enum) { keep, clear, set: T };
+    }
+    pub const Viewport = struct { width: u32, height: u32, dsf: ?f64 = null, mobile: bool = false, touch: bool = false, landscape: bool = false };
+    pub const UserAgent = struct { ua: []const u8, platform: ?[]const u8 = null, client_hints: ?[]const u8 = null };
+    pub const Geo = struct { unavailable: bool = false, latitude: f64 = 0, longitude: f64 = 0, accuracy: ?f64 = null };
+    pub const Media = struct { type: ?[]const u8 = null, color_scheme: ?[]const u8 = null, reduced_motion: ?[]const u8 = null, forced_colors: ?[]const u8 = null, contrast: ?[]const u8 = null };
+    /// 무리 이름(요청 JSON 의 키·MCP 의 `--<이름>-json` 옵션).
+    pub const group_names = [_][]const u8{ "viewport", "user_agent", "locale", "timezone", "geolocation", "media", "vision" };
+};
+
+/// `--viewport WxH[@dpr][,mobile][,touch][,landscape]`.
+fn parseViewportSpec(v: []const u8) ParseError!EmulateCmd.Viewport {
+    var parts = std.mem.splitScalar(u8, v, ',');
+    const size = parts.first();
+    const at = std.mem.indexOfScalar(u8, size, '@');
+    const dims = size[0 .. at orelse size.len];
+    // `390x844`·`390X844`·`390×844`(요약 글의 꼴 — × 는 UTF-8 두 바이트).
+    const sep: struct { at: usize, len: usize } = if (std.mem.indexOf(u8, dims, "\u{00D7}")) |k| .{ .at = k, .len = 2 } else if (std.mem.indexOfAny(u8, dims, "xX")) |k| .{ .at = k, .len = 1 } else return error.InvalidEmulateArgs;
+    var vp: EmulateCmd.Viewport = .{
+        .width = std.fmt.parseInt(u32, dims[0..sep.at], 10) catch return error.InvalidEmulateArgs,
+        .height = std.fmt.parseInt(u32, dims[sep.at + sep.len ..], 10) catch return error.InvalidEmulateArgs,
+    };
+    if (at) |a| vp.dsf = std.fmt.parseFloat(f64, size[a + 1 ..]) catch return error.InvalidEmulateArgs;
+    while (parts.next()) |flag| {
+        if (eq(flag, "mobile")) vp.mobile = true else if (eq(flag, "touch")) vp.touch = true else if (eq(flag, "landscape")) vp.landscape = true else return error.InvalidEmulateArgs;
+    }
+    return vp;
+}
+
+/// `--geolocation lat,lon[,acc]` 또는 `unavailable`.
+fn parseGeoSpec(v: []const u8) ParseError!EmulateCmd.Geo {
+    if (eq(v, "unavailable")) return .{ .unavailable = true };
+    var parts = std.mem.splitScalar(u8, v, ',');
+    var g: EmulateCmd.Geo = .{
+        .latitude = std.fmt.parseFloat(f64, parts.first()) catch return error.InvalidEmulateArgs,
+        .longitude = std.fmt.parseFloat(f64, parts.next() orelse return error.InvalidEmulateArgs) catch return error.InvalidEmulateArgs,
+    };
+    if (parts.next()) |acc| g.accuracy = std.fmt.parseFloat(f64, acc) catch return error.InvalidEmulateArgs;
+    if (parts.next() != null) return error.InvalidEmulateArgs;
+    return g;
+}
+
+/// `emulate --surface <id> (...)`(W9e①). 무리마다 값·`--no-x`(지움)·MCP 의 JSON 중 하나만, `--clear`·`--get` 은 무리와 함께 주지 않는다.
+fn parseEmulateArgs(rest: []const []const u8) ParseError!EmulateCmd {
+    var surface: ?u64 = null;
+    var cmd: EmulateCmd = .{ .surface_id = 0 };
+    var action: ?EmulateCmd.Action = null;
+    var media: EmulateCmd.Media = .{};
+    var media_given = false;
+    var ua_text: ?[]const u8 = null;
+    var platform: ?[]const u8 = null;
+    var hints: ?[]const u8 = null;
+    const Set = struct {
+        fn change(comptime T: type, field: *EmulateCmd.Change(T), next: EmulateCmd.Change(T)) ParseError!void {
+            if (field.* != .keep) return error.InvalidEmulateArgs;
+            field.* = next;
+        }
+    };
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (matchOpt(a, "--surface")) {
+            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+        } else if (matchOpt(a, "--viewport")) {
+            try Set.change(EmulateCmd.Viewport, &cmd.viewport, .{ .set = try parseViewportSpec(try optValue(rest, &i, "--viewport")) });
+        } else if (matchOpt(a, "--user-agent")) {
+            if (ua_text != null) return error.InvalidEmulateArgs;
+            ua_text = try optValue(rest, &i, "--user-agent");
+        } else if (matchOpt(a, "--platform")) {
+            if (platform != null) return error.InvalidEmulateArgs;
+            platform = try optValue(rest, &i, "--platform");
+        } else if (matchOpt(a, "--client-hints")) {
+            if (hints != null) return error.InvalidEmulateArgs;
+            hints = try optValue(rest, &i, "--client-hints");
+        } else if (matchOpt(a, "--locale")) {
+            try Set.change([]const u8, &cmd.locale, .{ .set = try optValue(rest, &i, "--locale") });
+        } else if (matchOpt(a, "--timezone")) {
+            try Set.change([]const u8, &cmd.timezone, .{ .set = try optValue(rest, &i, "--timezone") });
+        } else if (matchOpt(a, "--geolocation")) {
+            try Set.change(EmulateCmd.Geo, &cmd.geolocation, .{ .set = try parseGeoSpec(try optValue(rest, &i, "--geolocation")) });
+        } else if (matchOpt(a, "--vision")) {
+            try Set.change([]const u8, &cmd.vision, .{ .set = try optValue(rest, &i, "--vision") });
+        } else if (matchOpt(a, "--media") or matchOpt(a, "--color-scheme") or matchOpt(a, "--reduced-motion") or matchOpt(a, "--forced-colors") or matchOpt(a, "--contrast")) {
+            const name: []const u8 = for ([_][]const u8{ "--media", "--color-scheme", "--reduced-motion", "--forced-colors", "--contrast" }) |n| {
+                if (matchOpt(a, n)) break n;
+            } else unreachable;
+            const v = try optValue(rest, &i, name);
+            const slot: *?[]const u8 = if (eq(name, "--media")) &media.type else if (eq(name, "--color-scheme")) &media.color_scheme else if (eq(name, "--reduced-motion")) &media.reduced_motion else if (eq(name, "--forced-colors")) &media.forced_colors else &media.contrast;
+            if (slot.* != null) return error.InvalidEmulateArgs;
+            slot.* = v;
+            media_given = true;
+        } else if (eq(a, "--no-viewport") or eq(a, "--no-user-agent") or eq(a, "--no-locale") or eq(a, "--no-timezone") or eq(a, "--no-geolocation") or eq(a, "--no-media") or eq(a, "--no-vision")) {
+            if (eq(a, "--no-viewport")) try Set.change(EmulateCmd.Viewport, &cmd.viewport, .clear) else if (eq(a, "--no-user-agent")) try Set.change(EmulateCmd.UserAgent, &cmd.user_agent, .clear) else if (eq(a, "--no-locale")) try Set.change([]const u8, &cmd.locale, .clear) else if (eq(a, "--no-timezone")) try Set.change([]const u8, &cmd.timezone, .clear) else if (eq(a, "--no-geolocation")) try Set.change(EmulateCmd.Geo, &cmd.geolocation, .clear) else if (eq(a, "--no-media")) try Set.change(EmulateCmd.Media, &cmd.media, .clear) else try Set.change([]const u8, &cmd.vision, .clear);
+            i += 1;
+        } else if (eq(a, "--reload")) {
+            cmd.reload = true;
+            i += 1;
+        } else if (eq(a, "--clear") or eq(a, "--get")) {
+            const want: EmulateCmd.Action = if (eq(a, "--clear")) .clear else .get;
+            if (action) |c| if (c != want) return error.InvalidEmulateArgs;
+            action = want;
+            i += 1;
+        } else if (matchOpt(a, "--action")) {
+            const want = std.meta.stringToEnum(EmulateCmd.Action, try optValue(rest, &i, "--action")) orelse return error.InvalidEmulateArgs;
+            if (action) |c| if (c != want) return error.InvalidEmulateArgs;
+            action = want;
+        } else if (std.mem.startsWith(u8, a, "--") and std.mem.endsWith(u8, if (std.mem.indexOfScalar(u8, a, '=')) |e| a[0..e] else a, "-json")) {
+            // MCP 꼴: `--<무리>-json=<JSON>`(무리 이름의 `_` 는 `-`).
+            const head = if (std.mem.indexOfScalar(u8, a, '=')) |e| a[0..e] else a;
+            const gi = for (EmulateCmd.group_names, 0..) |g, k| {
+                var nb: [32]u8 = undefined;
+                const flag = std.fmt.bufPrint(&nb, "--{s}-json", .{g}) catch unreachable;
+                for (flag) |*ch| if (ch.* == '_') {
+                    ch.* = '-';
+                };
+                if (eq(head, flag)) break k;
+            } else return error.UnknownOption;
+            if (cmd.json[gi] != null) return error.InvalidEmulateArgs;
+            const text = try optValue(rest, &i, head);
+            // JSON 꼴인지만 여기서 본다(값의 뜻은 서버가 — 까닭과 함께).
+            var vbuf: [32 * 1024]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&vbuf);
+            if (!(std.json.validate(fba.allocator(), text) catch false)) return error.InvalidEmulateArgs;
+            cmd.json[gi] = text;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else return error.UnexpectedArgument;
+    }
+    if (ua_text) |u| {
+        try Set.change(EmulateCmd.UserAgent, &cmd.user_agent, .{ .set = .{ .ua = u, .platform = platform, .client_hints = hints } });
+    } else if (platform != null or hints != null) return error.InvalidEmulateArgs; // --platform·--client-hints 는 --user-agent 와만
+    if (media_given) try Set.change(EmulateCmd.Media, &cmd.media, .{ .set = media });
+    // 사람의 꼴과 JSON 꼴을 한 무리에 함께 주지 않는다.
+    const human = [_]bool{ cmd.viewport != .keep, cmd.user_agent != .keep, cmd.locale != .keep, cmd.timezone != .keep, cmd.geolocation != .keep, cmd.media != .keep, cmd.vision != .keep };
+    var any = false;
+    for (human, cmd.json) |h, j| {
+        if (h and j != null) return error.InvalidEmulateArgs;
+        any = any or h or j != null;
+    }
+    cmd.action = action orelse .set;
+    switch (cmd.action) {
+        .set => if (!any) return error.InvalidEmulateArgs, // 바꿀 것이 없다(--get 으로 본다)
+        .clear => if (any) return error.InvalidEmulateArgs,
+        .get => if (any or cmd.reload) return error.InvalidEmulateArgs,
+    }
+    cmd.surface_id = surface orelse return error.MissingSurface;
+    return cmd;
+}
 
 /// W9d③: `browser network-block` — 사람의 꼴(`--add P`·`--remove P`·`--rule N`·`--clear`·`--list`·`--strict on|off`)과 MCP 의 꼴(`--action a`·
 /// `--pattern P`·`--rule N`·`--on`·`--off`)을 함께 받는다(MCP 도구는 인자 하나하나를 옵션 하나로 옮긴다).
@@ -399,6 +570,7 @@ pub const ParseError = error{
     InvalidBlockAction, // `network-block` 에 동작이 없거나 둘 이상(W9d③)
     InvalidBlockArgs, // `network-block` 의 동작과 맞지 않는 옵션(패턴 없는 --add·--type 은 --add 와만·--on/--off 는 --strict 와만), 빈 패턴, 상한 넘음
     InvalidMockAction, // `network-mock` 에 동작이 없거나 둘 이상(W9d④)
+    InvalidEmulateArgs, // `emulate` 의 꼴 — 값 둘·`--no-x` 와 값·사람과 JSON 꼴을 한 무리에, --platform·--client-hints 만, 바꿀 것 없는 set, 무리와 함께 준 --clear·--get(W9e①)
     InvalidMockArgs, // `network-mock` 의 동작과 맞지 않는 옵션(응답 옵션은 --add 와만), 패턴 둘, 본문 둘, 잘못된 --header·--status, 상한 넘음
 };
 
@@ -584,6 +756,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (eq(sub, "network-record")) return .{ .request = .{ .network_record = try parseNetworkRecordArgs(rest) } };
     if (eq(sub, "network-block")) return .{ .request = .{ .network_block = try parseNetworkBlockArgs(rest) } };
     if (eq(sub, "network-mock")) return .{ .request = .{ .network_mock = try parseNetworkMockArgs(rest) } };
+    if (eq(sub, "emulate")) return .{ .request = .{ .emulate = try parseEmulateArgs(rest) } }; // W9e①
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -1564,7 +1737,7 @@ fn hasHelpFlag(args: []const []const u8) bool {
 /// 다음 토큰을 값으로 받는 옵션인가(`--opt=값` 꼴과 값 없는 플래그는 아니다).
 fn takesValue(opt: []const u8) bool {
     if (!std.mem.startsWith(u8, opt, "--") or std.mem.indexOfScalar(u8, opt, '=') != null) return false;
-    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--accept", "--dismiss", "--list", "--blocked", "--mocked" }) |flag| if (eq(opt, flag)) return false;
+    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--accept", "--dismiss", "--list", "--blocked", "--mocked", "--get", "--reload", "--no-viewport", "--no-user-agent", "--no-locale", "--no-timezone", "--no-geolocation", "--no-media", "--no-vision" }) |flag| if (eq(opt, flag)) return false;
     return true;
 }
 
@@ -1843,6 +2016,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             }
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkMock", .params = .{ .object = obj } } });
         },
+        .emulate => |e| return buildEmulateRequest(gpa, e, id),
         .open => |o| {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
@@ -1986,7 +2160,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock, emulate };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -2111,6 +2285,12 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 if (o.get("mocking")) |m| if (m == .object) {
                     const n = intField(m.object.get("rules")) orelse 0;
                     try w.print("  ▣ mocking ({d} rule{s}{s})", .{ n, if (n == 1) "" else "s", if (boolField(m.object.get("strict"))) ", strict" else "" });
+                };
+                // W9e①: 기기 흉내(탭 제목의 ◫ 와 같은 신호) — 요약은 maru 가 만든 글이지만 표시 안전하게.
+                if (o.get("emulation")) |e| if (e == .object) {
+                    try w.writeAll("  \u{25EB} emulating (");
+                    try writePageText(gpa, w, strField(e.object.get("summary")), false);
+                    try w.writeAll(")");
                 };
                 try w.writeAll("\n");
             }
@@ -2268,6 +2448,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         .network => return renderNetwork(gpa, result, w),
         .network_block => return renderNetworkBlock(gpa, result, w),
         .network_mock => return renderNetworkMock(gpa, result, w),
+        .emulate => return renderEmulate(gpa, result, w),
         .network_request => return renderNetworkRequest(gpa, result, w),
         .network_record => {
             // W9d②: 켬은 곧 답한다 — sidecar 가 켜졌다고 알리기 전이면 starting(`browser network` 의 recording 이 이어 알린다).
@@ -2442,6 +2623,206 @@ fn renderNetworkBlock(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *st
 
 /// W9d④: `browser.networkMock` 의 결과 — 제 규칙(번호·패턴·사이트·상태·종류·메서드·본문 크기·머리·수·잠듦), 다른 pane 의 규칙 수, 본문 바이트,
 /// 엄격 모드, sidecar 의 상태, 서비스 워커·경고. 패턴·사이트·머리 이름은 에이전트가 준 글이지만 표시 안전하게.
+/// W9e①: `browser.emulate {id, action, reload?, <무리>…}` — 사람의 꼴은 객체로 짓고, MCP 의 JSON 꼴은 그대로 싣는다.
+fn buildEmulateRequest(gpa: std.mem.Allocator, e: EmulateCmd, id: cp.Id) (std.mem.Allocator.Error || error{InvalidArgs})![]u8 {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(arena, "id", .{ .integer = @intCast(e.surface_id) });
+    try obj.put(arena, "action", .{ .string = @tagName(e.action) });
+    if (e.reload) try obj.put(arena, "reload", .{ .bool = true });
+    switch (e.viewport) {
+        .keep => {},
+        .clear => try obj.put(arena, "viewport", .null),
+        .set => |v| {
+            var o: std.json.ObjectMap = .empty;
+            try o.put(arena, "width", .{ .integer = v.width });
+            try o.put(arena, "height", .{ .integer = v.height });
+            if (v.dsf) |d| try o.put(arena, "device_scale_factor", .{ .float = d });
+            if (v.mobile) try o.put(arena, "mobile", .{ .bool = true });
+            if (v.touch) try o.put(arena, "touch", .{ .bool = true });
+            if (v.landscape) try o.put(arena, "landscape", .{ .bool = true });
+            try obj.put(arena, "viewport", .{ .object = o });
+        },
+    }
+    switch (e.user_agent) {
+        .keep => {},
+        .clear => try obj.put(arena, "user_agent", .null),
+        .set => |u| {
+            var o: std.json.ObjectMap = .empty;
+            try o.put(arena, "ua", .{ .string = u.ua });
+            if (u.platform) |pl| try o.put(arena, "platform", .{ .string = pl });
+            if (u.client_hints) |h| {
+                // `derive`·`none` 은 글, 그 밖은 JSON 객체(서버가 칸을 본다). JSON 이 아니면 글로 보내 서버가 까닭(`client_hints_invalid`)을 답한다.
+                const v: std.json.Value = if (h.len > 0 and h[0] == '{') (std.json.parseFromSliceLeaky(std.json.Value, arena, h, .{}) catch std.json.Value{ .string = h }) else .{ .string = h };
+                try o.put(arena, "client_hints", v);
+            }
+            try obj.put(arena, "user_agent", .{ .object = o });
+        },
+    }
+    const texts = [_]struct { key: []const u8, ch: EmulateCmd.Change([]const u8) }{ .{ .key = "locale", .ch = e.locale }, .{ .key = "timezone", .ch = e.timezone }, .{ .key = "vision", .ch = e.vision } };
+    for (texts) |f| switch (f.ch) {
+        .keep => {},
+        .clear => try obj.put(arena, f.key, .null),
+        .set => |t| try obj.put(arena, f.key, .{ .string = t }),
+    };
+    switch (e.geolocation) {
+        .keep => {},
+        .clear => try obj.put(arena, "geolocation", .null),
+        .set => |g| if (g.unavailable) try obj.put(arena, "geolocation", .{ .string = "unavailable" }) else {
+            var o: std.json.ObjectMap = .empty;
+            try o.put(arena, "latitude", .{ .float = g.latitude });
+            try o.put(arena, "longitude", .{ .float = g.longitude });
+            if (g.accuracy) |acc| try o.put(arena, "accuracy", .{ .float = acc });
+            try obj.put(arena, "geolocation", .{ .object = o });
+        },
+    }
+    switch (e.media) {
+        .keep => {},
+        .clear => try obj.put(arena, "media", .null),
+        .set => |m| {
+            var o: std.json.ObjectMap = .empty;
+            const fields = [_]struct { key: []const u8, v: ?[]const u8 }{ .{ .key = "type", .v = m.type }, .{ .key = "color_scheme", .v = m.color_scheme }, .{ .key = "reduced_motion", .v = m.reduced_motion }, .{ .key = "forced_colors", .v = m.forced_colors }, .{ .key = "contrast", .v = m.contrast } };
+            for (fields) |f| if (f.v) |v| try o.put(arena, f.key, .{ .string = v });
+            try obj.put(arena, "media", .{ .object = o });
+        },
+    }
+    for (e.json, EmulateCmd.group_names) |j, name| if (j) |text| {
+        const v = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch return error.InvalidArgs;
+        try obj.put(arena, name, v);
+    };
+    return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.emulate", .params = .{ .object = obj } } });
+}
+
+/// W9e①: `browser.emulate` 의 결과 — 무리마다 한 줄(값은 에이전트가 준 글이지만 표시 안전하게), 상태·사이트·실패, 덮지 않는 것·같은 프로세스의
+/// 창에 따라가는 것, 경고.
+fn renderEmulate(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
+    const emu = switch (result.get("emulation") orelse std.json.Value{ .null = {} }) {
+        .object => |o| o,
+        else => {
+            try w.writeAll("error: malformed emulate result\n");
+            return false;
+        },
+    };
+    const state = strField(result.get("state"));
+    if (emu.count() == 0) {
+        // 지웠어도 지움이 아직 걸리지 않았을 수 있다(W9e① 변이 WE53 — 렌더러가 죽어 쌓였거나, 보내지 못했다).
+        if (eq(state, "waiting_renderer")) {
+            try w.writeAll("no emulation set on this tab — the page's renderer is gone, so the old emulation stays until the page loads again (state waiting_renderer)\n");
+        } else if (eq(state, "failed")) {
+            try w.writeAll("no emulation set on this tab, but removing it failed — the page may still see the old device (state failed)\n");
+            try writeEmulateFailures(gpa, result, w);
+        } else if (eq(state, "sent")) {
+            try w.writeAll("no emulation set on this tab — removal sent, not yet confirmed (state sent)\n");
+        } else try w.writeAll("no emulation on this tab (it shows the real device)\n");
+        return true;
+    }
+    try w.writeAll("emulating on this tab — state ");
+    try writePageText(gpa, w, state, false);
+    if (result.get("site")) |site| if (site == .string) {
+        try w.writeAll(", only on ");
+        try writePageText(gpa, w, site.string, false);
+    };
+    if (!boolField(result.get("active"))) try w.writeAll(" (off-site — not applied now)");
+    if (eq(state, "waiting_renderer")) try w.writeAll(" (the page's renderer is gone — changes apply when the page loads again)");
+    try w.writeAll("\n");
+    if (emu.get("viewport")) |v| if (v == .object) {
+        const o = v.object;
+        try w.print("  viewport {d}\u{00D7}{d}", .{ intField(o.get("width")) orelse 0, intField(o.get("height")) orelse 0 });
+        if (o.get("device_scale_factor")) |d| switch (d) {
+            .float => |f| try w.print(" @{d}", .{f}),
+            .integer => |n| try w.print(" @{d}", .{n}),
+            else => {},
+        };
+        if (boolField(o.get("mobile"))) try w.writeAll(" mobile");
+        if (boolField(o.get("touch"))) try w.writeAll(" touch");
+        if (boolField(o.get("landscape"))) try w.writeAll(" landscape");
+        if (eq(strField(o.get("shown")), "fit")) {
+            const f: f64 = switch (o.get("fit_scale") orelse std.json.Value{ .null = {} }) {
+                .float => |x| x,
+                .integer => |n| @floatFromInt(n),
+                else => 1,
+            };
+            try w.print(" — the user sees it scaled to fit the pane ({d:.2}×)", .{f});
+        }
+        try w.writeAll("\n");
+    };
+    if (emu.get("user_agent")) |v| if (v == .object) {
+        try w.writeAll("  user agent ");
+        try writePageText(gpa, w, strField(v.object.get("ua")), true);
+        if (v.object.get("platform")) |pl| if (pl == .string) {
+            try w.writeAll(" platform ");
+            try writePageText(gpa, w, pl.string, true);
+        };
+        try w.writeAll(" (client hints ");
+        try writePageText(gpa, w, strField(v.object.get("client_hints")), false);
+        try w.writeAll(")\n");
+    };
+    inline for (.{ "locale", "timezone", "vision" }) |k| if (emu.get(k)) |v| if (v == .string) {
+        try w.writeAll("  " ++ k ++ " ");
+        try writePageText(gpa, w, v.string, false);
+        try w.writeAll("\n");
+    };
+    if (emu.get("geolocation")) |v| switch (v) {
+        .string => try w.writeAll("  geolocation unavailable (pages get POSITION_UNAVAILABLE)\n"),
+        .object => |o| {
+            const num = struct {
+                fn f(x: ?std.json.Value) f64 {
+                    return switch (x orelse return 0) {
+                        .float => |y| y,
+                        .integer => |n| @floatFromInt(n),
+                        else => 0,
+                    };
+                }
+            }.f;
+            try w.print("  geolocation {d},{d} (±{d} m — sites asking for location get these coordinates without a prompt; Chromium holds the request while the tab is hidden)\n", .{ num(o.get("latitude")), num(o.get("longitude")), num(o.get("accuracy")) });
+        },
+        else => {},
+    };
+    if (emu.get("media")) |v| if (v == .object) {
+        try w.writeAll("  media");
+        var it = v.object.iterator();
+        while (it.next()) |e| if (e.value_ptr.* == .string) {
+            try w.print(" {s}=", .{e.key_ptr.*});
+            try writePageText(gpa, w, e.value_ptr.string, false);
+        };
+        try w.writeAll("\n");
+    };
+    try writeEmulateFailures(gpa, result, w);
+    if (boolField(result.get("reloaded"))) try w.writeAll("reloaded — the first request already carries the new headers\n") else try w.writeAll("request headers (user agent, language) apply from the next navigation — pass --reload to reload now\n");
+    try w.writeAll("not covered: cross-site iframes, service workers, workers started before, worker Accept-Language (they keep the real values)\n");
+    if (result.get("process_shared")) |ps| if (ps == .array and ps.array.items.len > 0) {
+        try w.writeAll("shared with windows in the same renderer process (popups this tab opens):");
+        for (ps.array.items) |x| if (x == .string) {
+            try w.writeAll(" ");
+            try writePageText(gpa, w, x.string, false);
+        };
+        try w.writeAll("\n");
+    };
+    if (result.get("warnings")) |ws_| if (ws_ == .array and ws_.array.items.len > 0) {
+        try w.writeAll("warnings:");
+        for (ws_.array.items) |x| if (x == .string) {
+            try w.writeAll(" ");
+            try writePageText(gpa, w, x.string, false);
+        };
+        try w.writeAll("\n");
+    };
+    try w.writeAll("the tab title shows \u{25EB} while it emulates\n");
+    return true;
+}
+
+/// `failed:[{group, reason}]` 줄들(`browser.emulate`).
+fn writeEmulateFailures(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !void {
+    if (result.get("failed")) |f| if (f == .array) for (f.array.items) |item| if (item == .object) {
+        try w.writeAll("failed: ");
+        try writePageText(gpa, w, strField(item.object.get("group")), false);
+        try w.writeAll(" (");
+        try writePageText(gpa, w, strField(item.object.get("reason")), false);
+        try w.writeAll(")\n");
+    };
+}
+
 fn renderNetworkMock(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
     const rules = switch (result.get("rules") orelse std.json.Value{ .null = {} }) {
         .array => |a| a,
@@ -4007,6 +4388,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
         \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ⊘)
         \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site; requests made by iframes or workers of a site your permission does not cover are never mocked); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; needs the network and control permissions first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ▣)
+        \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; asks once per site on your tabs and works only while that site is shown; not on tabs the agent opened; the tab title shows ◫)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -5678,4 +6060,114 @@ test "W9d④ v1 SEVERE-1: 결과 글 — 규칙의 허락 밖 프레임 수(othe
     const text = out.written();
     try testing.expect(std.mem.indexOf(u8, text, "hits 0, other-site frame not mocked 4\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "note: an iframe or worker of a site your permission does not cover made requests a rule matched — they went to the real server") != null);
+}
+
+// ── W9e①: browser emulate ──
+// 시험이 증명하는 것: 사람의 꼴(`--viewport 390x844@3,mobile,touch`·`--user-agent`·`--platform`·`--client-hints`·`--locale`·`--timezone`·
+// `--geolocation lat,lon[,acc]|unavailable`·미디어 다섯·`--vision`·`--no-x`·`--reload`·`--clear`·`--get`)과 MCP 꼴(`--action`·`--<무리>-json`)을
+// 함께 받고 거절은 `InvalidEmulateArgs`(값 둘·지움과 값·사람과 JSON 을 한 무리에·UA 없는 platform·바꿀 것 없는 set·무리와 함께 준 clear/get),
+// 요청 모양(지움은 null, 덧쓰기는 준 무리만), 결과 글(무리 줄·사이트 밖·실패·덮지 않는 것·◫), 목록 줄 끝의 ◫ emulating.
+
+test "W9e①: emulate 파서 — 사람의 꼴과 MCP 꼴, 거절은 InvalidEmulateArgs" {
+    const a = (try parse(&.{ "emulate", "--surface", "9", "--viewport", "390x844@3,mobile,touch", "--user-agent", "UA/1", "--platform", "Linux armv8l", "--client-hints", "derive", "--locale=fr-FR", "--timezone", "Asia/Kolkata", "--geolocation", "48.85,2.35,20", "--color-scheme", "light", "--forced-colors", "active", "--vision", "deuteranopia", "--reload" })).request.emulate;
+    try testing.expectEqual(EmulateCmd.Action.set, a.action);
+    try testing.expect(a.reload);
+    try testing.expectEqual(@as(u32, 390), a.viewport.set.width);
+    try testing.expectEqual(@as(f64, 3), a.viewport.set.dsf.?);
+    try testing.expect(a.viewport.set.mobile and a.viewport.set.touch and !a.viewport.set.landscape);
+    try testing.expectEqualStrings("Linux armv8l", a.user_agent.set.platform.?);
+    try testing.expectEqual(@as(f64, 20), a.geolocation.set.accuracy.?);
+    try testing.expectEqualStrings("light", a.media.set.color_scheme.?);
+    try testing.expect(a.media.set.type == null);
+    try testing.expectEqual(@as(u32, 844), (try parse(&.{ "emulate", "--surface", "9", "--viewport", "390\u{00D7}844@3" })).request.emulate.viewport.set.height); // 요약 글의 꼴
+    const off = (try parse(&.{ "emulate", "--surface=9", "--no-viewport", "--no-locale", "--geolocation", "unavailable" })).request.emulate;
+    try testing.expect(off.viewport == .clear and off.locale == .clear and off.geolocation.set.unavailable);
+    try testing.expect((try parse(&.{ "emulate", "--surface", "9", "--clear" })).request.emulate.action == .clear);
+    try testing.expect((try parse(&.{ "emulate", "--surface", "9", "--get" })).request.emulate.action == .get);
+    try testing.expect((try parse(&.{ "emulate", "--surface", "9", "--clear", "--reload" })).request.emulate.reload);
+    // MCP 꼴.
+    const m = (try parse(&.{ "emulate", "--surface=9", "--action=set", "--viewport-json={\"width\":390,\"height\":844}", "--user-agent-json=null", "--locale-json=\"fr-FR\"" })).request.emulate;
+    try testing.expect(m.json[0] != null and m.json[1] != null and m.json[2] != null and m.viewport == .keep);
+    // 거절.
+    for ([_][]const []const u8{
+        &.{ "emulate", "--surface", "9" }, // 바꿀 것이 없다
+        &.{ "emulate", "--surface", "9", "--locale", "fr", "--locale", "de" },
+        &.{ "emulate", "--surface", "9", "--locale", "fr", "--no-locale" },
+        &.{ "emulate", "--surface", "9", "--platform", "x" },
+        &.{ "emulate", "--surface", "9", "--clear", "--locale", "fr" },
+        &.{ "emulate", "--surface", "9", "--get", "--reload" },
+        &.{ "emulate", "--surface", "9", "--clear", "--get" },
+        &.{ "emulate", "--surface", "9", "--viewport", "390" },
+        &.{ "emulate", "--surface", "9", "--viewport", "390x844,tablet" },
+        &.{ "emulate", "--surface", "9", "--geolocation", "48" },
+        &.{ "emulate", "--surface", "9", "--color-scheme", "light", "--no-media" },
+        &.{ "emulate", "--surface", "9", "--locale", "fr", "--locale-json=\"de\"" },
+        &.{ "emulate", "--surface", "9", "--viewport-json={bad" },
+        &.{ "emulate", "--surface", "9", "--action=nope" },
+    }) |args| try testing.expectError(error.InvalidEmulateArgs, parse(args));
+    try testing.expectError(error.UnknownOption, parse(&.{ "emulate", "--surface", "9", "--zoom-json=1" }));
+    try testing.expectError(error.MissingSurface, parse(&.{ "emulate", "--get" }));
+}
+
+// W9e① 변이 시험: 위치는 셋까지(넷째 조각은 거절), --platform·--client-hints 는 --user-agent 와만(다른 무리와 함께여도), 미디어 칸은 한 번씩,
+// 값을 받지 않는 깃발(--get·--reload·--no-x) 뒤의 -h 는 도움말이다(값으로 먹지 않는다).
+test "W9e① 변이: emulate 파서의 남은 거절 — 위치 넷째 조각·UA 없는 platform·미디어 칸 둘, 값 없는 깃발 뒤의 -h" {
+    for ([_][]const []const u8{
+        &.{ "emulate", "--surface", "9", "--geolocation", "48,2,20,9" },
+        &.{ "emulate", "--surface", "9", "--platform", "x", "--timezone", "UTC" },
+        &.{ "emulate", "--surface", "9", "--client-hints", "none", "--timezone", "UTC" },
+        &.{ "emulate", "--surface", "9", "--color-scheme", "light", "--color-scheme", "dark" },
+    }) |args| try testing.expectError(error.InvalidEmulateArgs, parse(args));
+    for ([_][]const u8{ "--get", "--reload", "--no-viewport", "--no-user-agent", "--no-locale", "--no-timezone", "--no-geolocation", "--no-media", "--no-vision" }) |flag| {
+        try testing.expect(hasHelpFlag(&.{ "emulate", "--surface", "9", flag, "-h" }));
+    }
+}
+
+test "W9e①: 요청 모양 — browser.emulate {id, action, reload?, 준 무리만, 지움은 null, client hints 객체, MCP JSON 그대로}" {
+    const a = try buildRequestBytes(testing.allocator, (try parse(&.{ "emulate", "--surface", "9", "--viewport", "390x844@3,mobile", "--no-timezone", "--geolocation", "unavailable", "--media", "print", "--user-agent", "UA", "--client-hints", "{\"brands\":[{\"brand\":\"B\",\"version\":\"1\"}],\"platform\":\"Android\"}" })).request, .{ .number = 1 });
+    defer testing.allocator.free(a);
+    try testing.expect(std.mem.indexOf(u8, a, "\"method\":\"browser.emulate\"") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"action\":\"set\"") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"viewport\":{\"width\":390,\"height\":844,\"device_scale_factor\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"mobile\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"timezone\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"geolocation\":\"unavailable\"") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"media\":{\"type\":\"print\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"client_hints\":{\"brands\":[{\"brand\":\"B\",\"version\":\"1\"}],\"platform\":\"Android\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"locale\"") == null and std.mem.indexOf(u8, a, "\"reload\"") == null);
+    const m = try buildRequestBytes(testing.allocator, (try parse(&.{ "emulate", "--surface=9", "--action=set", "--viewport-json={\"width\":390,\"height\":844}", "--vision-json=null" })).request, .{ .number = 1 });
+    defer testing.allocator.free(m);
+    try testing.expect(std.mem.indexOf(u8, m, "\"viewport\":{\"width\":390,\"height\":844}") != null and std.mem.indexOf(u8, m, "\"vision\":null") != null);
+    const g = try buildRequestBytes(testing.allocator, (try parse(&.{ "emulate", "--surface", "9", "--get" })).request, .{ .number = 1 });
+    defer testing.allocator.free(g);
+    try testing.expect(std.mem.indexOf(u8, g, "\"action\":\"get\"") != null);
+}
+
+test "W9e①: 결과 글 — 무리 줄·맞춤·사이트 밖·실패·덮지 않는 것·같은 프로세스의 창·경고·◫, 빈 흉내, 목록 줄 끝 ◫ emulating" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"emulation\":{\"viewport\":{\"width\":390,\"height\":844,\"device_scale_factor\":3,\"mobile\":true,\"touch\":false,\"landscape\":false,\"fit_scale\":0.4739,\"shown\":\"fit\"},\"user_agent\":{\"ua\":\"UA/1\",\"client_hints\":\"derived\"},\"locale\":\"fr-FR\",\"timezone\":\"Mars/Base\",\"geolocation\":{\"latitude\":48.85,\"longitude\":2.35,\"accuracy\":50}},\"site\":\"a.test\",\"active\":false,\"state\":\"failed\",\"failed\":[{\"group\":\"timezone\",\"reason\":\"timezone_unknown\"}],\"applies\":\"now\",\"headers_from\":\"next_navigation\",\"not_covered\":[\"cross_site_iframes\"],\"process_shared\":[\"timezone\",\"locale\"],\"warnings\":[\"user_sees_scaled\",\"off_site_inactive\"]}}", .emulate, &out.writer));
+    const text = out.written();
+    try testing.expect(std.mem.startsWith(u8, text, "emulating on this tab — state failed, only on a.test (off-site — not applied now)\n  viewport 390\u{00D7}844 @3 mobile — the user sees it scaled to fit the pane (0.47×)\n"));
+    try testing.expect(std.mem.indexOf(u8, text, "failed: timezone (timezone_unknown)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "geolocation 48.85,2.35 (±50 m") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "shared with windows in the same renderer process (popups this tab opens): timezone locale") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "not covered: cross-site iframes") != null);
+    try testing.expect(std.mem.endsWith(u8, text, "the tab title shows \u{25EB} while it emulates\n"));
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"emulation\":{},\"site\":null,\"active\":false,\"state\":\"active\",\"not_covered\":[]}}", .emulate, &out.writer));
+    try testing.expectEqualStrings("no emulation on this tab (it shows the real device)\n", out.written());
+    // 지운 흉내가 아직 걸리지 않았다(WE53) — 렌더러가 죽어 쌓였다, 보내지 못했다.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"emulation\":{},\"site\":null,\"active\":false,\"state\":\"waiting_renderer\",\"not_covered\":[]}}", .emulate, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "the old emulation stays until the page loads again (state waiting_renderer)") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"emulation\":{},\"site\":null,\"active\":false,\"state\":\"failed\",\"failed\":[{\"group\":\"timezone\",\"reason\":\"cdp_error\"}],\"not_covered\":[]}}", .emulate, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "removing it failed") != null and std.mem.indexOf(u8, out.written(), "failed: timezone (cdp_error)") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"emulation\":{\"timezone\":\"UTC\"},\"site\":null,\"active\":true,\"state\":\"waiting_renderer\",\"not_covered\":[]}}", .emulate, &out.writer));
+    try testing.expect(std.mem.startsWith(u8, out.written(), "emulating on this tab — state waiting_renderer (the page's renderer is gone — changes apply when the page loads again)\n"));
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":12,\"url\":\"https://a.test/\",\"title\":\"A\",\"engine\":\"chromium\",\"controllable\":true,\"emulation\":{\"summary\":\"390\u{00D7}844 mobile, off-site\",\"active\":false},\"methods\":[]}]}}", .list, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\u{25EB} emulating (390\u{00D7}844 mobile, off-site)") != null);
 }

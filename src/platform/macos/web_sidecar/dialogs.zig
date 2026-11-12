@@ -258,7 +258,8 @@ pub fn onLoadStart(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
 
 /// `on_load_error` — 주 프레임의 이동이 실패했다. 실패한 이동은 `on_load_start` 없이 오류 페이지로 옛 문서를 바꾸므로(CEF 헤더)
 /// 옛 문서의 미디어 요청을 여기서도 치운다(적대 검증). 멈춤·새 이동으로 끊긴 것(ERR_ABORTED)은 옛 문서가 남거나 새 문서의
-/// `on_load_start` 가 치운다 — 막기 쪽(`blocking.loadAborted` — 엄격의 경계 넘기 셈·진행 중 이동)에만 알린다.
+/// `on_load_start` 가 치운다 — 막기 쪽(`blocking.loadAborted` — 엄격의 경계 넘기 셈·진행 중 이동)과 흉내(`emulation.loadAborted` — 끊긴 홉이
+/// 바꾼 사이트 안팎)에만 알린다.
 pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, error_code: c.cef_errorcode_t, _: [*c]const c.cef_string_t, failed_url: [*c]const c.cef_string_t) callconv(.c) void {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
@@ -266,7 +267,10 @@ pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
     // W9d③ 3 차 검증 MED-A3-1: 하위 프레임의 이동이 문서 없이 끝났다(204·다운로드·오류·막힘 — 끊김 포함) — 막기 쪽의 진행 중 기록만 놓는다.
     if (frame.*.is_main.?(frame) == 0) return @import("blocking.zig").subframeEnded(browser, frame, failed_url, @intCast(error_code));
     // W9d③ 2 차 검증 LOW-A2-2: 끊긴 이동(204·다운로드·멈춤·새 이동에 밀림)도 막기 쪽에는 알린다 — 엄격의 경계 넘기 셈이 그 이동에 묶여 있다.
-    if (error_code == c.ERR_ABORTED) return @import("blocking.zig").loadAborted(browser, failed_url);
+    if (error_code == c.ERR_ABORTED) {
+        @import("emulation.zig").loadAborted(browser, failed_url); // W9e①: 끊긴 홉이 바꾼 사이트 안팎을 옛 문서로 되돌린다
+        return @import("blocking.zig").loadAborted(browser, failed_url);
+    }
     const id = browserId(browser) orelse return;
     permissions.cancelMedia(id);
     // 오류 페이지로 문서가 바뀌었다 — `on_load_start` 가 없으니 툴팁 기억도 여기서 비운다(W6b 적대 검증 — 연결이 거부된 링크

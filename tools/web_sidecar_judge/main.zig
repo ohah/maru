@@ -24,6 +24,7 @@
 //! 들지 않는다)만, `--review-block-v20a2` 는 2 차 검증 1–10 회차(`network_block_v20a2_check.zig` — 2 차 11–20 회차는 `runV20b` 에 더했다)만,
 //! `--review-block-v20a3`·`--review-block-v20c` 는 3 차 검증 1–10 회차(`network_block_v20a3_check.zig`)·11–20 회차(`network_block_check.zig` 의
 //! `runV20c`)만. `--network-mock` 은 W9d④ 가짜 응답(`network_mock_check.zig` — 탭 길·사람의 누름·서비스 워커·풀과 본문 창·재시작·비용)만 본다.
+//! `--emulation` 은 W9e① 기기 흉내(`emulation_check.zig` — 화면 맞춤·입력 좌표·정체·죽은 탭·위치·사이트 묶기·팝업·재시작)만 본다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -69,6 +70,7 @@ const network_block_v20a_check = @import("network_block_v20a_check.zig"); // W9d
 const network_block_v20a2_check = @import("network_block_v20a2_check.zig"); // W9d③ 2 차 20 회 적대 검증 1–10 회차
 const network_block_v20a3_check = @import("network_block_v20a3_check.zig"); // W9d③ 3 차 20 회 적대 검증 1–10 회차
 const network_mock_check = @import("network_mock_check.zig"); // W9d④ 가짜 응답
+const emulation_check = @import("emulation_check.zig"); // W9e① 기기 흉내
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -433,6 +435,15 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         network_mock_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "network-mock", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9e①: 기기 흉내 판정만(`emu-*` — 화면·정체·죽은 탭·위치·사이트 묶기·팝업·재시작, 시나리오마다 따로 띄운 sidecar·프로필).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--emulation")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        emulation_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "emulation", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--closeask")) {

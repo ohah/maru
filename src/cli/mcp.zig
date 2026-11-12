@@ -40,6 +40,9 @@ pub const ArgKind = enum {
     /// W9d④ 가짜 응답 객체 `{status?, content_type?, headers?:{이름:값}, body? | body_base64?}` — 칸마다 CLI `network-mock` 의 옵션으로(`--status=N`·
     /// `--content-type=T`·머리마다 `--header=이름: 값`·`--body=…`·`--body-base64=…`). 모르는 칸·틀린 꼴은 WrongType.
     mock_response,
+    /// W9e① 흉내의 무리 값(객체·글·null — 지움) — 값 그대로 JSON 한 토큰 `--flag=<JSON>`(CLI 가 그대로 싣고 서버가 까닭과 함께 본다). 스키마의
+    /// `type` 은 `json_types`.
+    json_value,
 };
 
 pub const Arg = struct {
@@ -58,6 +61,8 @@ pub const Arg = struct {
     positive: bool = false,
     /// `path_list` 의 개수 상한(스키마 `maxItems` — 파서의 상한과 같게).
     max_items: usize = 0,
+    /// `json_value` 의 스키마 `type`(여럿 — 예: object·null).
+    json_types: []const []const u8 = &.{},
 };
 
 pub const Tool = struct {
@@ -145,6 +150,17 @@ pub const tools = [_]Tool{
         .{ .key = "response", .kind = .mock_response, .description = "with add: the response — {status?, content_type?, headers?:{name:value}, body? or body_base64?}; HEAD gets no body" },
         .{ .key = "rules", .kind = .int_list, .flag = "--rule", .description = "with remove: rule numbers from list (1-32 of them)", .max_items = browser.max_block_patterns },
         .{ .key = "on", .kind = .bool_choice, .flag = "--on", .flag_false = "--off", .description = "with strict: true to turn strict mode on for the site the tab shows, false to turn it off" },
+    }) },
+    .{ .name = "browser_emulate", .subcommand = "emulate", .description = "Make a Chromium tab look like another device to its pages and servers (W9e①). action set changes only the settings you pass (null clears that one), clear removes all, get reads them. viewport {width, height, device_scale_factor?, mobile?, touch?, landscape?} — the user sees it scaled to fit the pane (fit_scale) and your clicks are scaled for you; user_agent {ua, platform?, client_hints?: \"derive\" (only for Chrome-like ua strings) | \"none\" | {brands, platform, ...}}; locale (BCP 47 — Intl, Accept-Language and navigator.language); timezone (IANA); geolocation {latitude, longitude, accuracy?} or \"unavailable\" — sites asking for location get these coordinates without a prompt and never the real location (Chromium holds location requests while the tab is hidden — tabs you open start hidden); media {type, color_scheme, reduced_motion, forced_colors, contrast}; vision (blurredVision, reducedContrast, achromatopsia, deuteranopia, protanopia, tritanopia). Request headers change from the next navigation (reload:true reloads now). Not covered: cross-site iframes, service workers and workers started earlier keep the real values (not_covered); time zone and locale are shared with popups in the same renderer process (process_shared). On the user's tabs the user is asked once per site and it applies only while that site is shown; tabs you opened need no permission. The first pane that sets it owns it; others can only get. The result state is sent, active, failed (see failed) or waiting_renderer (the tab's renderer is gone — the change, a clear too, applies when the page loads again). The tab title shows ◫; at most 10 changes a second.", .args = withSurface(&.{
+        .{ .key = "action", .kind = .string, .flag = "--action", .description = "set, clear or get", .required = true },
+        .{ .key = "reload", .kind = .flag, .flag = "--reload", .description = "with set or clear: reload the tab afterwards so the first request carries the new headers" },
+        .{ .key = "viewport", .kind = .json_value, .flag = "--viewport-json", .json_types = &.{ "object", "null" }, .description = "{width 1-4096, height 1-4096, device_scale_factor? 0.5-4, mobile?, touch?, landscape?} (width×height×dsf² up to 64 megapixels), or null to clear" },
+        .{ .key = "user_agent", .kind = .json_value, .flag = "--user-agent-json", .json_types = &.{ "object", "null" }, .description = "{ua (printable ASCII, up to 512 bytes), platform?, client_hints?}, or null to clear" },
+        .{ .key = "locale", .kind = .json_value, .flag = "--locale-json", .json_types = &.{ "string", "null" }, .description = "BCP 47 tag like fr-FR, or null to clear" },
+        .{ .key = "timezone", .kind = .json_value, .flag = "--timezone-json", .json_types = &.{ "string", "null" }, .description = "IANA name like Asia/Kolkata, or null to clear" },
+        .{ .key = "geolocation", .kind = .json_value, .flag = "--geolocation-json", .json_types = &.{ "object", "string", "null" }, .description = "{latitude, longitude, accuracy? (m, default 50)} or \"unavailable\", or null to clear" },
+        .{ .key = "media", .kind = .json_value, .flag = "--media-json", .json_types = &.{ "object", "null" }, .description = "{type? screen|print, color_scheme? light|dark, reduced_motion? reduce|no-preference, forced_colors? active|none, contrast? more|less|no-preference}, or null to clear" },
+        .{ .key = "vision", .kind = .json_value, .flag = "--vision-json", .json_types = &.{ "string", "null" }, .description = "blurredVision, reducedContrast, achromatopsia, deuteranopia, protanopia or tritanopia, or null to clear" },
     }) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address. On Chromium tabs only http, https and about:blank, and it waits up to 25 seconds for the first load (loaded:false when no page loaded — a download, an empty response, a same-page link, or the time ran out).", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
     .{ .name = "browser_get_url", .subcommand = "get-url", .description = "Print the tab's current document address.", .args = withSurface(&.{}) },
@@ -305,6 +321,16 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                         };
                     },
                     else => return error.WrongType,
+                },
+                // W9e①: 값 그대로(객체·글·null) — 한 토큰으로(`--flag=<JSON>` — 값이 `-` 로 시작해도 옵션으로 읽히지 않는다).
+                .json_value => {
+                    switch (v) {
+                        .object, .string, .null => {},
+                        else => return error.WrongType,
+                    }
+                    var aw: std.Io.Writer.Allocating = .init(arena);
+                    std.json.Stringify.value(v, .{}, &aw.writer) catch return error.OutOfMemory;
+                    try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, aw.written() }));
                 },
                 .mock_response => switch (v) {
                     .object => |r| {
@@ -522,7 +548,10 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "browser_network_block blocks a tab's requests by pattern on the site where you add the rule (the tab title shows ⊘; asked once per site " ++
             "on the user's tabs, not on tabs you opened; strict mode bypasses the site's service worker in that tab). " ++
             "browser_network_mock answers a tab's requests with responses you give, on the site where you add the rule (the tab title shows ▣; needs " ++
-            "the tab's control and network permissions; service and shared workers never see mocks, nor a shared worker's script — use strict for pages a service worker controls).") catch |e| break :blk e;
+            "the tab's control and network permissions; service and shared workers never see mocks, nor a shared worker's script — use strict for pages a service worker controls)." ++
+            "browser_emulate makes a tab look like another device (screen, user agent, language, time zone, location, media) to its pages and servers " ++
+            "(the tab title shows ◫; asked once per site on the user's tabs and applied only while that site is shown; cross-site iframes and service " ++
+            "workers keep the real values).") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -539,13 +568,14 @@ fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
         try s.objectField(a.key);
         try s.beginObject();
         try s.objectField("type");
-        try s.write(switch (a.kind) {
+        if (a.kind == .json_value) try s.write(a.json_types) else try s.write(switch (a.kind) {
             .string, .positional => "string",
             .int => "integer",
             .number => "number",
             .flag, .bool_choice => "boolean",
             .json_array, .path_list, .string_list, .int_list => "array",
             .mock_response => "object",
+            .json_value => unreachable,
         });
         if (a.kind == .mock_response) {
             // W9d④: 응답 객체의 칸(서버가 검사한다 — 머리 허용 목록·상태·크기).
@@ -751,6 +781,7 @@ test "W9f: 도구 표의 모든 도구는 CLI 하위 명령이고, 필수 인자
         });
         // W9d③·④: 막기·가짜의 필수 동작 — 그것만으로 받는 것(`list`).
         if (std.mem.eql(u8, t.subcommand, "network-block") or std.mem.eql(u8, t.subcommand, "network-mock")) try obj.put(arena, "action", .{ .string = "list" });
+        if (std.mem.eql(u8, t.subcommand, "emulate")) try obj.put(arena, "action", .{ .string = "get" }); // W9e①
         const extra: ?[]const u8 = if (std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "upload"))
             "selector"
         else if (std.mem.eql(u8, t.subcommand, "wait")) "selector" else null;
@@ -951,6 +982,8 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             try obj.put(arena, "action", .{ .string = action });
             if (!std.mem.eql(u8, opt.key, "rules") and !std.mem.eql(u8, opt.key, "on") and !std.mem.eql(u8, opt.key, "pattern")) try obj.put(arena, "pattern", .{ .string = "https://a.test/" });
         }
+        // W9e①: 흉내 — reload 는 clear 와, 무리는 set 과.
+        if (std.mem.eql(u8, t.subcommand, "emulate")) try obj.put(arena, "action", .{ .string = if (std.mem.eql(u8, opt.key, "reload")) "clear" else "set" });
         // 이 인자와 함께 써야 하는 짝(로케이터는 하나가 있어야, --name·--exact 는 role 과).
         const needs_locator = std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "wait") or std.mem.eql(u8, t.subcommand, "upload");
         const is_locator = std.mem.eql(u8, opt.key, "selector") or std.mem.eql(u8, opt.key, "ref") or std.mem.eql(u8, opt.key, "role") or std.mem.eql(u8, opt.key, "by_text") or std.mem.eql(u8, opt.key, "by_label");
@@ -970,6 +1003,7 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             .int_list => try jsonOf(arena, "[3]"),
             .bool_choice => .{ .bool = true },
             .mock_response => try jsonOf(arena, "{\"status\":200,\"content_type\":\"text/plain\",\"headers\":{\"X-A\":\"1\"},\"body\":\"x\"}"),
+            .json_value => .null,
             else => .{ .string = if (std.mem.eql(u8, opt.key, "rect")) "0,0,10,10" else if (std.mem.eql(u8, opt.key, "role")) "button" else if (std.mem.eql(u8, opt.key, "url")) "https://e.test/" else if (std.mem.eql(u8, opt.key, "types")) "xhr,image" else if (std.mem.eql(u8, opt.key, "status")) "4xx" else if (std.mem.eql(u8, opt.key, "out")) "/tmp/body" else "x" },
         });
         const a = try argv(arena, t, .{ .object = obj });
@@ -1459,4 +1493,37 @@ test "W9d④ 변이: browser_network_mock 응답 객체 — 모르는 글 칸·�
         "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":1000}}",
         "{\"surface\":4,\"action\":\"add\",\"pattern\":\"https://a.test/\",\"response\":{\"status\":-1}}",
     }) |bad| try testing.expectError(error.WrongType, argv(arena, mk, try jsonOf(arena, bad)));
+}
+
+test "W9e①: browser_emulate — 동작·reload·무리 값(객체·글·null)이 CLI 의 emulate 옵션으로(JSON 한 토큰), 틀린 꼴은 WrongType, 스키마의 type 은 여럿, 안내는 ◫·덮지 않는 것·위치를 말한다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const emu = findTool("browser_emulate").?;
+    const args = try argv(arena, emu, try jsonOf(arena, "{\"surface\":4,\"action\":\"set\",\"viewport\":{\"width\":390,\"height\":844,\"mobile\":true},\"locale\":\"fr-FR\",\"timezone\":null,\"geolocation\":\"unavailable\",\"reload\":true}"));
+    const cmd = (try browser.parse(args)).request.emulate;
+    try testing.expect(cmd.action == .set and cmd.reload);
+    const req = try browser.buildRequestBytes(arena, .{ .emulate = cmd }, .{ .number = 1 });
+    try testing.expect(std.mem.indexOf(u8, req, "\"viewport\":{\"width\":390,\"height\":844,\"mobile\":true}") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"timezone\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"geolocation\":\"unavailable\"") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"locale\":\"fr-FR\"") != null);
+    try testing.expectError(error.WrongType, argv(arena, emu, try jsonOf(arena, "{\"surface\":4,\"action\":\"set\",\"viewport\":[1]}")));
+    try testing.expectError(error.WrongType, argv(arena, emu, try jsonOf(arena, "{\"surface\":4,\"action\":\"set\",\"locale\":3}")));
+    try testing.expect(std.mem.indexOf(u8, emu.description, "◫") != null);
+    try testing.expect(std.mem.indexOf(u8, emu.description, "cross-site iframes") != null);
+    try testing.expect(std.mem.indexOf(u8, emu.description, "never the real location") != null);
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(r);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, r, .{});
+    defer parsed.deinit();
+    var seen = false;
+    for (parsed.value.object.get("result").?.object.get("tools").?.array.items) |t| if (std.mem.eql(u8, t.object.get("name").?.string, "browser_emulate")) {
+        const props = t.object.get("inputSchema").?.object.get("properties").?.object;
+        const types = props.get("geolocation").?.object.get("type").?.array.items;
+        try testing.expectEqual(@as(usize, 3), types.len);
+        try testing.expectEqualStrings("null", types[2].string);
+        seen = true;
+    };
+    try testing.expect(seen);
 }

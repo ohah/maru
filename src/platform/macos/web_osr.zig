@@ -4230,10 +4230,17 @@ fn onTraceData(gpa: std.mem.Allocator, v: ws.message.TraceData) void {
     r.gz.appendSlice(gpa, v.bytes) catch return finishTrace(gpa, r, .failed, "too_large");
 }
 
-fn onTraceFrames(v: ws.message.TraceFrames) void {
+/// sidecar 의 `trace_frames` — 가족 프레임 집합에 더한다. sidecar 바이트는 공격 입력이라(`trace_fields` 머리 주석) 합도 maru 가 막는다: 정직한
+/// sidecar 는 집합이 `max_trace_frames_total` 을 넘으면 `frames_overflow` 로 버리므로, 그보다 많은 서로 다른 id 는 같은 까닭으로 버린다(W9e② 20 회
+/// 검증 v1 R2 — 전에는 한 trace 동안 끝없이 더해 앱 메모리가 늘었다). 거르기에 넘긴 뒤·끝난 뒤의 늦은 것은 버린다(더할 집합이 아니다).
+fn onTraceFrames(gpa: std.mem.Allocator, v: ws.message.TraceFrames) void {
     const r = trace_run orelse return;
     if (r.generation != v.generation or r.surface != v.browser) return;
-    for (v.ids[0..v.count]) |id| r.frames.add(id) catch {};
+    if (r.phase == .filtering or r.phase == .done or r.phase == .discarded or r.phase == .failed) return;
+    for (v.ids[0..v.count]) |id| {
+        if (r.frames.count() >= ws.message.max_trace_frames_total and !r.frames.contains(id)) return finishTrace(gpa, r, .discarded, "frames_overflow");
+        r.frames.add(id) catch {};
+    }
 }
 
 fn startTraceWorker(gpa: std.mem.Allocator, r: *TraceRun) !void {
@@ -6734,7 +6741,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         // W9e②: 성능 trace.
         .trace_state => |v| onTraceState(gpa, v),
         .trace_data => |v| onTraceData(gpa, v),
-        .trace_frames => |v| onTraceFrames(v),
+        .trace_frames => |v| onTraceFrames(gpa, v),
         .net_mock_ack => |v| mock_pump.ack(v.body_id, v.received),
         // W9d①: 지켜보는 탭의 요청 기록 — 지켜보기를 끈 뒤에 늦게 온 것은 버린다(끌 때 지웠다).
         .net_begin => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) {
@@ -12905,6 +12912,67 @@ test "W9e②: trace 실패 갈래 — 남의 프레임이면 결과 없이 버�
         .fail => |f| try std.testing.expectEqualStrings("not_tracing", f.reason),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "W9e② 20 회 검증 v1 R2: 망가진 sidecar 가 trace_frames 를 끝없이 보내도 maru 의 프레임 집합은 상한(65,536)에서 멈춘다 — 넘는 새 id 면 frames_overflow 로 버림, 이미 쥔 id 를 다시 보내는 것은 넘침이 아니다, 버린 뒤·거르기에 넘긴 뒤의 것은 더하지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{404});
+    const start_p = try traceParams("{\"action\":\"start\"}");
+    const stop_p = try traceParams("{\"action\":\"stop\"}");
+    _ = try browserTrace(gpa, 404, .{ .pane = 5, .params = &start_p, .async_id = 41 });
+    const g = lastTraceFrame().?.generation;
+    apply(gpa, .{ .trace_state = .{ .browser = 404, .generation = g, .state = .recording } }, 0);
+    if (takeAnswerFor(41)) |a| gpa.free(a.json);
+    _ = try browserTrace(gpa, 404, .{ .pane = 5, .params = &stop_p, .async_id = 42 });
+    apply(gpa, .{ .trace_state = .{ .browser = 404, .generation = g, .state = .receiving } }, 0);
+    const cap = ws.message.max_trace_frames_total;
+    const per = ws.message.max_trace_frame_ids;
+    var bufs: [per][32]u8 = undefined;
+    // `from` 부터 64 개의 서로 다른 id(32 자 16 진).
+    const Send = struct {
+        fn batch(a: std.mem.Allocator, b: *[per][32]u8, gen: u32, from: usize) void {
+            var f: ws.message.TraceFrames = .{ .browser = 404, .generation = gen, .count = per };
+            for (0..per) |i| f.ids[i] = std.fmt.bufPrint(&b[i], "{X:0>32}", .{from + i}) catch unreachable;
+            apply(a, .{ .trace_frames = f }, 0);
+        }
+    };
+    var n: usize = 0;
+    while (n < cap) : (n += per) Send.batch(gpa, &bufs, g, n);
+    try std.testing.expectEqual(@as(usize, cap), trace_run.?.frames.count());
+    try std.testing.expect(trace_run.?.phase == .receiving and takeAnswerFor(42) == null);
+    // 정직한 다시 보냄(이미 쥔 id) — 상한에 있어도 넘침이 아니다.
+    Send.batch(gpa, &bufs, g, 0);
+    try std.testing.expect(trace_run.?.phase == .receiving);
+    // 상한을 넘는 새 id — 버림(frames_overflow), 기다리던 stop 에 이유를 싣고, 집합은 더 자라지 않는다.
+    Send.batch(gpa, &bufs, g, cap);
+    try std.testing.expect(trace_run.?.phase == .discarded);
+    try std.testing.expectEqual(@as(usize, cap), trace_run.?.frames.count());
+    const over = takeAnswerFor(42).?;
+    defer gpa.free(over.json);
+    try std.testing.expect(std.mem.indexOf(u8, over.json, "\"state\":\"discarded\"") != null and std.mem.indexOf(u8, over.json, "\"reason\":\"frames_overflow\"") != null);
+    // 버린 뒤에 오는 것도 더하지 않는다.
+    Send.batch(gpa, &bufs, g, cap + per);
+    try std.testing.expectEqual(@as(usize, cap), trace_run.?.frames.count());
+    // 거르기에 넘긴 뒤(새 빈 집합)에 온 늦은 것도 더하지 않는다.
+    _ = try browserTrace(gpa, 404, .{ .pane = 5, .params = &start_p, .async_id = 43 });
+    const g2 = lastTraceFrame().?.generation;
+    apply(gpa, .{ .trace_state = .{ .browser = 404, .generation = g2, .state = .recording } }, 0);
+    if (takeAnswerFor(43)) |a| gpa.free(a.json);
+    _ = try browserTrace(gpa, 404, .{ .pane = 5, .params = &stop_p, .async_id = 44 });
+    const gz = try traceTestGzip(gpa, false);
+    defer gpa.free(gz);
+    traceTestDeliver(gpa, 404, g2, gz);
+    try std.testing.expect(trace_run.?.phase == .filtering or trace_run.?.phase == .done);
+    Send.batch(gpa, &bufs, g2, 0);
+    try std.testing.expectEqual(@as(usize, 0), trace_run.?.frames.count());
+    traceTestPump(gpa);
+    const done = takeAnswerFor(44).?;
+    defer gpa.free(done.json);
+    try std.testing.expect(std.mem.indexOf(u8, done.json, "\"state\":\"done\"") != null);
 }
 
 test "W9e② 12 회차: 사람이 건드리는 메시지를 보내는 순간 maru 도 조건을 푼다 — sidecar 의 풀림 알림을 못 읽고 다시 떠도 옛 조건을 재생하지 않는다" {

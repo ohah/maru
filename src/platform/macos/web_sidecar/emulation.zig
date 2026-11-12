@@ -8,6 +8,9 @@
 //!   바라는 상태만) 새 렌더러에 차이만 낸다(이미 건 흉내는 Chromium 이 다시 건다 — E4).
 //! - **사용자 탭은 그 사이트에서만**(사용자 결정 Q1): 주 프레임 `on_before_browse`(홉마다 — W9d③ 엄격 모드와 같은 자리)에서 그 홉의 호스트를
 //!   grant 사이트가 덮으면 걸고 아니면 모두 지운다(값이 바뀔 때만). 리다이렉트 홉 요청 하나와 첫 요청의 client hints 는 한 요청 늦다(E12 — 문서화).
+//!   사이트 밖 문서에서 사이트 안으로 가는 홉은 요청 무리(UA·client hints·Accept-Language)만 걸고 나머지는 커밋(`on_load_start`)에서 건다 —
+//!   응답을 기다리는 동안 옛(밖의) 문서가 화면 흉내를 봤다(옮긴 판 검증 — `emu_plan.heldUntilCommit`). bfcache 복원은 `on_before_browse` 를
+//!   지나지 않아 복원된 밖의 문서가 pageshow 에서 흉내를 봤다 — maru 의 Chromium 은 bfcache 를 끈다(`app.zig` — 사용자 결정 2026-11-12).
 //! - **화면은 pane 에 맞춰 줄인다**(사용자 결정 Q3 — `scale`): pane 크기가 바뀌면 다시 셈해 다시 낸다(E2).
 //! - **위치는 W5b2 와 한 칸**(사용자 결정 Q2): `permissions.zig` 가 건다 — 그 탭의 위치만 묻는 프롬프트에는 묻지 않고 허용, 대신 허용한 출처는
 //!   흉내가 끝나면 되돌린다.
@@ -123,7 +126,9 @@ pub fn apply(v: msg.Emulation) void {
     if (v.generation != e.tab.generation) e.tab.newGeneration();
     e.tab.setWant(v) catch return; // 풀 때 검사를 지났다 — 오지 않는다
     var hb: [msg.max_net_host_bytes]u8 = undefined;
-    e.tab.on_site = e.tab.siteCovers(if (e.hop_known) e.hop() else topHost(browserOf(reg), &hb));
+    const shown = topHost(browserOf(reg), &hb);
+    // 진행 중 이동이 있으면 그 홉으로(밖의 문서에서 안으로면 커밋까지 요청 무리만), 아니면 지금 문서로.
+    _ = if (e.hop_known) e.tab.hop(e.hop(), shown) else e.tab.navigate(shown);
     e.tab.pane_w = reg.size.width;
     e.tab.pane_h = reg.size.height;
     if (logOn()) std.debug.print("emu: apply b={d} gen={d} flags=0x{x} on_site={} alive={}\n", .{ v.browser, v.generation, @as(u16, @bitCast(v.flags)), e.tab.on_site, e.tab.alive });
@@ -236,13 +241,14 @@ pub fn beforeBrowse(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, requ
     e.hop_len = host.len;
     e.hop_known = true;
     e.hop_canon = table_mod.canonHash(u16, units(raw));
-    if (!e.tab.navigate(if (host.len == 0) null else host)) return;
-    if (logOn()) std.debug.print("emu: site b={d} host={s} on_site={}\n", .{ e.browser, host, e.tab.on_site });
+    var sb: [msg.max_net_host_bytes]u8 = undefined;
+    if (!e.tab.hop(if (host.len == 0) null else host, topHost(browser, &sb))) return;
+    if (logOn()) std.debug.print("emu: site b={d} host={s} on_site={} hold={}\n", .{ e.browser, host, e.tab.on_site, e.tab.hold });
     run(e, reg);
     sendState(e, false);
 }
 
-/// 주 프레임 `on_load_start` — 렌더러가 죽은 뒤 새 문서가 시작됐다(새 렌더러): 쌓인 차이를 낸다.
+/// 주 프레임 `on_load_start` — 새 문서가 섰다(커밋): 사이트 안으로 가는 홉이 커밋까지 미룬 무리(`hold`)와 렌더러가 죽은 동안 쌓인 차이를 낸다.
 pub fn loadStart(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) void {
     if (browser == null or frame == null or frame.*.is_main.?(frame) == 0) return;
     const e = entryOf(browser.*.get_identifier.?(browser)) orelse return;
@@ -257,6 +263,7 @@ pub fn loadStart(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) void {
     e.hop_known = false;
     _ = e.tab.navigate(if (host.len == 0) null else host);
     if (logOn() and back) std.debug.print("emu: renderer back b={d}\n", .{e.browser});
+    if (logOn()) std.debug.print("emu: commit b={d} host={s} on_site={}\n", .{ e.browser, host, e.tab.on_site });
     // 새 렌더러(쌓인 차이)·사이트 안팎·DevTools 가 떨어져 모르게 된 종류 — 살아 있는 문서가 막 시작했으니 차이를 낸다(바뀐 것이 없으면 빈 열).
     run(e, reg);
     sendState(e, false);

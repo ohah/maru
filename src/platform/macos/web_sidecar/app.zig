@@ -5,6 +5,11 @@
 //! `use-mock-keychain`(D7, docs/plans/web-osr-backend.md) — 진짜 Keychain 을 쓰면 항목 이름이 Chromium 브라우저와 같은
 //! 「Chromium Safe Storage」이고, 소스 빌드는 업그레이드마다 서명이 바뀌어 허용 창이 반복될 수 있으며, 거부·실패하면
 //! 쿠키가 조용히 저장되지 않는다(실측). 이 스위치면 Keychain 을 건드리지 않고 재시작 뒤에도 로그인이 남았다(실측).
+//!
+//! `disable-back-forward-cache`(W9e① 옮긴 판 검증 — 사용자 결정 2026-11-12 「bfcache 끄기」) — 뒤로·앞으로가 문서를 bfcache 에서 되살리면
+//! `on_before_browse` 를 지나지 않아, 사용자 탭의 사이트에 묶인 기기 흉내가 남은 채 사이트 밖 문서의 pageshow 가 돌았고 그 안의 요청이 흉내
+//! UA·Accept-Language 를 실었다(판정자 `emu-site-bound-bfcache`). 이 스위치면 `pageshow.persisted` 가 늘 거짓이다(CEF 154 실측) — 뒤로·앞으로는
+//! 문서를 다시 불러온다(그만큼 느리다). 값을 갖는 `disable-features=BackForwardCache` 는 다른 쪽이 준 `disable-features` 목록과 겹치므로 쓰지 않는다.
 
 const std = @import("std");
 const c = @import("cef.zig").c;
@@ -15,7 +20,7 @@ var app: c.cef_app_t = undefined;
 var browser_process: c.cef_browser_process_handler_t = undefined;
 var api: *const library.Api = undefined;
 
-pub const product_switches = [_][]const u8{"use-mock-keychain"};
+pub const product_switches = [_][]const u8{ "use-mock-keychain", "disable-back-forward-cache" };
 
 /// 프로세스 수명 동안 사는 앱 객체를 돌려준다. `cef_initialize` 전에 한 번 부른다.
 pub fn get(loaded: *const library.Api) *c.cef_app_t {

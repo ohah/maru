@@ -4549,7 +4549,7 @@ W9d③ 의 결정을 이어받는다: **UC1**(사용자 탭에서는 (pane, 탭,
   가른다. **no-cors 의 다른 출처 가짜는 `basic`** 으로 읽힌다(CEF 의 표시 — 가짜의 바이트뿐이다).
 - 상태: 가짜의 `Set-Cookie` 는 저장된다(HttpOnly·Secure 까지) — `can_save_cookie` 0 이면 저장되지 않는다. `Clear-Site-Data` 는 듣지 않았다. **`Accept-CH` 는
   남는다**(다음 진짜 요청에 실렸다) — 머리는 금지 목록이 아니라 허용 목록이어야 한다. HTTP 캐시에는 들어가지 않는다, HSTS 는 듣지 않는다. **bfcache 는 규칙을
-  지운 뒤에도 가짜 문서를 되살린다** — `Cache-Control: no-store` 면 다시 요청한다.
+  지운 뒤에도 가짜 문서를 되살린다** — `Cache-Control: no-store` 면 다시 요청한다(W9e① 옮긴 판 검증 뒤 maru 의 Chromium 은 bfcache 를 끈다 — 2026-11-12; no-store 는 그대로).
 - 다운로드: 첨부(`Content-Disposition: attachment`)나 그려지지 않는 MIME(`application/octet-stream`)의 주 프레임 가짜는 가짜 바이트의 다운로드가 된다.
   `<a download>` 는 탭 길이 아니라 가짜가 되지 않는다.
 - 서비스 워커: SW 의 `respondWith(fetch())` 는 공유 길로 와 가짜가 되고 **SW 가 Cache Storage 에 넣은 가짜는 규칙을 지운 뒤에도, 같은 출처의 다른 탭에도
@@ -4932,3 +4932,37 @@ AppSession 이 있어야 해 단위 시험이 닿지 않는다 — 실제 앱 E2
 게이트 12 통과. 실제 CEF(한 번씩, 다시 돌린 것 없음): `--emulation` 30/0, `--network-mock` 73/0, `--network-block` 60/0, `--network` 173/0, `--network-body` 92/0,
 `--permissions` 27/0(W9e① 이 `permissions.zig` 를 바꿨다), `--input` 19/0, `--devtools` 19/0, `--upload` 9/0, `--dialogs` 12/0(끊김 갈래), `--popup` 8/0,
 `--contextmenu` 19/0, `--drag` 25/0, `--tooltip` 9/0. 돌리지 않음: 스모크 `w9e-emulate`(앱 GUI).
+
+**옮긴 판 20 회 검증(2026-11-12)**: 옮긴 판(65a51dd9f)을 두 검증자가 10 회씩 공격했다(저장소 밖 `$S/w9e1_v1`·`$S/w9e1_v2`). SEVERE 둘을 고쳤다:
+
+- **bfcache 복원(두 검증자 모두)** — 사용자 탭(127.0.0.1 묶음)에서 밖(localhost)으로 갔다가 뒤로·앞으로 하면 bfcache 가 밖의 문서를 되살리는데, 그 복원은
+  `on_before_browse` 를 지나지 않고 안전망 `on_load_start` 는 pageshow 뒤라, 복원된 밖의 문서가 pageshow 에서 흉내(UA·시간대·언어·화면)를 보고 그 안의 요청이
+  흉내 UA·`Accept-Language` 를 실었다(결정적 — 경쟁 아님). **사용자 결정(2026-11-12 「bfcache 끄기」)**: sidecar 의 제품 스위치에 `disable-back-forward-cache`
+  (`app.zig product_switches` — 값을 갖는 `disable-features=BackForwardCache` 는 다른 `disable-features` 목록과 겹쳐 쓰지 않았다). CEF 154 에서 이 스위치면
+  `pageshow.persisted` 가 늘 거짓이다 — 뒤로·앞으로는 다시 불러온다(그만큼 느리다). 새 판정 `emu-site-bound-bfcache`(사람의 뒤로·페이지의 `history.forward()` 두
+  갈래 — 밖의 문서의 첫 스크립트·pageshow 의 값, pageshow 요청의 머리): 스위치를 뺀 변이는 FAIL(두 갈래 모두 `P:tz.il.ua.lang.iw.dpr.mtp.print.fc`, pageshow
+  요청 `BoundUA/1`·`fr-FR`), 넣으면 PASS(모두 `N:-`). bfcache 로 돌아온 묶인 사이트의 흉내가 16 ms 늦던 LOW 는 사라졌다(다시 불러온 문서의 첫 스크립트가 흉내를 본다).
+- **밖→안의 느린 이동(MED)** — 밖의 문서가 묶인 사이트로 가는 이동을 기다리는 동안 홉에서 모든 무리를 걸어, 화면 흉내(브라우저 쪽 — 보이는 위젯에 곧 걸린다)가
+  옛 문서에 보였다(`innerWidth` 390·dpr 3; 밖의 페이지가 느린 주소로 그 기다림을 늘릴 수 있다). 고침: `emu_plan.Tab.hop`(보이는 문서가 밖이고 홉이 안이면
+  `hold`) — 요청 무리(`.ua` 한 호출 — UA·client hints·Accept-Language, 첫 문서 요청에 실린다 E5)만 홉에서, 나머지(화면·터치·언어·시간대·미디어·색각·위치)는
+  커밋(`on_load_start` → `navigate`)에서; 끊긴 홉(`loadAborted`)·안→밖 홉은 그대로(곧 지움), 기다리는 동안 상태는 사이트 밖(maru 의 입력 줄임·테두리가 옛 문서에
+  걸리지 않는다). 고치기 전 실측: 기다리는 3.5 초의 옛 문서 관찰 42 개 중 35 개가 `iw.dpr`, 시간대·언어·터치·미디어·UA 는 0(렌더러 쪽 명령은 DevTools 가 커밋까지
+  붙잡는 것으로 보인다), 옛 문서의 요청 머리는 진짜. 고친 뒤 42 개 모두 `-`·머리 진짜, 새 문서의 문서 요청 `BoundUA/1`, 새 문서의 첫 스크립트도 모든 무리를
+  봤다(미뤄도 늦지 않았다 — `on_load_start` 가 문서 스크립트보다 먼저). 새 판정 `emu-site-bound-slow-hop`. 변이(되돌림 `cmp`): 미루지 않기(`heldUntilCommit` 거짓)
+  → FAIL(35/42) · 순수 시험 RED, 상태만 안(`on_site` 에 hold 를 빼지 않음) → FAIL(상태 on_site=true) · 순수 RED, 커밋이 hold 를 끄지 않음 → 넷 FAIL
+  (`emu-site-bound`·`-aborted-hop`·`-bfcache`·`-slow-hop`). 재지 않은 변이: `emulation.apply` 가 진행 중 홉에서도 `navigate`(흉내가 이동 중에 오면 UA 가 한 요청
+  늦는 쪽 — 판정이 그 순간을 만들지 않는다). 오류 페이지(ERR_ABORTED 밖)로 끝난 밖→안 이동은 다음 이동까지 요청 무리만 건다(오류 페이지는 그 사이트의 문서가 아니다 —
+  재지 않았다).
+
+LOW(고치지 않음 — 사용자 결정 「심각한 것만」): 렌더러가 죽은 뒤 사이트 밖으로 가거나 죽은 동안 지우면 그 문서 요청 하나가 흉내 UA·언어를 싣는다(E12 꼴 — 죽은 동안
+UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulationEnabled`·`Page.setGeolocationOverride`·`Page.setDeviceOrientationOverride`·
+`DeviceOrientation.*` 이 `forbiddenMethod` 밖이다(CEF 154 가 받는다 — maru 의 CDP 메서드는 모두 리터럴이라 닿는 길은 없다); 지운·바꾼 위치는 같은 문서에 1 분까지
+옛 에이전트 좌표로 남는다(W5b2 보정 스크립트의 `maximumAge` 60 초·문서마다 좌표 하나 — MCP 설명·CLI 도움말·[control-plane-browser.md](../control-plane-browser.md)
+에 「위치의 바꿈·지움은 다음 문서부터(reload)」 를 더했다); `web_osr_emulate.Tab.sync` 는 주인 pane 의 grant 를 처음 하나만 본다(풀리는 쪽); 흉내 grant 만으로
+`set`/`clear` + `reload:true` 가 바뀐 것 없이도 새로고침한다(초당 10 번까지); bfcache 로 돌아온 묶인 사이트의 늦은 흉내(이제 bfcache 가 꺼져 없다). 글: MCP 설명의
+붙은 문장 사이 공백을 고쳤다.
+
+수(이 고침): 순수 sidecar **537**(emu_plan 11 — 홉의 커밋 기다림 시험 하나), `zig build test-cli-failure-contract` 924 통과/1 건너뜀, 게이트 12 통과.
+실제 CEF(한 번씩): `--emulation` **32/0**, `--network-mock` 73/0(`mock-no-store-bfcache` 포함), `--network-block` 60/0, `--network` 173/0,
+`--network-body` 92/0, `--devtools` 19/0, `--dialogs` 12/0, `--popup` 8/0, `--input` 19/0; `--permissions` 25/2(`perm-dismiss`·`perm-remembered` — 로컬 글꼴
+허용 뒤 목록이 오지 않음, 다시 돌려도 같다; bfcache 스위치를 뺀 판에서도 같아 이 고침 탓이 아니다 — 그때 이 기계는 Spotlight 가 부하 28 이었다, 옮긴 판에서는 27/0).

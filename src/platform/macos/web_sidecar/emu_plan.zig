@@ -9,6 +9,9 @@
 //!   - **렌더러가 없으면 아무것도 보내지 않는다**(빈 열). 렌더러가 죽은 탭에 `setDeviceMetricsOverride` 를 보내면 sidecar 가 통째로 죽었다
 //!     (E11 — 세 번). 이미 건 흉내는 Chromium 이 새 렌더러에 다시 건다(E4) — 되살아나면 그동안 쌓인 **차이만** 보낸다.
 //!   - 사이트에 묶인 탭(사용자 탭 — 사용자 결정 Q1)이 사이트 밖이면 **모두 지운다**(돌아오면 다시 건다).
+//!   - 사이트 밖 문서에서 사이트 안으로 가는 이동은 **커밋까지 요청 무리만**(`hold` — `heldUntilCommit`): 첫 문서 요청에 실어야 하는 UA·client
+//!     hints·Accept-Language(`.ua` 한 호출 — E5)는 홉에서 걸고, 나머지는 새 문서의 커밋(`navigate`)에서. 화면 흉내는 보이는 위젯에 곧 걸려 응답을
+//!     기다리는 동안 옛(밖의) 문서가 흉내 폭·배율을 봤다(옮긴 판 검증 2 회차 — 밖의 페이지는 느린 주소로 그 기다림을 늘릴 수 있다).
 //!   - 지움의 꼴: 미디어는 네 기능 이름을 모두 빈 값으로(`{}` 는 forced-colors 를 지우지 않았다 — E17), UA 는 `{"userAgent":""}`, 시간대는
 //!     `{"timezoneId":""}`, 언어는 `{}`, 색각은 `{"type":"none"}`, 화면은 `Emulation.clearDeviceMetricsOverride`, 터치는 `{"enabled":false}`.
 //!   - UA 와 언어의 머리 쪽(`Accept-Language`)은 **한 호출**이다(`setUserAgentOverride` — 뒤 호출에 acceptLanguage 가 없으면 기본으로 돌아간다,
@@ -78,6 +81,14 @@ pub fn groupOf(kind: Kind, ua_set: bool) msg.EmuGroup {
 
 pub const Status = enum { idle, pending, ok, failed };
 
+/// 사이트 안으로 가는 이동이 커밋되기 전(사이트 밖 문서가 아직 보인다) 미루는 종류인가 — 요청 무리(`.ua` — UA·client hints·Accept-Language,
+/// 첫 문서 요청에 실린다)만 홉에서 건다. 실측(CEF 154, 판정 `emu-site-bound-slow-hop`): 미루지 않으면 옛 문서가 기다림 내내 화면·배율 흉내를 봤고
+/// (시간대·언어·터치·미디어는 보지 않았다 — DevTools 가 커밋까지 렌더러 쪽 명령을 붙잡는 것으로 보인다), 위치 덮어쓰기는 브라우저 쪽이라 곧 걸린다.
+/// 모두 미뤄도 새 문서의 첫 스크립트는 모든 무리를 봤다(같은 판정의 `T0` — 커밋 알림 `on_load_start` 가 문서의 스크립트보다 먼저다).
+pub fn heldUntilCommit(kind: Kind) bool {
+    return kind != .ua;
+}
+
 /// fit 셈의 단일 출처는 `emu_fields.fitScale`(maru 도 같은 셈으로 결과의 `fit_scale` 을 미리 보인다).
 pub const fitScale = emu_fields.fitScale;
 
@@ -110,6 +121,9 @@ pub const Tab = struct {
     reason: msg.EmuFailReason = .none,
     alive: bool = true,
     on_site: bool = true,
+    /// 사이트 안으로 가는 주 프레임 이동이 커밋 전이고 지금 보이는 문서는 사이트 밖이다 — 요청 무리만 건다(`heldUntilCommit`). 상태는 사이트 밖으로
+    /// 알린다(maru 의 입력 줄임·테두리는 옛 문서에 걸리지 않는다). 커밋·끊김(`navigate`)이 끈다.
+    hold: bool = false,
     pane_w: u32 = 0,
     pane_h: u32 = 0,
     /// 마지막으로 보낸 metrics 의 fit(상태가 싣는다).
@@ -139,15 +153,21 @@ pub const Tab = struct {
         return w;
     }
 
+    /// 그 종류에 지금 걸려야 하는 상태 — 커밋을 기다리는 동안(`hold`) 요청 무리 밖은 빈 상태.
+    fn targetFor(self: *const Tab, kind: Kind) msg.Emulation {
+        if (self.hold and heldUntilCommit(kind)) return .{ .browser = if (self.want.get()) |w| w.browser else 0 };
+        return self.target();
+    }
+
     /// 무엇을 보낼지 — 바뀐 종류만. 렌더러가 없으면 빈 열(E11). 보낸다고 정한 종류는 `sent` 를 그 값으로 두고 `pending` 이다.
     pub fn plan(self: *Tab, out: *Cmds) void {
         out.* = .{};
         if (!self.alive) return;
-        const t = self.target();
-        self.fit = if (t.flags.viewport) fitScale(self.pane_w, self.pane_h, t.width, t.height) else 1;
+        const tm = self.targetFor(.metrics);
+        self.fit = if (tm.flags.viewport) fitScale(self.pane_w, self.pane_h, tm.width, tm.height) else 1;
         inline for (@import("type_info_fields").fields(Kind)) |f| {
             const kind: Kind = @fromBackingInt(@intCast(f.value));
-            self.planKind(kind, t, out);
+            self.planKind(kind, self.targetFor(kind), out);
         }
     }
 
@@ -223,11 +243,24 @@ pub const Tab = struct {
         return true;
     }
 
-    /// 주 프레임 이동 홉의 호스트 — 사이트 안팎이 바뀌었으면 참(부른 쪽이 계획을 다시 돌린다).
+    /// 맨 위 문서가 섰다(커밋 — `on_load_start`) 또는 이동이 끊겨 옛 문서가 남았다: 그 문서의 호스트로 사이트 안팎을 정하고 커밋 기다림을 끝낸다.
+    /// 바뀌었으면 참(부른 쪽이 계획을 다시 돌린다).
     pub fn navigate(self: *Tab, host: ?[]const u8) bool {
         const now = self.siteCovers(host);
-        if (now == self.on_site) return false;
+        const changed = now != self.on_site or self.hold;
         self.on_site = now;
+        self.hold = false;
+        return changed;
+    }
+
+    /// 주 프레임 이동 홉(`on_before_browse` — 커밋 전, 리다이렉트마다)의 호스트와 지금 보이는(커밋된) 문서의 호스트. 사이트 밖 문서에서 사이트 안으로
+    /// 가면 커밋까지 요청 무리만(`hold`), 안에서 안이면 모두, 밖으로 가면 곧 모두 지운다. 바뀌었으면 참.
+    pub fn hop(self: *Tab, host: ?[]const u8, shown: ?[]const u8) bool {
+        const now = self.siteCovers(host);
+        const hold = now and !self.siteCovers(shown);
+        if (now == self.on_site and hold == self.hold) return false;
+        self.on_site = now;
+        self.hold = hold;
         return true;
     }
 
@@ -235,7 +268,7 @@ pub const Tab = struct {
     pub fn resize(self: *Tab, w: u32, h: u32) bool {
         self.pane_w = w;
         self.pane_h = h;
-        const t = self.target();
+        const t = self.targetFor(.metrics);
         if (!t.flags.viewport) return false;
         return fitScale(w, h, t.width, t.height) != self.fit;
     }
@@ -273,11 +306,11 @@ pub const Tab = struct {
             }
         }
         active &= ~(failed | pending);
-        const t = self.target();
+        const t = self.targetFor(.metrics);
         return .{
             .browser = browser,
             .generation = self.generation,
-            .on_site = self.on_site,
+            .on_site = self.on_site and !self.hold,
             .alive = self.alive,
             .pending = pending != 0 or self.held(),
             .fit_scale = if (t.flags.viewport and self.alive) self.fit else if (t.flags.viewport) fitScale(self.pane_w, self.pane_h, t.width, t.height) else 1,
@@ -686,6 +719,70 @@ test "W9e①: 사이트에 묶인 탭 — 사이트 밖이면 모두 지우고(�
     var agent: Tab = .{};
     try agent.setWant(.{ .browser = 2, .generation = 1, .flags = .{ .timezone = true }, .timezone = "UTC" });
     try testing.expect(!agent.navigate("bank.test") and agent.on_site);
+}
+
+test "W9e①: 밖의 문서에서 사이트 안으로 가는 홉은 커밋까지 요청 무리만 — 옛 문서에 화면 흉내가 걸리지 않고 상태는 밖, 커밋·끊김이 끝낸다" {
+    var t: Tab = .{ .pane_w = 640, .pane_h = 400 };
+    var v = phone();
+    v.flags.site_bound = true;
+    v.site = "a.test";
+    v.flags.ua = true;
+    v.ua = "UA/1";
+    v.flags.timezone = true;
+    v.timezone = "UTC";
+    try t.setWant(v);
+    try testing.expect(t.navigate("bank.test")); // 밖의 문서
+    var c: Cmds = .{};
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 0), c.len);
+    // 밖 → 안 홉: UA 만(첫 문서 요청에 실린다), 화면·터치·시간대는 커밋까지 — 상태는 아직 밖(maru 의 입력 줄임·테두리가 옛 문서에 걸리지 않게).
+    try testing.expect(t.hop("www.a.test", "bank.test"));
+    try testing.expect(t.hold);
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 1), c.len);
+    try testing.expect(find(&c, .ua).?.set);
+    t.answered(.ua, true, "");
+    const mid = t.state(1);
+    try testing.expect(!mid.on_site and mid.fit_scale == 1 and mid.active_mask == 1 << @backingInt(msg.EmuGroup.user_agent));
+    try testing.expect(!t.hop("a.test", "bank.test")); // 안 → 안 리다이렉트 — 그대로 기다린다
+    try testing.expect(!t.resize(320, 200)); // 기다리는 동안 화면 흉내는 없다
+    _ = t.resize(640, 400);
+    // 커밋: 나머지를 건다.
+    try testing.expect(t.navigate("a.test"));
+    try testing.expect(!t.hold);
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 3), c.len);
+    try testing.expect(find(&c, .metrics).?.set and find(&c, .touch).?.set and find(&c, .timezone).?.set);
+    try testing.expect(t.state(1).on_site);
+    // 안의 문서에서 안으로 가는 홉은 기다리지 않는다(이미 걸려 있다), 밖으로 가는 홉은 곧 모두 지운다.
+    try testing.expect(!t.hop("a.test", "a.test"));
+    try testing.expect(t.hop("bank.test", "a.test"));
+    try testing.expect(!t.hold);
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 4), c.len);
+    for (c.slice()) |x| try testing.expect(!x.set);
+    // 안의 문서 → 밖(리다이렉트) → 다시 안: 보이는 문서가 안이라 곧 모두.
+    try testing.expect(t.hop("a.test", "a.test"));
+    try testing.expect(!t.hold);
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 4), c.len);
+    // 끊긴 홉(204·다운로드): 밖의 문서에서 안으로 — UA 를 건 뒤 끊기면 옛 문서로 되돌려 UA 를 지운다, 미룬 무리는 걸지 않는다.
+    try testing.expect(t.hop("bank.test", "a.test"));
+    t.plan(&c);
+    try testing.expect(t.navigate("bank.test") == false); // 커밋된 밖의 문서 — 이미 밖
+    try testing.expect(t.hop("a.test", "bank.test") and t.hold);
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 1), c.len);
+    try testing.expect(t.navigate("bank.test")); // 끊김 — 옛 문서(밖)
+    try testing.expect(!t.hold and !t.on_site);
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 1), c.len);
+    try testing.expect(!find(&c, .ua).?.set);
+    // 보이는 문서를 모르면(about:blank 등) 밖과 같이 기다린다; 묶이지 않은 탭은 기다리지 않는다.
+    try testing.expect(t.hop("a.test", null) and t.hold);
+    var agent: Tab = .{};
+    try agent.setWant(.{ .browser = 2, .generation = 1, .flags = .{ .timezone = true }, .timezone = "UTC" });
+    try testing.expect(!agent.hop("a.test", "bank.test") and !agent.hold);
 }
 
 test "W9e①: fit — pane 보다 작으면 1, 크면 줄이고 만분의 일로 내린다, pane 크기가 바뀌면 다시 보낸다(E2), 크기를 모르면 1" {

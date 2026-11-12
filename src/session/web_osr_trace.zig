@@ -773,9 +773,11 @@ const KeepSink = struct {
         } else if (std.mem.eql(u8, name, "navigationStart")) {
             self.last_nav_ts = ts;
         } else if (std.mem.eql(u8, name, "firstContentfulPaint")) {
-            if (self.summary.fcp_ms == null) self.summary.fcp_ms = (ts - (self.last_nav_ts orelse self.scan.start_ts orelse ts)) / 1000.0;
+            // 기록 시작(TSIB) 앞 시각의 FCP·LCP 표시는 세지 않는다 — 프레임이 자주 바뀌는 페이지에서 가족 iframe 의 **앞 문서** FCP 가
+            // `navigationStart` 없이 시작 앞에 늦게 남아 `fcp_ms` 가 음수였다(W9e② 7f49e6fd6 검증 LOW-2 — 실제 원본 a2c_5/6/1 −5.5/−17.8/−7.5 ms).
+            if (self.summary.fcp_ms == null and !self.beforeStart(o)) self.summary.fcp_ms = (ts - (self.last_nav_ts orelse self.scan.start_ts orelse ts)) / 1000.0;
         } else if (std.mem.eql(u8, name, "largestContentfulPaint::Candidate")) {
-            self.summary.lcp_ms = (ts - (self.last_nav_ts orelse self.scan.start_ts orelse ts)) / 1000.0;
+            if (!self.beforeStart(o)) self.summary.lcp_ms = (ts - (self.last_nav_ts orelse self.scan.start_ts orelse ts)) / 1000.0;
         } else if (std.mem.eql(u8, name, "DrawFrame")) {
             // 가족 layer tree 의 것만(A1-1 — 묶이지 않은 것은 위 F3′ 이 이미 버렸다; 번호가 없는 DrawFrame 은 세지 않는다).
             const lt = getInt(getObj(o, "args") orelse return, "layerTreeId") orelse return;
@@ -1393,6 +1395,31 @@ test "W9e② 20 회 검증 v2: 기록 시작(브라우저의 TSIB) 앞 시각의
     defer rt.deinit();
     try testing.expectEqual(Outcome.kept, rt.outcome);
     try testing.expectEqual(@as(u32, 159), rt.summary.covered_ms);
+}
+
+test "W9e② 7f49e6fd6 검증 LOW-2: 기록 시작(TSIB) 앞 시각의 FCP·LCP 표시(가족 iframe 의 앞 문서 — navigationStart 없음)는 세지 않는다 — 음수 fcp_ms 대신 새 문서의 값, 시작과 같은 시각은 센다" {
+    const gpa = testing.allocator;
+    var set = try familySet(gpa);
+    defer set.deinit();
+    // TSIB 1000 µs 앞(500·600)의 앞 문서 표시 — FCP 는 JSON 에서 그 탭의 navigationStart(3000)·FCP(53000) 앞에, LCP 는 그 탭의 LCP(83000) 뒤에 온다
+    // (센다면 FCP −0.5 ms·LCP 는 그 탭의 이동 기준으로 −2.4 ms).
+    const fcp_pre = "{\"name\":\"firstContentfulPaint\",\"ph\":\"R\",\"pid\":10,\"tid\":11,\"ts\":500,\"args\":{\"frame\":\"" ++ A2 ++ "\"}},";
+    const lcp_pre = ",{\"name\":\"largestContentfulPaint::Candidate\",\"ph\":\"R\",\"pid\":10,\"tid\":11,\"ts\":600,\"args\":{\"frame\":\"" ++ A2 ++ "\",\"data\":{\"size\":10}}}";
+    {
+        var r = try filterOf(gpa, fixtureFront(fcp_pre, lcp_pre), &set, .{});
+        defer r.deinit();
+        try testing.expectEqual(Outcome.kept, r.outcome);
+        try testing.expectEqual(@as(f64, 50), r.summary.fcp_ms.?);
+        try testing.expectEqual(@as(f64, 80), r.summary.lcp_ms.?);
+    }
+    // 시작과 같은 시각은 앞이 아니다 — 센다(이동이 아직 없으니 시작 기준 0 ms).
+    {
+        const fcp_at = "{\"name\":\"firstContentfulPaint\",\"ph\":\"R\",\"pid\":10,\"tid\":11,\"ts\":1000,\"args\":{\"frame\":\"" ++ A2 ++ "\"}},";
+        var r = try filterOf(gpa, fixtureFront(fcp_at, ""), &set, .{});
+        defer r.deinit();
+        try testing.expectEqual(Outcome.kept, r.outcome);
+        try testing.expectEqual(@as(f64, 0), r.summary.fcp_ms.?);
+    }
 }
 
 test "W9e② A4-1: sidecar 가 자른 trace — 끝나지 않은 마지막 이벤트는 버리고 남김, 덮은 시간은 남은 주 스레드 이벤트의 끝까지, 요약에 truncated" {

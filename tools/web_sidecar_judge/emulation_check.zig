@@ -26,7 +26,11 @@
 //!   걸지 않고, 묶인 사이트의 문서에서 밖으로 가는 204 가 흉내를 풀어 두지 않는다).
 //! 넘나듦(`emh`): emu-site-bound-bfcache(뒤로·앞으로 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그 요청이 흉내 머리를 싣지
 //!   않는다 — maru 의 Chromium 은 bfcache 를 끈다)·emu-site-bound-slow-hop(밖의 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안 흉내를
-//!   보지 않는다 — 문서에 보이는 무리는 커밋 뒤에 건다).
+//!   보지 않고, 그동안 그 문서가 만든 iframe 셋·Worker 의 요청은 진짜 머리다 — 탭 전체의 흉내는 모두 커밋 뒤에 걸고, 그 홉의 문서 요청 하나에만
+//!   흉내 머리를 넣는다: 커밋 뒤 요청과 같은 꼴, 새 문서의 첫 스크립트는 모든 흉내)·emu-site-bound-hop-headers(client hints 를 가진 흉내 — 밖 → 안
+//!   302 → 밖: 안 홉은 흉내 UA·Accept-Language·client hints 셋, 밖으로 가는 다음 홉은 진짜; 느린 홉의 문서 요청 머리가 커밋 뒤 요청과 같다)·
+//!   emu-site-bound-error-page(밖 → 묶인 사이트의 닫힌 포트: 오류 페이지가 기다림을 끝낸다 — 상태는 그 주소의 사이트 안·기다림 없음, 다음 밖 이동은
+//!   진짜).
 //! 팝업(`emp`): emu-popup-shared(같은 프로세스의 팝업은 시간대·locale 이 따라오고 제 흉내는 process_shared_conflict — E13).
 //! 재시작(`emr`): emu-restart(about:blank → 흉내 → 이동이면 문서 요청부터, 옛 sidecar 가 대신 허용한 출처는 새 sidecar 가 되돌린다 — P2-6).
 
@@ -246,14 +250,31 @@ const mx_tail = "'></iframe><script>" ++ mx_js ++
 const sg_js =
     \\function SG(){var l=[];try{var r=Intl.DateTimeFormat().resolvedOptions();if(r.timeZone==='Asia/Tokyo')l.push('tz');if(String(r.locale).indexOf('fr')===0)l.push('il');if(navigator.userAgent.indexOf('BoundUA')===0)l.push('ua');if(String(navigator.language).indexOf('fr')===0)l.push('lang');if(innerWidth===390)l.push('iw');if(devicePixelRatio===3)l.push('dpr');if(navigator.maxTouchPoints===5)l.push('mtp');if(matchMedia('print').matches)l.push('print');if(matchMedia('(forced-colors:active)').matches)l.push('fc')}catch(x){l.push('err')}return l.join('.')||'-'}
 ;
-/// 느린 이동을 기다리는 옛 문서: 100 ms 마다 제가 보는 것을 서버로(요청 머리도 서버가 적는다).
-const ob_html = "<!doctype html><title>ob</title><script>" ++ sg_js ++
+/// 느린 이동을 기다리는 옛 문서: 100 ms 마다 제가 보는 것을 서버로(요청 머리도 서버가 적는다). `KID()` 는 기다리는 동안 브라우저 쪽에서 요청을
+/// 만드는 것 넷 — 같은 사이트 iframe·다른 사이트(b.localhost) iframe·iframe 을 대상으로 한 form 제출·dedicated Worker(집중 검증 1 회차: 홉에서 건
+/// 탭 전체의 UA 가 이 요청들에 실렸다). `GO(u,k)` 는 그 주소로 옮기고 `k` 면 700 ms 뒤 `KID()`.
+const ob_html = "<!doctype html><title>ob</title><body><script>" ++ sg_js ++
     \\
     \\window.T0=SG();var n=0;setInterval(function(){n++;fetch('/obs?n='+n+'&e='+SG()).catch(function(){})},100);
+    \\function KID(){var a=document.createElement('iframe');a.src='/ifr?same';document.body.appendChild(a);
+    \\var b=document.createElement('iframe');b.src='http://b.localhost:'+location.port+'/ifr?cross';document.body.appendChild(b);
+    \\try{window.W=new Worker('/wk?w')}catch(e){}
+    \\var q=document.createElement('iframe');q.name='ff';document.body.appendChild(q);
+    \\var f=document.createElement('form');f.method='GET';f.action='/ifr';f.target='ff';var h=document.createElement('input');h.name='form';h.value='1';f.appendChild(h);document.body.appendChild(f);f.submit()}
+    \\window.GO=function(u,k){setTimeout(function(){location.href=u},0);if(k)setTimeout(KID,700);return 'go'};
     \\</script>
 ;
-/// 느린 응답 뒤의 새 문서(묶인 사이트) — 첫 스크립트가 본 것(`T0`, 관측)과 `P()`.
-const slow_html = "<!doctype html><title>slow</title><script>" ++ sg_js ++ "window.T0=SG();" ++ p_js ++ "</script>";
+/// 기다리는 동안 만든 iframe 의 문서 — 그 안의 fetch 도 서버가 적는다.
+const ifr_html = "<!doctype html><title>ifr</title><script>" ++ sg_js ++
+    \\
+    \\fetch('/ifs?t='+location.search.slice(1)+'&h='+location.host+'&e='+SG()).catch(function(){});
+    \\</script>
+;
+const wk_js = "fetch('/wks?e='+(navigator.userAgent.indexOf('BoundUA')===0?'ua':'-')+'&l='+navigator.language).catch(function(){})";
+/// 느린 응답 뒤의 새 문서(묶인 사이트) — 첫 스크립트가 본 것(`T0`)과 `P()`, 첫 스크립트의 요청 하나(`/aft?<같은 꼬리>&nu=` — 그때 navigator 의
+/// UA 가 흉내 `B`(BoundUA)·`A`(Android)·진짜 `R`; 관측: 탭 전체 흉내는 커밋에서 걸려 이 요청과 겨룬다).
+const slow_html = "<!doctype html><title>slow</title><script>" ++ sg_js ++ "window.T0=SG();" ++ p_js ++
+    "var nu=navigator.userAgent;fetch('/aft?'+location.search.slice(1)+'&nu='+(nu.indexOf('BoundUA')===0?'B':nu.indexOf('Android')>0?'A':'R')).catch(function(){});</script>";
 /// bfcache 에 들 수 있는 문서(no-store 없음 — `replyCacheable`): 첫 스크립트와 pageshow 가 본 것, pageshow 의 요청.
 const bf_html = "<!doctype html><title>bf</title><script>" ++ sg_js ++
     \\
@@ -313,6 +334,13 @@ fn serveParsed(conn: c_int, r: []const u8) void {
     // 문서 없는 이동(204 — 주 프레임 이동이 ERR_ABORTED 로 끊기고 옛 문서가 남는다; main 으로 옮길 때 더함).
     if (std.mem.eql(u8, path, "/nc")) return reply(conn, "204 No Content", "text/plain", "", "");
     if (std.mem.eql(u8, path, "/ob")) return reply(conn, "200 OK", html, "", ob_html);
+    if (std.mem.eql(u8, path, "/ifr")) return reply(conn, "200 OK", html, "", ifr_html);
+    if (std.mem.eql(u8, path, "/wk")) return reply(conn, "200 OK", "text/javascript", "", wk_js);
+    if (std.mem.eql(u8, path, "/r3")) {
+        // 밖 → 묶인 사이트(이 302) → 밖: 묶인 사이트 홉에 넣은 흉내 머리가 밖으로 가는 다음 홉에 남으면 안 된다.
+        const loc = std.fmt.bufPrint(&bb, "Location: http://localhost:{d}/pp?via=r3\r\n", .{port}) catch return;
+        return reply(conn, "302 Found", "text/plain", loc, "r3");
+    }
     if (std.mem.eql(u8, path, "/bf")) return replyCacheable(conn, bf_html);
     // 느린 응답(`?ms=N` 동안 잡았다가 문서 — 밖의 문서가 묶인 사이트로 가는 이동을 오래 기다리게).
     if (std.mem.eql(u8, path, "/slow")) {
@@ -1302,7 +1330,7 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     defer sess.deinit();
     const r = &sess.run;
     var u: [256]u8 = undefined;
-    var d: [2400]u8 = undefined;
+    var d: [4096]u8 = undefined;
     var js: [400]u8 = undefined;
     const ps_js = "JSON.stringify([location.host,T0,PS,SG()])";
     // (가) 뒤로: 밖 a → 안 b → (사람의) 뒤로 a.  (나) 앞으로: 안 b → 밖 c → 뒤로 b → (페이지의) 앞으로 c.
@@ -1337,13 +1365,14 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     const in_ok = contains(on_b, "127.0.0.1") and contains(on_b, "tz.") and contains(back_b, "127.0.0.1");
     report(st0 != null and in_ok and clean_a and clean_c and req_ok and st4 != null and !st4.?.on_site, "emu-site-bound-bfcache", std.fmt.bufPrint(&d, "안 {s} | 뒤로(사람) 밖 {s} | 안 {s} | 앞으로(페이지) 밖 {s} on_site={} | pageshow 요청 a {d}개(흉내 {d}·머리 {d}) c {d}개(흉내 {d}·머리 {d}) {s}{s}", .{ on_b[0..@min(on_b.len, 120)], back_a, back_b[0..@min(back_b.len, 120)], fwd_c, if (st4) |x| x.on_site else true, la.total, la.seen, la.header, lc.total, lc.seen, lc.header, la.buf[0..la.len], lc.buf[0..lc.len] }) catch "");
 
-    // 느린 이동: 밖 문서(localhost /ob)가 묶인 사이트의 /slow?ms=3500 으로(페이지 스크립트 — 밖의 페이지가 기다림을 늘릴 수 있다).
+    // 느린 이동: 밖 문서(localhost /ob)가 묶인 사이트의 /slow?ms=3500 으로(페이지 스크립트 — 밖의 페이지가 기다림을 늘릴 수 있다). 기다리는 동안
+    // 옛 문서가 iframe 셋(같은 사이트·다른 사이트·form 대상)과 Worker 를 만든다 — 그 요청들은 진짜 UA·Accept-Language 여야 한다.
     try r.create(2, uLocal(&u, "/ob?w"));
     _ = try r.emulate(2, bound_all);
     r.pump(400);
     var g0: [64]u8 = undefined;
     const t0_old = r.ev(2, "T0", &g0);
-    const go = std.fmt.bufPrint(&js, "setTimeout(function(){{location.href='http://127.0.0.1:{d}/slow?ms=3500&w'}},0);'go'", .{port}) catch unreachable;
+    const go = std.fmt.bufPrint(&js, "GO('http://127.0.0.1:{d}/slow?ms=3500&w',1)", .{port}) catch unreachable;
     var g1: [64]u8 = undefined;
     _ = r.ev(2, go, &g1);
     r.pump(1500);
@@ -1351,17 +1380,141 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     r.pump(1000);
     const st_mid2 = r.st[2];
     _ = r.until(Run.loadsAt, 2, r.loads[2] + 1, 8000);
-    r.pump(400);
+    r.pump(600);
     var lo: Leaks = undefined;
     leaksOn("/obs?", "localhost", &lo);
+    var kid: Kids = undefined;
+    kidsOf(&kid);
     const doc = firstReqOn("/slow?ms=3500&w", "127.0.0.1");
+    const aft = firstReqOn("/aft?ms=3500&w", "127.0.0.1");
+    const aft2 = laterReq(r, 2, "/aft2?w");
     var g2: [700]u8 = undefined;
     const new_doc = r.ev(2, "JSON.stringify([location.host,'T0='+T0,SG(),P().tz,innerWidth])", &g2);
     const st_end = r.st[2];
-    const mid_off = st_mid != null and !st_mid.?.on_site and st_mid2 != null and !st_mid2.?.on_site;
+    // 기다리는 동안 상태는 밖이고 답을 기다리지 않는다(옮긴 판 검증 L1 — 전에는 홉에서 건 UA 의 답이 커밋 뒤에 와 내내 pending).
+    const mid_off = st_mid != null and !st_mid.?.on_site and !st_mid.?.pending and st_mid.?.active_mask == 0 and st_mid2 != null and !st_mid2.?.on_site and !st_mid2.?.pending;
     const old_ok = std.mem.eql(u8, t0_old, "-") and lo.total >= 20 and lo.seen == 0 and lo.header == 0;
-    const new_ok = doc != null and std.mem.eql(u8, doc.?.uaText(), "BoundUA/1") and contains(new_doc, "127.0.0.1") and contains(new_doc, "Asia/Tokyo") and contains(new_doc, ",390]") and st_end != null and st_end.?.on_site;
-    report(old_ok and mid_off and new_ok, "emu-site-bound-slow-hop", std.fmt.bufPrint(&d, "옛 문서 T0={s} · 기다리는 동안 관찰 {d}개(흉내 {d}·흉내 머리 {d}) {s}· 상태 on_site 1.5 초={} 2.5 초={} | 새 문서 요청 ua=[{s}] {s} on_site={}", .{ t0_old, lo.total, lo.seen, lo.header, lo.buf[0..lo.len], if (st_mid) |x| x.on_site else true, if (st_mid2) |x| x.on_site else true, if (doc) |x| x.uaText()[0..@min(x.ua_len, 30)] else "-", new_doc[0..@min(new_doc.len, 200)], if (st_end) |x| x.on_site else false }) catch "");
+    const kids_ok = kid.docs == 4 and kid.dirty == 0 and kid.inner >= 3 and kid.inner_dirty == 0;
+    // 그 홉의 문서 요청 하나는 흉내 UA(넣었다), 커밋 뒤 요청과 같은 꼴(UA·client hints 셋 — metadata 없는 UA 면 client hints 없음). Accept-Language 는
+    // 넣어도 CEF 154 가 진짜로 되돌린다(실측 — 그 요청 하나 늦음, 적기만 한다).
+    const doc_ok = doc != null and aft2 != null and std.mem.eql(u8, doc.?.uaText(), "BoundUA/1") and sameHeaders(&doc.?, &aft2.?, false);
+    const t0_all = "T0=tz.il.ua.lang.iw.dpr.mtp.print.fc";
+    const new_ok = contains(new_doc, "127.0.0.1") and contains(new_doc, t0_all) and contains(new_doc, "Asia/Tokyo") and contains(new_doc, ",390]") and st_end != null and st_end.?.on_site;
+    var hb: [2][400]u8 = undefined;
+    var hb3: [400]u8 = undefined;
+    report(old_ok and mid_off and kids_ok and doc_ok and new_ok, "emu-site-bound-slow-hop", std.fmt.bufPrint(&d, "옛 문서 T0={s} · 기다리는 동안 관찰 {d}개(흉내 {d}·흉내 머리 {d}) {s}· 상태 1.5 초 on_site={} pending={} active=0x{x} 2.5 초 on_site={} | 옛 문서가 만든 요청 문서 {d}개(흉내 머리 {d}) 안의 fetch {d}개(흉내 {d}) {s}| 새 문서 요청 {s} · 커밋 뒤 {s} · 첫 스크립트의 요청 {s} {s} | 새 문서 {s} on_site={}", .{ t0_old, lo.total, lo.seen, lo.header, lo.buf[0..lo.len], if (st_mid) |x| x.on_site else true, if (st_mid) |x| x.pending else true, if (st_mid) |x| x.active_mask else 0, if (st_mid2) |x| x.on_site else true, kid.docs, kid.dirty, kid.inner, kid.inner_dirty, kid.buf[0..kid.len], headerText(&hb[0], doc), headerText(&hb[1], aft2), if (aft) |x| x.targetText() else "-", headerText(&hb3, aft), new_doc[0..@min(new_doc.len, 200)], if (st_end) |x| x.on_site else false }) catch "");
+    // 다음 탭이 이 탭의 렌더러를 나누지 않게(같은 사이트 — locale·시간대는 프로세스에 하나다: E13).
+    try r.host.send(.{ .destroy_browser = 2 });
+    r.pump(500);
+
+    // client hints 를 가진 흉내 — 밖 → 안(302) → 밖: 묶인 사이트 홉의 요청은 흉내 머리(client hints 셋까지), 밖으로 가는 다음 홉은 진짜(넣은 머리가
+    // 리다이렉트를 넘어 남지 않는다). 그 뒤 같은 탭에서 밖 → 안(느림): 문서 요청의 머리가 커밋 뒤 요청과 같다.
+    var hv = derivedAndroid();
+    hv.flags.site_bound = true;
+    hv.site = "127.0.0.1";
+    hv.flags.locale = true;
+    hv.accept_language = "de-DE,de,en";
+    hv.icu_locale = "de_DE";
+    try r.create(3, uLocal(&u, "/ob?h"));
+    _ = try r.emulate(3, hv);
+    r.pump(300);
+    const base = lastReq("/obs?");
+    _ = r.ev(3, std.fmt.bufPrint(&js, "GO('http://127.0.0.1:{d}/r3?h')", .{port}) catch unreachable, &g1);
+    _ = r.until(Run.loadsAt, 3, r.loads[3] + 1, 6000);
+    r.pump(400);
+    const r3 = firstReqOn("/r3?h", "127.0.0.1");
+    const via = firstReqOn("/pp?via=r3", "localhost");
+    const st_via = r.st[3];
+    try r.nav(3, uLocal(&u, "/ob?h2"));
+    r.pump(300);
+    _ = r.ev(3, std.fmt.bufPrint(&js, "GO('http://127.0.0.1:{d}/slow?ms=1500&h')", .{port}) catch unreachable, &g1);
+    _ = r.until(Run.loadsAt, 3, r.loads[3] + 1, 6000);
+    r.pump(600);
+    const hdoc = firstReqOn("/slow?ms=1500&h", "127.0.0.1");
+    const haft_first = firstReqOn("/aft?ms=1500&h", "127.0.0.1");
+    const haft = laterReq(r, 3, "/aft2?h");
+    const want_chua = "\"Chromium\";v=\"154\", \"Not A(Brand\";v=\"99\"";
+    const r3_ok = r3 != null and std.mem.eql(u8, r3.?.uaText(), android_ua) and std.mem.eql(u8, r3.?.chuaText(), want_chua) and
+        std.mem.eql(u8, r3.?.mobText(), "?1") and std.mem.eql(u8, r3.?.platText(), "\"Android\"");
+    const via_ok = via != null and base != null and std.mem.eql(u8, via.?.uaText(), base.?.uaText()) and std.mem.eql(u8, via.?.alText(), base.?.alText()) and sameHeaders(&via.?, &base.?, true) and st_via != null and !st_via.?.on_site;
+    const hdoc_ok = hdoc != null and haft != null and std.mem.eql(u8, hdoc.?.uaText(), android_ua) and std.mem.eql(u8, hdoc.?.chuaText(), want_chua) and sameHeaders(&hdoc.?, &haft.?, false);
+    var hb2: [4][400]u8 = undefined;
+    report(r3_ok and via_ok and hdoc_ok, "emu-site-bound-hop-headers", std.fmt.bufPrint(&d, "안 302 홉 {s} | 밖 다음 홉 {s} (진짜 {s}) on_site={} | 느린 홉 문서 {s} · 커밋 뒤 {s} · 첫 스크립트의 요청 {s} {s}", .{ headerText(&hb2[0], r3), headerText(&hb2[1], via), headerText(&hb2[2], base), if (st_via) |x| x.on_site else true, headerText(&hb2[3], hdoc), headerText(&hb[0], haft), if (haft_first) |x| x.targetText() else "-", headerText(&hb3, haft_first) }) catch "");
+
+    // 밖 → 묶인 사이트의 닫힌 포트(연결 거부 — 오류 페이지, `on_load_start` 없음): 오류 페이지(실패한 주소 — 묶인 사이트)가 커밋된 문서로 기다림을
+    // 끝낸다(옮긴 판 검증 L2 — 안 그러면 다음 이동까지 상태가 밖·hold 로 남았다; 실측: 이 오류에서 Chromium 이 2.5 초 안에 스스로 다시 불러 오지 않았다).
+    // 그 뒤 밖으로 가는 이동의 문서 요청은 진짜.
+    const closed = closedPort();
+    try r.create(4, uLocal(&u, "/ob?e"));
+    _ = try r.emulate(4, bound_all);
+    r.pump(300);
+    _ = r.ev(4, std.fmt.bufPrint(&js, "GO('http://127.0.0.1:{d}/err?e')", .{closed}) catch unreachable, &g1);
+    r.pump(2500);
+    const st_err = r.st[4];
+    try r.nav(4, uLocal(&u, "/ob?e2"));
+    r.pump(300);
+    const e2 = firstReqOn("/ob?e2", "localhost");
+    var g3: [200]u8 = undefined;
+    const after_err = r.ev(4, "JSON.stringify([location.host,T0,SG()])", &g3);
+    const err_ok = st_err != null and st_err.?.on_site and !st_err.?.pending and e2 != null and !contains(e2.?.uaText(), "BoundUA") and !std.mem.startsWith(u8, e2.?.alText(), "fr") and contains(after_err, "localhost") and !leakText(after_err);
+    report(err_ok, "emu-site-bound-error-page", std.fmt.bufPrint(&d, "오류 페이지 2.5 초 on_site={} pending={} active=0x{x} | 밖 이동 문서 {s} 문서 {s}", .{ if (st_err) |x| x.on_site else false, if (st_err) |x| x.pending else true, if (st_err) |x| x.active_mask else 0, headerText(&hb[0], e2), after_err }) catch "");
+}
+
+/// 기다리는 동안 옛 문서가 만든 요청들(`ob_html` 의 `KID`): iframe 문서 셋·Worker 스크립트(`docs` — 흉내 UA·Accept-Language 를 실은 수 `dirty`)와 그
+/// 안의 fetch(`inner` — 흉내를 본 수 `inner_dirty`).
+const Kids = struct { docs: u32 = 0, dirty: u32 = 0, inner: u32 = 0, inner_dirty: u32 = 0, buf: [900]u8 = undefined, len: usize = 0 };
+
+fn kidsOf(out: *Kids) void {
+    out.* = .{};
+    var w: std.Io.Writer = .fixed(&out.buf);
+    _ = std.c.pthread_mutex_lock(&srv_lock);
+    defer _ = std.c.pthread_mutex_unlock(&srv_lock);
+    for (srv_recs.items) |rec| {
+        const t = rec.targetText();
+        const header = contains(rec.uaText(), "BoundUA") or std.mem.startsWith(u8, rec.alText(), "fr");
+        if (std.mem.startsWith(u8, t, "/ifr?") or std.mem.startsWith(u8, t, "/wk?")) {
+            out.docs += 1;
+            if (header) out.dirty += 1;
+            w.print("{s}@{s} ua=[{s}] al=[{s}]; ", .{ t[0..@min(t.len, 16)], rec.host[0..@min(rec.host_len, 12)], rec.uaText()[0..@min(rec.ua_len, 10)], rec.alText()[0..@min(rec.al_len, 8)] }) catch {};
+        } else if (std.mem.startsWith(u8, t, "/ifs?") or std.mem.startsWith(u8, t, "/wks?")) {
+            out.inner += 1;
+            const seen = contains(t, "e=ua") or (if (std.mem.indexOf(u8, t, "e=")) |at| !std.mem.startsWith(u8, t[at + 2 ..], "-") else false);
+            if (header or seen) out.inner_dirty += 1;
+        }
+    }
+    out.len = w.buffered().len;
+}
+
+/// 두 요청의 흉내에 닿는 머리(UA·Sec-CH-UA·-Mobile·-Platform, `with_al` 이면 Accept-Language 도)가 모두 같은가.
+fn sameHeaders(a: *const Rec, b: *const Rec, with_al: bool) bool {
+    return std.mem.eql(u8, a.uaText(), b.uaText()) and (!with_al or std.mem.eql(u8, a.alText(), b.alText())) and std.mem.eql(u8, a.chuaText(), b.chuaText()) and
+        std.mem.eql(u8, a.mobText(), b.mobText()) and std.mem.eql(u8, a.platText(), b.platText());
+}
+
+/// 커밋이 끝난 뒤 그 탭의 문서가 보내는 요청 하나(탭 전체 흉내가 확실히 걸린 뒤 — 첫 스크립트의 요청은 커밋의 걸기와 겨룬다).
+fn laterReq(r: *Run, b: u64, target: []const u8) ?Rec {
+    var js: [200]u8 = undefined;
+    var out: [16]u8 = undefined;
+    _ = r.ev(b, std.fmt.bufPrint(&js, "fetch('{s}').then(function(){{return 1}})", .{target}) catch return null, &out);
+    r.pump(300);
+    return lastReq(target);
+}
+
+fn headerText(buf: []u8, rec: ?Rec) []const u8 {
+    const x = rec orelse return "-";
+    return std.fmt.bufPrint(buf, "ua=[{s}] al=[{s}] ch=[{s}] m=[{s}] p=[{s}]", .{ x.uaText()[0..@min(x.ua_len, 40)], x.alText(), x.chuaText()[0..@min(x.chua_len, 80)], x.mobText(), x.platText() }) catch "?";
+}
+
+/// 듣지 않는 루프백 포트 하나(묶었다가 곧 닫는다 — 연결 거부의 오류 페이지).
+fn closedPort() u16 {
+    const fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 9;
+    defer _ = std.c.close(fd);
+    var addr: SockaddrIn = .{ .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+    if (bind(fd, &addr, @sizeOf(SockaddrIn)) != 0) return 9;
+    var len: u32 = @sizeOf(SockaddrIn);
+    if (getsockname(fd, &addr, &len) != 0) return 9;
+    return std.mem.bigToNative(u16, addr.port);
 }
 
 /// `ps_js` 의 답에 흉내를 본 표지가 있는가(`SG()` 의 이름 — `-` 가 아닌 것).

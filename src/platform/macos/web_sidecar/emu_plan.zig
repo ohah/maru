@@ -9,9 +9,11 @@
 //!   - **렌더러가 없으면 아무것도 보내지 않는다**(빈 열). 렌더러가 죽은 탭에 `setDeviceMetricsOverride` 를 보내면 sidecar 가 통째로 죽었다
 //!     (E11 — 세 번). 이미 건 흉내는 Chromium 이 새 렌더러에 다시 건다(E4) — 되살아나면 그동안 쌓인 **차이만** 보낸다.
 //!   - 사이트에 묶인 탭(사용자 탭 — 사용자 결정 Q1)이 사이트 밖이면 **모두 지운다**(돌아오면 다시 건다).
-//!   - 사이트 밖 문서에서 사이트 안으로 가는 이동은 **커밋까지 요청 무리만**(`hold` — `heldUntilCommit`): 첫 문서 요청에 실어야 하는 UA·client
-//!     hints·Accept-Language(`.ua` 한 호출 — E5)는 홉에서 걸고, 나머지는 새 문서의 커밋(`navigate`)에서. 화면 흉내는 보이는 위젯에 곧 걸려 응답을
-//!     기다리는 동안 옛(밖의) 문서가 흉내 폭·배율을 봤다(옮긴 판 검증 2 회차 — 밖의 페이지는 느린 주소로 그 기다림을 늘릴 수 있다).
+//!   - 사이트 밖 문서에서 사이트 안으로 가는 이동은 **커밋까지 탭 전체에 아무것도 걸지 않는다**(`hold` — `heldUntilCommit`): 그 홉의 주 프레임 문서
+//!     요청 하나에만 흉내 `User-Agent`·`Accept-Language`·client hints 를 직접 넣고(`injection` — `emu_inject.zig` 가 IO 스레드에서), 모든 무리는 새
+//!     문서의 커밋(`navigate`)에서 건다. 화면 흉내를 홉에서 걸면 응답을 기다리는 동안 옛(밖의) 문서가 흉내 폭·배율을 봤고(옮긴 판 검증 2 회차), UA
+//!     호출을 홉에서 걸면 그 옛 문서가 만든 iframe·form 대상·Worker 의 요청이 허락하지 않은 사이트로 흉내 UA·Accept-Language 를 실었다(집중 검증
+//!     1 회차 — 밖의 페이지는 느린 주소로 그 기다림을 늘릴 수 있다; 사용자 결정 2026-11-12 「그 한 요청만 머리를 직접 넣기」).
 //!   - 지움의 꼴: 미디어는 네 기능 이름을 모두 빈 값으로(`{}` 는 forced-colors 를 지우지 않았다 — E17), UA 는 `{"userAgent":""}`, 시간대는
 //!     `{"timezoneId":""}`, 언어는 `{}`, 색각은 `{"type":"none"}`, 화면은 `Emulation.clearDeviceMetricsOverride`, 터치는 `{"enabled":false}`.
 //!   - UA 와 언어의 머리 쪽(`Accept-Language`)은 **한 호출**이다(`setUserAgentOverride` — 뒤 호출에 acceptLanguage 가 없으면 기본으로 돌아간다,
@@ -21,8 +23,8 @@
 //!   - 위치는 CDP 를 여기서 보내지 않는다 — W5b2 와 한 칸(`permissions.zig`)이 건다. 이 표는 「무엇을 바라는가」 만 정한다.
 //!
 //! 시험이 증명하는 것: 바뀐 것만 명령, 지움 꼴(미디어 네 이름 빈 값·UA ""·시간대 ""·언어 {}·색각 none), 죽은 동안 빈 열·되살아나면 쌓인 차이만,
-//! metrics 는 살아 있을 때만(변이: 이 검사를 지우면 시험이 실패한다), 사이트 밖 모두 지움·돌아오면 다시, fit 셈과 resize, 답 받기의 마스크·까닭,
-//! 번호 대역.
+//! metrics 는 살아 있을 때만(변이: 이 검사를 지우면 시험이 실패한다), 사이트 밖 모두 지움·돌아오면 다시, 밖→안 홉의 기다림(탭 전체에 아무것도·상태는 밖,
+//! 그 홉의 문서 요청에 넣을 머리 — 넣지 않는 경우·client hints 의 꼴·Accept-Language 의 q 값), fit 셈과 resize, 답 받기의 마스크·까닭, 번호 대역.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -81,12 +83,15 @@ pub fn groupOf(kind: Kind, ua_set: bool) msg.EmuGroup {
 
 pub const Status = enum { idle, pending, ok, failed };
 
-/// 사이트 안으로 가는 이동이 커밋되기 전(사이트 밖 문서가 아직 보인다) 미루는 종류인가 — 요청 무리(`.ua` — UA·client hints·Accept-Language,
-/// 첫 문서 요청에 실린다)만 홉에서 건다. 실측(CEF 154, 판정 `emu-site-bound-slow-hop`): 미루지 않으면 옛 문서가 기다림 내내 화면·배율 흉내를 봤고
-/// (시간대·언어·터치·미디어는 보지 않았다 — DevTools 가 커밋까지 렌더러 쪽 명령을 붙잡는 것으로 보인다), 위치 덮어쓰기는 브라우저 쪽이라 곧 걸린다.
-/// 모두 미뤄도 새 문서의 첫 스크립트는 모든 무리를 봤다(같은 판정의 `T0` — 커밋 알림 `on_load_start` 가 문서의 스크립트보다 먼저다).
+/// 사이트 안으로 가는 이동이 커밋되기 전(사이트 밖 문서가 아직 보인다) 미루는 종류인가 — **모두**. 실측(CEF 154, 판정 `emu-site-bound-slow-hop`):
+/// 화면을 홉에서 걸면 옛 문서가 기다림 내내 화면·배율 흉내를 봤고(시간대·언어·터치·미디어는 보지 않았다 — DevTools 가 커밋까지 렌더러 쪽 명령을
+/// 붙잡는 것으로 보인다), UA 호출(`.ua` — UA·client hints·Accept-Language)을 홉에서 걸면 렌더러 쪽(navigator·옛 문서의 fetch)은 붙잡혔지만
+/// 브라우저 쪽에서 만드는 이동 요청 — 옛 문서가 만든 iframe 문서·form 대상·dedicated Worker 스크립트 — 이 곧 흉내 머리를 싣고 허락하지 않은
+/// 사이트로 갔다(집중 검증 1 회차 SEVERE). 그 홉의 문서 요청 하나는 `Tab.injection` 이 머리로 직접 채운다(사용자 결정 2026-11-12). 모두 미뤄도 새
+/// 문서의 첫 스크립트는 모든 무리를 봤다(같은 판정의 `T0` — 커밋 알림 `on_load_start` 가 문서의 스크립트보다 먼저다).
 pub fn heldUntilCommit(kind: Kind) bool {
-    return kind != .ua;
+    _ = kind;
+    return true;
 }
 
 /// fit 셈의 단일 출처는 `emu_fields.fitScale`(maru 도 같은 셈으로 결과의 `fit_scale` 을 미리 보인다).
@@ -121,8 +126,9 @@ pub const Tab = struct {
     reason: msg.EmuFailReason = .none,
     alive: bool = true,
     on_site: bool = true,
-    /// 사이트 안으로 가는 주 프레임 이동이 커밋 전이고 지금 보이는 문서는 사이트 밖이다 — 요청 무리만 건다(`heldUntilCommit`). 상태는 사이트 밖으로
-    /// 알린다(maru 의 입력 줄임·테두리는 옛 문서에 걸리지 않는다). 커밋·끊김(`navigate`)이 끈다.
+    /// 사이트 안으로 가는 주 프레임 이동이 커밋 전이고 지금 보이는 문서는 사이트 밖이다 — 탭 전체에는 아무것도 걸지 않고(`heldUntilCommit`) 그 홉의
+    /// 문서 요청에만 머리를 넣는다(`injection`). 상태는 사이트 밖으로 알린다(maru 의 입력 줄임·테두리는 옛 문서에 걸리지 않는다). 커밋·끊김·오류
+    /// 페이지(`navigate`)가 끈다.
     hold: bool = false,
     pane_w: u32 = 0,
     pane_h: u32 = 0,
@@ -153,7 +159,7 @@ pub const Tab = struct {
         return w;
     }
 
-    /// 그 종류에 지금 걸려야 하는 상태 — 커밋을 기다리는 동안(`hold`) 요청 무리 밖은 빈 상태.
+    /// 그 종류에 지금 걸려야 하는 상태 — 커밋을 기다리는 동안(`hold`) 미루는 종류(지금은 모두 — `heldUntilCommit`)는 빈 상태.
     fn targetFor(self: *const Tab, kind: Kind) msg.Emulation {
         if (self.hold and heldUntilCommit(kind)) return .{ .browser = if (self.want.get()) |w| w.browser else 0 };
         return self.target();
@@ -254,13 +260,25 @@ pub const Tab = struct {
     }
 
     /// 주 프레임 이동 홉(`on_before_browse` — 커밋 전, 리다이렉트마다)의 호스트와 지금 보이는(커밋된) 문서의 호스트. 사이트 밖 문서에서 사이트 안으로
-    /// 가면 커밋까지 요청 무리만(`hold`), 안에서 안이면 모두, 밖으로 가면 곧 모두 지운다. 바뀌었으면 참.
+    /// 가면 커밋까지 탭 전체에 아무것도 걸지 않고 그 홉의 문서 요청에만 머리(`hold` — `injection`), 안에서 안이면 모두, 밖으로 가면 곧 모두 지운다.
+    /// 바뀌었으면 참.
     pub fn hop(self: *Tab, host: ?[]const u8, shown: ?[]const u8) bool {
         const now = self.siteCovers(host);
         const hold = now and !self.siteCovers(shown);
         if (now == self.on_site and hold == self.hold) return false;
         self.on_site = now;
         self.hold = hold;
+        return true;
+    }
+
+    /// 밖→안 홉을 기다리는 동안(`hold`) 그 홉의 주 프레임 문서 요청 하나에 넣을 머리 — UA·언어 흉내가 있을 때만(아니면 거짓, `out` 은 그대로).
+    /// 탭 전체의 걸기는 커밋까지 미루므로(`heldUntilCommit`) 허락한 사이트로 가는 그 요청만 흉내 머리를 싣는다(사용자 결정 2026-11-12). 지움·철회·
+    /// 다른 사이트로 바뀐 `emulation`(부른 쪽이 `hop` 을 다시 돌린다)·커밋·끊김은 `hold` 를 내리거나 흉내를 비워 거짓이 된다.
+    pub fn injection(self: *const Tab, out: *Inject) bool {
+        if (!self.hold or !self.on_site) return false;
+        const w = self.want.get() orelse return false;
+        if (!w.flags.site_bound or !(w.flags.ua or w.flags.locale)) return false;
+        out.* = Inject.build(w) catch return false; // 버퍼는 가장 큰 흉내를 담는다(시험) — 못 담으면 넣지 않는다(흉내 머리가 한 요청 늦을 뿐)
         return true;
     }
 
@@ -539,6 +557,150 @@ pub fn buildParams(kind: Kind, t: msg.Emulation, fit: f32, buf: []u8, cmd: *Cmd)
     return w.buffered();
 }
 
+// ── 밖→안 홉의 문서 요청 하나에 넣는 머리(사용자 결정 2026-11-12 「그 한 요청만 머리를 직접 넣기」) ─────────────────────
+
+/// client hints 머리 중 흉내 metadata 로 값을 셀 수 있는 것(소문자). 이 밖의 `sec-ch-ua*`(full-version·form-factors 등)는 맞출 값을 모르므로
+/// 고쳐 쓸 때 뺀다(그 요청 하나는 그 머리가 없다 — 커밋 뒤 요청부터 Chromium 이 흉내 metadata 로 셈한다).
+pub const hint_names = [_][]const u8{
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "sec-ch-ua-platform-version",
+    "sec-ch-ua-arch",
+    "sec-ch-ua-model",
+    "sec-ch-ua-bitness",
+    "sec-ch-ua-full-version-list",
+    "sec-ch-ua-wow64",
+};
+
+/// 가장 큰 흉내(UA 512·Accept-Language 128 의 q 값·브랜드 넷 둘·글 다섯 — 모두 이스케이프 두 배)를 담는다(시험).
+const inject_buf_bytes = 6 * 1024;
+
+/// 그 요청에 넣을 머리. 값은 `buf` 의 자리(`Span`)로 쥔다 — IO 스레드의 표(`emu_inject.zig`)가 구조체를 복사해 가도 맞게. `Accept-Language` 는
+/// 넣어도 CEF 154 가 그 요청을 진짜 값으로 냈다(실측 — 그 한 요청의 언어는 늦다, `emu_inject.zig`).
+pub const Inject = struct {
+    const Span = struct { off: u16 = 0, len: u16 = 0 };
+    pub const Hints = enum(u8) {
+        /// 건드리지 않는다(UA 흉내가 없다 — 언어만이면 기본 UA·client hints 그대로: E7).
+        keep,
+        /// 모두 뺀다(UA 흉내에 metadata 가 없다 — Chromium 도 그 흉내 아래에서는 client hints 를 보내지 않았다: `emu-ua-none-safari`).
+        drop,
+        /// 요청에 있는 것만 흉내 metadata 의 값으로(낮은 엔트로피 셋은 믿을 만한 출처에만, 높은 것은 그 사이트가 Accept-CH 로 청했을 때만 실린다 —
+        /// 없는 머리를 더하지 않는다), 셀 수 없는 것은 뺀다.
+        rewrite,
+    };
+    pub const Action = union(enum) { keep, drop, set: []const u8 };
+
+    ua: ?Span = null,
+    accept_language: ?Span = null,
+    hints: Hints = .keep,
+    /// `hints == .rewrite` 일 때 `hint_names` 마다의 값(null = 뺀다).
+    hint_values: [hint_names.len]?Span = @splat(null),
+    buf: [inject_buf_bytes]u8 = undefined,
+    used: usize = 0,
+
+    fn text(self: *const Inject, s: Span) []const u8 {
+        return self.buf[s.off..][0..s.len];
+    }
+
+    pub fn userAgent(self: *const Inject) ?[]const u8 {
+        return if (self.ua) |s| self.text(s) else null;
+    }
+
+    pub fn acceptLanguage(self: *const Inject) ?[]const u8 {
+        return if (self.accept_language) |s| self.text(s) else null;
+    }
+
+    /// 요청에 있는 머리 하나를 어떻게 하나(이름은 대소문자 무시). `User-Agent`·`Accept-Language` 는 요청에 없어도 부른 쪽이 더한다(`userAgent`·
+    /// `acceptLanguage`).
+    pub fn action(self: *const Inject, name: []const u8) Action {
+        if (std.ascii.eqlIgnoreCase(name, "user-agent")) return if (self.userAgent()) |v| .{ .set = v } else .keep;
+        if (std.ascii.eqlIgnoreCase(name, "accept-language")) return if (self.acceptLanguage()) |v| .{ .set = v } else .keep;
+        if (name.len < 9 or !std.ascii.eqlIgnoreCase(name[0..9], "sec-ch-ua")) return .keep;
+        switch (self.hints) {
+            .keep => return .keep,
+            .drop => return .drop,
+            .rewrite => {
+                for (hint_names, self.hint_values) |n, v| if (std.ascii.eqlIgnoreCase(name, n)) return if (v) |s| .{ .set = self.text(s) } else .drop;
+                return .drop;
+            },
+        }
+    }
+
+    fn put(self: *Inject, comptime f: anytype, args: anytype) !Span {
+        var w: Writer = .fixed(self.buf[self.used..]);
+        try f(&w, args);
+        const n = w.buffered().len;
+        const s: Span = .{ .off = @intCast(self.used), .len = @intCast(n) };
+        self.used += n;
+        return s;
+    }
+
+    /// 흉내 상태에서 — Chromium 이 커밋 뒤 탭 전체의 `setUserAgentOverride` 로 낼 머리와 같은 꼴(판정 `emu-site-bound-slow-hop` 이 커밋 뒤
+    /// 요청의 머리와 견준다).
+    pub fn build(w: msg.Emulation) !Inject {
+        var out: Inject = .{};
+        if (w.flags.ua) out.ua = try out.put(writeRaw, w.ua);
+        if (w.flags.locale) out.accept_language = try out.put(writeAcceptLanguage, w.accept_language);
+        if (w.flags.ua) {
+            if (!w.flags.hints) {
+                out.hints = .drop;
+            } else {
+                out.hints = .rewrite;
+                const h = w.hints;
+                out.hint_values[0] = try out.put(writeBrandHeader, h.brands[0..h.brand_count]);
+                out.hint_values[1] = try out.put(writeRaw, if (h.mobile) "?1" else "?0");
+                out.hint_values[2] = try out.put(writeSfString, h.platform);
+                out.hint_values[3] = try out.put(writeSfString, h.platform_version);
+                out.hint_values[4] = try out.put(writeSfString, h.architecture);
+                out.hint_values[5] = try out.put(writeSfString, h.model);
+                out.hint_values[6] = try out.put(writeSfString, h.bitness);
+                // 전체 목록을 주지 않은 흉내면 Chromium 이 무엇을 셀지 재지 않았다 — 뺀다.
+                if (h.full_count > 0) out.hint_values[7] = try out.put(writeBrandHeader, h.full_list[0..h.full_count]);
+                out.hint_values[8] = try out.put(writeRaw, "?0"); // metadata 의 wow64 를 보내지 않는다 — 거짓
+            }
+        }
+        return out;
+    }
+};
+
+fn writeRaw(w: *Writer, v: []const u8) !void {
+    try w.writeAll(v);
+}
+
+/// Chromium 이 `setUserAgentOverride` 의 `acceptLanguage` 목록에 붙이는 q 값과 같은 꼴(`fr-FR,fr` → `fr-FR,fr;q=0.9` — 실측 E7·이 판정의
+/// 커밋 뒤 요청): 첫째는 q 없이, 다음부터 0.9 에서 0.1 씩 내려 0.1 에서 멈춘다, 빈 항목은 건너뛴다.
+fn writeAcceptLanguage(w: *Writer, list: []const u8) !void {
+    var q: u8 = 10;
+    var it = std.mem.tokenizeScalar(u8, list, ',');
+    while (it.next()) |lang| {
+        if (q == 10) try w.writeAll(lang) else try w.print(",{s};q=0.{d}", .{ lang, q });
+        if (q > 1) q -= 1;
+    }
+}
+
+/// 구조화 머리(RFC 8941)의 문자열 — `"` 와 `\` 만 이스케이프(글은 인쇄 가능한 ASCII 로 검사를 지났다 — `emu_fields.printable`).
+fn writeSfString(w: *Writer, v: []const u8) !void {
+    try w.writeByte('"');
+    for (v) |ch| {
+        if (ch == '"' or ch == '\\') try w.writeByte('\\');
+        try w.writeByte(ch);
+    }
+    try w.writeByte('"');
+}
+
+/// `Sec-CH-UA`·`Sec-CH-UA-Full-Version-List` — `"브랜드";v="버전"` 을 `, ` 로 잇는다(버전이 비면 `;v=` 없이).
+fn writeBrandHeader(w: *Writer, list: []const msg.EmuBrand) !void {
+    for (list, 0..) |b, i| {
+        if (i > 0) try w.writeAll(", ");
+        try writeSfString(w, b.brand);
+        if (b.version.len != 0) {
+            try w.writeAll(";v=");
+            try writeSfString(w, b.version);
+        }
+    }
+}
+
 // ── 시험 ────────────────────────────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -721,7 +883,7 @@ test "W9e①: 사이트에 묶인 탭 — 사이트 밖이면 모두 지우고(�
     try testing.expect(!agent.navigate("bank.test") and agent.on_site);
 }
 
-test "W9e①: 밖의 문서에서 사이트 안으로 가는 홉은 커밋까지 요청 무리만 — 옛 문서에 화면 흉내가 걸리지 않고 상태는 밖, 커밋·끊김이 끝낸다" {
+test "W9e①: 밖의 문서에서 사이트 안으로 가는 홉은 커밋까지 탭 전체에 아무것도 걸지 않는다 — 상태는 밖·기다림 없음, 그 홉의 문서 요청에만 머리, 커밋이 모두 건다, 끊김·안→밖은 머리를 거둔다" {
     var t: Tab = .{ .pane_w = 640, .pane_h = 400 };
     var v = phone();
     v.flags.site_bound = true;
@@ -735,54 +897,152 @@ test "W9e①: 밖의 문서에서 사이트 안으로 가는 홉은 커밋까지
     var c: Cmds = .{};
     t.plan(&c);
     try testing.expectEqual(@as(usize, 0), c.len);
-    // 밖 → 안 홉: UA 만(첫 문서 요청에 실린다), 화면·터치·시간대는 커밋까지 — 상태는 아직 밖(maru 의 입력 줄임·테두리가 옛 문서에 걸리지 않게).
+    var inj: Inject = .{};
+    try testing.expect(!t.injection(&inj)); // 밖의 문서 — 넣지 않는다
+    // 밖 → 안 홉: 탭 전체에는 아무것도(UA 호출도 — 옛 문서의 iframe·Worker 요청이 흉내 UA 를 실었다: 집중 검증 1 회차), 상태는 밖이고 기다리는
+    // 답이 없다(옮긴 판 검증 L1 — 전에는 UA 의 답이 커밋 뒤에 와 기다림 내내 pending 이었다). 그 홉의 문서 요청에만 흉내 머리.
     try testing.expect(t.hop("www.a.test", "bank.test"));
     try testing.expect(t.hold);
     t.plan(&c);
-    try testing.expectEqual(@as(usize, 1), c.len);
-    try testing.expect(find(&c, .ua).?.set);
-    t.answered(.ua, true, "");
+    try testing.expectEqual(@as(usize, 0), c.len);
     const mid = t.state(1);
-    try testing.expect(!mid.on_site and mid.fit_scale == 1 and mid.active_mask == 1 << @backingInt(msg.EmuGroup.user_agent));
-    try testing.expect(!t.hop("a.test", "bank.test")); // 안 → 안 리다이렉트 — 그대로 기다린다
+    try testing.expect(!mid.on_site and mid.fit_scale == 1 and mid.active_mask == 0 and !mid.pending);
+    try testing.expect(t.injection(&inj));
+    try testing.expectEqualStrings("UA/1", inj.userAgent().?);
+    try testing.expect(inj.acceptLanguage() == null);
+    try testing.expect(!t.hop("a.test", "bank.test")); // 안 → 안 리다이렉트 — 그대로 기다리고 그 홉에도 넣는다
+    try testing.expect(t.injection(&inj));
     try testing.expect(!t.resize(320, 200)); // 기다리는 동안 화면 흉내는 없다
     _ = t.resize(640, 400);
-    // 커밋: 나머지를 건다.
+    // 커밋: 모두 건다(UA 도 — 새 문서의 첫 스크립트가 본다), 머리 넣기는 끝.
     try testing.expect(t.navigate("a.test"));
-    try testing.expect(!t.hold);
+    try testing.expect(!t.hold and !t.injection(&inj));
     t.plan(&c);
-    try testing.expectEqual(@as(usize, 3), c.len);
-    try testing.expect(find(&c, .metrics).?.set and find(&c, .touch).?.set and find(&c, .timezone).?.set);
+    try testing.expectEqual(@as(usize, 4), c.len);
+    try testing.expect(find(&c, .metrics).?.set and find(&c, .touch).?.set and find(&c, .ua).?.set and find(&c, .timezone).?.set);
     try testing.expect(t.state(1).on_site);
     // 안의 문서에서 안으로 가는 홉은 기다리지 않는다(이미 걸려 있다), 밖으로 가는 홉은 곧 모두 지운다.
     try testing.expect(!t.hop("a.test", "a.test"));
+    try testing.expect(!t.injection(&inj));
     try testing.expect(t.hop("bank.test", "a.test"));
     try testing.expect(!t.hold);
     t.plan(&c);
     try testing.expectEqual(@as(usize, 4), c.len);
     for (c.slice()) |x| try testing.expect(!x.set);
-    // 안의 문서 → 밖(리다이렉트) → 다시 안: 보이는 문서가 안이라 곧 모두.
+    // 안의 문서 → 밖(리다이렉트) → 다시 안: 보이는 문서가 안이라 곧 모두(머리는 넣지 않는다 — 탭 전체가 이미 싣는다).
     try testing.expect(t.hop("a.test", "a.test"));
-    try testing.expect(!t.hold);
+    try testing.expect(!t.hold and !t.injection(&inj));
     t.plan(&c);
     try testing.expectEqual(@as(usize, 4), c.len);
-    // 끊긴 홉(204·다운로드): 밖의 문서에서 안으로 — UA 를 건 뒤 끊기면 옛 문서로 되돌려 UA 를 지운다, 미룬 무리는 걸지 않는다.
+    // 끊긴 홉(204·다운로드): 밖의 문서에서 안으로 — 아무것도 걸지 않았으니 지울 것도 없고, 머리 넣기가 끝난다.
     try testing.expect(t.hop("bank.test", "a.test"));
     t.plan(&c);
     try testing.expect(t.navigate("bank.test") == false); // 커밋된 밖의 문서 — 이미 밖
     try testing.expect(t.hop("a.test", "bank.test") and t.hold);
     t.plan(&c);
-    try testing.expectEqual(@as(usize, 1), c.len);
+    try testing.expectEqual(@as(usize, 0), c.len);
     try testing.expect(t.navigate("bank.test")); // 끊김 — 옛 문서(밖)
-    try testing.expect(!t.hold and !t.on_site);
+    try testing.expect(!t.hold and !t.on_site and !t.injection(&inj));
     t.plan(&c);
-    try testing.expectEqual(@as(usize, 1), c.len);
-    try testing.expect(!find(&c, .ua).?.set);
+    try testing.expectEqual(@as(usize, 0), c.len);
+    // 밖 → 안(302) → 밖: 밖으로 가는 홉에는 넣지 않는다.
+    try testing.expect(t.hop("a.test", "bank.test") and t.injection(&inj));
+    try testing.expect(t.hop("bank.test", "bank.test"));
+    try testing.expect(!t.hold and !t.injection(&inj));
     // 보이는 문서를 모르면(about:blank 등) 밖과 같이 기다린다; 묶이지 않은 탭은 기다리지 않는다.
     try testing.expect(t.hop("a.test", null) and t.hold);
     var agent: Tab = .{};
     try agent.setWant(.{ .browser = 2, .generation = 1, .flags = .{ .timezone = true }, .timezone = "UTC" });
-    try testing.expect(!agent.hop("a.test", "bank.test") and !agent.hold);
+    try testing.expect(!agent.hop("a.test", "bank.test") and !agent.hold and !agent.injection(&inj));
+}
+
+test "W9e①: 머리 넣기 — 기다리는 동안 지움·철회·다른 사이트·UA 없는 흉내는 넣지 않는다, 언어만이면 UA·client hints 를 그대로, metadata 없는 UA 는 client hints 를 뺀다" {
+    var t: Tab = .{};
+    var v: msg.Emulation = .{ .browser = 1, .generation = 1, .flags = .{ .site_bound = true, .ua = true, .locale = true }, .site = "a.test", .ua = "UA/1", .accept_language = "fr-FR,fr", .icu_locale = "fr_FR" };
+    try t.setWant(v);
+    _ = t.navigate("bank.test");
+    try testing.expect(t.hop("a.test", "bank.test"));
+    var inj: Inject = .{};
+    try testing.expect(t.injection(&inj));
+    try testing.expectEqualStrings("UA/1", inj.action("User-Agent").set);
+    try testing.expectEqualStrings("fr-FR,fr;q=0.9", inj.action("accept-language").set);
+    // metadata 없는 UA — Chromium 도 그 흉내 아래에서는 client hints 를 보내지 않는다(`emu-ua-none-safari`): 모두 뺀다.
+    try testing.expect(inj.action("Sec-CH-UA") == .drop and inj.action("sec-ch-ua-platform") == .drop and inj.action("Sec-CH-UA-Mobile") == .drop and inj.action("sec-ch-ua-form-factors") == .drop);
+    try testing.expect(inj.action("Accept") == .keep and inj.action("Cookie") == .keep and inj.action("sec-ch-u") == .keep and inj.action("Sec-Fetch-Mode") == .keep);
+    // 언어만: UA 와 client hints 는 그대로(E7 — 빈 userAgent + acceptLanguage 와 같다).
+    v.generation = 2;
+    v.flags.ua = false;
+    v.ua = "";
+    try t.setWant(v);
+    try testing.expect(t.injection(&inj));
+    try testing.expect(inj.action("User-Agent") == .keep and inj.action("Sec-CH-UA") == .keep and inj.userAgent() == null);
+    try testing.expectEqualStrings("fr-FR,fr;q=0.9", inj.acceptLanguage().?);
+    // UA·언어가 없는 흉내(화면만) — 넣을 머리가 없다.
+    try t.setWant(.{ .browser = 1, .generation = 3, .flags = .{ .site_bound = true, .timezone = true }, .site = "a.test", .timezone = "UTC" });
+    try testing.expect(!t.injection(&inj));
+    // 기다리는 동안 지움(철회와 같은 빈 frame) — 부른 쪽이 `hop` 을 다시 돌린다: 묶이지 않아 기다리지 않고 넣지 않는다.
+    try t.setWant(v);
+    try testing.expect(t.injection(&inj));
+    try t.setWant(.{ .browser = 1, .generation = 4 });
+    _ = t.hop("a.test", "bank.test");
+    try testing.expect(!t.hold and !t.injection(&inj));
+    // 기다리는 동안 다른 사이트로 바뀐 grant — 그 홉은 이제 밖이다.
+    var other = v;
+    other.generation = 5;
+    other.site = "c.test";
+    try t.setWant(other);
+    _ = t.hop("a.test", "bank.test");
+    try testing.expect(!t.hold and !t.on_site and !t.injection(&inj));
+}
+
+test "W9e①: 머리 넣기의 값 — client hints 는 흉내 metadata 의 구조화 머리(이스케이프·빈 버전), 요청에 있는 것만 고치고 셀 수 없는 것은 뺀다, Accept-Language 의 q 값, 가장 큰 흉내도 담는다" {
+    var v: msg.Emulation = .{ .browser = 1, .generation = 1, .flags = .{ .site_bound = true, .ua = true, .hints = true }, .site = "a.test", .ua = "Mozilla/5.0 Android" };
+    v.hints.brand_count = 3;
+    v.hints.brands[0] = .{ .brand = "Chromium", .version = "154" };
+    v.hints.brands[1] = .{ .brand = "Not A(Brand", .version = "99" };
+    v.hints.brands[2] = .{ .brand = "a\"b\\c", .version = "" };
+    v.hints.platform = "Android";
+    v.hints.platform_version = "14.0.0";
+    v.hints.model = "Pixel 8";
+    v.hints.mobile = true;
+    var inj = try Inject.build(v);
+    try testing.expectEqualStrings("\"Chromium\";v=\"154\", \"Not A(Brand\";v=\"99\", \"a\\\"b\\\\c\"", inj.action("sec-ch-ua").set);
+    try testing.expectEqualStrings("?1", inj.action("Sec-CH-UA-Mobile").set);
+    try testing.expectEqualStrings("\"Android\"", inj.action("Sec-CH-UA-Platform").set);
+    try testing.expectEqualStrings("\"14.0.0\"", inj.action("sec-ch-ua-platform-version").set);
+    try testing.expectEqualStrings("\"Pixel 8\"", inj.action("sec-ch-ua-model").set);
+    try testing.expectEqualStrings("\"\"", inj.action("sec-ch-ua-arch").set);
+    try testing.expectEqualStrings("?0", inj.action("sec-ch-ua-wow64").set);
+    try testing.expect(inj.action("sec-ch-ua-full-version-list") == .drop); // 전체 목록을 주지 않았다 — Chromium 의 값을 모른다
+    try testing.expect(inj.action("sec-ch-ua-full-version") == .drop and inj.action("sec-ch-ua-form-factors") == .drop);
+    try testing.expect(inj.acceptLanguage() == null and inj.action("Accept-Language") == .keep);
+    v.hints.full_count = 1;
+    v.hints.full_list[0] = .{ .brand = "Chromium", .version = "154.0.1.2" };
+    v.hints.mobile = false;
+    inj = try Inject.build(v);
+    try testing.expectEqualStrings("\"Chromium\";v=\"154.0.1.2\"", inj.action("Sec-CH-UA-Full-Version-List").set);
+    try testing.expectEqualStrings("?0", inj.action("sec-ch-ua-mobile").set);
+    // 구조체를 복사해도 값이 맞다(IO 스레드의 표가 복사해 간다 — 값을 자리로 쥔다).
+    const copy = inj;
+    try testing.expectEqualStrings("Mozilla/5.0 Android", copy.userAgent().?);
+    // q 값: 0.1 씩 내려 0.1 에서 멈춘다, 빈 항목은 건너뛴다.
+    var al: msg.Emulation = .{ .browser = 1, .flags = .{ .locale = true }, .accept_language = "a,,b,c,d,e,f,g,h,i,j,k,l", .icu_locale = "a" };
+    inj = try Inject.build(al);
+    try testing.expectEqualStrings("a,b;q=0.9,c;q=0.8,d;q=0.7,e;q=0.6,f;q=0.5,g;q=0.4,h;q=0.3,i;q=0.2,j;q=0.1,k;q=0.1,l;q=0.1", inj.acceptLanguage().?);
+    al.accept_language = "fr";
+    inj = try Inject.build(al);
+    try testing.expectEqualStrings("fr", inj.acceptLanguage().?);
+    // 가장 큰 흉내 — UA 512, 언어 128(항목 64 개), 브랜드 넷 둘·글 다섯 모두 이스케이프 두 배.
+    const hint = array_repeat.repeat("\"", 64);
+    var big: msg.Emulation = .{ .browser = 1, .flags = .{ .ua = true, .hints = true, .locale = true }, .ua = array_repeat.repeat("u", 512), .accept_language = "a" ++ array_repeat.repeat(",a", 63) ++ "a", .icu_locale = "a" };
+    big.hints = .{ .brand_count = 4, .full_count = 4, .platform = hint, .platform_version = hint, .architecture = hint, .model = hint, .bitness = hint, .mobile = true };
+    for (0..4) |i| {
+        big.hints.brands[i] = .{ .brand = hint, .version = hint };
+        big.hints.full_list[i] = .{ .brand = hint, .version = hint };
+    }
+    inj = try Inject.build(big);
+    try testing.expect(inj.action("sec-ch-ua-full-version-list").set.len > 4 * 2 * 128);
+    try testing.expect(inj.acceptLanguage().?.len > 128);
 }
 
 test "W9e①: fit — pane 보다 작으면 1, 크면 줄이고 만분의 일로 내린다, pane 크기가 바뀌면 다시 보낸다(E2), 크기를 모르면 1" {

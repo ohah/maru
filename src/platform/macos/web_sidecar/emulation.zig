@@ -8,8 +8,11 @@
 //!   바라는 상태만) 새 렌더러에 차이만 낸다(이미 건 흉내는 Chromium 이 다시 건다 — E4).
 //! - **사용자 탭은 그 사이트에서만**(사용자 결정 Q1): 주 프레임 `on_before_browse`(홉마다 — W9d③ 엄격 모드와 같은 자리)에서 그 홉의 호스트를
 //!   grant 사이트가 덮으면 걸고 아니면 모두 지운다(값이 바뀔 때만). 리다이렉트 홉 요청 하나와 첫 요청의 client hints 는 한 요청 늦다(E12 — 문서화).
-//!   사이트 밖 문서에서 사이트 안으로 가는 홉은 요청 무리(UA·client hints·Accept-Language)만 걸고 나머지는 커밋(`on_load_start`)에서 건다 —
-//!   응답을 기다리는 동안 옛(밖의) 문서가 화면 흉내를 봤다(옮긴 판 검증 — `emu_plan.heldUntilCommit`). bfcache 복원은 `on_before_browse` 를
+//!   사이트 밖 문서에서 사이트 안으로 가는 홉은 탭 전체에 아무것도 걸지 않고 모든 무리를 커밋(`on_load_start`)에서 건다 — 응답을 기다리는 동안
+//!   옛(밖의) 문서가 화면 흉내를 봤고, 홉에서 건 UA 호출은 그 옛 문서가 만든 iframe·form 대상·Worker 의 요청에 흉내 머리를 실었다(옮긴 판 검증·집중
+//!   검증 — `emu_plan.heldUntilCommit`). 그 홉의 주 프레임 문서 요청 하나에만 흉내 UA·client hints(·Accept-Language — CEF 154 는 진짜로 낸다)를
+//!   직접 넣는다(`emu_inject.zig` — IO 스레드, 사용자 결정 2026-11-12 「그 한 요청만 머리를 직접 넣기」; 여기서는 기다림이 바뀔 때마다 넣을 값을
+//!   적고 거둔다). bfcache 복원은 `on_before_browse` 를
 //!   지나지 않아 복원된 밖의 문서가 pageshow 에서 흉내를 봤다 — maru 의 Chromium 은 bfcache 를 끈다(`app.zig` — 사용자 결정 2026-11-12).
 //! - **화면은 pane 에 맞춰 줄인다**(사용자 결정 Q3 — `scale`): pane 크기가 바뀌면 다시 셈해 다시 낸다(E2).
 //! - **위치는 W5b2 와 한 칸**(사용자 결정 Q2): `permissions.zig` 가 건다 — 그 탭의 위치만 묻는 프롬프트에는 묻지 않고 허용, 대신 허용한 출처는
@@ -26,6 +29,7 @@ const browsers = @import("browsers.zig");
 const registry_mod = @import("registry.zig");
 const emu_plan = @import("emu_plan.zig");
 const permissions = @import("permissions.zig");
+const emu_inject = @import("emu_inject.zig");
 const table_mod = @import("net_block_table.zig"); // 주소의 정규 해시(막기의 끊긴 이동 짝짓기와 같은 셈 — `canonHash`)
 
 const msg = protocol.message;
@@ -127,13 +131,23 @@ pub fn apply(v: msg.Emulation) void {
     e.tab.setWant(v) catch return; // 풀 때 검사를 지났다 — 오지 않는다
     var hb: [msg.max_net_host_bytes]u8 = undefined;
     const shown = topHost(browserOf(reg), &hb);
-    // 진행 중 이동이 있으면 그 홉으로(밖의 문서에서 안으로면 커밋까지 요청 무리만), 아니면 지금 문서로.
+    // 진행 중 이동이 있으면 그 홉으로(밖의 문서에서 안으로면 커밋까지 기다리고 그 홉의 문서 요청에만 머리), 아니면 지금 문서로.
     _ = if (e.hop_known) e.tab.hop(e.hop(), shown) else e.tab.navigate(shown);
+    syncInject(e); // 기다리는 동안 온 지움·철회·다른 사이트는 그 뒤 홉부터 넣지 않는다
     e.tab.pane_w = reg.size.width;
     e.tab.pane_h = reg.size.height;
     if (logOn()) std.debug.print("emu: apply b={d} gen={d} flags=0x{x} on_site={} alive={}\n", .{ v.browser, v.generation, @as(u16, @bitCast(v.flags)), e.tab.on_site, e.tab.alive });
     run(e, reg);
     sendState(e, true);
+}
+
+/// 그 탭이 밖→안 홉을 기다리면 그 홉(주소)의 문서 요청에 넣을 머리를 IO 스레드의 표에 적고, 아니면 거둔다.
+fn syncInject(e: *Entry) void {
+    var inj: emu_plan.Inject = .{};
+    if (e.hop_known and e.tab.injection(&inj)) {
+        emu_inject.set(e.cef_id, e.hop_canon, &inj);
+        if (logOn()) std.debug.print("emu: inject b={d} canon={x}\n", .{ e.browser, e.hop_canon });
+    } else emu_inject.clear(e.cef_id);
 }
 
 fn run(e: *Entry, reg: *const registry_mod.Entry) void {
@@ -242,7 +256,9 @@ pub fn beforeBrowse(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, requ
     e.hop_known = true;
     e.hop_canon = table_mod.canonHash(u16, units(raw));
     var sb: [msg.max_net_host_bytes]u8 = undefined;
-    if (!e.tab.hop(if (host.len == 0) null else host, topHost(browser, &sb))) return;
+    const changed = e.tab.hop(if (host.len == 0) null else host, topHost(browser, &sb));
+    syncInject(e); // 안→안 리다이렉트도(새 홉의 주소로), 안→밖 홉은 거둔다 — 그 홉의 요청보다 먼저(IO 스레드는 이 뒤에 그 요청을 본다)
+    if (!changed) return;
     if (logOn()) std.debug.print("emu: site b={d} host={s} on_site={} hold={}\n", .{ e.browser, host, e.tab.on_site, e.tab.hold });
     run(e, reg);
     sendState(e, false);
@@ -262,6 +278,7 @@ pub fn loadStart(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) void {
     const host = protocol.net_policy.hostOfUrl16(units(raw), &hb);
     e.hop_known = false;
     _ = e.tab.navigate(if (host.len == 0) null else host);
+    emu_inject.clear(e.cef_id); // 그 이동은 끝났다
     if (logOn() and back) std.debug.print("emu: renderer back b={d}\n", .{e.browser});
     if (logOn()) std.debug.print("emu: commit b={d} host={s} on_site={}\n", .{ e.browser, host, e.tab.on_site });
     // 새 렌더러(쌓인 차이)·사이트 안팎·DevTools 가 떨어져 모르게 된 종류 — 살아 있는 문서가 막 시작했으니 차이를 낸다(바뀐 것이 없으면 빈 열).
@@ -280,9 +297,29 @@ pub fn loadAborted(browser: [*c]c.cef_browser_t, failed_url: [*c]const c.cef_str
     const reg = browsers.state.registry.byCefId(e.cef_id) orelse return;
     if (reg.closing) return;
     e.hop_known = false;
+    emu_inject.clear(e.cef_id);
     var hb: [msg.max_net_host_bytes]u8 = undefined;
     if (!e.tab.navigate(topHost(browserOf(reg), &hb))) return;
     if (logOn()) std.debug.print("emu: aborted b={d} on_site={}\n", .{ e.browser, e.tab.on_site });
+    run(e, reg);
+    sendState(e, false);
+}
+
+/// 주 프레임 이동이 실패해 오류 페이지가 섰다(`on_load_error` 의 ERR_ABORTED 밖 — CEF 헤더: `on_load_start` 없이 옛 문서를 바꾼다). 끊긴 주소가
+/// 마지막 홉이면 그 오류 페이지(실패한 주소)를 커밋된 문서로 보고 기다림을 끝낸다 — 안 그러면 밖→안 홉의 기다림·넣을 머리가 다음 이동까지 남았다
+/// (옮긴 판 검증 L2 — Chromium 의 자동 다시 불러오기가 없는 오류면). 허락한 사이트 주소의 오류 페이지라 흉내가 걸려도 새는 쪽이 아니다.
+pub fn loadFailed(browser: [*c]c.cef_browser_t, failed_url: [*c]const c.cef_string_t) void {
+    if (browser == null) return;
+    const e = entryOf(browser.*.get_identifier.?(browser)) orelse return;
+    if (!e.hop_known or table_mod.canonHash(u16, units(failed_url)) != e.hop_canon) return;
+    const reg = browsers.state.registry.byCefId(e.cef_id) orelse return;
+    if (reg.closing) return;
+    e.hop_known = false;
+    emu_inject.clear(e.cef_id);
+    var hb: [msg.max_net_host_bytes]u8 = undefined;
+    const host = protocol.net_policy.hostOfUrl16(units(failed_url), &hb);
+    if (!e.tab.navigate(if (host.len == 0) null else host)) return;
+    if (logOn()) std.debug.print("emu: error page b={d} host={s} on_site={}\n", .{ e.browser, host, e.tab.on_site });
     run(e, reg);
     sendState(e, false);
 }
@@ -318,6 +355,7 @@ pub fn autoAllowedChanged(id: BrowserId) void {
 /// 가 되돌린다.
 pub fn browserClosed(cef_id: c_int) void {
     dropPending(cef_id);
+    emu_inject.clear(cef_id);
     for (&entries) |*e| if (e.*) |v| if (v.cef_id == cef_id) {
         if (v.reg != null) object.release(v.reg);
         e.* = null;

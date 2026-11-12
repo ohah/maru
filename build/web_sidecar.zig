@@ -23,9 +23,9 @@ pub const Context = struct {
     maru_version: []const u8,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 3 + unsandboxed_policy 4 + datalist_page 3 + devtools_table 11 + console_gate 16 + net_gate 23 + net_body_table 267 + net_body_sw 38 + out_queue 4 + net_block_table 18 + sw_share 3 + net_domain 22 + net_block_review_tests 38 + net_block_review_b4_tests 7 + net_block_review_a5_tests 11 + net_block_review_a6_tests 4 + net_block_review_a7_tests 4 + nav_exempt 2 + net_mock_table 14 + emu_plan 10 + geo_slot 4 + events 1 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 3 + unsandboxed_policy 4 + datalist_page 3 + devtools_table 11 + console_gate 16 + net_gate 23 + net_body_table 267 + net_body_sw 38 + out_queue 4 + net_block_table 18 + sw_share 3 + net_domain 22 + net_block_review_tests 38 + net_block_review_b4_tests 7 + net_block_review_a5_tests 11 + net_block_review_a6_tests 4 + net_block_review_a7_tests 4 + nav_exempt 2 + net_mock_table 14 + emu_plan 11 + geo_slot 4 + events 1 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 536;
+const pure_test_count = 537;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{

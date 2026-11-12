@@ -24,6 +24,9 @@
 //! 사이트 묶기(`ems`): emu-site-bound(사이트 안에서만 — 떠나면 지우고 돌아오면 다시, 리다이렉트로 떠나는 홉 하나는 늦다: E12)·
 //!   emu-site-bound-aborted-hop(문서 없이 끊긴 이동(204)은 옛 문서의 사이트로 되돌린다 — 밖의 문서에서 묶인 사이트로 가는 204 가 그 문서에 흉내를
 //!   걸지 않고, 묶인 사이트의 문서에서 밖으로 가는 204 가 흉내를 풀어 두지 않는다).
+//! 넘나듦(`emh`): emu-site-bound-bfcache(뒤로·앞으로 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그 요청이 흉내 머리를 싣지
+//!   않는다 — maru 의 Chromium 은 bfcache 를 끈다)·emu-site-bound-slow-hop(밖의 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안 흉내를
+//!   보지 않는다 — 문서에 보이는 무리는 커밋 뒤에 건다).
 //! 팝업(`emp`): emu-popup-shared(같은 프로세스의 팝업은 시간대·locale 이 따라오고 제 흉내는 process_shared_conflict — E13).
 //! 재시작(`emr`): emu-restart(about:blank → 흉내 → 이동이면 문서 요청부터, 옛 sidecar 가 대신 허용한 출처는 새 sidecar 가 되돌린다 — P2-6).
 
@@ -239,6 +242,33 @@ const mx_tail = "'></iframe><script>" ++ mx_js ++
     \\</script>
 ;
 
+/// 사이트 밖 문서가 흉내를 보는가(사이트 묶기의 오감 — `bound_all` 의 값만 고른다): 보인 것의 이름을 쉼표로, 없으면 `-`.
+const sg_js =
+    \\function SG(){var l=[];try{var r=Intl.DateTimeFormat().resolvedOptions();if(r.timeZone==='Asia/Tokyo')l.push('tz');if(String(r.locale).indexOf('fr')===0)l.push('il');if(navigator.userAgent.indexOf('BoundUA')===0)l.push('ua');if(String(navigator.language).indexOf('fr')===0)l.push('lang');if(innerWidth===390)l.push('iw');if(devicePixelRatio===3)l.push('dpr');if(navigator.maxTouchPoints===5)l.push('mtp');if(matchMedia('print').matches)l.push('print');if(matchMedia('(forced-colors:active)').matches)l.push('fc')}catch(x){l.push('err')}return l.join('.')||'-'}
+;
+/// 느린 이동을 기다리는 옛 문서: 100 ms 마다 제가 보는 것을 서버로(요청 머리도 서버가 적는다).
+const ob_html = "<!doctype html><title>ob</title><script>" ++ sg_js ++
+    \\
+    \\window.T0=SG();var n=0;setInterval(function(){n++;fetch('/obs?n='+n+'&e='+SG()).catch(function(){})},100);
+    \\</script>
+;
+/// 느린 응답 뒤의 새 문서(묶인 사이트) — 첫 스크립트가 본 것(`T0`, 관측)과 `P()`.
+const slow_html = "<!doctype html><title>slow</title><script>" ++ sg_js ++ "window.T0=SG();" ++ p_js ++ "</script>";
+/// bfcache 에 들 수 있는 문서(no-store 없음 — `replyCacheable`): 첫 스크립트와 pageshow 가 본 것, pageshow 의 요청.
+const bf_html = "<!doctype html><title>bf</title><script>" ++ sg_js ++
+    \\
+    \\window.T0=SG();window.PS=[];addEventListener('pageshow',function(e){var s=SG();PS.push((e.persisted?'P':'N')+':'+s);fetch('/sub?bf='+location.search.slice(1)+'&p='+(e.persisted?1:0)+'&e='+s).catch(function(){})});
+    \\</script>
+;
+
+/// `reply` 와 같되 `Cache-Control: no-store` 없이(bfcache 에 들 수 있게).
+fn replyCacheable(conn: c_int, body: []const u8) void {
+    var hb: [512]u8 = undefined;
+    const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nCache-Control: max-age=0\r\nConnection: close\r\n\r\n", .{ html, body.len }) catch return;
+    _ = std.c.write(conn, head.ptr, head.len);
+    _ = std.c.write(conn, body.ptr, body.len);
+}
+
 const po_html = "<!doctype html><title>po</title><button id=o onclick=\"window.pop=window.open('/pp?child','w1')\" style='position:fixed;left:0;top:0;width:300px;height:200px'>open</button><script>" ++ p_js ++ "</script>";
 
 fn serveParsed(conn: c_int, r: []const u8) void {
@@ -282,6 +312,19 @@ fn serveParsed(conn: c_int, r: []const u8) void {
     }
     // 문서 없는 이동(204 — 주 프레임 이동이 ERR_ABORTED 로 끊기고 옛 문서가 남는다; main 으로 옮길 때 더함).
     if (std.mem.eql(u8, path, "/nc")) return reply(conn, "204 No Content", "text/plain", "", "");
+    if (std.mem.eql(u8, path, "/ob")) return reply(conn, "200 OK", html, "", ob_html);
+    if (std.mem.eql(u8, path, "/bf")) return replyCacheable(conn, bf_html);
+    // 느린 응답(`?ms=N` 동안 잡았다가 문서 — 밖의 문서가 묶인 사이트로 가는 이동을 오래 기다리게).
+    if (std.mem.eql(u8, path, "/slow")) {
+        var ms: u32 = 3000;
+        if (std.mem.indexOf(u8, target, "ms=")) |at| {
+            var e = at + 3;
+            while (e < target.len and std.ascii.isDigit(target[e])) e += 1;
+            ms = @min(std.fmt.parseInt(u32, target[at + 3 .. e], 10) catch 3000, 8000);
+        }
+        os.sleepMs(ms);
+        return reply(conn, "200 OK", html, "", slow_html);
+    }
     return reply(conn, "200 OK", "text/plain", "Access-Control-Allow-Origin: *\r\n", "ok");
 }
 
@@ -737,6 +780,7 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     geolocation(report, host_path, root) catch |err| report(false, "emu-geo", @errorName(err));
     mixedPrompt(report, host_path, root) catch |err| report(false, "emu-geo-mixed-prompt", @errorName(err));
     siteBound(report, host_path, root) catch |err| report(false, "emu-site-bound", @errorName(err));
+    siteBoundHistory(report, host_path, root) catch |err| report(false, "emu-site-bound-history", @errorName(err));
     popup(report, host_path, root) catch |err| report(false, "emu-popup-shared", @errorName(err));
     restart(report, host_path, root) catch |err| report(false, "emu-restart", @errorName(err));
 }
@@ -1213,6 +1257,126 @@ fn siteBound(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     const ok_a = nca != null and contains(p5, "localhost") and !contains(p5, "Asia/Tokyo") and st5 != null and !st5.?.on_site;
     const ok_b = contains(p6, "Asia/Tokyo") and ncb != null and contains(p7, "127.0.0.1") and contains(p7, "Asia/Tokyo") and st7 != null and st7.?.on_site;
     report(ok_a and ok_b, "emu-site-bound-aborted-hop", std.fmt.bufPrint(&d, "밖→안 204 서버={} {s} on_site={} | 안 {s} | 안→밖 204 서버={} {s} on_site={}", .{ nca != null, p5[0..@min(p5.len, 200)], if (st5) |x| x.on_site else true, p6[0..@min(p6.len, 120)], ncb != null, p7[0..@min(p7.len, 200)], if (st7) |x| x.on_site else false }) catch "");
+}
+
+/// 사이트 묶기의 넘나듦 판정에 거는 흉내 — 옛 문서에 닿으면 `SG()` 가 이름으로 알린다.
+const bound_all: msg.Emulation = .{ .browser = 0, .flags = .{ .site_bound = true, .viewport = true, .touch = true, .ua = true, .locale = true, .timezone = true, .media = true }, .site = "127.0.0.1", .width = 390, .height = 844, .dsf = 3, .ua = "BoundUA/1", .accept_language = "fr-FR,fr", .icu_locale = "fr_FR", .timezone = "Asia/Tokyo", .media = .{ .type = .print, .forced_colors = .active } };
+
+/// 서버가 받은 요청 중 그 글로 시작하고 그 호스트에서 온 것 — 수, 흉내를 본(`e=` 가 `-` 가 아닌)·흉내 머리(UA·Accept-Language)를 실은 수, 처음 몇 개.
+const Leaks = struct { total: u32 = 0, seen: u32 = 0, header: u32 = 0, buf: [700]u8 = undefined, len: usize = 0 };
+
+fn leaksOn(prefix: []const u8, host_prefix: []const u8, out: *Leaks) void {
+    out.* = .{};
+    var w: std.Io.Writer = .fixed(&out.buf);
+    _ = std.c.pthread_mutex_lock(&srv_lock);
+    defer _ = std.c.pthread_mutex_unlock(&srv_lock);
+    for (srv_recs.items) |rec| {
+        const t = rec.targetText();
+        if (!std.mem.startsWith(u8, t, prefix) or !std.mem.startsWith(u8, rec.host[0..rec.host_len], host_prefix)) continue;
+        out.total += 1;
+        const seen = if (std.mem.indexOf(u8, t, "e=")) |at| !std.mem.startsWith(u8, t[at + 2 ..], "-") else false;
+        const header = contains(rec.uaText(), "BoundUA") or std.mem.startsWith(u8, rec.alText(), "fr");
+        if (seen) out.seen += 1;
+        if (header) out.header += 1;
+        if ((seen or header) and out.seen + out.header <= 6) w.print("{s} ua=[{s}] al=[{s}]; ", .{ t[0..@min(t.len, 60)], rec.uaText()[0..@min(rec.ua_len, 12)], rec.alText()[0..@min(rec.al_len, 12)] }) catch {};
+    }
+    out.len = w.buffered().len;
+}
+
+/// 이동을 보내고(사람의 뒤로·앞으로 또는 페이지 스크립트) 문서가 서거나(새로 불러옴) 잠깐 지나기를(bfcache 복원 — 불러옴이 없을 수 있다) 기다린다.
+fn settleNav(r: *Run, b: u64) void {
+    _ = r.until(Run.loadsAt, b, r.loads[b] + 1, 3000);
+    r.pump(700);
+}
+
+/// 사이트 묶기의 넘나듦(사용자 결정 Q1 의 빈틈 둘 — 옮긴 판 20 회 검증 2026-11-12).
+/// emu-site-bound-bfcache: 뒤로·앞으로로 돌아간 사이트 밖 문서(127.0.0.1 묶음, localhost 문서)가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그
+/// 문서의 요청이 흉내 머리를 싣지 않는다 — bfcache 복원은 `on_before_browse` 를 지나지 않아 흉내가 남은 채 pageshow 가 돌았다(그래서 maru 의 Chromium
+/// 은 bfcache 를 끈다 — 사용자 결정 2026-11-12; 복원되면 보고에 `P` 가 보인다).
+/// emu-site-bound-slow-hop: 사이트 밖 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안(3.5 초) 옛 문서가 화면·배율·시간대·UA·언어·터치·
+/// 미디어 흉내를 보지 않고 그 요청도 흉내 머리를 싣지 않으며 상태는 사이트 밖이다; 새 문서의 문서 요청부터 흉내 UA, 새 문서는 모두 흉내(첫 스크립트가 본
+/// 것은 관측으로 적는다).
+fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !void {
+    var sess: Session = undefined;
+    try open(&sess, host_path, root, "emh");
+    defer sess.deinit();
+    const r = &sess.run;
+    var u: [256]u8 = undefined;
+    var d: [2400]u8 = undefined;
+    var js: [400]u8 = undefined;
+    const ps_js = "JSON.stringify([location.host,T0,PS,SG()])";
+    // (가) 뒤로: 밖 a → 안 b → (사람의) 뒤로 a.  (나) 앞으로: 안 b → 밖 c → 뒤로 b → (페이지의) 앞으로 c.
+    try r.create(1, uLocal(&u, "/bf?a"));
+    const st0 = try r.emulate(1, bound_all);
+    try r.nav(1, uLoop(&u, "/bf?b"));
+    var b1: [400]u8 = undefined;
+    const on_b = r.ev(1, ps_js, &b1);
+    try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .back } });
+    settleNav(r, 1);
+    var b2: [400]u8 = undefined;
+    const back_a = r.ev(1, ps_js, &b2);
+    try r.nav(1, uLoop(&u, "/bf?b2"));
+    try r.nav(1, uLocal(&u, "/bf?c"));
+    try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .back } });
+    settleNav(r, 1);
+    var b3: [400]u8 = undefined;
+    const back_b = r.ev(1, ps_js, &b3);
+    _ = r.ev(1, "setTimeout(function(){history.forward()},0);1", &js);
+    settleNav(r, 1);
+    var b4: [400]u8 = undefined;
+    const fwd_c = r.ev(1, ps_js, &b4);
+    const st4 = r.st[1];
+    var la: Leaks = undefined;
+    leaksOn("/sub?bf=a", "localhost", &la);
+    var lc: Leaks = undefined;
+    leaksOn("/sub?bf=c", "localhost", &lc);
+    // 밖 문서(a·c)가 본 것: T0·pageshow·지금 모두 `-`.
+    const clean_a = contains(back_a, "localhost") and !leakText(back_a);
+    const clean_c = contains(fwd_c, "localhost") and !leakText(fwd_c);
+    const req_ok = la.total >= 2 and lc.total >= 2 and la.seen == 0 and la.header == 0 and lc.seen == 0 and lc.header == 0;
+    const in_ok = contains(on_b, "127.0.0.1") and contains(on_b, "tz.") and contains(back_b, "127.0.0.1");
+    report(st0 != null and in_ok and clean_a and clean_c and req_ok and st4 != null and !st4.?.on_site, "emu-site-bound-bfcache", std.fmt.bufPrint(&d, "안 {s} | 뒤로(사람) 밖 {s} | 안 {s} | 앞으로(페이지) 밖 {s} on_site={} | pageshow 요청 a {d}개(흉내 {d}·머리 {d}) c {d}개(흉내 {d}·머리 {d}) {s}{s}", .{ on_b[0..@min(on_b.len, 120)], back_a, back_b[0..@min(back_b.len, 120)], fwd_c, if (st4) |x| x.on_site else true, la.total, la.seen, la.header, lc.total, lc.seen, lc.header, la.buf[0..la.len], lc.buf[0..lc.len] }) catch "");
+
+    // 느린 이동: 밖 문서(localhost /ob)가 묶인 사이트의 /slow?ms=3500 으로(페이지 스크립트 — 밖의 페이지가 기다림을 늘릴 수 있다).
+    try r.create(2, uLocal(&u, "/ob?w"));
+    _ = try r.emulate(2, bound_all);
+    r.pump(400);
+    var g0: [64]u8 = undefined;
+    const t0_old = r.ev(2, "T0", &g0);
+    const go = std.fmt.bufPrint(&js, "setTimeout(function(){{location.href='http://127.0.0.1:{d}/slow?ms=3500&w'}},0);'go'", .{port}) catch unreachable;
+    var g1: [64]u8 = undefined;
+    _ = r.ev(2, go, &g1);
+    r.pump(1500);
+    const st_mid = r.st[2];
+    r.pump(1000);
+    const st_mid2 = r.st[2];
+    _ = r.until(Run.loadsAt, 2, r.loads[2] + 1, 8000);
+    r.pump(400);
+    var lo: Leaks = undefined;
+    leaksOn("/obs?", "localhost", &lo);
+    const doc = firstReqOn("/slow?ms=3500&w", "127.0.0.1");
+    var g2: [700]u8 = undefined;
+    const new_doc = r.ev(2, "JSON.stringify([location.host,'T0='+T0,SG(),P().tz,innerWidth])", &g2);
+    const st_end = r.st[2];
+    const mid_off = st_mid != null and !st_mid.?.on_site and st_mid2 != null and !st_mid2.?.on_site;
+    const old_ok = std.mem.eql(u8, t0_old, "-") and lo.total >= 20 and lo.seen == 0 and lo.header == 0;
+    const new_ok = doc != null and std.mem.eql(u8, doc.?.uaText(), "BoundUA/1") and contains(new_doc, "127.0.0.1") and contains(new_doc, "Asia/Tokyo") and contains(new_doc, ",390]") and st_end != null and st_end.?.on_site;
+    report(old_ok and mid_off and new_ok, "emu-site-bound-slow-hop", std.fmt.bufPrint(&d, "옛 문서 T0={s} · 기다리는 동안 관찰 {d}개(흉내 {d}·흉내 머리 {d}) {s}· 상태 on_site 1.5 초={} 2.5 초={} | 새 문서 요청 ua=[{s}] {s} on_site={}", .{ t0_old, lo.total, lo.seen, lo.header, lo.buf[0..lo.len], if (st_mid) |x| x.on_site else true, if (st_mid2) |x| x.on_site else true, if (doc) |x| x.uaText()[0..@min(x.ua_len, 30)] else "-", new_doc[0..@min(new_doc.len, 200)], if (st_end) |x| x.on_site else false }) catch "");
+}
+
+/// `ps_js` 의 답에 흉내를 본 표지가 있는가(`SG()` 의 이름 — `-` 가 아닌 것).
+fn leakText(s: []const u8) bool {
+    const names = [_][]const u8{ "tz", "il", "ua", "lang", "iw", "dpr", "mtp", "print", "fc", "err" };
+    // 이름은 `"` 또는 `:`·`.` 뒤에 와서 `.`·`"` 로 끝난다 — 호스트 글자와 섞이지 않게 앞뒤를 본다.
+    for (names) |n| {
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, s, i, n)) |at| : (i = at + 1) {
+            const before = if (at == 0) ' ' else s[at - 1];
+            const after = if (at + n.len >= s.len) ' ' else s[at + n.len];
+            if ((before == '"' or before == ':' or before == '.') and (after == '"' or after == '.')) return true;
+        }
+    }
+    return false;
 }
 
 // ── 팝업(같은 렌더러 프로세스) ─────────────────────────────────────────────────────────────────────────────

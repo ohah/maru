@@ -5035,7 +5035,7 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
 
 8. 숨은 탭 CPU(배경 우선순위로 몇 배 느림): Chrome DevTools MCP(Puppeteer 기본값)처럼 CEF 명령줄에 `--disable-renderer-backgrounding`·
    `--disable-background-timer-throttling`·`--disable-backgrounding-occluded-windows` 를 넣는다 — 브라우저 전체(사용자 숨은 탭 포함)에 걸리는 배터리 대가를
-   받아들임. **→ 착수 전 실측에서 목적(숨은 탭 CPU)이 이뤄지지 않아 넣지 않았다 — 사용자 확인을 다시 기다린다**(아래).
+   받아들임. **→ 착수 전 실측에서 목적(숨은 탭 CPU)이 이뤄지지 않았다 — 넣지 않는다(사용자 결정 2026-11-13)**(아래 실측).
 9. 사람이 셸에서 직접 친 CLI 의 CPU·네트워크 조건은 **그 pane 의 셸이 주인** — `--clear`(또는 `--no-cpu`·`--no-network`)하거나 그 셸이 끝날 때 푼다
    (`no_agent_process` 거절 대신). 구현함.
 10. trace 압축은 **늘 sidecar 가** 한다 — Chromium 의 gzip 스트림은 압축을 `BEST_EFFORT` 작업으로 돌려 보이는 첫 페인트 전(에이전트 탭은 숨은 채 열린다 —
@@ -5180,7 +5180,7 @@ ok), `emu-cond-owner-exit`(진짜 자식 프로세스 둘을 주인으로 — `c
 
 **확인 결정 8–11(2026-10-29 오후)**:
 
-- **결정 8 착수 전 실측 — 목적이 이뤄지지 않아 넣지 않았다(사용자 확인 대기)**. 탐침은 저장소 밖(`$S/w9e2k` — 판정자에 대본 실행기를 붙이고, 스위치를
+- **결정 8 착수 전 실측 — 목적이 이뤄지지 않아 넣지 않는다(사용자 결정 2026-11-13)**. 탐침은 저장소 밖(`$S/w9e2k` — 판정자에 대본 실행기를 붙이고, 스위치를
   `on_before_command_line_processing` 의 `product_switches` 에 넣은 빌드와 뺀 빌드를 환경 변수 하나로 갈랐다; 「`maru-web-host` 의 argv 에 붙이기」 는
   Chromium 에 닿지 않아 버렸다). 실제 CEF 154.0.23, 1 분 부하 18–24, 같은 순간의 보이는 대조 탭은 늘 101–103 ms.
   - **숨은 에이전트 탭 CPU**(바쁜 반복 3×10⁷, 세 번씩, 네 판): 스위치 없이 숨김 225–710 ms·focus 흉내 + `Tracing.start` 235–476 ms, **스위치 셋을 넣어도
@@ -5203,7 +5203,8 @@ ok), `emu-cond-owner-exit`(진짜 자식 프로세스 둘을 주인으로 — `c
     focus 흉내 중인 숨은 에이전트 탭의 타이머는 스위치 없이도 100 번/5 s(흉내가 페이지를 보이는 것으로 만든다) — trace 에는 이득이 없다. 렌더러 백그라운딩
     스위치는 위처럼 효과가 보이지 않았고, occluded-windows 는 창이 없는 OSR 이라 대상이 없다.
   - 결론: 결정 8 의 목적(숨은 탭 trace 의 CPU)은 이 스위치로 이뤄지지 않고, 남는 것은 **타이머가 잦은 숨은 사용자 탭의 배터리 대가**(그런 탭 하나에 약 20 mW·
-    깨어남 ≈ 20 배, 조용한 페이지는 차이 없음)뿐이다 — 결정 밖의 결과라 넣지 않고 사용자 확인을 다시 받는다. `warnings:["hidden_tab_cpu_background"]` 는 남긴다.
+    깨어남 ≈ 20 배, 조용한 페이지는 차이 없음)뿐이다 — 결정 밖의 결과라 넣지 않고 사용자 확인을 다시 받았다. **사용자 결정(2026-11-13): 스위치 셋을 넣지 않는다** —
+    숨은 탭 CPU 는 나아지지 않고, 사용자 숨은 탭의 타이머만 덜 조여지는 대신 전력을 낸다. `warnings:["hidden_tab_cpu_background"]` 는 남긴다.
 - **결정 9 구현** — `control_self_origin` 이 1g 출처를 찾을 때 foreground 작업 맨 위의 **부모가 같은 uid·같은 세션·제어 터미널이 있고 다른 process group(셸은
   작업마다 새 그룹을 만든다)이며 자식보다 늦게 시작하지 않았고 좀비가 아니면** 그 부모를 `shell` 로 적는다(`shellOf`). `ownerOf` 는 한 번짜리 CLI 가 곧 맨 위일
   때(앞에 에이전트가 없다) 그 셸을 주인으로(`Owner.shell`, 결과 `owner:{…:{kind:"shell", pid}}`, CLI 「the shell you typed it in (pid N) runs — clear it with
@@ -5424,7 +5425,7 @@ ok), `emu-cond-owner-exit`(진짜 자식 프로세스 둘을 주인으로 — `c
   **22 중 21**(실제 CEF 만으로는 「뒤로·앞으로를 새 문서로」 도 산다).
 
 **남은 틈**: 숨은 에이전트 탭의 trace 는 프레임은 나오지만 **CPU 는 배경 우선순위**라 주 스레드 수치(긴 작업·TBT)가 보이는 탭보다 몇 배 크다
-(`hidden_tab_cpu_background` — Puppeteer 기본 스위치 셋으로도 되돌지 않았다: 확인 결정 8 실측). offline 의 `navigator.onLine` 은 같은 렌더러 프로세스의 사용자 iframe·팝업에도
+(`hidden_tab_cpu_background` — Puppeteer 기본 스위치 셋으로도 되돌지 않아 넣지 않는다: 확인 결정 8 실측, 사용자 결정 2026-11-13). offline 의 `navigator.onLine` 은 같은 렌더러 프로세스의 사용자 iframe·팝업에도
 번진다(결정 3). 이유 공개에 제한이 없어 「사용자가 X 를 품은 페이지를 열고 있다」 를 끝없이 물을 수 있다(결정 6). 사람이 셸에서 직접 친 한 번짜리 CLI 의 조건은 그 셸이
 끝날 때까지 남는다(확인 결정 9 — 지우지 않으면 셸이 사는 동안), 주인을 못 찾는 호출은 걸 수 없다(`no_agent_process`), 주인은 0.5 s 안에 풀린다(폴링). 서비스 워커·다른 사이트 iframe 은 trace·cpu·network 모두 덮지 않고, 가짜 응답(W9d④)은 지연·offline 을 무시하고
 곧 답한다(`not_covered`). `loading`·원문 범주를 빼서 DevTools 로 열면 로딩 트랙 일부와 소스 보기가 비고 브라우저·GPU 쪽 이벤트도 없다. 렌더러 프로세스 상한을 넘겨

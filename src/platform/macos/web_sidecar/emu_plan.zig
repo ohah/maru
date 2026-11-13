@@ -96,8 +96,9 @@ pub const Status = enum { idle, pending, ok, failed };
 /// 붙잡는 것으로 보인다), UA 호출(`.ua` — UA·client hints·Accept-Language)을 홉에서 걸면 렌더러 쪽(navigator·옛 문서의 fetch)은 붙잡혔지만
 /// 브라우저 쪽에서 만드는 이동 요청 — 옛 문서가 만든 iframe 문서·form 대상·dedicated Worker 스크립트 — 이 곧 흉내 머리를 싣고 허락하지 않은
 /// 사이트로 갔다(집중 검증 1 회차 SEVERE). 그 홉의 문서 요청 하나는 `Tab.injection` 이 머리로 직접 채운다(사용자 결정 2026-11-12). 렌더러 쪽 명령은
-/// 홉에서 보내도 Chromium 이 이동 동안 붙잡아 커밋 뒤에 닿으므로 미뤄서 잃는 것은 없다 — 새 문서의 첫 스크립트와는 겨룬다(새로 뜨는 렌더러면 이기고, 밖의
-/// 문서가 그 사이트 iframe 을 품어 렌더러가 이미 떠 있으면 수 ms 진다 — 사용자 결정 2026-11-12 「받아들이고 문서에 적기」, 판정 `emu-site-bound-reused-renderer`).
+/// 홉에서 보내도 Chromium 이 이동 동안 붙잡아 커밋 뒤에 닿으므로 미뤄서 잃는 것은 없다 — 새 문서의 첫 스크립트와는 겨룬다(그 사이트의 렌더러가 이미 떠
+/// 있으면 — 밖의 문서가 품은 그 사이트 iframe, 또는 응답을 기다리는 동안 미리 뜬 렌더러 — 가끔 수 ms 진다: 사용자 결정 2026-11-12 「받아들이고 문서에 적기」,
+/// 판정 `emu-site-bound-reused-renderer`·`emu-site-bound-slow-hop` 의 `-first-script(obs)`).
 pub fn heldUntilCommit(kind: Kind) bool {
     _ = kind;
     return true;

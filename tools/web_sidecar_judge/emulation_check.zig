@@ -27,8 +27,10 @@
 //! 넘나듦(`emh`): emu-site-bound-bfcache(뒤로·앞으로 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그 요청이 흉내 머리를 싣지
 //!   않는다 — maru 의 Chromium 은 bfcache 를 끈다)·emu-site-bound-slow-hop(밖의 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안 흉내를
 //!   보지 않고, 그동안 그 문서가 만든 iframe 셋·Worker 의 요청은 진짜 머리다 — 탭 전체의 흉내는 모두 커밋 뒤에 걸고, 그 홉의 문서 요청 하나에만
-//!   흉내 머리를 넣는다: 커밋 뒤 요청과 같은 꼴, 새 문서의 첫 스크립트는 모든 흉내)·emu-site-bound-hop-headers(client hints 를 가진 흉내 — 밖 → 안
-//!   302 → 밖: 안 홉은 흉내 UA·Accept-Language·client hints 셋, 밖으로 가는 다음 홉은 진짜; 느린 홉의 문서 요청 머리가 커밋 뒤 요청과 같다)·
+//!   흉내 머리를 넣는다: 커밋 뒤 요청과 같은 꼴, 새 문서는 커밋 뒤 1 초 안에 모든 흉내)·emu-site-bound-slow-hop-first-script(obs)(새 문서의 첫
+//!   스크립트가 본 것·모든 흉내까지 ms·그 요청의 머리·렌더러 수 — 커밋 뒤에야 닿는 흉내와 겨루는 경주라 단언하지 않는다)·
+//!   emu-site-bound-hop-headers(client hints 를 가진 흉내 — 밖 → 안 302 → 밖: 안 홉은 흉내 UA·Accept-Language·client hints 셋, 밖으로 가는
+//!   다음 홉은 진짜; 느린 홉의 문서 요청 머리가 커밋 뒤 요청과 같다)·
 //!   emu-site-bound-error-page(밖 → 묶인 사이트의 닫힌 포트: 오류 페이지가 기다림을 끝낸다 — 상태는 그 주소의 사이트 안·기다림 없음, 다음 밖 이동은
 //!   진짜).
 //! 팝업(`emp`): emu-popup-shared(같은 프로세스의 팝업은 시간대·locale 이 따라오고 제 흉내는 process_shared_conflict — E13).
@@ -275,9 +277,10 @@ const wk_js = "fetch('/wks?e='+(navigator.userAgent.indexOf('BoundUA')===0?'ua':
 /// UA 가 흉내 `B`(BoundUA)·`A`(Android)·진짜 `R`; 관측: 탭 전체 흉내는 커밋에서 걸려 이 요청과 겨룬다).
 const slow_html = "<!doctype html><title>slow</title><script>" ++ sg_js ++ "window.T0=SG();" ++ p_js ++
     "var nu=navigator.userAgent;fetch('/aft?'+location.search.slice(1)+'&nu='+(nu.indexOf('BoundUA')===0?'B':nu.indexOf('Android')>0?'A':'R')).catch(function(){});</script>";
-/// 묶인 사이트의 렌더러가 이미 떠 있는 새 문서(`/slowr` — `/slow` 와 같은 느린 응답): 첫 스크립트가 본 것(`T0`)과 그 요청 하나(`/aft?…`), 모든 흉내가 보인
-/// 때(`FULL` — 첫 스크립트로부터 ms, 처음부터면 0, 5 초 안에 못 보면 -1).
-const slowr_html = "<!doctype html><title>slowr</title><script>" ++ sg_js ++
+/// 밖→안 이동의 새 문서(`/slowr` — `/slow` 와 같은 느린 응답; emu-site-bound-reused-renderer 와 -slow-hop): 첫 스크립트가 본 것(`T0`)과 그 요청 하나
+/// (`/aft?…`), 모든 흉내가 보인 때(`FULL` — 첫 스크립트로부터 ms, 처음부터면 0, 5 초 안에 못 보면 -1), `P()`. 첫 스크립트는 커밋 뒤에야 렌더러에 닿는
+/// 흉내와 겨룬다 — 그 사이트의 렌더러가 이미 떠 있으면(그 사이트 iframe·기다리는 동안 미리 띄운 렌더러) 진다.
+const slowr_html = "<!doctype html><title>slowr</title><script>" ++ sg_js ++ p_js ++
     "window.T0=SG();var t0=performance.now(),A='tz.il.ua.lang.iw.dpr.mtp.print.fc';window.FULL=T0===A?0:-1;" ++
     "var nu=navigator.userAgent;fetch('/aft?'+location.search.slice(1)+'&nu='+(nu.indexOf('BoundUA')===0?'B':'R')).catch(function(){});" ++
     "if(FULL<0)(function q(){if(SG()===A){FULL=Math.round(performance.now()-t0);return}if(performance.now()-t0<5000)setTimeout(q,2)})();</script>";
@@ -1384,8 +1387,8 @@ fn settleNav(r: *Run, b: u64) void {
 /// 문서의 요청이 흉내 머리를 싣지 않는다 — bfcache 복원은 `on_before_browse` 를 지나지 않아 흉내가 남은 채 pageshow 가 돌았다(그래서 maru 의 Chromium
 /// 은 bfcache 를 끈다 — 사용자 결정 2026-11-12; 복원되면 보고에 `P` 가 보인다).
 /// emu-site-bound-slow-hop: 사이트 밖 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안(3.5 초) 옛 문서가 화면·배율·시간대·UA·언어·터치·
-/// 미디어 흉내를 보지 않고 그 요청도 흉내 머리를 싣지 않으며 상태는 사이트 밖이다; 새 문서의 문서 요청부터 흉내 UA, 새 문서는 모두 흉내(첫 스크립트가 본
-/// 것은 관측으로 적는다).
+/// 미디어 흉내를 보지 않고 그 요청도 흉내 머리를 싣지 않으며 상태는 사이트 밖이다; 새 문서의 문서 요청부터 흉내 UA, 새 문서는 커밋 뒤 1 초 안에 모든
+/// 흉내(첫 스크립트가 본 것은 `-first-script(obs)` 로 적는다 — 커밋 뒤에야 닿는 흉내와 겨루는 경주라 가끔 진다: W9e 후속 2026-11-13).
 fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     var sess: Session = undefined;
     try open(&sess, host_path, root, "emh");
@@ -1434,10 +1437,14 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     r.pump(400);
     var g0: [64]u8 = undefined;
     const t0_old = r.ev(2, "T0", &g0);
-    const go = std.fmt.bufPrint(&js, "GO('http://127.0.0.1:{d}/slow?ms=3500&w',1)", .{port}) catch unreachable;
+    const rend0 = r.renderers();
+    const go = std.fmt.bufPrint(&js, "GO('http://127.0.0.1:{d}/slowr?ms=3500&w',1)", .{port}) catch unreachable;
     var g1: [64]u8 = undefined;
     _ = r.ev(2, go, &g1);
-    r.pump(1500);
+    r.pump(500);
+    // 옛 문서가 iframe 을 만들기(700 ms) 전의 렌더러 수 — 늘었으면 묶인 사이트의 렌더러가 커밋 전에 떠 있다(첫 스크립트 경주의 까닭, 관측).
+    const rend_wait = r.renderers();
+    r.pump(1000);
     const st_mid = r.st[2];
     r.pump(1000);
     const st_mid2 = r.st[2];
@@ -1447,12 +1454,13 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     leaksOn("/obs?", "localhost", &lo);
     var kid: Kids = undefined;
     kidsOf(&kid);
-    const doc = firstReqOn("/slow?ms=3500&w", "127.0.0.1");
+    const doc = firstReqOn("/slowr?ms=3500&w", "127.0.0.1");
     const aft = firstReqOn("/aft?ms=3500&w", "127.0.0.1");
     const aft2 = laterReq(r, 2, "/aft2?w");
     var g2: [700]u8 = undefined;
-    const new_doc = r.ev(2, "JSON.stringify([location.host,'T0='+T0,SG(),P().tz,innerWidth])", &g2);
+    const new_doc = r.ev(2, "JSON.stringify([location.host,'T0='+T0,'FULL='+FULL,SG(),P().tz,innerWidth])", &g2);
     const st_end = r.st[2];
+    const rend_end = r.renderers();
     // 기다리는 동안 상태는 밖이고 답을 기다리지 않는다(옮긴 판 검증 L1 — 전에는 홉에서 건 UA 의 답이 커밋 뒤에 와 내내 pending).
     const mid_off = st_mid != null and !st_mid.?.on_site and !st_mid.?.pending and st_mid.?.active_mask == 0 and st_mid2 != null and !st_mid2.?.on_site and !st_mid2.?.pending;
     const old_ok = std.mem.eql(u8, t0_old, "-") and lo.total >= 20 and lo.seen == 0 and lo.header == 0;
@@ -1460,11 +1468,15 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     // 그 홉의 문서 요청 하나는 흉내 UA(넣었다), 커밋 뒤 요청과 같은 꼴(UA·client hints 셋 — metadata 없는 UA 면 client hints 없음). Accept-Language 는
     // 넣어도 CEF 154 가 진짜로 되돌린다(실측 — 그 요청 하나 늦음, 적기만 한다).
     const doc_ok = doc != null and aft2 != null and std.mem.eql(u8, doc.?.uaText(), "BoundUA/1") and sameHeaders(&doc.?, &aft2.?, false);
-    const t0_all = "T0=tz.il.ua.lang.iw.dpr.mtp.print.fc";
-    const new_ok = contains(new_doc, "127.0.0.1") and contains(new_doc, t0_all) and contains(new_doc, "Asia/Tokyo") and contains(new_doc, ",390]") and st_end != null and st_end.?.on_site;
+    // 새 문서는 커밋 뒤 1 초 안에 모든 흉내(`FULL`)·지금도 모두(`SG()`)·시간대·화면. 첫 스크립트(`T0`)가 모두를 봤는지는 단언하지 않는다 — 커밋 뒤에야 렌더러에
+    // 닿는 명령과 겨루는 경주라(W9e① 「데워진 렌더러의 첫 스크립트」 와 같은 까닭) 열 판에 둘~넷 진다(`T0=iw.dpr`·`-`; main 빌드도 같다).
+    const hop_full_ms = fullMs(new_doc);
+    const new_ok = contains(new_doc, "127.0.0.1") and hop_full_ms >= 0 and hop_full_ms <= 1000 and contains(new_doc, ",\"tz.il.ua.lang.iw.dpr.mtp.print.fc\",") and
+        contains(new_doc, "Asia/Tokyo") and contains(new_doc, ",390]") and st_end != null and st_end.?.on_site;
     var hb: [2][400]u8 = undefined;
     var hb3: [400]u8 = undefined;
-    report(old_ok and mid_off and kids_ok and doc_ok and new_ok, "emu-site-bound-slow-hop", std.fmt.bufPrint(&d, "옛 문서 T0={s} · 기다리는 동안 관찰 {d}개(흉내 {d}·흉내 머리 {d}) {s}· 상태 1.5 초 on_site={} pending={} active=0x{x} 2.5 초 on_site={} | 옛 문서가 만든 요청 문서 {d}개(흉내 머리 {d}) 안의 fetch {d}개(흉내 {d}) {s}| 새 문서 요청 {s} · 커밋 뒤 {s} · 첫 스크립트의 요청 {s} {s} | 새 문서 {s} on_site={}", .{ t0_old, lo.total, lo.seen, lo.header, lo.buf[0..lo.len], if (st_mid) |x| x.on_site else true, if (st_mid) |x| x.pending else true, if (st_mid) |x| x.active_mask else 0, if (st_mid2) |x| x.on_site else true, kid.docs, kid.dirty, kid.inner, kid.inner_dirty, kid.buf[0..kid.len], headerText(&hb[0], doc), headerText(&hb[1], aft2), if (aft) |x| x.targetText() else "-", headerText(&hb3, aft), new_doc[0..@min(new_doc.len, 200)], if (st_end) |x| x.on_site else false }) catch "");
+    report(old_ok and mid_off and kids_ok and doc_ok and new_ok, "emu-site-bound-slow-hop", std.fmt.bufPrint(&d, "옛 문서 T0={s} · 기다리는 동안 관찰 {d}개(흉내 {d}·흉내 머리 {d}) {s}· 상태 1.5 초 on_site={} pending={} active=0x{x} 2.5 초 on_site={} | 옛 문서가 만든 요청 문서 {d}개(흉내 머리 {d}) 안의 fetch {d}개(흉내 {d}) {s}| 새 문서 요청 {s} · 커밋 뒤 {s} | 새 문서 {s} on_site={}", .{ t0_old, lo.total, lo.seen, lo.header, lo.buf[0..lo.len], if (st_mid) |x| x.on_site else true, if (st_mid) |x| x.pending else true, if (st_mid) |x| x.active_mask else 0, if (st_mid2) |x| x.on_site else true, kid.docs, kid.dirty, kid.inner, kid.inner_dirty, kid.buf[0..kid.len], headerText(&hb[0], doc), headerText(&hb[1], aft2), new_doc[0..@min(new_doc.len, 200)], if (st_end) |x| x.on_site else false }) catch "");
+    report(true, "emu-site-bound-slow-hop-first-script(obs)", std.fmt.bufPrint(&d, "첫 스크립트 {s}(모든 흉내까지 {d} ms — 0 이면 처음부터) · 첫 스크립트의 요청 {s} {s} · 렌더러 이동 전 {d}·기다린 0.5 초 {d}·끝 {d}", .{ if (std.mem.indexOf(u8, new_doc, "T0=")) |at| new_doc[at .. std.mem.indexOfScalarPos(u8, new_doc, at, '"') orelse new_doc.len] else "-", hop_full_ms, if (aft) |x| x.targetText() else "-", headerText(&hb3, aft), rend0, rend_wait, rend_end }) catch "");
     // 다음 탭이 이 탭의 렌더러를 나누지 않게(같은 사이트 — locale·시간대는 프로세스에 하나다: E13).
     try r.host.send(.{ .destroy_browser = 2 });
     r.pump(500);
@@ -1560,17 +1572,22 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     const old_clean = std.mem.eql(u8, t0_obf, "-") and lo5.total >= lo0.total + 8 and lo5.seen == lo0.seen and lo5.header == lo0.header and
         st_wait != null and !st_wait.?.on_site and st_wait.?.active_mask == 0;
     const kids_clean = kid5.docs == kid0.docs + 4 and kid5.dirty == kid0.dirty and kid5.inner >= kid0.inner + 3 and kid5.inner_dirty == kid0.inner_dirty;
-    const full_ms: i64 = if (std.mem.indexOf(u8, fnew, "FULL=")) |at| blk: {
-        var e = at + 5;
-        if (e < fnew.len and fnew[e] == '-') break :blk -1;
-        while (e < fnew.len and std.ascii.isDigit(fnew[e])) e += 1;
-        break :blk std.fmt.parseInt(i64, fnew[at + 5 .. e], 10) catch -1;
-    } else -1;
+    const full_ms = fullMs(fnew);
     const fnew_ok = contains(fnew, "127.0.0.1") and full_ms >= 0 and full_ms <= 1000 and contains(fnew, "," ++ "\"tz.il.ua.lang.iw.dpr.mtp.print.fc\"]") and st_f != null and st_f.?.on_site and
         fdoc != null and std.mem.eql(u8, fdoc.?.uaText(), "BoundUA/1");
+    const t0_all = "T0=tz.il.ua.lang.iw.dpr.mtp.print.fc";
     const reload_ok = contains(freload, "127.0.0.1") and contains(freload, t0_all);
     report(old_clean and kids_clean and fnew_ok and reload_ok, "emu-site-bound-reused-renderer", std.fmt.bufPrint(&d, "옛 문서 T0={s} · 기다리는 동안 관찰 +{d}개(흉내 {d}·머리 {d}) {s}· 1.1 초 on_site={} active=0x{x} | 옛 문서가 만든 요청 문서 +{d}개(흉내 머리 {d}) 안의 fetch +{d}개(흉내 {d}) {s}| 새 문서 요청 ua=[{s}] · 새 문서 {s} on_site={} | 새로고침 {s}", .{ t0_obf, lo5.total - lo0.total, lo5.seen - lo0.seen, lo5.header - lo0.header, lo5.buf[0..lo5.len], if (st_wait) |x| x.on_site else true, if (st_wait) |x| x.active_mask else 0, kid5.docs - kid0.docs, kid5.dirty - kid0.dirty, kid5.inner - kid0.inner, kid5.inner_dirty - kid0.inner_dirty, kid5.buf[0..@min(kid5.len, 300)], if (fdoc) |x| x.uaText()[0..@min(x.ua_len, 20)] else "-", fnew, if (st_f) |x| x.on_site else false, freload }) catch "");
     report(true, "emu-site-bound-reused-renderer-first-script(obs)", std.fmt.bufPrint(&d, "첫 스크립트 {s}(모든 흉내까지 {d} ms — 0 이면 처음부터) · 첫 스크립트의 요청 {s} {s} · 렌더러 {d}", .{ if (std.mem.indexOf(u8, fnew, "T0=")) |at| fnew[at .. std.mem.indexOfScalarPos(u8, fnew, at, '"') orelse fnew.len] else "-", full_ms, if (faft) |x| x.targetText() else "-", headerText(&hb[1], faft), rend }) catch "");
+}
+
+/// 새 문서의 답에서 `FULL=` 값(`slowr_html` — 첫 스크립트로부터 모든 흉내가 보이기까지 ms, 처음부터면 0); 없거나 음수(5 초 안에 못 봄)면 -1.
+fn fullMs(s: []const u8) i64 {
+    const at = std.mem.indexOf(u8, s, "FULL=") orelse return -1;
+    var e = at + 5;
+    if (e < s.len and s[e] == '-') return -1;
+    while (e < s.len and std.ascii.isDigit(s[e])) e += 1;
+    return std.fmt.parseInt(i64, s[at + 5 .. e], 10) catch -1;
 }
 
 /// 기다리는 동안 옛 문서가 만든 요청들(`ob_html` 의 `KID`): iframe 문서 셋·Worker 스크립트(`docs` — 흉내 UA·Accept-Language 를 실은 수 `dirty`)와 그

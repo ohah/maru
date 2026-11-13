@@ -4989,7 +4989,7 @@ AppSession 이 있어야 해 단위 시험이 닿지 않는다 — 실제 앱 E2
   같고(4/4), 302 가 iframe 없는 문서에 떨어지면 맞다(2/2; 탐침 `$S/w9e1_fix3`). 65a51dd9f(모두 홉에서)에서도 302 갈래는 틀렸다(`dpr` 만), 렌더러 쪽 종류만
   홉에서 거는 판도 같다 — 미룸을 되돌려도 고쳐지지 않는다. 다른 길(빈 문서를 거쳐 다시 이동·커밋 뒤 한 번 더 불러오기)은 이동의 뜻을 바꿔 택하지 않았다. 판정
   `emu-site-bound-reused-renderer`(밖의 문서 `/obf` 가 127.0.0.1 iframe 을 품는다 — 기다리는 동안 옛 문서·그 문서가 만든 iframe 셋·Worker 의 요청은 진짜,
-  새 문서는 커밋 뒤 1 초 안에 모든 흉내, 새로고침은 첫 스크립트부터; 첫 스크립트가 본 것과 걸리기까지의 ms 는 `-first-script(obs)` 로 적는다). 변이: 모두 홉에서
+  새 문서는 커밋 알림 안에서 흉내 명령이 나가고 첫 스크립트로부터 25 ms 안에 모든 흉내 — 아래 「FULL 상한 조이기」, 새로고침은 첫 스크립트부터; 첫 스크립트가 본 것과 걸리기까지의 ms 는 `-first-script(obs)` 로 적는다). 변이: 모두 홉에서
   (`heldUntilCommit` 거짓) → FAIL(옛 문서 15/15 `iw.dpr`, 옛 문서가 만든 요청 4/4 흉내 머리), 커밋에서 내지 않음 → FAIL(새 문서·새로고침 모두 `-`). 이 판정을 더한 뒤 `--emulation` **36/0**·순수 539·게이트(바뀐 것) 통과.
   수(이 고침): 순수 sidecar **539**(emu_plan 13 — 기다림 시험 하나를 바꾸고 머리 넣기 둘), `zig build test-cli-failure-contract` 924 통과/1 건너뜀, 게이트 12 통과.
   실제 CEF(한 번씩, 다시 돌린 것 없음, 부하 4–19): `--emulation` **34/0**, `--network-mock` 73/0, `--network-block` 60/0, `--network` 173/0, `--network-body` 92/0,
@@ -5002,7 +5002,7 @@ AppSession 이 있어야 해 단위 시험이 닿지 않는다 — 실제 앱 E2
 뜬다**(렌더러 수 이동 전 3 → 기다린 0.5 초(옛 문서가 iframe 을 만들기 전) 4 → 끝 5, 열 판 모두 같다). 그 경주에서 지면 첫 스크립트와 그 요청 하나가 흉내 전(진짜)
 값을 보고 4 ms 뒤부터 모든 흉내다 — 허락한 사이트가 진짜 값을 잠깐 보는 쪽이라 제품은 바꾸지 않았다(사용자 결정 2026-11-12 「받아들이고 문서에 적기」 와 같은
 결과; 그 결정이 적은 조건 「그 사이트 iframe 을 품었으면」 보다 넓다). 판정만 바꿨다: 새 문서를 `/slowr`(첫 스크립트로부터 모든 흉내까지의 ms `FULL`)로 받아
-**커밋 뒤 1 초 안에 모든 흉내**를 단언하고, 첫 스크립트가 본 것·그 요청의 머리·렌더러 수는 새 관측 `emu-site-bound-slow-hop-first-script(obs)` 로 적는다
+**커밋 뒤 1 초 안에 모든 흉내**를 단언하고(아래 「FULL 상한 조이기」 가 커밋 알림의 차례와 25 ms 로 바꿨다), 첫 스크립트가 본 것·그 요청의 머리·렌더러 수는 새 관측 `emu-site-bound-slow-hop-first-script(obs)` 로 적는다
 (`--emulation` 46 → **47**). 기다리는 동안·홉 요청 머리·커밋 뒤 흉내의 단언은 그대로다. 변이(실제 CEF, 되돌림 `cmp`·`git diff` 확인): 미루지 않기(`heldUntilCommit`
 거짓 — 옛 문서 35/42 `iw.dpr`)·상태만 안(`on_site=true`)·커밋이 hold 를 끄지 않음(`FULL=-1`·`on_site=false`)·UA 만 홉에서(`pending=true`)·넣지 않음(새 문서 요청
 진짜 UA)·client hints 를 건드리지 않음(문서 요청 진짜 client hints — 이 판은 경주에서 져 `T0=-`·`FULL=4` 였지만 머리로 FAIL)·커밋에서 내지 않음(`FULL=-1`) —
@@ -5032,6 +5032,18 @@ Chromium: 이동 동안 보낸 렌더러 쪽 명령은 새 렌더러에 **커밋
 요소 300 개 2 → 3 ms, CPU 반복은 차이 없음), 디버거가 붙었다는 신호를 A 가 잴 수 있다. 그 밖에 `Debugger` 도메인을 에이전트의 DevTools 호출과 나눠 쓰는 주인,
 맨 위·하위 프레임 가리기, 답이 오지 않을 때 푸는 시한, A 가 뜨자마자 묶인 사이트로 가면 문을 걸기 전이라 남는 틈, 어림 600–900 줄. **A 의 대가가 더 무겁다 — 막지
 않고 적는다(사용자 결정 2026-11-14)**: 경주는 넓힌 조건(그 사이트의 렌더러가 이미 떠 있으면) 그대로 받아들이고, 판정은 `-first-script(obs)` 관측으로 둔다.
+
+**FULL 상한 조이기(W9e 후속 2026-11-14)**: 「커밋 뒤 1 초 안」 은 너무 넓었다 — 커밋 뒤 40 ms·100 ms 늦게 거는 변이(`FULL` 30–48·99–113, 첫 스크립트와
+그 요청은 늘 진짜)가 `--emulation` 47/0 으로 살았는데, 문서가 받아들인 것은 「가끔, 몇 ms」 다. slow-hop·reused-renderer 둘 다 이제 (1) **커밋 알림의
+차례** — 이동을 보낸 뒤 그 탭의 첫 사이트 안 `emulation_state` 가 `pending`(명령을 보냈다)이고 같은 `on_load_start` 가 보내는 `page_started` 보다 먼저 온다
+(한 줄 pipe 의 차례라 부하와 상관없다), (2) 첫 스크립트로부터 **25 ms** 안에 모든 흉내를 단언한다. 실측 `FULL`: 1 분 부하 1–20 에서 slow-hop 0·4·
+reused-renderer 3·4(10 판 47/0), 판정자가 띄운 `yes` 22 개로 1 분 부하 37–136 에서도 slow-hop 0(12/12 첫 스크립트가 이김)·reused-renderer 3(12/12), 차례 24/24 맞음 —
+고정 상한만으로도 갈리지만 늦게 거는 변이의 `FULL` 은 첫 스크립트가 늦게 돌면 줄어드니 결정적인 것은 차례다. 변이(실제 CEF, 되돌림 `cmp`·`git diff`): 40 ms
+늦게(차례 어긋남·`FULL` 35·48)·100 ms 늦게 상태는 곧(상태 `pending:false`·104·111)·300 ms 늦게·300 ms 늦게 상태는 곧과 위 일곱 — **11 중 11** 이
+slow-hop 을 FAIL 시켰고, reused-renderer 는 client hints 그대로 하나만 빼고 잡았다(산 변이 없음). 그 부하에서 이 둘과 상관없는
+판정이 가끔 FAIL 했다(`emu-site-bound-bfcache` 4·`emu-net-dead-release` 2·`emu-geo-hidden-held(obs)` 2·`emu-dead-tab-no-crash` 1 / 12 판; 부하
+1–20 의 판에서는 없었다). bfcache 넷은 뒤로 간 밖의 문서의 첫 스크립트와 그 요청 하나가 흉내(`BoundUA/1`·`fr-FR`)를 봤다 — 이 고침 밖이라 원인은 보지
+않았고 따로 남긴다(`$S/w9e_fu2/logs/loaded_*.log`).
 
 LOW(고치지 않음 — 사용자 결정 「심각한 것만」): 렌더러가 죽은 뒤 사이트 밖으로 가거나 죽은 동안 지우면 그 문서 요청 하나가 흉내 UA·언어를 싣는다(E12 꼴 — 죽은 동안
 UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulationEnabled`·`Page.setGeolocationOverride`·`Page.setDeviceOrientationOverride`·

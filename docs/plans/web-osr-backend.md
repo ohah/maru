@@ -4994,6 +4994,20 @@ AppSession 이 있어야 해 단위 시험이 닿지 않는다 — 실제 앱 E2
   실제 CEF(한 번씩, 다시 돌린 것 없음, 부하 4–19): `--emulation` **34/0**, `--network-mock` 73/0, `--network-block` 60/0, `--network` 173/0, `--network-body` 92/0,
   `--permissions` 27/0, `--devtools` 19/0.
 
+**slow-hop 의 가끔 FAIL(W9e 후속 2026-11-13)**: W9e② 옮긴 판 아홉 판 중 넷·main 빌드 세 판 중 하나에서 `emu-site-bound-slow-hop` 이 FAIL 했다. 실패한
+판을 모두 보면 기다리는 동안의 조건(옛 문서 관찰 42 개 모두 `-`·머리 진짜, 상태 밖·`pending:false`, 옛 문서가 만든 요청 넷·안의 fetch 진짜)과 새 문서 요청의 머리는
+모두 맞고, 틀린 것은 **새 문서의 첫 스크립트가 본 것**(`T0=iw.dpr`·`ua.lang.iw.dpr.mtp`·`-` — 로그의 `T0=-` 는 옛 문서가 아니라 새 문서의 값) 하나다. 위 「데워진
+렌더러의 첫 스크립트」 와 같은 경주다: 렌더러 쪽 흉내는 커밋 뒤에야 렌더러에 닿고, 묶인 사이트의 렌더러는 iframe 을 품지 않아도 **응답을 기다리는 동안 이미
+뜬다**(렌더러 수 이동 전 3 → 기다린 0.5 초(옛 문서가 iframe 을 만들기 전) 4 → 끝 5, 열 판 모두 같다). 그 경주에서 지면 첫 스크립트와 그 요청 하나가 흉내 전(진짜)
+값을 보고 4 ms 뒤부터 모든 흉내다 — 허락한 사이트가 진짜 값을 잠깐 보는 쪽이라 제품은 바꾸지 않았다(사용자 결정 2026-11-12 「받아들이고 문서에 적기」 와 같은
+결과; 그 결정이 적은 조건 「그 사이트 iframe 을 품었으면」 보다 넓다). 판정만 바꿨다: 새 문서를 `/slowr`(첫 스크립트로부터 모든 흉내까지의 ms `FULL`)로 받아
+**커밋 뒤 1 초 안에 모든 흉내**를 단언하고, 첫 스크립트가 본 것·그 요청의 머리·렌더러 수는 새 관측 `emu-site-bound-slow-hop-first-script(obs)` 로 적는다
+(`--emulation` 46 → **47**). 기다리는 동안·홉 요청 머리·커밋 뒤 흉내의 단언은 그대로다. 변이(실제 CEF, 되돌림 `cmp`·`git diff` 확인): 미루지 않기(`heldUntilCommit`
+거짓 — 옛 문서 35/42 `iw.dpr`)·상태만 안(`on_site=true`)·커밋이 hold 를 끄지 않음(`FULL=-1`·`on_site=false`)·UA 만 홉에서(`pending=true`)·넣지 않음(새 문서 요청
+진짜 UA)·client hints 를 건드리지 않음(문서 요청 진짜 client hints — 이 판은 경주에서 져 `T0=-`·`FULL=4` 였지만 머리로 FAIL)·커밋에서 내지 않음(`FULL=-1`) —
+**7 중 7** 이 `emu-site-bound-slow-hop` 을 FAIL 시켰다(산 변이 없음). 고친 판 `--emulation` 열 판 모두 **47/0**(1 분 부하 1.0–4.3), 그중 둘에서 첫 스크립트가 졌다
+(`T0=-`·`ua.lang.iw.dpr.mtp`, 모든 흉내까지 4 ms — 고치기 전 판정이면 FAIL), 고치기 전 판정은 같은 작업 트리에서 세 판 중 하나 FAIL(`T0=iw.dpr.mtp`).
+
 LOW(고치지 않음 — 사용자 결정 「심각한 것만」): 렌더러가 죽은 뒤 사이트 밖으로 가거나 죽은 동안 지우면 그 문서 요청 하나가 흉내 UA·언어를 싣는다(E12 꼴 — 죽은 동안
 UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulationEnabled`·`Page.setGeolocationOverride`·`Page.setDeviceOrientationOverride`·
 `DeviceOrientation.*` 이 `forbiddenMethod` 밖이다(CEF 154 가 받는다 — maru 의 CDP 메서드는 모두 리터럴이라 닿는 길은 없다); 지운·바꾼 위치는 같은 문서에 1 분까지
@@ -5494,7 +5508,7 @@ boundary 시험 — 위 절의 「ABI 238」 은 옛 번호다), 순수 sidecar 
 `--popup` 8/0, `--contextmenu` 19/0, `--drag` 25/0, `--tooltip` 9/0. **`emu-site-bound-slow-hop` 은 가끔 FAIL 한다** — 옮긴 판 `--emulation` 아홉 판 중 넷에서
 새 문서의 첫 스크립트가 흉내를 일부만 봤다(`T0=iw.dpr`·`ua.lang.iw.dpr.mtp`·`-`; 나머지 조건은 모두 PASS). W9e① 이 「보장이 아니라 경쟁에서 이긴 관측」 이라 적은
 그 경주다 — **main(77386b02e) 빌드도 세 판 중 하나에서 같은 꼴(`T0=-`)로 FAIL** 했다(1 분 부하 2–4, 임시 작업 트리). 이 커밋 탓이 아니다; 판정을 그 경주에
-덜 기대게 바꾸는 일은 W9e① 의 몫으로 남긴다. 돌리지 않음: 스모크(앱 GUI), 판정자 기본(전체) 모드·`--review-*` 묶음.
+덜 기대게 바꾸는 일은 W9e① 의 몫으로 남긴다(→ W9e 후속 2026-11-13 에서 바꿨다 — W9e① 절 「slow-hop 의 가끔 FAIL」). 돌리지 않음: 스모크(앱 GUI), 판정자 기본(전체) 모드·`--review-*` 묶음.
 
 **W9e② 20 회 검증(2026-11-13)**: 옮긴 커밋(d63e15beb)에 적대 검증 20 회(v1 1–10·v2 11–20)를 돌려 SEVERE 0, 고친 것 둘.
 - **MED — 옮긴 직후 trace 의 헛폐기(고침)**: bfcache 가 꺼진 main 에서 같은 사이트 뒤로·앞으로·이동 직후의 trace 를 거르기가 가끔 통째 버리고(`mixed_content`·

@@ -14,6 +14,10 @@
 //!   직접 넣는다(`emu_inject.zig` — IO 스레드, 사용자 결정 2026-11-12 「그 한 요청만 머리를 직접 넣기」; 여기서는 기다림이 바뀔 때마다 넣을 값을
 //!   적고 거둔다). bfcache 복원은 `on_before_browse` 를
 //!   지나지 않아 복원된 밖의 문서가 pageshow 에서 흉내를 봤다 — maru 의 Chromium 은 bfcache 를 끈다(`app.zig` — 사용자 결정 2026-11-12).
+//! - **거꾸로(안→밖) — maru 가 시작한 이동은 지움의 답 뒤에**(사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」 — `gateNav`): 사이트 안 문서에서 밖으로
+//!   가는 HTTP 캐시의 뒤로(bfcache 가 아니다 — `pageshow` 의 `persisted` 거짓)는 홉에서 커밋까지가 짧아 홉에서 낸 지움이 새 렌더러에 옛 상태가 선 뒤
+//!   닿았다 — 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 봤다. maru 의 주소·뒤로·앞으로·우클릭 메뉴의 뒤로·앞으로는 지움을 먼저 내고 그 답이
+//!   다 오거나 100 ms 가 지나면 낸다. 페이지·에이전트 CDP 가 시작한 이동은 덮지 않는다(남는 틈 — 계획 문서).
 //! - **화면은 pane 에 맞춰 줄인다**(사용자 결정 Q3 — `scale`): pane 크기가 바뀌면 다시 셈해 다시 낸다(E2).
 //! - **위치는 W5b2 와 한 칸**(사용자 결정 Q2): `permissions.zig` 가 건다 — 그 탭의 위치만 묻는 프롬프트에는 묻지 않고 허용, 대신 허용한 출처는
 //!   흉내가 끝나면 되돌린다.
@@ -69,6 +73,20 @@ const Entry = struct {
     /// W9e② V-A7: 이 탭의 하위 프레임이 가졌던 사이트들(`noteSubframeSite` — 커밋한 문서만, 주 문서마다, 넘치면 지금 있는 프레임으로 다시 센다:
     /// v20c N2 — `proc_share.SubSites`). 모름이면 물려받는 하위 프레임이 있을 때 위험으로 친다.
     sub: proc_share.SubSites = .{},
+    /// 거꾸로 경주 게이트(사용자 결정 2026-11-14) — 지움의 답을 기다리는 maru 의 이동 줄(`gateNav`).
+    gate: emu_plan.Gate = .{},
+    /// 줄에 있는 주소 이동의 주소 사본(`c_allocator`).
+    gate_url: ?[]u8 = null,
+    /// 게이트가 적은 가상 홉(대상의 호스트 — `hop_*`)이 아직 진짜 홉·커밋·끊김으로 바뀌지 않았다.
+    gate_pseudo: bool = false,
+    /// 게이트를 연(이동을 낸) 시각 — 안전망(`emu_plan.gate_safety_ms`). 0 = 없음.
+    gate_opened_ms: i64 = 0,
+    /// 가상 홉 동안 떠 있는 떠나기 확인(요청 번호 — 안전망을 멈추고, 머무르기·답 없이 치움이면 되돌린다). 0 = 없음.
+    gate_dialog: u32 = 0,
+    /// 로그·판정: 지움 수와 받은 답 수, 건 시각(µs).
+    gate_clears: u32 = 0,
+    gate_replies: u32 = 0,
+    gate_t0_us: u64 = 0,
 
     fn hop(self: *const Entry) ?[]const u8 {
         return if (self.hop_len == 0) null else self.hop_host[0..self.hop_len];
@@ -79,8 +97,11 @@ var entries: [registry_mod.capacity]?Entry = @splat(null);
 var observer: c.cef_dev_tools_message_observer_t = undefined;
 var observer_ready = false;
 var next_id: i32 = emu_plan.id_base;
-/// 답을 기다리는 흉내 호출(탭 32 × 종류 9 이면 288 — 넘치면 답을 기다리지 않고 「모름」 으로 둔다).
-var pending_ids: [320]struct { id: i32 = 0, cef_id: c_int = 0, kind: emu_plan.Kind = .metrics } = @splat(.{});
+/// 답을 기다리는 흉내 호출(탭 32 × 종류 9 이면 288 — 넘치면 답을 기다리지 않고 「모름」 으로 둔다). `clear` 는 게이트가 낸 지움(`gate_arming`
+/// 동안 — 상태(`Tab.status`)는 건드리지 않고 게이트의 남은 수만 센다: 평소 홉의 지움은 지금처럼 쫓지 않는다 — `emulation_state.pending` 의 뜻 그대로).
+var pending_ids: [320]struct { id: i32 = 0, cef_id: c_int = 0, kind: emu_plan.Kind = .metrics, clear: bool = false } = @splat(.{});
+/// 게이트가 지움을 내는 동안(`armGate` 의 `run` — UI 스레드).
+var gate_arming = false;
 
 fn logOn() bool {
     return std.c.getenv("MARU_WEB_TEST_EMU_LOG") != null;
@@ -402,9 +423,9 @@ fn sendCmd(e: *Entry, reg: *const registry_mod.Entry, cmd: emu_plan.Cmd) void {
         p.* = .{};
     };
     var tracked = false;
-    if (cmd.set) {
+    if (cmd.set or gate_arming) {
         for (&pending_ids) |*p| if (p.id == 0) {
-            p.* = .{ .id = id, .cef_id = e.cef_id, .kind = cmd.kind };
+            p.* = .{ .id = id, .cef_id = e.cef_id, .kind = cmd.kind, .clear = !cmd.set };
             tracked = true;
             break;
         };
@@ -427,8 +448,17 @@ fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browse
     for (&pending_ids) |*p| if (p.id == id) {
         const cef_id = p.cef_id;
         const kind = p.kind;
+        const clear = p.clear;
         p.* = .{};
         const e = entryOf(cef_id) orelse return;
+        if (clear) {
+            // 게이트의 지움 — 실패 답도 답이다(렌더러가 처리했다). 마지막 답이면 열기를 task 로 미룬다: 관찰자 콜백 안에서 이동·명령을 내지 않는다
+            // (`Check failed: !check_reentrancy` — W9d②·W9e② 의 같은 사고, 공격 A13).
+            e.gate_replies += 1;
+            if (logOn()) std.debug.print("emu: result b={d} {s} clear ok={}\n", .{ e.browser, @tagName(kind), success != 0 });
+            if (e.gate.active and gateLeft(cef_id) == 0) postGate(0);
+            return;
+        }
         const bytes: []const u8 = if (result != null and size > 0) @as([*]const u8, @ptrCast(result.?))[0..@min(size, 4096)] else "";
         e.tab.answered(kind, success != 0, bytes);
         if (logOn()) std.debug.print("emu: result b={d} {s} ok={} {s}\n", .{ e.browser, @tagName(kind), success != 0, if (success != 0) "" else bytes });
@@ -452,6 +482,7 @@ fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_brow
     // 답을 기다리던 것은 걸렸는지 모른다 — 다음 계획(되살아난 뒤)이 다시 낸다.
     e.tab.detached();
     sendState(e, false);
+    if (e.gate.active) postGate(0); // 게이트의 지움은 더 답이 오지 않는다 — 연다(관찰자 콜백 밖에서)
 }
 
 // ── CEF 사건 ───────────────────────────────────────────────────────────────────────────────────────────
@@ -472,6 +503,10 @@ pub fn beforeBrowse(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, requ
     e.hop_len = host.len;
     e.hop_known = true;
     e.hop_canon = table_mod.canonHash(u16, units(raw));
+    // 게이트: 이동이 시작됐다 — 가상 홉은 진짜 홉으로 끝나고(안전망도), 기다리는 줄이 있으면(그 사이 페이지가 이동을 시작했다 — 이 뒤 지움은 커밋까지 답이
+    // 오지 않는다, 공격 A4) 더 기다리지 않고 연다(task — 요청 처리기 안에서 이동을 내지 않는다).
+    endPseudo(e);
+    if (e.gate.active) postGate(0);
     var sb: [msg.max_net_host_bytes]u8 = undefined;
     const changed = e.tab.hop(if (host.len == 0) null else host, topHost(browser, &sb));
     syncInject(e); // 안→안 리다이렉트도(새 홉의 주소로), 안→밖 홉은 거둔다 — 그 홉의 요청보다 먼저(IO 스레드는 이 뒤에 그 요청을 본다)
@@ -508,6 +543,7 @@ pub fn loadStart(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, transit
     var hb: [msg.max_net_host_bytes]u8 = undefined;
     const host = protocol.net_policy.hostOfUrl16(units(raw), &hb);
     e.hop_known = false;
+    endPseudo(e);
     _ = e.tab.navigate(if (host.len == 0) null else host);
     emu_inject.clear(e.cef_id); // 그 이동은 끝났다
     if (logOn() and back) std.debug.print("emu: renderer back b={d}\n", .{e.browser});
@@ -528,6 +564,7 @@ pub fn loadAborted(browser: [*c]c.cef_browser_t, failed_url: [*c]const c.cef_str
     const reg = browsers.state.registry.byCefId(e.cef_id) orelse return;
     if (reg.closing) return;
     e.hop_known = false;
+    endPseudo(e);
     emu_inject.clear(e.cef_id);
     var hb: [msg.max_net_host_bytes]u8 = undefined;
     if (!e.tab.navigate(topHost(browserOf(reg), &hb))) return;
@@ -546,6 +583,7 @@ pub fn loadFailed(browser: [*c]c.cef_browser_t, failed_url: [*c]const c.cef_stri
     const reg = browsers.state.registry.byCefId(e.cef_id) orelse return;
     if (reg.closing) return;
     e.hop_known = false;
+    endPseudo(e);
     emu_inject.clear(e.cef_id);
     var hb: [msg.max_net_host_bytes]u8 = undefined;
     const host = protocol.net_policy.hostOfUrl16(units(failed_url), &hb);
@@ -564,6 +602,7 @@ pub fn rendererGone(cef_id: c_int) void {
     e.tab.rendererGone();
     if (logOn()) std.debug.print("emu: renderer gone b={d}\n", .{e.browser});
     sendState(e, false);
+    if (e.gate.active) postGate(0); // 지움의 답은 오지 않는다 — 연다(새 렌더러는 Chromium 이 옛 흉내를 다시 건다 — 남는 틈, 공격 A9)
 }
 
 /// pane 크기가 바뀌었다(`resize`) — 흉내 화면이 있으면 fit 을 다시 셈해 다시 낸다(Chromium 은 셈하지 않는다 — E2).
@@ -589,6 +628,7 @@ pub fn browserClosed(cef_id: c_int) void {
     emu_inject.clear(cef_id);
     for (&entries) |*e| if (e.*) |v| if (v.cef_id == cef_id) {
         if (v.reg != null) object.release(v.reg);
+        if (v.gate_url) |u| std.heap.c_allocator.free(u); // 줄은 버린다(이동 없음)
         e.* = null;
     };
 }
@@ -691,4 +731,346 @@ pub fn framesChanged() void {
         run(e, reg);
         sendState(e, false);
     };
+}
+
+// ── 거꾸로 경주 게이트(사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」) ─────────────────────────────────────────
+//
+// 사이트에 묶인 흉내가 걸린 사이트 안 문서에서 maru 가 시작한 이동(wire `navigate`·`nav_action` 뒤로·앞으로, 우클릭 메뉴의 뒤로·앞으로 — CEF 가 직접
+// 낸다)이 사이트 밖 문서로 가면, 지움을 **먼저** 내고 그 답을 쫓아 다 오거나 시한(`emu_plan.gate_deadline_ms`)이 지나면 이동을 낸다(UI task —
+// 관찰자 콜백 안에서는 내지 않는다). 캐시에서 오는 뒤로는 홉에서 커밋까지가 짧아, 홉에서 낸 지움이 이동 동안 붙잡혔다가 새 렌더러에 옛 상태가 선 뒤
+// 닿았다 — 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 보고 그 요청이 흉내 머리를 실었다(실측 부하 22: 27/40·21/40, 게이트 0/40; 답은
+// 0.4 ms). 지움은 대상 호스트로 적은 가상 홉(`gate_pseudo`)이 낸다 — 이동이 시작되면 진짜 홉이 이어받고, 시작되지 않으면(떠나기 확인의 머무르기·답
+// 없이 치운 확인·멈춤·안전망 1 초) 지금 문서로 되돌려 다시 건다. 페이지·에이전트 CDP 가 시작한 이동은 덮지 않는다(남는 틈 — 계획 문서).
+
+const max_hist = 64;
+var hist_visitor: c.cef_navigation_entry_visitor_t = undefined;
+var hist_ready = false;
+var hist_hosts: [max_hist][msg.max_net_host_bytes]u8 = undefined;
+var hist_lens: [max_hist]usize = undefined;
+var hist_canon: [max_hist]u64 = undefined;
+var hist_seen: [max_hist]bool = undefined;
+var hist_current: ?usize = null;
+
+fn visitHist(_: [*c]c.cef_navigation_entry_visitor_t, ent: [*c]c.cef_navigation_entry_t, current: c_int, index: c_int, _: c_int) callconv(.c) c_int {
+    defer object.releaseArg(ent);
+    if (ent == null or index < 0 or index >= max_hist) return 1;
+    const i: usize = @intCast(index);
+    const u = ent.*.get_url.?(ent);
+    defer if (u != null) browsers.state.api.string_userfree_utf16_free(u);
+    hist_lens[i] = protocol.net_policy.hostOfUrl16(units(u), &hist_hosts[i]).len;
+    hist_canon[i] = table_mod.canonHash(u16, units(u));
+    hist_seen[i] = true;
+    if (current != 0) hist_current = i;
+    return 1;
+}
+
+/// 게이트가 볼 이동의 대상 — 문서를 바꾸는 이동이면 `known`(호스트를 모르면 빈 글 — 밖), 정규 해시는 가상 홉의 끊김 짝짓기에.
+const Target = struct {
+    known: bool = false,
+    host_buf: [msg.max_net_host_bytes]u8 = undefined,
+    host_len: usize = 0,
+    canon: u64 = 0,
+
+    fn host(self: *const Target) ?[]const u8 {
+        return if (self.host_len == 0) null else self.host_buf[0..self.host_len];
+    }
+};
+
+/// 그 이동이 갈 문서. 뒤로·앞으로는 기록의 지금 항목(진행 중 기록 이동이 있으면 그 대상 — `blocking.historyAt` 과 같다) ± 1 의 주소 — 그 방향에 항목이
+/// 없으면 모름(이동이 없다). 몸짓 없이 생긴 항목을 Chromium 이 건너뛰는 개입은 CEF 가 알리지 않는다(남는 틈 — 공격 A3). 새로고침은 게이트하지 않는다
+/// (사이트 안 문서 — 밖으로 리다이렉트하면 그 홉이 지운다).
+fn targetOf(reg: *const registry_mod.Entry, step: emu_plan.GateStep, url: []const u8) Target {
+    var t: Target = .{};
+    switch (step.action) {
+        .reload => return t,
+        .navigate => {
+            if (!emu_plan.docChanging(url)) return t;
+            // 호스트는 권한(authority) 안에만 있다 — 앞부분을 바이트 그대로 UTF-16 으로(ASCII 가 아니면 호스트를 못 읽어 밖: 더 지우는 쪽).
+            var wide: [2048]u16 = undefined;
+            const n = @min(url.len, wide.len);
+            for (url[0..n], wide[0..n]) |ch, *w| w.* = ch;
+            t.host_len = protocol.net_policy.hostOfUrl16(wide[0..n], &t.host_buf).len;
+            t.canon = table_mod.canonHash(u8, url);
+            t.known = true;
+        },
+        .back, .forward, .menu_back, .menu_forward => {
+            const step_dir: i64 = if (step.action == .back or step.action == .menu_back) -1 else 1;
+            if (!hist_ready) {
+                hist_visitor = object.zeroed(c.cef_navigation_entry_visitor_t);
+                object.staticRefCounted(&hist_visitor.base);
+                hist_visitor.visit = &visitHist;
+                hist_ready = true;
+            }
+            const b = browserOf(reg);
+            const host = b.*.get_host.?(b);
+            if (host == null) return t;
+            defer object.release(host);
+            hist_seen = @splat(false);
+            hist_current = null;
+            host.*.get_navigation_entries.?(host, &hist_visitor, 0);
+            const cur = hist_current orelse return t;
+            const next = @as(i64, @intCast(cur)) + step_dir;
+            if (next < 0 or next >= max_hist or !hist_seen[@intCast(next)]) return t;
+            const i: usize = @intCast(next);
+            @memcpy(t.host_buf[0..hist_lens[i]], hist_hosts[i][0..hist_lens[i]]);
+            t.host_len = hist_lens[i];
+            t.canon = hist_canon[i];
+            t.known = true;
+        },
+    }
+    return t;
+}
+
+/// 다른 주 프레임 이동이 진행 중인가(진짜 홉을 봤고 커밋·끊김·오류가 아직 — 가상 홉은 셈하지 않는다).
+fn navInProgress(e: *const Entry) bool {
+    return e.hop_known and !e.gate_pseudo;
+}
+
+/// 그 탭의 게이트 지움 가운데 답을 기다리는 수(칸을 훑어 센다 — 같은 종류의 새 명령이 칸을 지우면 그 종류는 새 명령이 대신한다).
+fn gateLeft(cef_id: c_int) u32 {
+    var n: u32 = 0;
+    for (pending_ids) |p| {
+        if (p.id != 0 and p.clear and p.cef_id == cef_id) n += 1;
+    }
+    return n;
+}
+
+fn dropClears(cef_id: c_int) void {
+    for (&pending_ids) |*p| if (p.id != 0 and p.clear and p.cef_id == cef_id) {
+        p.* = .{};
+    };
+}
+
+fn nowMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+}
+
+fn nowUs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000 + @as(u64, @intCast(ts.nsec)) / 1000;
+}
+
+var gate_task: c.cef_task_t = undefined;
+var gate_task_ready = false;
+/// 걸어 둔 늦은 task 의 가장 이른 때(더 이른 때가 필요하면 하나 더 건다 — task 는 몇 번 돌아도 같다).
+var gate_timer_due: i64 = std.math.maxInt(i64);
+
+/// 게이트 task 를 `delay_ms` 뒤에(0 = 곧 — 답·끊김·진행 중 이동이 왔다) 건다. 모든 탭의 마감·답·안전망을 한 번에 본다.
+fn postGate(delay_ms: i64) void {
+    if (!gate_task_ready) {
+        gate_task = object.zeroed(c.cef_task_t);
+        object.staticRefCounted(&gate_task.base);
+        gate_task.execute = &gateSweep;
+        gate_task_ready = true;
+    }
+    const due = nowMs() + delay_ms;
+    if (delay_ms > 0 and due >= gate_timer_due) return;
+    if (browsers.state.api.post_delayed_task(c.TID_UI, &gate_task, delay_ms) != 0 and delay_ms > 0) gate_timer_due = due;
+}
+
+fn gateSweep(_: [*c]c.cef_task_t) callconv(.c) void {
+    gate_timer_due = std.math.maxInt(i64);
+    const now = nowMs();
+    var next: i64 = std.math.maxInt(i64);
+    for (&entries) |*slot| if (slot.*) |*e| {
+        if (e.gate.active) {
+            const why: ?[]const u8 = if (gateLeft(e.cef_id) == 0)
+                (if (e.gate_replies >= e.gate_clears) "replies" else "gone")
+            else if (navInProgress(e))
+                "in_progress"
+            else if (e.gate.due(now))
+                "timeout"
+            else
+                null;
+            if (why) |w| openGate(e, w) else next = @min(next, e.gate.deadline_ms);
+        }
+        if (e.gate_pseudo and e.gate_opened_ms != 0 and e.gate_dialog == 0) {
+            const at = e.gate_opened_ms + emu_plan.gate_safety_ms;
+            if (now >= at) restorePseudo(e, "safety") else next = @min(next, at);
+        }
+    };
+    if (next != std.math.maxInt(i64)) postGate(@max(1, next - now));
+}
+
+/// 줄에 하나를 더한다(주소면 사본을 쥔다). 쥐지 못하면 거짓 — 줄이 찼으면 지금 줄을 곧 열고(차례 그대로), 부른 쪽이 이것을 곧 낸다.
+fn enqueue(e: *Entry, step: emu_plan.GateStep, url: []const u8) bool {
+    if (step.action == .navigate) {
+        const copy = std.heap.c_allocator.dupe(u8, url) catch {
+            openGate(e, "full");
+            return false;
+        };
+        if (e.gate_url) |old| std.heap.c_allocator.free(old);
+        e.gate_url = copy;
+    }
+    switch (e.gate.push(step)) {
+        .queued => {},
+        .full => {
+            openGate(e, "full");
+            return false;
+        },
+    }
+    if (logOn() and e.gate.len > 1) std.debug.print("emu: gate b={d} queue {s}\n", .{ e.browser, @tagName(step.action) });
+    return true;
+}
+
+/// 대상의 호스트로 가상 홉을 적고 지움을 낸다(그 지움만 답을 쫓는다). 답을 기다리는 지움 수.
+fn armGate(e: *Entry, reg: *const registry_mod.Entry, t: *const Target) u32 {
+    @memcpy(e.hop_host[0..t.host_len], t.host_buf[0..t.host_len]);
+    e.hop_len = t.host_len;
+    e.hop_known = true;
+    e.hop_canon = t.canon;
+    e.gate_pseudo = true;
+    e.gate_opened_ms = 0;
+    e.gate_dialog = 0;
+    var sb: [msg.max_net_host_bytes]u8 = undefined;
+    _ = e.tab.hop(t.host(), topHost(browserOf(reg), &sb));
+    syncInject(e);
+    gate_arming = true;
+    run(e, reg);
+    gate_arming = false;
+    sendState(e, false);
+    e.gate_clears = gateLeft(e.cef_id);
+    e.gate_replies = 0;
+    e.gate_t0_us = nowUs();
+    return e.gate_clears;
+}
+
+/// maru 가 시작한 이동 하나(`browsers.navigate`·`navAction` 의 뒤로·앞으로·새로고침, `context_menu.onCommand` 의 뒤로·앞으로) — 게이트가 붙잡았으면
+/// 참(부른 쪽은 내지 않는다 — 게이트가 연 뒤 같은 길로 낸다). 기다리는 줄이 있으면 차례를 지켜 뒤에 붙인다. 흉내가 걸린 사이트 안 문서가 아니면
+/// 기록 항목도 읽지 않고 곧 거짓(0 지연).
+pub fn gateNav(reg: *const registry_mod.Entry, step: emu_plan.GateStep, url: []const u8) bool {
+    const e = entryOf(reg.cef_id) orelse return false;
+    if (e.gate.active) return enqueue(e, step, url);
+    if (step.action == .reload or reg.closing) return false;
+    const w = e.tab.wanted() orelse return false;
+    if (!w.flags.site_bound or !e.tab.on_site or e.tab.hold or !e.tab.alive) return false;
+    const t = targetOf(reg, step, url);
+    if (!t.known) return false;
+    const in_progress = navInProgress(e);
+    if (!e.tab.gateWanted(t.host(), in_progress)) {
+        if (in_progress and logOn() and e.tab.gateWanted(t.host(), false)) std.debug.print("emu: nogate b={d} in_progress {s}\n", .{ e.browser, @tagName(step.action) });
+        return false;
+    }
+    e.gate.start(nowMs());
+    if (!enqueue(e, step, url)) {
+        e.gate = .{};
+        return false;
+    }
+    const n = armGate(e, reg, &t);
+    if (logOn()) std.debug.print("emu: gate b={d} hold {s} clears={d} host={s}\n", .{ e.browser, @tagName(step.action), n, t.host() orelse "-" });
+    if (n == 0) openGate(e, "replies") else postGate(emu_plan.gate_deadline_ms);
+    return true;
+}
+
+/// 줄을 연다 — 행동마다 그 직전에 게이트를 다시 본다(그 사이 다시 걸렸으면 — 페이지가 사이트 안으로 커밋 등 — 남은 줄로 다시 기다린다, 마감은 처음
+/// 것). 닫히는 탭·종료 중이면 버린다(이동 없음).
+fn openGate(e: *Entry, why: []const u8) void {
+    var buf: [emu_plan.Gate.capacity]emu_plan.GateStep = undefined;
+    const deadline = e.gate.deadline_ms;
+    const steps = e.gate.take(&buf);
+    dropClears(e.cef_id);
+    const url = e.gate_url;
+    e.gate_url = null;
+    var owned = url; // 다시 기다리면 줄이 도로 쥔다
+    defer if (owned) |u| std.heap.c_allocator.free(u);
+    if (logOn()) std.debug.print("emu: gate b={d} open {s} replies={d}/{d} after={d}us\n", .{ e.browser, why, e.gate_replies, e.gate_clears, nowUs() -| e.gate_t0_us });
+    const reg = browsers.state.registry.byCefId(e.cef_id) orelse return;
+    if (reg.closing or browsers.state.shutting_down) return;
+    for (steps, 0..) |step, i| {
+        if (!std.mem.eql(u8, why, "full") and nowMs() < deadline) {
+            const t = targetOf(reg, step, url orelse "");
+            if (t.known and e.tab.gateWanted(t.host(), navInProgress(e))) {
+                e.gate.restart(deadline, steps[i..]);
+                e.gate_url = url;
+                owned = null;
+                const n = armGate(e, reg, &t);
+                if (logOn()) std.debug.print("emu: gate b={d} hold {s} clears={d} again\n", .{ e.browser, @tagName(step.action), n });
+                if (n == 0) return openGate(e, "replies"); // 다시 낼 지움이 없다 — 마감 안에서 같은 상태라 다시 걸리지 않는다
+                postGate(@max(1, deadline - nowMs()));
+                return;
+            }
+        }
+        startStep(reg, step, url orelse "");
+    }
+    if (e.gate_pseudo) {
+        e.gate_opened_ms = nowMs();
+        postGate(emu_plan.gate_safety_ms);
+    }
+}
+
+fn startStep(reg: *const registry_mod.Entry, step: emu_plan.GateStep, url: []const u8) void {
+    switch (step.action) {
+        .navigate => browsers.startNavigate(reg, url, step.user),
+        .back => browsers.startNavAction(reg, .back, step.user),
+        .forward => browsers.startNavAction(reg, .forward, step.user),
+        .reload => browsers.startNavAction(reg, .reload, step.user),
+        // CEF 의 메뉴 명령(`MENU_ID_BACK`·`FORWARD`)이 하는 일과 같다 — 막기 토큰 없이(지금과 같다).
+        .menu_back, .menu_forward => {
+            const b = browserOf(reg);
+            if (step.action == .menu_back) b.*.go_back.?(b) else b.*.go_forward.?(b);
+        },
+    }
+}
+
+/// 가상 홉이 진짜 홉·커밋·끊김·오류 페이지로 끝났다(안전망도 끝).
+fn endPseudo(e: *Entry) void {
+    e.gate_pseudo = false;
+    e.gate_opened_ms = 0;
+    e.gate_dialog = 0;
+}
+
+/// 이동이 일어나지 않았다 — 가상 홉을 거두고 지금 문서로 사이트 안팎을 다시 정해 다시 건다.
+fn restorePseudo(e: *Entry, why: []const u8) void {
+    if (!e.gate_pseudo) return;
+    endPseudo(e);
+    e.hop_known = false;
+    const reg = browsers.state.registry.byCefId(e.cef_id) orelse return;
+    if (reg.closing) return;
+    var hb: [msg.max_net_host_bytes]u8 = undefined;
+    const changed = e.tab.navigate(topHost(browserOf(reg), &hb));
+    if (logOn()) std.debug.print("emu: gate b={d} restore {s} on_site={}\n", .{ e.browser, why, e.tab.on_site });
+    if (!changed) return;
+    run(e, reg);
+    sendState(e, false);
+}
+
+/// 멈춤(`nav_action stop`) — 기다리는 줄을 버리고(이동 없음) 가상 홉을 되돌린다. 부른 쪽이 그 뒤 `stop_load` 를 낸다.
+pub fn gateStop(reg: *const registry_mod.Entry) void {
+    const e = entryOf(reg.cef_id) orelse return;
+    if (e.gate.active) {
+        var buf: [emu_plan.Gate.capacity]emu_plan.GateStep = undefined;
+        const steps = e.gate.take(&buf);
+        dropClears(e.cef_id);
+        if (e.gate_url) |u| std.heap.c_allocator.free(u);
+        e.gate_url = null;
+        if (logOn()) std.debug.print("emu: gate b={d} cancel stop steps={d}\n", .{ e.browser, steps.len });
+    }
+    restorePseudo(e, "stop");
+}
+
+/// 가상 홉 동안 떠나기 확인이 떴다(`dialogs.ask`) — 답할 때까지 안전망을 멈춘다. 그동안 흉내는 이미 지운 채다(사용자 결정 2026-11-14 — 머무르기면 다시 건다).
+pub fn beforeUnloadShown(id: BrowserId, request: u32) void {
+    const e = entryById(id) orelse return;
+    if (e.gate_pseudo) e.gate_dialog = request;
+}
+
+/// 대화상자에 답이 왔다 — 가상 홉의 떠나기 확인이면 머무르기는 되돌리고, 떠나기는 이동이 시작되기를 다시 기다린다(안전망을 새로).
+pub fn dialogAnswered(id: BrowserId, request: u32, accept: bool) void {
+    const e = entryById(id) orelse return;
+    if (e.gate_dialog == 0 or e.gate_dialog != request) return;
+    e.gate_dialog = 0;
+    if (!accept) return restorePseudo(e, "stay");
+    e.gate_opened_ms = nowMs();
+    postGate(emu_plan.gate_safety_ms);
+}
+
+/// 그 탭의 대화상자가 답 없이 치워졌다(maru 의 새 이동이 취소로 답함·상태 비우기·렌더러 죽음) — 가상 홉의 떠나기 확인이었으면 그 이동은 시작되지 않았다.
+pub fn dialogsDropped(id: BrowserId) void {
+    const e = entryById(id) orelse return;
+    if (e.gate_dialog == 0) return;
+    e.gate_dialog = 0;
+    restorePseudo(e, "dropped");
 }

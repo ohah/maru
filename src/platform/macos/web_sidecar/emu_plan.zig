@@ -28,7 +28,9 @@
 //!
 //! 시험이 증명하는 것: 바뀐 것만 명령, 지움 꼴(미디어 네 이름 빈 값·UA ""·시간대 ""·언어 {}·색각 none), 죽은 동안 빈 열·되살아나면 쌓인 차이만,
 //! metrics 는 살아 있을 때만(변이: 이 검사를 지우면 시험이 실패한다), 사이트 밖 모두 지움·돌아오면 다시, 밖→안 홉의 기다림(탭 전체에 아무것도·상태는 밖,
-//! 그 홉의 문서 요청에 넣을 머리 — 넣지 않는 경우·client hints 의 꼴·Accept-Language 의 q 값), fit 셈과 resize, 답 받기의 마스크·까닭, 번호 대역.
+//! 그 홉의 문서 요청에 넣을 머리 — 넣지 않는 경우·client hints 의 꼴·Accept-Language 의 q 값), fit 셈과 resize, 답 받기의 마스크·까닭, 번호 대역,
+//! 거꾸로 경주 게이트(`Tab.gateWanted`·`Gate`·`docChanging` — 사용자 결정 2026-11-14: 언제 지움의 답을 기다리는가·홉과 어긋나지 않음·줄의 규칙·
+//! 가상 홉 뒤 되돌림·`javascript:`).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -343,6 +345,21 @@ pub const Tab = struct {
         return true;
     }
 
+    /// maru 가 시작한 주 프레임 이동(주소·뒤로·앞으로·우클릭 메뉴의 뒤로·앞으로)이 `dest`(그 문서의 호스트 — 모르면 null, 밖)으로 갈 때 먼저 지우고 그
+    /// 답을 기다려야 하는가(거꾸로 경주 게이트 — 사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」). 사이트 안 문서에 걸린 흉내가 있고 대상이 사이트
+    /// 밖일 때만 — 홉(`hop`)이 안→밖으로 지우는 바로 그 경우다(같은 `siteCovers` — 게이트와 홉이 어긋나지 않는다). 캐시에서 오는 뒤로는 홉에서 커밋까지가
+    /// 짧아, 홉에서 낸 지움이 이동 동안 붙잡혔다가 새 렌더러에 옛 상태가 선 뒤에야 닿았다(실측 — 부하 22 에서 27/40·21/40 이 첫 스크립트·pageshow 에서
+    /// 흉내를 봤다); 이동을 시작하기 **전에** 지움의 답을 받으면 0/40. 렌더러가 죽었거나(보낼 곳이 없다)·밖→안 기다림(`hold` — 걸린 것이 없다)·걸린 CDP
+    /// 흉내가 없거나(위치는 브라우저 쪽이라 새 렌더러에 옛 상태로 붙지 않는다)·**다른 주 프레임 이동이 진행 중**(`nav_in_progress` — 이동이 시작된 뒤 낸
+    /// 렌더러 쪽 명령은 커밋까지 답이 오지 않아(실측 0/6) 기다림은 시한만큼 늦기만 한다)이면 거짓 — 지금처럼 곧 이동한다.
+    pub fn gateWanted(self: *const Tab, dest: ?[]const u8, nav_in_progress: bool) bool {
+        if (!self.alive or self.hold or nav_in_progress or !self.on_site) return false;
+        const w = self.want.get() orelse return false;
+        if (!w.flags.site_bound or self.siteCovers(dest)) return false;
+        for (self.sent, 0..) |s, i| if (s != 0 and i != @backingInt(Kind.geo)) return true;
+        return false;
+    }
+
     /// 밖→안 홉을 기다리는 동안(`hold`) 그 홉의 주 프레임 문서 요청 하나에 넣을 머리 — UA·언어 흉내가 있을 때만(아니면 거짓, `out` 은 그대로).
     /// 탭 전체의 걸기는 커밋까지 미루므로(`heldUntilCommit`) 허락한 사이트로 가는 그 요청만 흉내 머리를 싣는다(사용자 결정 2026-11-12). 지움·철회·
     /// 다른 사이트로 바뀐 `emulation`(부른 쪽이 `hop` 을 다시 돌린다)·커밋·끊김은 `hold` 를 내리거나 흉내를 비워 거짓이 된다.
@@ -425,6 +442,89 @@ pub const Tab = struct {
         };
     }
 };
+
+// ── 거꾸로 경주 게이트(사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」) ─────────────────────────────────────────────
+
+/// 지움의 답을 기다리는 상한(ms — 사용자 결정 2026-11-14). 답은 부하 22 에서도 0.35–0.43 ms 에 왔다(실측 40 판) — 늦는 길은 옛 문서의 주 스레드가 바쁠
+/// 때뿐이고 그때 답은 그 일이 끝나야 온다(바쁜 페이지 300 ms: 10/10 시한까지) — 긴 시한은 보호를 더하지 않고 사람의 뒤로를 늦춘다. 시한이 지나면
+/// 이동을 그대로 시작한다(지금 동작 — 경주는 남는다).
+pub const gate_deadline_ms: i64 = 100;
+/// 게이트를 연(이동을 낸) 뒤 이 안에 주 프레임 홉·떠나기 확인·커밋·끊김이 없으면 이동이 일어나지 않은 것으로 보고 지움을 되돌린다(공격 A8 — 기록
+/// 이동이 주 프레임을 옮기지 않는 항목 등에서 흉내가 꺼진 채 남지 않게).
+pub const gate_safety_ms: i64 = 1000;
+
+/// 게이트가 붙잡는 maru 의 이동 하나. `user` 는 wire 의 `user`(D2 토큰 — 낼 때 건다). 메뉴의 뒤로·앞으로는 CEF 의 메뉴 명령과 같이 토큰 없이 낸다.
+pub const GateAction = enum { back, forward, reload, navigate, menu_back, menu_forward };
+pub const GateStep = struct { action: GateAction, user: bool = false };
+
+/// 탭 하나의 게이트 줄 — 지움의 답을 기다리는 동안 온 maru 의 이동을 차례대로 쥔다. 규칙: 주소 이동은 줄을 그것 하나로 바꾼다(새 주소가 진행 중
+/// 이동을 대신한다 — Chrome 과 같다; 주소 사본은 부른 쪽이 하나 쥔다), 뒤로·앞으로·새로고침은 뒤에 붙는다, 줄이 차면 `full` — 부른 쪽이 곧 연다
+/// (버리지 않는다 — 지연 상한이 사라지지 않게). 마감은 처음 시작한 때로부터 `gate_deadline_ms` — 다시 걸어도(`restart`) 처음 마감 그대로다.
+pub const Gate = struct {
+    pub const capacity = 8;
+    steps: [capacity]GateStep = undefined,
+    len: usize = 0,
+    deadline_ms: i64 = 0,
+    active: bool = false,
+
+    pub fn start(self: *Gate, now_ms: i64) void {
+        self.* = .{ .active = true, .deadline_ms = now_ms + gate_deadline_ms };
+    }
+
+    /// 열 때 남은 줄로 다시 기다린다(마감은 처음 것).
+    pub fn restart(self: *Gate, deadline_ms: i64, rest: []const GateStep) void {
+        self.* = .{ .active = true, .deadline_ms = deadline_ms };
+        for (rest) |s| _ = self.push(s);
+    }
+
+    pub const Push = enum { queued, full };
+
+    pub fn push(self: *Gate, step: GateStep) Push {
+        if (step.action == .navigate) {
+            self.steps[0] = step;
+            self.len = 1;
+            return .queued;
+        }
+        if (self.len == capacity) return .full;
+        self.steps[self.len] = step;
+        self.len += 1;
+        return .queued;
+    }
+
+    pub fn hasNavigate(self: *const Gate) bool {
+        for (self.steps[0..self.len]) |s| if (s.action == .navigate) return true;
+        return false;
+    }
+
+    pub fn due(self: *const Gate, now_ms: i64) bool {
+        return self.active and now_ms >= self.deadline_ms;
+    }
+
+    /// 줄을 꺼내고 게이트를 닫는다(열기·멈춤).
+    pub fn take(self: *Gate, out: *[capacity]GateStep) []const GateStep {
+        const n = self.len;
+        @memcpy(out[0..n], self.steps[0..n]);
+        self.* = .{};
+        return out[0..n];
+    }
+};
+
+/// 그 주소로 가는 이동이 문서를 바꾸는가 — `javascript:` 는 지금 문서 안에서 돌아 커밋이 없다(지우면 흉내가 꺼진 채 남는다 — 공격 A10). 앞의 공백·
+/// 제어 문자와 사이의 탭·줄바꿈은 Chromium(GURL)처럼 건너뛰고 스킴은 대소문자를 가리지 않는다. `about:`·`data:`·`file:` 은 문서를 세운다(호스트가
+/// 없어 밖 — 홉과 같다). 잘못 가려 게이트해도 이동이 없으면 안전망(`gate_safety_ms`)이 되돌린다.
+pub fn docChanging(url: []const u8) bool {
+    const want = "javascript:";
+    var i: usize = 0;
+    while (i < url.len and url[i] <= 0x20) i += 1;
+    var k: usize = 0;
+    while (i < url.len and k < want.len) : (i += 1) {
+        const ch = url[i];
+        if (ch == '\t' or ch == '\n' or ch == '\r') continue;
+        if (std.ascii.toLower(ch) != want[k]) return true;
+        k += 1;
+    }
+    return k < want.len;
+}
 
 // ── 인자 JSON ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1385,4 +1485,159 @@ test "W9e② main 위로 옮김: 밖→안 홉의 커밋을 기다리는 동안 
     try testing.expect(t.navigate("a.test")); // 커밋
     try testing.expectEqual(@as(u32, 400), t.networkTarget().latency_ms);
     try testing.expect(t.networkTarget().flags.network);
+}
+
+// ── W9e① 거꾸로 경주 게이트(사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」) ──
+// 시험이 증명하는 것: 게이트는 사이트 안 문서에 걸린 CDP 흉내가 있고 대상이 밖일 때만(하위 도메인·같은 호스트는 안, 호스트 모름은 밖, 렌더러 죽음·
+// 밖→안 기다림·이미 밖·묶이지 않은 탭·건 것 없음·위치만·진행 중 이동은 아님 — 0 지연), 게이트와 홉이 같은 표에서 어긋나지 않는다, 줄의 규칙(주소는
+// 줄을 대신·뒤로·앞으로·새로고침은 뒤에·차면 full·마감은 처음 것), 가상 홉 뒤 온 새 흉내는 다시 걸지 않고 되돌림이 다시 건다, `javascript:` 는 문서를
+// 바꾸지 않는다.
+
+fn boundTz(gen: u32) msg.Emulation {
+    return .{ .browser = 1, .generation = gen, .flags = .{ .site_bound = true, .timezone = true }, .site = "a.test", .timezone = "UTC" };
+}
+
+test "W9e① 게이트: gateWanted — 사이트 안 문서에 걸린 CDP 흉내가 있고 대상이 밖일 때만, 그 밖은 0 지연(진행 중 이동 — A4 — 도)" {
+    var c: Cmds = .{};
+    var t: Tab = .{};
+    try t.setWant(boundTz(1));
+    _ = t.navigate("a.test");
+    t.plan(&c);
+    try testing.expect(t.gateWanted("bank.test", false));
+    try testing.expect(t.gateWanted(null, false)); // about:blank·data:·file: — 호스트 없음은 밖(홉과 같다)
+    try testing.expect(!t.gateWanted("a.test", false));
+    try testing.expect(!t.gateWanted("www.a.test", false)); // 하위 도메인은 안
+    try testing.expect(!t.gateWanted("bank.test", true)); // 다른 주 프레임 이동이 진행 중 — 답이 오지 않는다(실측 0/6)
+    t.answered(.timezone, true, "");
+    try testing.expect(t.gateWanted("bank.test", false)); // 답을 받은 뒤도
+    var dead = t;
+    dead.rendererGone();
+    try testing.expect(!dead.gateWanted("bank.test", false));
+    var held = t;
+    try testing.expect(held.navigate("bank.test"));
+    try testing.expect(held.hop("a.test", "bank.test") and held.hold);
+    try testing.expect(!held.gateWanted("c.test", false)); // 밖→안 기다림 — 걸린 것이 없다
+    var off = t;
+    try testing.expect(off.navigate("bank.test"));
+    try testing.expect(!off.gateWanted("c.test", false)); // 이미 밖
+    var cleared = t;
+    try cleared.setWant(.{ .browser = 1, .generation = 2, .flags = .{ .site_bound = true }, .site = "a.test" });
+    cleared.plan(&c);
+    try testing.expectEqual(@as(usize, 1), c.len); // 시간대 지움
+    try testing.expect(!cleared.gateWanted("bank.test", false)); // 건 것이 없다
+    var agent: Tab = .{};
+    try agent.setWant(.{ .browser = 2, .generation = 1, .flags = .{ .timezone = true }, .timezone = "UTC" });
+    agent.plan(&c);
+    try testing.expect(!agent.gateWanted("bank.test", false)); // 묶이지 않은 탭(에이전트 탭)
+    var none: Tab = .{};
+    try testing.expect(!none.gateWanted("bank.test", false));
+    var geo: Tab = .{};
+    try geo.setWant(.{ .browser = 3, .generation = 1, .flags = .{ .site_bound = true, .geo = true }, .site = "a.test", .latitude = 1 });
+    _ = geo.navigate("a.test");
+    geo.plan(&c);
+    try testing.expect(geo.sent[@backingInt(Kind.geo)] != 0);
+    try testing.expect(!geo.gateWanted("bank.test", false)); // 위치만 — 브라우저 쪽이라 기다릴 CDP 지움이 없다
+    var lost: Tab = .{};
+    try lost.setWant(boundTz(1));
+    _ = lost.navigate("a.test");
+    lost.plan(&c);
+    lost.detached(); // 답 전에 DevTools 가 떨어졌다 — 걸렸는지 모른다(`unknown_hash`): 걸린 것으로 친다
+    try testing.expect(lost.gateWanted("bank.test", false));
+}
+
+test "W9e① 게이트: 같은 표에서 「게이트 참 ⇔ 홉이 안→밖으로 바꾼다」 — 둘이 어긋나지 않는다(공격 A7)" {
+    const targets = [_]?[]const u8{ "a.test", "www.a.test", "A.TEST", "x.y.a.test", "bank.test", "evila.test", "a.test.evil", "test", "", null };
+    for (targets) |target| {
+        var c: Cmds = .{};
+        var t: Tab = .{};
+        try t.setWant(boundTz(1));
+        _ = t.navigate("a.test");
+        t.plan(&c);
+        const g = t.gateWanted(target, false);
+        var h = t;
+        const was_on = h.on_site;
+        _ = h.hop(target, "a.test");
+        try testing.expectEqual(was_on and !h.on_site, g);
+        h.plan(&c);
+        try testing.expectEqual(g, c.len == 1 and !c.items[0].set); // 게이트가 참이면 홉이 지운다, 아니면 아무것도
+    }
+}
+
+test "W9e① 게이트: 줄 — 주소는 줄을 대신하고 뒤로·앞으로·새로고침은 뒤에, 차면 full, 마감은 처음 것(다시 걸어도)" {
+    var g: Gate = .{};
+    try testing.expect(!g.active and !g.due(1 << 40));
+    g.start(1000);
+    try testing.expect(g.active and !g.due(1099) and g.due(1000 + gate_deadline_ms));
+    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .back, .user = true }));
+    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .forward }));
+    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .reload, .user = true }));
+    try testing.expectEqual(@as(usize, 3), g.len);
+    try testing.expect(!g.hasNavigate());
+    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .navigate, .user = true })); // 진행 중 이동을 대신한다
+    try testing.expectEqual(@as(usize, 1), g.len);
+    try testing.expect(g.hasNavigate() and g.steps[0].user);
+    _ = g.push(.{ .action = .menu_back });
+    try testing.expectEqual(GateAction.menu_back, g.steps[1].action);
+    while (g.len < Gate.capacity) _ = g.push(.{ .action = .back });
+    try testing.expectEqual(Gate.Push.full, g.push(.{ .action = .forward })); // 버리지 않는다 — 부른 쪽이 곧 연다
+    try testing.expectEqual(@as(usize, Gate.capacity), g.len);
+    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .navigate })); // 찼어도 주소는 줄을 대신한다
+    try testing.expectEqual(@as(usize, 1), g.len);
+    _ = g.push(.{ .action = .back });
+    _ = g.push(.{ .action = .forward });
+    var out: [Gate.capacity]GateStep = undefined;
+    const steps = g.take(&out);
+    try testing.expectEqual(@as(usize, 3), steps.len);
+    try testing.expect(steps[0].action == .navigate and steps[1].action == .back and steps[2].action == .forward);
+    try testing.expect(!g.active and g.len == 0 and !g.due(1 << 40));
+    g.restart(1100, steps[1..]); // 남은 줄로 다시 — 마감은 처음 것
+    try testing.expect(g.active and g.len == 2 and g.deadline_ms == 1100 and g.due(1100) and !g.due(1099));
+}
+
+test "W9e① 게이트: 가상 홉 — 지운 뒤 기다리는 동안 온 새 흉내는 다시 걸지 않고(상태는 밖), 이동이 일어나지 않으면 되돌림이 다시 건다" {
+    var c: Cmds = .{};
+    var t: Tab = .{ .pane_w = 640, .pane_h = 400 };
+    var v = phone();
+    v.flags.site_bound = true;
+    v.site = "a.test";
+    v.flags.timezone = true;
+    v.timezone = "UTC";
+    try t.setWant(v);
+    _ = t.navigate("a.test");
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 3), c.len);
+    for (c.slice()) |x| t.answered(x.kind, true, "");
+    try testing.expect(t.gateWanted("bank.test", false));
+    try testing.expect(t.hop("bank.test", "a.test")); // 게이트의 가상 홉 — 대상의 호스트로
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 3), c.len);
+    for (c.slice()) |x| try testing.expect(!x.set);
+    try testing.expect(!t.state(1).pending and !t.state(1).on_site); // 지움의 답은 상태가 기다리지 않는다(A12)
+    try testing.expect(!t.gateWanted("bank.test", false)); // 이미 밖 — 다음 이동은 곧
+    // 기다리는 동안 온 maru 의 새 흉내(같은 값, 새 세대) — `apply` 는 홉을 알면 그 홉으로 정한다: 다시 걸지 않는다.
+    v.generation = 2;
+    try t.setWant(v);
+    try testing.expect(!t.hop("bank.test", "a.test"));
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 0), c.len);
+    // 이동이 일어나지 않았다(떠나기 확인의 머무르기·멈춤·안전망) — 지금 문서로 되돌리면 다시 건다.
+    try testing.expect(t.navigate("a.test"));
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 3), c.len);
+    for (c.slice()) |x| try testing.expect(x.set);
+    try testing.expect(t.gateWanted("bank.test", false));
+}
+
+test "W9e① 게이트: javascript: 주소는 문서를 바꾸지 않는다 — 앞 공백·제어 문자·사이의 탭·줄바꿈·대소문자(공격 A10), 다른 스킴은 바꾼다" {
+    try testing.expect(docChanging("https://bank.test/"));
+    try testing.expect(docChanging("about:blank"));
+    try testing.expect(docChanging("data:text/html,x"));
+    try testing.expect(docChanging("file:///tmp/x.html"));
+    try testing.expect(docChanging(""));
+    try testing.expect(docChanging("javascript"));
+    try testing.expect(docChanging("javascripts:x"));
+    try testing.expect(docChanging("http://javascript:80/"));
+    try testing.expect(!docChanging("javascript:alert(1)"));
+    try testing.expect(!docChanging("  JavaScript:void(0)"));
+    try testing.expect(!docChanging("\x01\x1f java\tscr\nipt\r:x"));
 }

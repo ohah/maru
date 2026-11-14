@@ -385,6 +385,9 @@ pub fn onCommand(value: message.ContextMenuCommand) void {
         .open_image_new_tab => if (held.open_image) |url| {
             browsers.state.writer.send(.{ .open_tab = .{ .browser = entry.id, .placement = .background, .url = url } }) catch {};
         },
+        // W9e① 거꾸로 경주 게이트: 메뉴의 뒤로·앞으로는 wire `nav_action` 을 지나지 않고 CEF 가 스스로 낸다(공격 A1) — 흉내가 걸린 사이트 안
+        // 문서에서 밖으로 가면 메뉴에는 취소로 답하고 게이트가 지움의 답을 받은 뒤 같은 일(`go_back`·`go_forward`)을 낸다.
+        .back, .forward => if (@import("emulation.zig").gateNav(entry, .{ .action = if (command == .back) .menu_back else .menu_forward }, "")) return answer(held, null),
         else => {},
     }
     // CEF 가 곧 거둔다(`on_context_menu_dismissed` — 실측: 답하면 바로 온다) — 닫힘은 그때 알린다.

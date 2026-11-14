@@ -24,8 +24,10 @@
 //! 사이트 묶기(`ems`): emu-site-bound(사이트 안에서만 — 떠나면 지우고 돌아오면 다시, 리다이렉트로 떠나는 홉 하나는 늦다: E12)·
 //!   emu-site-bound-aborted-hop(문서 없이 끊긴 이동(204)은 옛 문서의 사이트로 되돌린다 — 밖의 문서에서 묶인 사이트로 가는 204 가 그 문서에 흉내를
 //!   걸지 않고, 묶인 사이트의 문서에서 밖으로 가는 204 가 흉내를 풀어 두지 않는다).
-//! 넘나듦(`emh`): emu-site-bound-bfcache(뒤로·앞으로 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그 요청이 흉내 머리를 싣지
-//!   않는다 — maru 의 Chromium 은 bfcache 를 끈다)·emu-site-bound-slow-hop(밖의 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안 흉내를
+//! 넘나듦(`emh`): emu-site-bound-bfcache(maru 의 뒤로로 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그 요청이 흉내 머리를 싣지
+//!   않는다 — 이름은 bfcache 지만 maru 의 Chromium 은 bfcache 를 끄고, 샌 것은 HTTP 캐시의 뒤로(`persisted` 거짓 — `N:`)였다: 게이트가 지움의 답을
+//!   다 받은 뒤 이동을 냈는지 host 로그의 차례로 단언한다 — 부하와 상관없다)·emu-site-bound-bfcache-page(obs)(페이지의 `history.forward()` 는 게이트
+//!   밖 — 사용자 결정 2026-11-14, 적기만)·emu-site-bound-slow-hop(밖의 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안 흉내를
 //!   보지 않고, 그동안 그 문서가 만든 iframe 셋·Worker 의 요청은 진짜 머리다 — 탭 전체의 흉내는 모두 커밋 뒤에 걸고, 그 홉의 문서 요청 하나에만
 //!   흉내 머리를 넣는다: 커밋 뒤 요청과 같은 꼴, 새 문서의 흉내 명령은 커밋 알림 안에서 나가고(`page_started` 보다 먼저 온 `pending` 상태 — 차례라
 //!   부하에 흔들리지 않는다) 첫 스크립트로부터 25 ms 안에 모든 흉내)·emu-site-bound-slow-hop-first-script(obs)(새 문서의 첫 스크립트가 본 것·모든
@@ -34,6 +36,11 @@
 //!   다음 홉은 진짜; 느린 홉의 문서 요청 머리가 커밋 뒤 요청과 같다)·
 //!   emu-site-bound-error-page(밖 → 묶인 사이트의 닫힌 포트: 오류 페이지가 기다림을 끝낸다 — 상태는 그 주소의 사이트 안·기다림 없음, 다음 밖 이동은
 //!   진짜).
+//! 거꾸로 경주 게이트(`emk` — 사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」, host 로그의 차례): emu-site-bound-gate(0 지연 — 흉내 없는 탭·
+//!   밖→밖·안→안은 게이트 줄 0, 사람의 주소 이동이 밖으로 — hold → 지움 답 → open → 커밋)·emu-site-bound-gate-menu(우클릭 메뉴의 뒤로)·
+//!   emu-site-bound-gate-stop(기다리는 동안 멈춤 — 되돌려 다시 건다)·emu-site-bound-gate-timeout(바쁜 문서 — 100 ms 에 연다, 아래 한계만)·
+//!   emu-site-bound-gate-stay(떠나기 확인의 머무르기 — 되돌려 다시 건다)·emu-site-bound-gate-in-progress(다른 이동이 진행 중이면 게이트하지 않는다).
+//!   판 끝에 emu-no-observer-reentrancy(모든 host 로그 — 관찰자 콜백 안에서 이동·명령을 내지 않았다, `main.zig`).
 //! 팝업(`emp`): emu-popup-shared(같은 프로세스의 팝업은 시간대·locale 이 따라오고 제 흉내는 process_shared_conflict — E13).
 //! 재시작(`emr`): emu-restart(about:blank → 흉내 → 이동이면 문서 요청부터, 옛 sidecar 가 대신 허용한 출처는 새 sidecar 가 되돌린다 — P2-6).
 
@@ -292,6 +299,13 @@ const bf_html = "<!doctype html><title>bf</title><script>" ++ sg_js ++
     \\</script>
 ;
 
+/// 떠나기 확인을 거는 묶인 사이트 문서(W9e① 게이트 판정 — 몸짓 뒤 `BU` 가 참이면 떠날 때 묻는다).
+const bu_html = "<!doctype html><title>bu</title><script>" ++ sg_js ++
+    \\
+    \\window.T0=SG();window.BU=1;addEventListener('beforeunload',function(e){if(window.BU){e.preventDefault();e.returnValue='x'}});
+    \\</script>
+;
+
 /// `reply` 와 같되 `Cache-Control: no-store` 없이(bfcache 에 들 수 있게).
 fn replyCacheable(conn: c_int, body: []const u8) void {
     var hb: [512]u8 = undefined;
@@ -374,6 +388,7 @@ fn serveParsed(conn: c_int, r: []const u8) void {
         return reply(conn, "302 Found", "text/plain", loc, "r3");
     }
     if (std.mem.eql(u8, path, "/bf")) return replyCacheable(conn, bf_html);
+    if (std.mem.eql(u8, path, "/bu")) return replyCacheable(conn, bu_html);
     // 느린 응답(`?ms=N` 동안 잡았다가 문서 — 밖의 문서가 묶인 사이트로 가는 이동을 오래 기다리게).
     if (std.mem.eql(u8, path, "/obf")) {
         // 밖의 문서가 묶인 사이트(127.0.0.1)의 iframe 을 품는다 — 그 사이트의 렌더러가 이 탭(BrowsingInstance)에 떠 있다.
@@ -555,6 +570,12 @@ pub const Run = struct {
     cm_page: [max_tabs]u32 = @splat(0),
     cm_state: [max_tabs]u32 = @splat(0),
     cm_pending: [max_tabs]bool = @splat(false),
+    /// W9e① 게이트 판정: 받은 JS 대화상자(마지막 요청·종류·수)와 우클릭 메뉴(마지막 번호·수) — 판정자가 maru 역할로 답한다.
+    dlg_req: [max_tabs]u32 = @splat(0),
+    dlg_kind: [max_tabs]msg.JsDialogKind = @splat(.alert),
+    dlgs: [max_tabs]u32 = @splat(0),
+    menu_id: [max_tabs]u32 = @splat(0),
+    menus: [max_tabs]u32 = @splat(0),
 
     fn take(self: *Run, m: msg.Message) void {
         if (extra_hook) |h| h(m); // v20b 탐침: 판정자가 따로 세는 메시지(net_begin 등)
@@ -576,6 +597,15 @@ pub const Run = struct {
                 self.gone[v.browser] += 1;
             },
             .failure => self.failures += 1,
+            .js_dialog => |v| if (v.browser < max_tabs) {
+                self.dlg_req[v.browser] = v.request;
+                self.dlg_kind[v.browser] = v.kind;
+                self.dlgs[v.browser] += 1;
+            },
+            .context_menu => |v| if (v.browser < max_tabs) {
+                self.menu_id[v.browser] = v.menu;
+                self.menus[v.browser] += 1;
+            },
             .trace_state => |v| if (self.tr_state_n < self.tr_states.len) {
                 self.tr_states[self.tr_state_n] = v;
                 self.tr_state_n += 1;
@@ -687,6 +717,12 @@ pub const Run = struct {
     pub fn settledAt(self: *Run, b: u64, want: u32) bool {
         const s = self.st[b] orelse return false;
         return s.generation == want and !s.pending;
+    }
+    pub fn dialogsAt(self: *Run, b: u64, want: u32) bool {
+        return self.dlgs[b] >= want;
+    }
+    pub fn menusAt(self: *Run, b: u64, want: u32) bool {
+        return self.menus[b] >= want;
     }
     pub fn genAt(self: *Run, b: u64, want: u32) bool {
         const s = self.st[b] orelse return false;
@@ -906,6 +942,7 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     mixedPrompt(report, host_path, root) catch |err| report(false, "emu-geo-mixed-prompt", @errorName(err));
     siteBound(report, host_path, root) catch |err| report(false, "emu-site-bound", @errorName(err));
     siteBoundHistory(report, host_path, root) catch |err| report(false, "emu-site-bound-history", @errorName(err));
+    siteBoundGate(report, host_path, root) catch |err| report(false, "emu-site-bound-gate", @errorName(err));
     popup(report, host_path, root) catch |err| report(false, "emu-popup-shared", @errorName(err));
     restart(report, host_path, root) catch |err| report(false, "emu-restart", @errorName(err));
 }
@@ -1414,10 +1451,135 @@ fn settleNav(r: *Run, b: u64) void {
     r.pump(700);
 }
 
+// ── host 로그(시험 훅 `MARU_WEB_TEST_EMU_LOG` — sidecar 의 UI 스레드가 stderr 에 적는 차례) ──────────────────────────────────
+
+var host_log_buf: [1024 * 1024]u8 = undefined;
+
+fn openLog(root: []const u8, name: []const u8) c_int {
+    var pb: [1100]u8 = undefined;
+    const path = std.fmt.bufPrintSentinel(&pb, "{s}/{s}.host.log", .{ root, name }, 0) catch return -1;
+    return std.c.open(path, .{ .ACCMODE = .RDONLY });
+}
+
+/// 그 세션 host 로그의 지금 길이(읽지 못하면 0) — 이 뒤에 적힌 줄만 보려고 표시한다.
+fn logLen(root: []const u8, name: []const u8) usize {
+    const fd = openLog(root, name);
+    if (fd < 0) return 0;
+    defer _ = std.c.close(fd);
+    const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+    return if (end < 0) 0 else @intCast(end);
+}
+
+/// 표시(`logLen`) 뒤로 적힌 것(공용 버퍼 — 다음 부름이 덮는다; 넘치면 앞부분).
+fn logFrom(root: []const u8, name: []const u8, from: usize) []const u8 {
+    const fd = openLog(root, name);
+    if (fd < 0) return "";
+    defer _ = std.c.close(fd);
+    var len: usize = 0;
+    while (len < host_log_buf.len) {
+        const n = std.c.pread(fd, host_log_buf[len..].ptr, host_log_buf.len - len, @intCast(from + len));
+        if (n <= 0) break;
+        len += @intCast(n);
+    }
+    return host_log_buf[0..len];
+}
+
+fn countIn(log: []const u8, needle: []const u8) u32 {
+    var n: u32 = 0;
+    var it = std.mem.splitScalar(u8, log, '\n');
+    while (it.next()) |line| {
+        if (contains(line, needle)) n += 1;
+    }
+    return n;
+}
+
+/// `key` 뒤의 낱말(빈칸·줄 끝까지).
+fn wordAfter(line: []const u8, key: []const u8) []const u8 {
+    const at = std.mem.indexOf(u8, line, key) orelse return "";
+    const rest = line[at + key.len ..];
+    return rest[0 .. std.mem.indexOfAny(u8, rest, " \r") orelse rest.len];
+}
+
+/// W9e① 거꾸로 경주 게이트의 차례(host 로그): `gate b=<b> hold <행동> clears=N` → 그 탭의 지움 답 줄(`emu: result b=<b> <종류> clear`) → `gate b=<b>
+/// open <까닭> replies=k/N` → `commit b=<b> host=<호스트>`. 판정자는 sidecar 가 센 `replies=` 만 믿지 않고 답 줄을 센다. 연 뒤 커밋 전이면 `early`.
+const GateOrder = struct {
+    held: bool = false,
+    clears: u32 = 0,
+    results: u32 = 0,
+    why_buf: [16]u8 = undefined,
+    why_len: usize = 0,
+    replied: u32 = 0,
+    replies_of: u32 = 0,
+    after_us: u64 = 0,
+    opened: bool = false,
+    early: bool = false,
+    commit: bool = false,
+
+    fn why(self: *const GateOrder) []const u8 {
+        return self.why_buf[0..self.why_len];
+    }
+
+    /// 답을 다 받고 열었고(시한 아님) 그 뒤에 커밋했다.
+    fn ok(self: *const GateOrder, min_clears: u32) bool {
+        return self.held and self.clears >= min_clears and self.results == self.clears and self.opened and std.mem.eql(u8, self.why(), "replies") and
+            self.replied == self.clears and self.replies_of == self.clears and !self.early and self.commit;
+    }
+
+    fn text(self: *const GateOrder, buf: []u8) []const u8 {
+        if (!self.held) return "게이트 없음";
+        return std.fmt.bufPrint(buf, "hold clears={d} · 답 줄 {d} · open {s} {d}/{d} {d} µs · 커밋 {s}", .{ self.clears, self.results, if (self.opened) self.why() else "-", self.replied, self.replies_of, self.after_us, if (self.early) "열기 전" else if (self.commit) "뒤" else "없음" }) catch "-";
+    }
+};
+
+fn gateOrder(log: []const u8, b: u64, action: []const u8, commit_host: []const u8) GateOrder {
+    var o: GateOrder = .{};
+    var hb: [64]u8 = undefined;
+    var rb: [40]u8 = undefined;
+    var ob: [40]u8 = undefined;
+    var cb: [300]u8 = undefined;
+    const hold = std.fmt.bufPrint(&hb, "emu: gate b={d} hold {s} ", .{ b, action }) catch return o;
+    const res = std.fmt.bufPrint(&rb, "emu: result b={d} ", .{b}) catch return o;
+    const open_ = std.fmt.bufPrint(&ob, "emu: gate b={d} open ", .{b}) catch return o;
+    const commit_any = std.fmt.bufPrint(&cb, "emu: commit b={d} host=", .{b}) catch return o;
+    var it = std.mem.splitScalar(u8, log, '\n');
+    while (it.next()) |line| {
+        if (!o.held) {
+            if (contains(line, hold)) {
+                o.held = true;
+                o.clears = std.fmt.parseInt(u32, wordAfter(line, "clears="), 10) catch 0;
+            }
+        } else if (!o.opened) {
+            if (contains(line, res) and contains(line, " clear ok=")) {
+                o.results += 1;
+            } else if (contains(line, commit_any)) {
+                o.early = true;
+            } else if (contains(line, open_)) {
+                o.opened = true;
+                const w = wordAfter(line, open_);
+                o.why_len = @min(w.len, o.why_buf.len);
+                @memcpy(o.why_buf[0..o.why_len], w[0..o.why_len]);
+                const rep = wordAfter(line, "replies=");
+                if (std.mem.indexOfScalar(u8, rep, '/')) |sl| {
+                    o.replied = std.fmt.parseInt(u32, rep[0..sl], 10) catch 0;
+                    o.replies_of = std.fmt.parseInt(u32, rep[sl + 1 ..], 10) catch 0;
+                }
+                const af = wordAfter(line, "after=");
+                o.after_us = std.fmt.parseInt(u64, af[0 .. std.mem.indexOf(u8, af, "us") orelse af.len], 10) catch 0;
+            }
+        } else if (contains(line, commit_any) and std.mem.startsWith(u8, wordAfter(line, commit_any), commit_host)) {
+            o.commit = true;
+            break;
+        }
+    }
+    return o;
+}
+
 /// 사이트 묶기의 넘나듦(사용자 결정 Q1 의 빈틈 둘 — 옮긴 판 20 회 검증 2026-11-12).
-/// emu-site-bound-bfcache: 뒤로·앞으로로 돌아간 사이트 밖 문서(127.0.0.1 묶음, localhost 문서)가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그
+/// emu-site-bound-bfcache: maru 의 뒤로로 돌아간 사이트 밖 문서(127.0.0.1 묶음, localhost 문서)가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그
 /// 문서의 요청이 흉내 머리를 싣지 않는다 — bfcache 복원은 `on_before_browse` 를 지나지 않아 흉내가 남은 채 pageshow 가 돌았다(그래서 maru 의 Chromium
-/// 은 bfcache 를 끈다 — 사용자 결정 2026-11-12; 복원되면 보고에 `P` 가 보인다).
+/// 은 bfcache 를 끈다 — 사용자 결정 2026-11-12; 복원되면 보고에 `P` 가 보인다). 끈 뒤에도 부하에서 샌 것은 HTTP 캐시의 뒤로(`N:` — 홉에서 낸 지움이
+/// 이동 동안 붙잡혀 새 렌더러에 늦게 닿았다)였다 — 거꾸로 경주 게이트(사용자 결정 2026-11-14)가 지움의 답을 받은 뒤 이동을 내는지 host 로그의 차례
+/// (`gateOrder`)로 단언한다. 페이지의 앞으로(나)는 게이트 밖이라 `-page(obs)` 로 적는다.
 /// emu-site-bound-slow-hop: 사이트 밖 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안(3.5 초) 옛 문서가 화면·배율·시간대·UA·언어·터치·
 /// 미디어 흉내를 보지 않고 그 요청도 흉내 머리를 싣지 않으며 상태는 사이트 밖이다; 새 문서의 문서 요청부터 흉내 UA, 새 문서의 흉내 명령은 커밋 알림
 /// 안에서 나가고(`commitOrder`) 첫 스크립트로부터 `full_max_ms` 안에 모든 흉내(첫 스크립트가 본 것은 `-first-script(obs)` 로 적는다 — 커밋 뒤에야 닿는 흉내와 겨루는 경주라 가끔 진다: W9e 후속 2026-11-13).
@@ -1436,8 +1598,10 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     try r.nav(1, uLoop(&u, "/bf?b"));
     var b1: [400]u8 = undefined;
     const on_b = r.ev(1, ps_js, &b1);
+    const mark_a = logLen(root, "emh");
     try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .back } });
     settleNav(r, 1);
+    const order_a = gateOrder(logFrom(root, "emh", mark_a), 1, "back", "localhost");
     var b2: [400]u8 = undefined;
     const back_a = r.ev(1, ps_js, &b2);
     try r.nav(1, uLoop(&u, "/bf?b2"));
@@ -1458,9 +1622,14 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     // 밖 문서(a·c)가 본 것: T0·pageshow·지금 모두 `-`.
     const clean_a = contains(back_a, "localhost") and !leakText(back_a);
     const clean_c = contains(fwd_c, "localhost") and !leakText(fwd_c);
-    const req_ok = la.total >= 2 and lc.total >= 2 and la.seen == 0 and la.header == 0 and lc.seen == 0 and lc.header == 0;
-    const in_ok = contains(on_b, "127.0.0.1") and contains(on_b, "tz.") and contains(back_b, "127.0.0.1");
-    report(st0 != null and in_ok and clean_a and clean_c and req_ok and st4 != null and !st4.?.on_site, "emu-site-bound-bfcache", std.fmt.bufPrint(&d, "안 {s} | 뒤로(사람) 밖 {s} | 안 {s} | 앞으로(페이지) 밖 {s} on_site={} | pageshow 요청 a {d}개(흉내 {d}·머리 {d}) c {d}개(흉내 {d}·머리 {d}) {s}{s}", .{ on_b[0..@min(on_b.len, 120)], back_a, back_b[0..@min(back_b.len, 120)], fwd_c, if (st4) |x| x.on_site else true, la.total, la.seen, la.header, lc.total, lc.seen, lc.header, la.buf[0..la.len], lc.buf[0..lc.len] }) catch "");
+    const req_a = la.total >= 2 and la.seen == 0 and la.header == 0;
+    const req_c = lc.total >= 2 and lc.seen == 0 and lc.header == 0;
+    const in_ok = contains(on_b, "127.0.0.1") and contains(on_b, "tz.");
+    var ob: [200]u8 = undefined;
+    // (가) maru 의 뒤로: 게이트가 지움의 답을 다 받은 뒤 이동을 냈다 — host 로그(한 UI 스레드의 stderr)의 차례라 부하와 상관없다.
+    report(st0 != null and in_ok and clean_a and req_a and order_a.ok(6), "emu-site-bound-bfcache", std.fmt.bufPrint(&d, "안 {s} | 뒤로(maru) 밖 {s} · 차례 {s} | pageshow 요청 a {d}개(흉내 {d}·머리 {d}) {s}", .{ on_b[0..@min(on_b.len, 120)], back_a, order_a.text(&ob), la.total, la.seen, la.header, la.buf[0..la.len] }) catch "");
+    // (나) 페이지가 시작한 앞으로(`history.forward()`)는 게이트 밖이다(사용자 결정 2026-11-14 — 남는 틈, 부하 22 에서 35/40 샌다): 단언하지 않고 적는다.
+    report(true, "emu-site-bound-bfcache-page(obs)", std.fmt.bufPrint(&d, "안 {s} | 앞으로(페이지) 밖 {s} on_site={} 샘={} | pageshow 요청 c {d}개(흉내 {d}·머리 {d}) {s}", .{ back_b[0..@min(back_b.len, 120)], fwd_c, if (st4) |x| x.on_site else true, !(clean_c and req_c), lc.total, lc.seen, lc.header, lc.buf[0..lc.len] }) catch "");
 
     // 느린 이동: 밖 문서(localhost /ob)가 묶인 사이트의 /slow?ms=3500 으로(페이지 스크립트 — 밖의 페이지가 기다림을 늘릴 수 있다). 기다리는 동안
     // 옛 문서가 iframe 셋(같은 사이트·다른 사이트·form 대상)과 Worker 를 만든다 — 그 요청들은 진짜 UA·Accept-Language 여야 한다.
@@ -1620,6 +1789,175 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     const reload_ok = contains(freload, "127.0.0.1") and contains(freload, t0_all);
     report(old_clean and kids_clean and fnew_ok and reload_ok, "emu-site-bound-reused-renderer", std.fmt.bufPrint(&d, "옛 문서 T0={s} · 기다리는 동안 관찰 +{d}개(흉내 {d}·머리 {d}) {s}· 1.1 초 on_site={} active=0x{x} | 옛 문서가 만든 요청 문서 +{d}개(흉내 머리 {d}) 안의 fetch +{d}개(흉내 {d}) {s}| 새 문서 요청 ua=[{s}] · 새 문서 {s} on_site={} · 커밋 알림 {s} | 새로고침 {s}", .{ t0_obf, lo5.total - lo0.total, lo5.seen - lo0.seen, lo5.header - lo0.header, lo5.buf[0..lo5.len], if (st_wait) |x| x.on_site else true, if (st_wait) |x| x.active_mask else 0, kid5.docs - kid0.docs, kid5.dirty - kid0.dirty, kid5.inner - kid0.inner, kid5.inner_dirty - kid0.inner_dirty, kid5.buf[0..@min(kid5.len, 300)], if (fdoc) |x| x.uaText()[0..@min(x.ua_len, 20)] else "-", fnew, if (st_f) |x| x.on_site else false, f_commit, freload }) catch "");
     report(true, "emu-site-bound-reused-renderer-first-script(obs)", std.fmt.bufPrint(&d, "첫 스크립트 {s}(모든 흉내까지 {d} ms — 0 이면 처음부터) · 커밋 알림 {s} · 첫 스크립트의 요청 {s} {s} · 렌더러 {d}", .{ if (std.mem.indexOf(u8, fnew, "T0=")) |at| fnew[at .. std.mem.indexOfScalarPos(u8, fnew, at, '"') orelse fnew.len] else "-", full_ms, f_commit, if (faft) |x| x.targetText() else "-", headerText(&hb[1], faft), rend }) catch "");
+}
+
+/// 그 탭의 문서를 `ms` 동안 바쁘게 한다(주 스레드 — 지움의 답이 그 일이 끝나야 온다). 돌기 시작할 때까지 잠깐 기다린다.
+fn busyPage(r: *Run, b: u64, ms: u32) void {
+    var js: [200]u8 = undefined;
+    var out: [32]u8 = undefined;
+    _ = r.ev(b, std.fmt.bufPrint(&js, "setTimeout(function(){{var s=performance.now();while(performance.now()-s<{d}){{}}}},0);1", .{ms}) catch unreachable, &out);
+    r.pump(40);
+}
+
+/// W9e① 거꾸로 경주 게이트(사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」) — host 로그의 차례로 판정한다(한 UI 스레드의 stderr — 부하와
+/// 상관없다). 탭 1 의 기록: 밖 ga → 안 gb → (주소) 밖 gx → 밖 gy → 안 gc → 안 gd → 뒤로 gc → (메뉴) 뒤로 gy → 안 ge → … .
+/// emu-site-bound-gate: 0 지연(흉내 없는 탭의 뒤로·밖→밖 주소 이동은 게이트 줄 0)·사람의 주소 이동이 밖으로(hold → 답 → open → 커밋, 돌아간 문서는 흉내를
+///   보지 않는다)·사이트 안 → 안(주소·뒤로 모두 게이트 없음, 흉내 그대로).
+/// emu-site-bound-gate-menu: 우클릭 메뉴의 뒤로(CEF 가 스스로 내던 길 — 공격 A1)도 같은 차례.
+/// emu-site-bound-gate-stop: 바쁜 문서(답이 늦다)에서 뒤로 → 곧 멈춤: 줄을 버리고 되돌려 다시 건다(문서·흉내 그대로, 연 줄 없음).
+/// emu-site-bound-gate-timeout: 바쁜 문서에서 뒤로 — 시한(100 ms)에 연다(아래 한계만 단언 — 위는 부하에 흔들려 적기만 한다).
+/// emu-site-bound-gate-stay: 떠나기 확인이 있는 문서에서 뒤로 → 머무르기: 되돌려 다시 건다(확인이 떠 있는 동안은 이미 지운 채 — 사용자 결정 2026-11-14).
+/// emu-site-bound-gate-in-progress: 다른 주 프레임 이동이 진행 중이면 게이트하지 않는다(그 지움은 커밋까지 답이 오지 않는다 — 공격 A4).
+fn siteBoundGate(report: Report, host_path: [:0]const u8, root: []const u8) !void {
+    var sess: Session = undefined;
+    try open(&sess, host_path, root, "emk");
+    defer sess.deinit();
+    const r = &sess.run;
+    var u: [256]u8 = undefined;
+    var d: [2400]u8 = undefined;
+    var ob: [4][200]u8 = undefined;
+    const ps_js = "JSON.stringify([location.host,T0,PS,SG()])";
+
+    // 0 지연 — 흉내 없는 탭(2)의 뒤로.
+    try r.create(2, uLoop(&u, "/bf?z1"));
+    try r.nav(2, uLocal(&u, "/bf?z2"));
+    const m0 = logLen(root, "emk");
+    try r.action(2, .back);
+    var z: [200]u8 = undefined;
+    const z_back = r.ev(2, "location.host", &z);
+    const z_gates = countIn(logFrom(root, "emk", m0), "emu: gate b=2 ");
+    try r.host.send(.{ .destroy_browser = 2 });
+    r.pump(300);
+
+    // 터치 흉내는 빼고(마우스 우클릭이 메뉴를 띄우게) 나머지 다섯 무리 — 지움 다섯.
+    var bound_gate = bound_all;
+    bound_gate.flags.touch = false;
+    try r.create(1, uLocal(&u, "/bf?ga"));
+    _ = try r.emulate(1, bound_gate);
+    try r.nav(1, uLoop(&u, "/bf?gb"));
+    var g1: [400]u8 = undefined;
+    const on_gb = r.ev(1, ps_js, &g1);
+    // 사람의 주소 이동(밖으로).
+    const m1 = logLen(root, "emk");
+    try r.host.send(.{ .navigate = .{ .browser = 1, .url = uLocal(&u, "/bf?gx"), .user = true } });
+    settleNav(r, 1);
+    const o_nav = gateOrder(logFrom(root, "emk", m1), 1, "navigate", "localhost");
+    var g2: [400]u8 = undefined;
+    const at_gx = r.ev(1, ps_js, &g2);
+    // 밖 → 밖(게이트 없음).
+    const m2 = logLen(root, "emk");
+    try r.nav(1, uLocal(&u, "/bf?gy"));
+    const off_gates = countIn(logFrom(root, "emk", m2), "emu: gate b=1 ");
+    // 안 → 안: 주소·뒤로.
+    try r.nav(1, uLoop(&u, "/bf?gc"));
+    const m3 = logLen(root, "emk");
+    try r.nav(1, uLoop(&u, "/bf?gd"));
+    try r.action(1, .back);
+    var g3: [400]u8 = undefined;
+    const at_gc = r.ev(1, ps_js, &g3);
+    const in_gates = countIn(logFrom(root, "emk", m3), "emu: gate b=1 ");
+    const st_gc = r.st[1];
+    const ok1 = z_gates == 0 and contains(z_back, "127.0.0.1") and contains(on_gb, "tz.") and o_nav.ok(5) and contains(at_gx, "localhost") and !leakText(at_gx) and
+        off_gates == 0 and in_gates == 0 and contains(at_gc, "127.0.0.1") and contains(at_gc, "tz.") and st_gc != null and st_gc.?.on_site;
+    report(ok1, "emu-site-bound-gate", std.fmt.bufPrint(&d, "흉내 없는 탭 뒤로 게이트 {d} 줄({s}) | 안 {s} → 주소(사람) 밖: {s} · 밖 문서 {s} | 밖→밖 게이트 {d} 줄 | 안→안 주소·뒤로 게이트 {d} 줄 · 문서 {s} on_site={}", .{ z_gates, z_back, on_gb[0..@min(on_gb.len, 100)], o_nav.text(&ob[0]), at_gx, off_gates, in_gates, at_gc[0..@min(at_gc.len, 100)], if (st_gc) |x| x.on_site else false }) catch "");
+
+    // 우클릭 메뉴의 뒤로(gc → gy 밖).
+    // 우클릭 메뉴는 초점이 있는 탭에서(`contextmenu_check` 와 같다), 새 문서의 첫 프레임 뒤 ~0.5 초 안의 입력은 렌더러가 버린다(W4a 실측) — 기다렸다
+    // 누르고, 오지 않으면 한 번 더.
+    try r.host.send(.{ .set_focus = .{ .browser = 1, .value = true } });
+    r.pump(800);
+    var menu_shown = false;
+    for (0..2) |_| {
+        const menus0 = r.menus[1];
+        try r.host.send(.{ .mouse = .{ .browser = 1, .kind = .move, .point = .{ .x = 40, .y = 40 } } });
+        try r.host.send(.{ .mouse = .{ .browser = 1, .kind = .down, .button = .right, .point = .{ .x = 40, .y = 40 }, .click_count = 1 } });
+        try r.host.send(.{ .mouse = .{ .browser = 1, .kind = .up, .button = .right, .point = .{ .x = 40, .y = 40 }, .click_count = 1 } });
+        menu_shown = r.until(Run.menusAt, 1, menus0 + 1, 2000);
+        if (menu_shown) break;
+    }
+    const m4 = logLen(root, "emk");
+    if (menu_shown) try r.host.send(.{ .context_menu_command = .{ .browser = 1, .menu = r.menu_id[1], .command = .back } });
+    settleNav(r, 1);
+    const o_menu = gateOrder(logFrom(root, "emk", m4), 1, "menu_back", "localhost");
+    var g4: [400]u8 = undefined;
+    const at_gy = r.ev(1, ps_js, &g4);
+    report(menu_shown and o_menu.ok(5) and contains(at_gy, "localhost") and !leakText(at_gy), "emu-site-bound-gate-menu", std.fmt.bufPrint(&d, "메뉴 {} · {s} · 밖 문서 {s}", .{ menu_shown, o_menu.text(&ob[1]), at_gy }) catch "");
+
+    // 멈춤: 바쁜 안의 문서에서 뒤로 → 곧 멈춤.
+    try r.nav(1, uLoop(&u, "/bf?ge"));
+    busyPage(r, 1, 400);
+    const m5 = logLen(root, "emk");
+    try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .back, .user = true } });
+    try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .stop, .user = true } });
+    r.pump(1200);
+    const l5 = logFrom(root, "emk", m5);
+    const s_hold = countIn(l5, "emu: gate b=1 hold back ");
+    const s_cancel = countIn(l5, "emu: gate b=1 cancel stop steps=1");
+    const s_restore = countIn(l5, "emu: gate b=1 restore stop on_site=true");
+    const s_open = countIn(l5, "emu: gate b=1 open ");
+    const s_commit = countIn(l5, "emu: commit b=1 ");
+    var g5: [400]u8 = undefined;
+    const at_ge = r.ev(1, ps_js, &g5);
+    const st_ge = r.st[1];
+    report(s_hold == 1 and s_cancel == 1 and s_restore == 1 and s_open == 0 and s_commit == 0 and contains(at_ge, "127.0.0.1") and contains(at_ge, "tz.") and st_ge != null and st_ge.?.on_site, "emu-site-bound-gate-stop", std.fmt.bufPrint(&d, "hold {d} · cancel {d} · restore {d} · open {d} · 커밋 {d} · 문서 {s} on_site={}", .{ s_hold, s_cancel, s_restore, s_open, s_commit, at_ge[0..@min(at_ge.len, 120)], if (st_ge) |x| x.on_site else false }) catch "");
+
+    // 시한: 바쁜 안의 문서에서 뒤로(ge → gy 밖).
+    busyPage(r, 1, 400);
+    const m6 = logLen(root, "emk");
+    try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .back, .user = true } });
+    settleNav(r, 1);
+    const o_to = gateOrder(logFrom(root, "emk", m6), 1, "back", "localhost");
+    var g6: [400]u8 = undefined;
+    const at_to = r.ev(1, ps_js, &g6);
+    const to_ok = o_to.held and o_to.clears >= 5 and o_to.opened and std.mem.eql(u8, o_to.why(), "timeout") and o_to.after_us >= 95_000 and o_to.commit and !o_to.early and contains(at_to, "localhost");
+    report(to_ok, "emu-site-bound-gate-timeout", std.fmt.bufPrint(&d, "{s} (시한 100 ms — 아래 한계 95 ms 만 단언, 위는 적기만) · 밖 문서 {s}(시한 뒤 이동은 지금 동작 — 경주가 남는다)", .{ o_to.text(&ob[2]), at_to }) catch "");
+
+    // 떠나기 확인 머무르기(gy → 안 gf, 몸짓 → 뒤로 → 확인 → 머무르기).
+    try r.nav(1, uLoop(&u, "/bu?gf"));
+    // 떠나기 확인은 몸짓이 있었던 문서에서만 — 첫 프레임 뒤 ~0.5 초 안의 입력은 버려진다(W4a 실측): 기다렸다 누르고, 활성이 없으면 한 번 더.
+    r.pump(800);
+    var act: [16]u8 = undefined;
+    var active = false;
+    for (0..3) |_| {
+        r.userClick(1, 40, 40);
+        active = std.mem.eql(u8, r.ev(1, "navigator.userActivation.hasBeenActive", &act), "true");
+        if (active) break;
+        r.pump(300);
+    }
+    const dl0 = r.dlgs[1];
+    const m7 = logLen(root, "emk");
+    try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .back, .user = true } });
+    const asked = r.until(Run.dialogsAt, 1, dl0 + 1, 5000) and r.dlg_kind[1] == .before_unload;
+    const st_ask = r.st[1];
+    if (asked) try r.host.send(.{ .dialog_reply = .{ .browser = 1, .request = r.dlg_req[1], .accept = false, .text = "" } });
+    r.pump(900);
+    const l7 = logFrom(root, "emk", m7);
+    const o_stay = gateOrder(l7, 1, "back", "localhost");
+    const stay_restore = countIn(l7, "emu: gate b=1 restore stay on_site=true");
+    const stay_commit = countIn(l7, "emu: commit b=1 ");
+    var g7: [400]u8 = undefined;
+    const at_gf = r.ev(1, "JSON.stringify([location.host,location.search,SG()])", &g7);
+    const st_gf = r.st[1];
+    const stay_ok = asked and o_stay.held and o_stay.opened and std.mem.eql(u8, o_stay.why(), "replies") and stay_restore == 1 and stay_commit == 0 and contains(at_gf, "127.0.0.1") and
+        contains(at_gf, "gf") and contains(at_gf, "tz.") and st_gf != null and st_gf.?.on_site;
+    report(stay_ok, "emu-site-bound-gate-stay", std.fmt.bufPrint(&d, "몸짓 {} · 확인 {} · {s} · restore {d} · 커밋 {d} · 확인 동안 on_site={}(지운 채 — 사용자 결정) · 머무른 문서 {s} on_site={}", .{ active, asked, o_stay.text(&ob[3]), stay_restore, stay_commit, if (st_ask) |x| x.on_site else true, at_gf, if (st_gf) |x| x.on_site else false }) catch "");
+
+    // 진행 중 이동: 안의 느린 주소로 가는 동안 뒤로(gf → gy 밖) — 게이트하지 않는다.
+    var bx: [16]u8 = undefined;
+    _ = r.ev(1, "window.BU=0;1", &bx);
+    const m8 = logLen(root, "emk");
+    const before8 = r.loads[1];
+    try r.host.send(.{ .navigate = .{ .browser = 1, .url = uLoop(&u, "/slow?ms=1500&gk"), .user = true } });
+    r.pump(300);
+    try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .back, .user = true } });
+    _ = r.until(Run.loadsAt, 1, before8 + 1, 4000);
+    r.pump(500);
+    const l8 = logFrom(root, "emk", m8);
+    const p_hold = countIn(l8, "emu: gate b=1 hold ");
+    const p_skip = countIn(l8, "emu: nogate b=1 in_progress back");
+    var g8: [200]u8 = undefined;
+    const at8 = r.ev(1, "location.host", &g8);
+    report(p_hold == 0 and p_skip == 1 and contains(at8, "localhost"), "emu-site-bound-gate-in-progress", std.fmt.bufPrint(&d, "hold {d} · 진행 중이라 건너뜀 {d} · 도착 {s}", .{ p_hold, p_skip, at8 }) catch "");
 }
 
 /// 밖→안 이동의 새 문서가 첫 스크립트로부터 모든 흉내를 보기까지의 상한(`FULL`, ms). 실측(W9e 후속 2026-11-14): 1 분 부하 1–20 에서 slow-hop 0–4·

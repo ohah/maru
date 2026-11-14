@@ -828,6 +828,20 @@ fn readHistory(reg: *const registry_mod.Entry) ?usize {
     return hist_current;
 }
 
+/// 그 탭의 보이는 항목(Chromium 의 `GetVisibleEntry` — maru 가 낸 새 주소 이동이 시작됐으면 그 대기 항목, 아니면 지금 문서)의 주소 해시, 모르면 null.
+fn visibleHash(reg: *const registry_mod.Entry) ?u64 {
+    const b = browserOf(reg);
+    const host = b.*.get_host.?(b);
+    if (host == null) return null;
+    defer object.release(host);
+    const ent = host.*.get_visible_navigation_entry.?(host);
+    if (ent == null) return null;
+    defer object.release(ent);
+    const u = ent.*.get_url.?(ent);
+    defer if (u != null) browsers.state.api.string_userfree_utf16_free(u);
+    return table_mod.canonHash(u16, units(u));
+}
+
 /// 다른 주 프레임 이동이 진행 중인가(진짜 홉을 봤고 커밋·끊김·오류가 아직 — 가상 홉은 셈하지 않는다).
 fn navInProgress(e: *const Entry) bool {
     return e.hop_known and !e.gate_pseudo;
@@ -986,10 +1000,12 @@ fn openGate(e: *Entry, why: []const u8) void {
     if (logOn()) std.debug.print("emu: gate b={d} open {s} replies={d}/{d} after={d}us\n", .{ e.browser, why, e.gate_replies, e.gate_clears, nowUs() -| e.gate_t0_us });
     const reg = browsers.state.registry.byCefId(e.cef_id) orelse return;
     if (reg.closing or browsers.state.shutting_down) return;
-    // 기록 이동(뒤로·앞으로)만 냈는데 Chromium 이 아무 이동도 시작하지 않았는지 보려고 첫 기록 이동 앞의 지금 항목을 적는다.
+    // 낸 이동을 Chromium 이 하나도 시작하지 않았는지 보려고 첫 이동 앞의 지금 항목(기록 이동이 시작되면 그 대상으로 바뀐다)과 보이는 항목(주소 이동이
+    // 시작되면 그 대기 항목으로 바뀐다)을 적는다.
     var hist_before: ?usize = null;
-    var hist_read = false;
-    var other = false;
+    var vis_before: ?u64 = null;
+    var before_read = false;
+    var reload = false;
     for (steps, 0..) |step, i| {
         if (!std.mem.eql(u8, why, "full") and nowMs() < deadline) {
             const t = targetOf(reg, step, url orelse "");
@@ -1004,20 +1020,20 @@ fn openGate(e: *Entry, why: []const u8) void {
                 return;
             }
         }
-        switch (step.action) {
-            .back, .forward, .menu_back, .menu_forward => if (!hist_read) {
-                hist_read = true;
-                hist_before = readHistory(reg);
-            },
-            .navigate, .reload => other = true,
+        if (!before_read) {
+            before_read = true;
+            hist_before = readHistory(reg);
+            vis_before = visibleHash(reg);
         }
+        if (step.action == .reload) reload = true;
         startStep(reg, step, url orelse "");
     }
     if (e.gate_pseudo) {
-        // 기록 이동만 냈는데 지금 항목이 그대로다 — Chromium 이 이동을 시작하지 않았다(옆 항목이 몸짓 없이 생긴 것뿐이라 건너뛴 뒤로·앞으로: CEF 의
-        // `can_go_back` 은 그래도 참이다 — 게이트 적대 검증 2026-11-14, 안전망 1 초 동안 사이트 안 문서의 흉내가 지워져 있었다). 곧 되돌린다. 떠나기
-        // 확인을 기다리는 이동은 그 대상이 지금 항목이라(진행 중 기록 이동) 여기 걸리지 않는다.
-        if (!other) if (hist_before) |before| if (readHistory(reg) == before) return restorePseudo(e, "none");
+        // 지금 항목도 보이는 항목도 그대로다 — Chromium 이 아무 이동도 시작하지 않았다. 곧 되돌린다(안전망 1 초 동안 사이트 안 문서의 흉내가 지워져
+        // 있었다): 옆 항목이 몸짓 없이 생긴 것뿐이라 건너뛴 뒤로·앞으로(CEF 의 `can_go_back` 은 그래도 참이다 — 게이트 적대 검증 2026-11-14), Chromium
+        // 이 읽지 못해 말없이 버린 주소(포트 99999·`%40` 호스트 — 후속 검증 2026-11-15). 떠나기 확인·처리기를 기다리는 이동도 대기 항목이 이미 서
+        // 있어(기록 이동은 지금 항목, 주소 이동은 보이는 항목) 걸리지 않는다. 새로고침은 같은 문서라 보지 않는다(보이는 항목이 그대로다).
+        if (!reload) if (hist_before) |hb| if (vis_before) |vb| if (readHistory(reg) == hb and visibleHash(reg) == vb) return restorePseudo(e, "none");
         e.gate_opened_ms = nowMs();
         postGate(emu_plan.gate_safety_ms);
     }

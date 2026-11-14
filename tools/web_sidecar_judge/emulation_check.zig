@@ -40,8 +40,8 @@
 //!   밖→밖·안→안은 게이트 줄 0, 사람의 주소 이동이 밖으로 — hold → 지움 답 → open → 커밋)·emu-site-bound-gate-menu(우클릭 메뉴의 뒤로)·
 //!   emu-site-bound-gate-stop(기다리는 동안 멈춤 — 되돌려 다시 건다)·emu-site-bound-gate-timeout(바쁜 문서 — 100 ms 에 연다, 아래 한계만)·
 //!   emu-site-bound-gate-stay(떠나기 확인의 머무르기 — 되돌려 다시 건다)·emu-site-bound-gate-in-progress(다른 이동이 진행 중이면 게이트하지 않는다)·
-//!   emu-site-bound-gate-target(이동을 시작하지 않는 뒤로는 연 뒤 곧 되돌린다·`\` 주소는 Chromium 처럼 밖)·emu-site-bound-gate-safety(1 초 안에 홉이
-//!   없으면 안전망이 되돌린다 — 바쁜 떠나기 처리기).
+//!   emu-site-bound-gate-target(이동을 시작하지 않는 뒤로·Chromium 이 버리는 주소는 연 뒤 곧 되돌린다·`\` 주소는 Chromium 처럼 밖)·emu-site-bound-gate-safety(1 초
+//!   안에 홉이 없으면 안전망이 되돌린다 — 바쁜 떠나기 처리기, 뒤로와 주소 이동).
 //!   판 끝에 emu-no-observer-reentrancy(모든 host 로그 — 관찰자 콜백 안에서 이동·명령을 내지 않았다, `main.zig`).
 //! 팝업(`emp`): emu-popup-shared(같은 프로세스의 팝업은 시간대·locale 이 따라오고 제 흉내는 process_shared_conflict — E13).
 //! 재시작(`emr`): emu-restart(about:blank → 흉내 → 이동이면 문서 요청부터, 옛 sidecar 가 대신 허용한 출처는 새 sidecar 가 되돌린다 — P2-6).
@@ -1814,9 +1814,10 @@ fn busyPage(r: *Run, b: u64, ms: u32) void {
 /// emu-site-bound-gate-timeout: 바쁜 문서에서 뒤로 — 시한(100 ms)에 연다(아래 한계만 단언 — 위는 부하에 흔들려 적기만 한다).
 /// emu-site-bound-gate-stay: 떠나기 확인이 있는 문서에서 뒤로 → 머무르기: 되돌려 다시 건다(확인이 떠 있는 동안은 이미 지운 채 — 사용자 결정 2026-11-14).
 /// emu-site-bound-gate-in-progress: 다른 주 프레임 이동이 진행 중이면 게이트하지 않는다(그 지움은 커밋까지 답이 오지 않는다 — 공격 A4).
-/// emu-site-bound-gate-target: 옆 항목이 몸짓 없이 떠난 밖 문서뿐이라 Chromium 이 시작하지 않는 뒤로(CEF 의 `can_go_back` 은 참)는 연 뒤 곧 되돌린다·
-///   `http://밖\@안/` 은 Chromium 처럼 밖으로 읽어 붙잡는다(게이트 적대 검증 2026-11-14).
-/// emu-site-bound-gate-safety: 연 뒤 1 초 안에 홉이 없으면(대화상자 없이 바쁜 떠나기 처리기) 안전망이 되돌리고, 그 뒤 이동은 홉이 지운다(공격 A8).
+/// emu-site-bound-gate-target: 옆 항목이 몸짓 없이 떠난 밖 문서뿐이라 Chromium 이 시작하지 않는 뒤로(CEF 의 `can_go_back` 은 참)와 Chromium 이 말없이
+///   버리는 주소(포트 99999 — 후속 검증 2026-11-15)는 연 뒤 곧 되돌린다·`http://밖\@안/` 은 Chromium 처럼 밖으로 읽어 붙잡는다(게이트 적대 검증 2026-11-14).
+/// emu-site-bound-gate-safety: 연 뒤 1 초 안에 홉이 없으면(대화상자 없이 바쁜 떠나기 처리기) 안전망이 되돌리고, 그 뒤 이동은 홉이 지운다(공격 A8) —
+///   뒤로와 주소 이동 둘 다(처리기를 기다리는 이동은 「시작하지 않았다」 로 곧 되돌리지 않는다).
 fn siteBoundGate(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     var sess: Session = undefined;
     try open(&sess, host_path, root, "emk");
@@ -1990,6 +1991,20 @@ fn siteBoundGate(report: Report, host_path: [:0]const u8, root: []const u8) !voi
     const n_hold = countIn(lg9, "emu: gate b=3 hold back ");
     const n_none = countIn(lg9, "emu: gate b=3 restore none on_site=true");
     const n_safety = countIn(lg9, "emu: gate b=3 restore safety");
+    // Chromium 이 읽지 못해 말없이 버리는 주소(포트 99999 — `browser.navigate` 의 「3 초 안에 시작하지 않으면 실패」 와 같은 주소, 후속 검증 2026-11-15):
+    // 게이트는 호스트를 못 읽어 밖으로 보고 붙잡지만 이동은 시작되지 않는다 — 보이는 항목이 그대로라 곧 되돌린다(안전망 1 초 동안 흉내가 지워져 있었다).
+    var iv: [200]u8 = undefined;
+    const ivu = std.fmt.bufPrint(&iv, "http://127.0.0.1:99999/bf?iv{d}", .{port}) catch unreachable;
+    const m_iv = logLen(root, "emk");
+    try r.host.send(.{ .navigate = .{ .browser = 3, .url = ivu, .user = true } });
+    r.pump(150);
+    var g_iv: [400]u8 = undefined;
+    const at_iv = r.ev(3, "JSON.stringify([location.host,location.search,SG()])", &g_iv);
+    const st_iv = r.st[3];
+    const lg_iv = logFrom(root, "emk", m_iv);
+    const iv_hold = countIn(lg_iv, "emu: gate b=3 hold navigate ");
+    const iv_none = countIn(lg_iv, "emu: gate b=3 restore none on_site=true");
+    const iv_ok = iv_hold == 1 and iv_none == 1 and countIn(lg_iv, "emu: commit b=3 ") == 0 and contains(at_iv, "?na") and contains(at_iv, "tz.") and st_iv != null and st_iv.?.on_site;
     // `\` 는 Chromium 처럼 `/` — `http://localhost:P\@127.0.0.1:P/…` 는 밖(localhost)이다: 게이트가 사용자 정보 너머의 127.0.0.1 로 읽어 건너뛰었다.
     var bs: [300]u8 = undefined;
     const inner = uLoop(&nu, "/bf?bs");
@@ -1998,7 +2013,7 @@ fn siteBoundGate(report: Report, host_path: [:0]const u8, root: []const u8) !voi
     try r.host.send(.{ .navigate = .{ .browser = 3, .url = bsu, .user = true } });
     settleNav(r, 3);
     const o_bs = gateOrder(logFrom(root, "emk", m10), 3, "navigate", "localhost");
-    report(n_hold == 1 and n_none == 1 and contains(at_na, "?na") and contains(at_na, "tz.") and st_na != null and st_na.?.on_site and o_bs.ok(5), "emu-site-bound-gate-target", std.fmt.bufPrint(&d, "이동 없는 뒤로: hold {d} · 곧 되돌림 {d} · 안전망 {d} · 150 ms 뒤 문서 {s} on_site={} | `\\` 주소 {s}: {s}", .{ n_hold, n_none, n_safety, at_na, if (st_na) |x| x.on_site else false, bsu, o_bs.text(&ob[0]) }) catch "");
+    report(n_hold == 1 and n_none == 1 and contains(at_na, "?na") and contains(at_na, "tz.") and st_na != null and st_na.?.on_site and iv_ok and o_bs.ok(5), "emu-site-bound-gate-target", std.fmt.bufPrint(&d, "이동 없는 뒤로: hold {d} · 곧 되돌림 {d} · 안전망 {d} · 150 ms 뒤 문서 {s} on_site={} | 버려지는 주소: hold {d} · 곧 되돌림 {d} · 150 ms 뒤 문서 {s} on_site={} | `\\` 주소 {s}: {s}", .{ n_hold, n_none, n_safety, at_na, if (st_na) |x| x.on_site else false, iv_hold, iv_none, at_iv, if (st_iv) |x| x.on_site else false, bsu, o_bs.text(&ob[0]) }) catch "");
     try r.host.send(.{ .destroy_browser = 3 });
     r.pump(300);
 
@@ -2019,7 +2034,26 @@ fn siteBoundGate(report: Report, host_path: [:0]const u8, root: []const u8) !voi
     const at_commit = std.mem.indexOf(u8, lg11, "emu: commit b=4 host=localhost");
     const safe_ok = at_hold != null and at_open != null and at_safe != null and at_commit != null and at_hold.? < at_open.? and at_open.? < at_safe.? and at_safe.? < at_commit.? and
         countIn(lg11, "emu: gate b=4 restore ") == 1;
-    report(safe_ok, "emu-site-bound-gate-safety", std.fmt.bufPrint(&d, "hold {} · open {} · 안전망 {} · 밖 커밋 {} (차례 hold < open < 안전망 < 커밋) · 되돌림 줄 {d}", .{ at_hold != null, at_open != null, at_safe != null, at_commit != null, countIn(lg11, "emu: gate b=4 restore ") }) catch "");
+    try r.host.send(.{ .destroy_browser = 4 });
+    r.pump(300);
+    // 주소 이동도 같다(후속 검증 2026-11-15): 처리기를 기다리는 동안 대기 항목이 이미 서 있어 「시작하지 않았다」 로 곧 되돌리지 않는다 — 곧 되돌리면 흉내를
+    // 다시 건 채 밖으로 커밋한다.
+    try r.create(4, uLocal(&u, "/bf?tx"));
+    try r.nav(4, uLoop(&u, "/bf?ta"));
+    _ = try r.emulate(4, bound_gate);
+    _ = r.ev(4, "addEventListener('beforeunload',function(){var s=performance.now();while(performance.now()-s<1500){}});1", &na);
+    const m12 = logLen(root, "emk");
+    try r.host.send(.{ .navigate = .{ .browser = 4, .url = uLocal(&u, "/bf?ty"), .user = true } });
+    _ = r.until(Run.loadsAt, 4, r.loads[4] + 1, 5000);
+    r.pump(300);
+    const lg12 = logFrom(root, "emk", m12);
+    const nv_hold = std.mem.indexOf(u8, lg12, "emu: gate b=4 hold navigate ");
+    const nv_open = std.mem.indexOf(u8, lg12, "emu: gate b=4 open replies ");
+    const nv_safe = std.mem.indexOf(u8, lg12, "emu: gate b=4 restore safety on_site=true");
+    const nv_commit = std.mem.indexOf(u8, lg12, "emu: commit b=4 host=localhost");
+    const nav_ok = nv_hold != null and nv_open != null and nv_safe != null and nv_commit != null and nv_hold.? < nv_open.? and nv_open.? < nv_safe.? and nv_safe.? < nv_commit.? and
+        countIn(lg12, "emu: gate b=4 restore ") == 1;
+    report(safe_ok and nav_ok, "emu-site-bound-gate-safety", std.fmt.bufPrint(&d, "뒤로: hold {} · open {} · 안전망 {} · 밖 커밋 {} (차례 hold < open < 안전망 < 커밋) · 되돌림 줄 {d} | 주소 이동: hold {} · open {} · 안전망 {} · 밖 커밋 {} · 되돌림 줄 {d}", .{ at_hold != null, at_open != null, at_safe != null, at_commit != null, countIn(lg11, "emu: gate b=4 restore "), nv_hold != null, nv_open != null, nv_safe != null, nv_commit != null, countIn(lg12, "emu: gate b=4 restore ") }) catch "");
     try r.host.send(.{ .destroy_browser = 4 });
     r.pump(300);
 }

@@ -1519,10 +1519,11 @@ const GateOrder = struct {
         return self.why_buf[0..self.why_len];
     }
 
-    /// 답을 다 받고 열었고(시한 아님) 그 뒤에 커밋했다.
+    /// 답을 다 받고 곧 열었고(시한의 절반 안 — 답을 보지 않고 시한만 기다리는 길도 열 때는 남은 수가 0 이라 「replies」 로 적힌다: 변이 M7) 그 뒤에
+    /// 커밋했다. 답은 부하 22 에서도 0.4 ms 안이다(실측).
     fn ok(self: *const GateOrder, min_clears: u32) bool {
         return self.held and self.clears >= min_clears and self.results == self.clears and self.opened and std.mem.eql(u8, self.why(), "replies") and
-            self.replied == self.clears and self.replies_of == self.clears and !self.early and self.commit;
+            self.replied == self.clears and self.replies_of == self.clears and self.after_us < quick_open_us and !self.early and self.commit;
     }
 
     fn text(self: *const GateOrder, buf: []u8) []const u8 {
@@ -1530,6 +1531,9 @@ const GateOrder = struct {
         return std.fmt.bufPrint(buf, "hold clears={d} · 답 줄 {d} · open {s} {d}/{d} {d} µs · 커밋 {s}", .{ self.clears, self.results, if (self.opened) self.why() else "-", self.replied, self.replies_of, self.after_us, if (self.early) "열기 전" else if (self.commit) "뒤" else "없음" }) catch "-";
     }
 };
+
+/// 마지막 답에서 열기까지의 상한(µs) — 시한(100 ms)의 절반.
+const quick_open_us: u64 = 50_000;
 
 fn gateOrder(log: []const u8, b: u64, action: []const u8, commit_host: []const u8) GateOrder {
     var o: GateOrder = .{};

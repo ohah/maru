@@ -237,13 +237,25 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
     const browser = browserOf(entry);
     const frame = browser.*.get_main_frame.?(browser);
     if (frame == null) return fail(writer, value.browser, .unknown_browser, "browser has no main frame");
+    object.release(frame);
+    // W9e① 거꾸로 경주 게이트: 흉내가 걸린 사이트 안 문서에서 밖으로 가면 지움의 답을 받은 뒤(최대 100 ms) 낸다(`emulation.gateNav`).
+    if (@import("emulation.zig").gateNav(entry, .{ .action = .navigate, .user = value.user }, value.url)) return;
+    startNavigate(entry, value.url, value.user);
+}
+
+/// 주소 이동을 낸다(곧, 또는 게이트가 연 뒤 — `emulation.openGate`).
+pub fn startNavigate(entry: *const registry_mod.Entry, url_text: []const u8, user: bool) void {
+    const browser = browserOf(entry);
+    const frame = browser.*.get_main_frame.?(browser);
+    if (frame == null) return;
     defer object.release(frame);
     var url = std.mem.zeroes(c.cef_string_t);
-    library.setString(state.api, &url, value.url);
+    library.setString(state.api, &url, url_text);
     defer state.api.string_utf16_clear(&url);
     // W9d③ D2: 사용자가 친 이동 — 그 주소의 이동 한 번은 막기 규칙이 막지 않는다(토큰은 `on_before_browse` 가 그 이동에 묶는다).
-    // 사용자 것이 아닌 이동은 남은 토큰을 거둔다 — 친 주소와 같은 주소면 다툼으로 남긴다(둘 다 진짜 — W9d④ v1 SEVERE-2).
-    if (value.user) @import("blocking.zig").userNavigate(value.browser, value.url) else @import("blocking.zig").agentNavigateTo(value.browser, value.url);
+    // 사용자 것이 아닌 이동은 남은 토큰을 거둔다 — 친 주소와 같은 주소면 다툼으로 남긴다(둘 다 진짜 — W9d④ v1 SEVERE-2). 게이트가 미룬 이동은
+    // 낼 때 건다(토큰의 1 초 창이 기다림에 먹히지 않게 — 공격 A18).
+    if (user) @import("blocking.zig").userNavigate(entry.id, url_text) else @import("blocking.zig").agentNavigateTo(entry.id, url_text);
     frame.*.load_url.?(frame, &url); // W9e②: 사람의 이동은 `noteHumanInput` 이 이미 셌다(`human_use.touchOf`)
 }
 
@@ -252,38 +264,56 @@ fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
     const entry = state.registry.byId(value.browser) orelse return fail(writer, value.browser, .unknown_browser, "no such browser");
     dialogs.cancelFor(value.browser);
     if (value.action != .stop) permissions.cancelMedia(value.browser);
+    const emulation = @import("emulation.zig");
+    if (value.action == .stop) {
+        // 멈춤은 새 문서를 부르지 않는다 — 대화상자 억제를 풀 표시를 남기지 않는다. 게이트가 기다리는 이동은 버리고 지운 흉내를 되돌린다.
+        dialogs.keepSuppression(value.browser);
+        emulation.gateStop(entry);
+    } else {
+        const action: @import("emu_plan.zig").GateAction = switch (value.action) {
+            .back => .back,
+            .forward => .forward,
+            .reload, .stop => .reload,
+        };
+        // W9e① 거꾸로 경주 게이트(`emulation.gateNav`) — 새로고침은 게이트하지 않지만 기다리는 줄이 있으면 그 뒤에 선다.
+        if (emulation.gateNav(entry, .{ .action = action, .user = value.user }, "")) return;
+    }
+    startNavAction(entry, value.action, value.user);
+}
+
+/// 뒤로·앞으로·새로고침·멈춤을 낸다(곧, 또는 게이트가 연 뒤 — `emulation.openGate`).
+pub fn startNavAction(entry: *const registry_mod.Entry, action: protocol.message.NavActionKind, user: bool) void {
     const browser = browserOf(entry);
-    // 멈춤은 새 문서를 부르지 않는다 — 대화상자 억제를 풀 표시를 남기지 않는다.
-    if (value.action == .stop) dialogs.keepSuppression(value.browser);
     // W9d③ D2: 사용자의 뒤로·앞으로·새로고침 — 그 몸짓이 시작한 주 프레임 이동 하나(1 초 — 같은 갈래만)는 막기 규칙이 막지 않는다. 갈 곳이 없는
     // 뒤로·앞으로는 이동을 시작하지 않으므로 토큰도 걸지 않는다(20 회 검증 A LOW-3: 남은 토큰을 1 초 안의 에이전트 이동이 가져갔다).
     // 3 차 검증 LOW-A3-4·4 차 검증 A-LOW: 주 프레임 주소가 그대로인 기록 이동(iframe 만·같은 주소의 같은 문서)은 주 프레임 이동을 시작하지 않는다 —
     // 토큰은 이동 앞에 걸고(그 `on_before_browse` 가 곧 올 수 있다), 이동을 시작한 뒤 Chromium 이 고른 실제 대상(건너뛰는 항목 너머)을 읽어 거둔다.
-    // 멈춤은 몸짓의 이동을 끝낸다 — 누가 눌렀든 남은 토큰을 거둔다(3 차 검증 LOW-A3-3: 토큰은 이동이 시작될 때까지 기다리므로).
+    // 멈춤은 몸짓의 이동을 끝낸다 — 누가 눌렀든 남은 토큰을 거둔다(3 차 검증 LOW-A3-3: 토큰은 이동이 시작될 때까지 기다리므로). 게이트가 미룬
+    // 이동은 낼 때 건다(공격 A18 — 지금과 같은 차례).
     const blocking = @import("blocking.zig");
-    const step: i32 = if (value.action == .back) -1 else 1;
+    const step: i32 = if (action == .back) -1 else 1;
     var history_token = false;
     var history_before: ?@import("net_block_table.zig").HistoryAt = null;
-    if (value.action == .stop) {
-        blocking.agentNavigate(value.browser);
-    } else if (value.user) switch (value.action) {
-        .back, .forward => if ((if (value.action == .back) browser.*.can_go_back.?(browser) else browser.*.can_go_forward.?(browser)) != 0) {
+    if (action == .stop) {
+        blocking.agentNavigate(entry.id);
+    } else if (user) switch (action) {
+        .back, .forward => if ((if (action == .back) browser.*.can_go_back.?(browser) else browser.*.can_go_forward.?(browser)) != 0) {
             history_before = blocking.historyAt(browser, step);
-            blocking.userNavAction(value.browser, .history);
+            blocking.userNavAction(entry.id, .history);
             history_token = true;
         },
-        .reload => blocking.userNavAction(value.browser, .reload),
+        .reload => blocking.userNavAction(entry.id, .reload),
         .stop => {},
-    } else if (value.action == .reload) {
-        blocking.agentReload(value.browser); // 같은 문서 — 산 새로 고침 토큰은 다툼으로 남긴다(W9d④ v1 SEVERE-2)
-    } else blocking.agentNavigate(value.browser); // 사용자 것이 아닌 다른 곳으로 가는 이동은 남은 토큰을 거둔다
-    switch (value.action) {
+    } else if (action == .reload) {
+        blocking.agentReload(entry.id); // 같은 문서 — 산 새로 고침 토큰은 다툼으로 남긴다(W9d④ v1 SEVERE-2)
+    } else blocking.agentNavigate(entry.id); // 사용자 것이 아닌 다른 곳으로 가는 이동은 남은 토큰을 거둔다
+    switch (action) {
         .back => browser.*.go_back.?(browser),
         .forward => browser.*.go_forward.?(browser),
         .reload => browser.*.reload.?(browser),
         .stop => browser.*.stop_load.?(browser),
     }
-    if (history_token) blocking.settleHistoryToken(value.browser, history_before, blocking.historyAt(browser, step));
+    if (history_token) blocking.settleHistoryToken(entry.id, history_before, blocking.historyAt(browser, step));
 }
 
 /// 모두 닫기를 요청한다. 열린 브라우저가 없으면 바로 루프를 끝낸다.
@@ -428,7 +458,7 @@ fn retryRings(_: [*c]c.cef_task_t) callconv(.c) void {
     if (next) |at| postRingRetry(at -| now);
 }
 
-fn browserOf(entry: *registry_mod.Entry) [*c]c.cef_browser_t {
+fn browserOf(entry: *const registry_mod.Entry) [*c]c.cef_browser_t {
     return @ptrCast(@alignCast(entry.handle));
 }
 

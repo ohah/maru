@@ -171,7 +171,10 @@ fn ask(
         return giveUp(kind, callback);
     };
     // W9d③ 2 차 검증 LOW-A2-4: 사용자 이동의 D2 토큰은 이 확인에 답할 때까지 시계를 멈춘다(그 이동의 `on_before_browse` 는 답한 뒤에 온다).
-    if (kind == .before_unload) @import("blocking.zig").beforeUnloadShown(id, request);
+    if (kind == .before_unload) {
+        @import("blocking.zig").beforeUnloadShown(id, request);
+        @import("emulation.zig").beforeUnloadShown(id, request); // W9e① 게이트: 답할 때까지 안전망을 멈춘다
+    }
     return true;
 }
 
@@ -212,6 +215,7 @@ pub fn onResetDialogState(_: [*c]c.cef_jsdialog_handler_t, browser: [*c]c.cef_br
     if (browser == null) return;
     const entry = browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) orelse return;
     @import("blocking.zig").dialogsDropped(entry.id);
+    @import("emulation.zig").dialogsDropped(entry.id); // W9e① 게이트: 가상 홉의 떠나기 확인이 치워졌다 — 지운 흉내를 되돌린다
     while (table.takeFor(entry.id, .js)) |pending| {
         const callback: [*c]c.cef_jsdialog_callback_t = @ptrCast(@alignCast(pending.callback));
         object.release(callback);
@@ -229,6 +233,7 @@ pub fn cancelFor(id: BrowserId) void {
         };
     }
     @import("blocking.zig").dialogsDropped(id); // 머무르기로 답한다 — 그 이동은 시작되지 않는다(부른 쪽이 새 토큰을 건다)
+    @import("emulation.zig").dialogsDropped(id); // W9e① 게이트: 같은 까닭 — 지운 흉내를 되돌린다(새 이동이 다시 게이트를 본다)
     while (table.takeFor(id, .js)) |pending| {
         const callback: [*c]c.cef_jsdialog_callback_t = @ptrCast(@alignCast(pending.callback));
         callback.*.cont.?(callback, 0, null);
@@ -290,6 +295,7 @@ pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
 /// 놓고 maru 에 알린다(떠 있는 sheet 를 닫게).
 pub fn rendererGone(id: BrowserId) void {
     @import("blocking.zig").dialogsDropped(id);
+    @import("emulation.zig").dialogsDropped(id);
     while (table.takeFor(id, .js)) |pending| {
         object.release(@as([*c]c.cef_jsdialog_callback_t, @ptrCast(@alignCast(pending.callback))));
         browsers.state.writer.send(.{ .dialog_closed = .{ .browser = pending.browser, .request = pending.request } }) catch {};
@@ -385,6 +391,7 @@ pub fn handle(msg: Message) bool {
             // 떠나기 확인에 머무르기 — 이동이 취소됐다. 그 이동이 남긴 「새 문서에서 풀기」 표시를 지운다.
             if (!value.accept) clearReset(value.browser);
             @import("blocking.zig").dialogAnswered(value.browser, value.request, value.accept); // W9d③ D2 토큰의 멈춤을 푼다
+            @import("emulation.zig").dialogAnswered(value.browser, value.request, value.accept); // W9e① 게이트: 머무르기면 지운 흉내를 되돌린다
             const callback: [*c]c.cef_jsdialog_callback_t = @ptrCast(@alignCast(pending.callback));
             var text = std.mem.zeroes(c.cef_string_t);
             library.setString(browsers.state.api, &text, value.text);

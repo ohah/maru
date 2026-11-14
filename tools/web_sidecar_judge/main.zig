@@ -452,6 +452,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         warmUp(host, std.mem.span(argv[3]));
         emulation_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "emulation", "{s}", .{@errorName(err)});
         perf_check.runConditions(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "emulation-conditions", "{s}", .{@errorName(err)});
+        // W9e① 거꾸로 경주 게이트: 관찰자 콜백 안에서 이동·명령을 내지 않았다(마지막 지움의 답은 task 로 연다 — 공격 A13) — 이 판의 모든 host 로그.
+        @import("probe_select.zig").noReentrancy(&reportText, std.mem.span(argv[3]), "emu-no-observer-reentrancy");
         return if (failures == 0) 0 else 1;
     }
     // W9e②: 성능 trace 판정만(`tr-*` — 기록·숨은 탭 focus 흉내·섞임 폐기·사람 폐기·닫힘·하나만·막은 도메인).

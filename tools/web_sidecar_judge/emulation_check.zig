@@ -39,7 +39,9 @@
 //! 거꾸로 경주 게이트(`emk` — 사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」, host 로그의 차례): emu-site-bound-gate(0 지연 — 흉내 없는 탭·
 //!   밖→밖·안→안은 게이트 줄 0, 사람의 주소 이동이 밖으로 — hold → 지움 답 → open → 커밋)·emu-site-bound-gate-menu(우클릭 메뉴의 뒤로)·
 //!   emu-site-bound-gate-stop(기다리는 동안 멈춤 — 되돌려 다시 건다)·emu-site-bound-gate-timeout(바쁜 문서 — 100 ms 에 연다, 아래 한계만)·
-//!   emu-site-bound-gate-stay(떠나기 확인의 머무르기 — 되돌려 다시 건다)·emu-site-bound-gate-in-progress(다른 이동이 진행 중이면 게이트하지 않는다).
+//!   emu-site-bound-gate-stay(떠나기 확인의 머무르기 — 되돌려 다시 건다)·emu-site-bound-gate-in-progress(다른 이동이 진행 중이면 게이트하지 않는다)·
+//!   emu-site-bound-gate-target(이동을 시작하지 않는 뒤로는 연 뒤 곧 되돌린다·`\` 주소는 Chromium 처럼 밖)·emu-site-bound-gate-safety(1 초 안에 홉이
+//!   없으면 안전망이 되돌린다 — 바쁜 떠나기 처리기).
 //!   판 끝에 emu-no-observer-reentrancy(모든 host 로그 — 관찰자 콜백 안에서 이동·명령을 내지 않았다, `main.zig`).
 //! 팝업(`emp`): emu-popup-shared(같은 프로세스의 팝업은 시간대·locale 이 따라오고 제 흉내는 process_shared_conflict — E13).
 //! 재시작(`emr`): emu-restart(about:blank → 흉내 → 이동이면 문서 요청부터, 옛 sidecar 가 대신 허용한 출처는 새 sidecar 가 되돌린다 — P2-6).
@@ -1812,6 +1814,9 @@ fn busyPage(r: *Run, b: u64, ms: u32) void {
 /// emu-site-bound-gate-timeout: 바쁜 문서에서 뒤로 — 시한(100 ms)에 연다(아래 한계만 단언 — 위는 부하에 흔들려 적기만 한다).
 /// emu-site-bound-gate-stay: 떠나기 확인이 있는 문서에서 뒤로 → 머무르기: 되돌려 다시 건다(확인이 떠 있는 동안은 이미 지운 채 — 사용자 결정 2026-11-14).
 /// emu-site-bound-gate-in-progress: 다른 주 프레임 이동이 진행 중이면 게이트하지 않는다(그 지움은 커밋까지 답이 오지 않는다 — 공격 A4).
+/// emu-site-bound-gate-target: 옆 항목이 몸짓 없이 떠난 밖 문서뿐이라 Chromium 이 시작하지 않는 뒤로(CEF 의 `can_go_back` 은 참)는 연 뒤 곧 되돌린다·
+///   `http://밖\@안/` 은 Chromium 처럼 밖으로 읽어 붙잡는다(게이트 적대 검증 2026-11-14).
+/// emu-site-bound-gate-safety: 연 뒤 1 초 안에 홉이 없으면(대화상자 없이 바쁜 떠나기 처리기) 안전망이 되돌리고, 그 뒤 이동은 홉이 지운다(공격 A8).
 fn siteBoundGate(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     var sess: Session = undefined;
     try open(&sess, host_path, root, "emk");
@@ -1962,6 +1967,61 @@ fn siteBoundGate(report: Report, host_path: [:0]const u8, root: []const u8) !voi
     var g8: [200]u8 = undefined;
     const at8 = r.ev(1, "location.host", &g8);
     report(p_hold == 0 and p_skip == 1 and contains(at8, "localhost"), "emu-site-bound-gate-in-progress", std.fmt.bufPrint(&d, "hold {d} · 진행 중이라 건너뜀 {d} · 도착 {s}", .{ p_hold, p_skip, at8 }) catch "");
+
+    // 이동이 시작되지 않는 뒤로(게이트 적대 검증 2026-11-14): [밖 nx(몸짓 없이 떠난 문서 — Chromium 이 뒤로에서 건너뛰는 항목), 안 na] 에서 뒤로 — CEF 의
+    // `can_go_back` 은 참이지만 Chromium 은 이동을 시작하지 않는다. 게이트는 옆 항목(밖)을 보고 붙잡았다가, 연 뒤 지금 항목이 그대로면 곧 되돌린다(안전망
+    // 1 초 동안 흉내가 지워져 있었다).
+    var nj: [600]u8 = undefined;
+    var nu: [256]u8 = undefined;
+    var na: [400]u8 = undefined;
+    try r.create(3, uLocal(&u, "/bf?nx"));
+    const l9 = r.loads[3];
+    _ = r.ev(3, std.fmt.bufPrint(&nj, "location.href='{s}';1", .{uLoop(&nu, "/bf?na")}) catch unreachable, &na);
+    _ = r.until(Run.loadsAt, 3, l9 + 1, 4000);
+    r.pump(300);
+    _ = try r.emulate(3, bound_gate);
+    const m9 = logLen(root, "emk");
+    try r.host.send(.{ .nav_action = .{ .browser = 3, .action = .back, .user = true } });
+    r.pump(150);
+    var g9: [400]u8 = undefined;
+    const at_na = r.ev(3, "JSON.stringify([location.host,location.search,SG()])", &g9);
+    const st_na = r.st[3];
+    const lg9 = logFrom(root, "emk", m9);
+    const n_hold = countIn(lg9, "emu: gate b=3 hold back ");
+    const n_none = countIn(lg9, "emu: gate b=3 restore none on_site=true");
+    const n_safety = countIn(lg9, "emu: gate b=3 restore safety");
+    // `\` 는 Chromium 처럼 `/` — `http://localhost:P\@127.0.0.1:P/…` 는 밖(localhost)이다: 게이트가 사용자 정보 너머의 127.0.0.1 로 읽어 건너뛰었다.
+    var bs: [300]u8 = undefined;
+    const inner = uLoop(&nu, "/bf?bs");
+    const bsu = std.fmt.bufPrint(&bs, "{s}\\@{s}", .{ uLocal(&u, ""), inner["http://".len..] }) catch unreachable;
+    const m10 = logLen(root, "emk");
+    try r.host.send(.{ .navigate = .{ .browser = 3, .url = bsu, .user = true } });
+    settleNav(r, 3);
+    const o_bs = gateOrder(logFrom(root, "emk", m10), 3, "navigate", "localhost");
+    report(n_hold == 1 and n_none == 1 and contains(at_na, "?na") and contains(at_na, "tz.") and st_na != null and st_na.?.on_site and o_bs.ok(5), "emu-site-bound-gate-target", std.fmt.bufPrint(&d, "이동 없는 뒤로: hold {d} · 곧 되돌림 {d} · 안전망 {d} · 150 ms 뒤 문서 {s} on_site={} | `\\` 주소 {s}: {s}", .{ n_hold, n_none, n_safety, at_na, if (st_na) |x| x.on_site else false, bsu, o_bs.text(&ob[0]) }) catch "");
+    try r.host.send(.{ .destroy_browser = 3 });
+    r.pump(300);
+
+    // 안전망(공격 A8): 대화상자 없이 1.5 초 바쁜 떠나기 처리기 — 뒤로를 낸 뒤 Chromium 이 그 처리기를 기다려 1 초 안에 홉이 없다. 안전망이 지금 문서로
+    // 되돌려 다시 걸고, 그 뒤 이동이 시작되면 홉이 지금처럼 지운다(남는 틈 — 계획 문서).
+    try r.create(4, uLocal(&u, "/bf?sx"));
+    try r.nav(4, uLoop(&u, "/bf?sa"));
+    _ = try r.emulate(4, bound_gate);
+    _ = r.ev(4, "addEventListener('beforeunload',function(){var s=performance.now();while(performance.now()-s<1500){}});1", &na);
+    const m11 = logLen(root, "emk");
+    try r.host.send(.{ .nav_action = .{ .browser = 4, .action = .back, .user = true } });
+    _ = r.until(Run.loadsAt, 4, r.loads[4] + 1, 5000);
+    r.pump(300);
+    const lg11 = logFrom(root, "emk", m11);
+    const at_hold = std.mem.indexOf(u8, lg11, "emu: gate b=4 hold back ");
+    const at_open = std.mem.indexOf(u8, lg11, "emu: gate b=4 open replies ");
+    const at_safe = std.mem.indexOf(u8, lg11, "emu: gate b=4 restore safety on_site=true");
+    const at_commit = std.mem.indexOf(u8, lg11, "emu: commit b=4 host=localhost");
+    const safe_ok = at_hold != null and at_open != null and at_safe != null and at_commit != null and at_hold.? < at_open.? and at_open.? < at_safe.? and at_safe.? < at_commit.? and
+        countIn(lg11, "emu: gate b=4 restore ") == 1;
+    report(safe_ok, "emu-site-bound-gate-safety", std.fmt.bufPrint(&d, "hold {} · open {} · 안전망 {} · 밖 커밋 {} (차례 hold < open < 안전망 < 커밋) · 되돌림 줄 {d}", .{ at_hold != null, at_open != null, at_safe != null, at_commit != null, countIn(lg11, "emu: gate b=4 restore ") }) catch "");
+    try r.host.send(.{ .destroy_browser = 4 });
+    r.pump(300);
 }
 
 /// 밖→안 이동의 새 문서가 첫 스크립트로부터 모든 흉내를 보기까지의 상한(`FULL`, ms). 실측(W9e 후속 2026-11-14): 1 분 부하 1–20 에서 slow-hop 0–4·

@@ -70,7 +70,7 @@
 
 **op_kind·enum**: `BrowserMethod`에 `screenshot` **끝에 추가**(op_kind=5 — 3=subscribe가 op로 안 실려도 enum 값 유지; `app_host_abi.zig` 컴파일 assert에 `screenshot==5` 추가, 순서변경 금지 주석 준수). `parseBrowserMethod("screenshot")` 매핑은 **Swift case 5 배선과 같은 슬라이스에서** 추가한다(먼저 추가하면 screenshot 요청이 Swift 미처리 op으로 defer돼 reap timeout까지 hang — 그전엔 `method_not_found` 유지).
 
-**CLI(`maru browser screenshot --surface N --out FILE`)**: `fetchControlResponse`가 응답 1프레임만 읽으므로 **chunk-aware 읽기**로 확장 — `browser.screenshotChunk` notification을 seq별 누적하고, 최종 응답(id 매칭)에서 `seq_total` 확인 후 seq 0..N-1을 이어붙여 PNG를 `--out`(또는 stdout)로 쓴다. seq 누락/불일치=에러. 렌더는 cookies의 JSON 재직렬화와 다른 **바이너리 파일 출력** 경로.
+**CLI(`maru browser screenshot --surface N --out FILE`)**: `fetchControlResponse`가 응답 1프레임만 읽으므로 **chunk-aware 읽기**로 확장 — `browser.screenshotChunk` notification을 seq별 누적하고, 최종 응답(id 매칭)에서 `seq_total` 확인 후 seq 0..N-1을 이어붙여 PNG를 `--out` 으로 쓴다(`--out` 이 없으면 한 번짜리 CLI·repl 은 보내기 전에 거절한다 — stdout 바이트는 `maru mcp` 만 받아 이미지 결과로 싣는다, §9.6 2026-11-16). seq 누락/불일치=에러. 렌더는 cookies의 JSON 재직렬화와 다른 **바이너리 파일 출력** 경로.
 
 **슬라이스**: **5f-1-0**(이 문서). **5f-1-1**=서버측 전 경로(Zig `BrowserMethod.screenshot`+parser+scope+chunk/complete 직렬화 L2+PNG IHDR 파서+`completeBrowserOp` screenshot 분기+Swift `takeSnapshot`+case 5)+헤드리스 유닛(chunk 직렬화·IHDR·크기상한)+실앱 스모크(스모크 클라가 screenshot 구동→chunk 수신→PNG 헤더 `\x89PNG` 확인). **5f-1-2**=CLI(`cli/browser.zig` screenshot 서브커맨드+`main.zig` chunk-aware read+파일 출력)+헤드리스 파서 유닛+self-verify(`MARU_TEST_GRANT_DECISION=approve`→screenshot→PNG 파일 헤더).
 

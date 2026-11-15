@@ -85,10 +85,14 @@ fn handle(io: std.Io, allocator: std.mem.Allocator, line: []const u8, stdout: *s
             var err: std.Io.Writer.Allocating = .init(allocator);
             defer err.deinit();
             // 인자를 먼저 본다 — CLI 의 도움말 전체 대신 이유 한 줄로 답한다.
-            _ = browser.parse(c.argv) catch |e| {
-                const msg = try std.fmt.allocPrint(allocator, "error: {s}\n", .{browser_run.usageReason(e)});
-                defer allocator.free(msg);
-                const r = try mcp.toolResult(allocator, c.id, msg, true);
+            var diag: browser.Diag = .{};
+            _ = browser.parseDiag(c.argv, &diag) catch |e| {
+                var msg: std.Io.Writer.Allocating = .init(allocator);
+                defer msg.deinit();
+                try msg.writer.writeAll("error: ");
+                try browser_run.writeParseReason(&msg.writer, e, diag);
+                try msg.writer.writeAll("\n");
+                const r = try mcp.toolResult(allocator, c.id, msg.written(), true);
                 defer allocator.free(r);
                 return writeLine(stdout, r);
             };
@@ -154,5 +158,31 @@ test "W9f 적대 리뷰 4 회차: CLI 파서가 거절한 도구 호출(로케�
         const result = p.value.object.get("result").?.object;
         try std.testing.expect(result.get("isError").?.bool);
         try std.testing.expect(std.mem.indexOf(u8, result.get("content").?.array.items[0].object.get("text").?.string, "needs one of --selector") != null);
+    }
+}
+
+test "M8·D5: CLI 파서가 거절한 낱말과 스키마에 없는 키를 도구 결과가 이름으로 말한다" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest else {
+        var fds: [2]std.c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        defer _ = std.c.close(fds[0]);
+        const input = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"browser_click\",\"arguments\":{\"surface\":1,\"selectr\":\"a\"}}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"browser_click\",\"arguments\":{\"surface\":1,\"\\u001b[2Jx\":1}}}\n";
+        try std.testing.expectEqual(@as(isize, input.len), std.c.write(fds[1], input, input.len));
+        _ = std.c.close(fds[1]);
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer err.deinit();
+        try serveQuietly(std.testing.io, std.testing.allocator, fds[0], &out.writer, &err.writer);
+        var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, out.written(), "\n"), '\n');
+        const want = [_][]const u8{ "error: unknown argument 'selectr' for this tool (see its input schema)", "error: unknown argument '[2Jx' for this tool (see its input schema)" };
+        for (want) |w| {
+            const p = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, lines.next().?, .{});
+            defer p.deinit();
+            const result = p.value.object.get("result").?.object;
+            try std.testing.expect(result.get("isError").?.bool);
+            try std.testing.expectEqualStrings(w, result.get("content").?.array.items[0].object.get("text").?.string);
+        }
     }
 }

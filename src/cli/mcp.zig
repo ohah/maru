@@ -262,6 +262,30 @@ pub fn findTool(name: []const u8) ?*const Tool {
     return null;
 }
 
+/// 도구의 인자 이름 → 그 정의. 없으면 null(`argv` 의 「모르는 키」 와 그 거절 글이 같은 판정을 쓴다).
+fn findArg(tool: *const Tool, key: []const u8) ?*const Arg {
+    for (tool.args) |*a| if (std.mem.eql(u8, a.key, key)) return a;
+    return null;
+}
+
+/// 「모르는 키」 거절 글 — 그 키의 이름까지(D5: 전에는 어느 키인지 말하지 않아 에이전트가 스키마를 다시 읽고 추측했다). 키는 에이전트가
+/// 보낸 JSON 이라 `browser.writeArgToken`(보이지 않는 글자 빼기·64 바이트)으로 거른다. 돌려준 글은 `arena` 소유.
+fn unknownArgumentText(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Value) std.mem.Allocator.Error![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
+    w.writeAll("error: unknown argument ") catch return error.OutOfMemory;
+    if (arguments) |a| if (a == .object) {
+        var it = a.object.iterator();
+        while (it.next()) |e| if (findArg(tool, e.key_ptr.*) == null) {
+            browser.writeArgToken(w, e.key_ptr.*) catch return error.OutOfMemory;
+            w.writeAll(" ") catch return error.OutOfMemory;
+            break;
+        };
+    };
+    w.writeAll("for this tool (see its input schema)") catch return error.OutOfMemory;
+    return aw.written();
+}
+
 pub const ArgError = error{ UnknownArgument, WrongType, MissingArgument, RelativePath, OutOfMemory };
 
 /// 도구 인자(JSON 객체)를 `maru browser` CLI 인자로 옮긴다 — 하위 명령이 맨 앞, 위치 인자는 맨 뒤. 모르는 키·틀린 형은 거절한다
@@ -281,9 +305,7 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
     if (obj) |o| {
         var it = o.iterator();
         while (it.next()) |e| {
-            const spec = for (tool.args) |*a| {
-                if (std.mem.eql(u8, a.key, e.key_ptr.*)) break a;
-            } else return error.UnknownArgument;
+            const spec = findArg(tool, e.key_ptr.*) orelse return error.UnknownArgument;
             const v = e.value_ptr.*;
             switch (spec.kind) {
                 // 값은 `--flag=값` 한 토큰으로 — 값이 `-` 로 시작하거나 `--help` 여도 옵션·도움말로 읽히지 않는다.
@@ -484,7 +506,7 @@ pub fn handleLine(gpa: std.mem.Allocator, arena: std.mem.Allocator, line: []cons
         } else return .{ .reply = try cp.serializeError(gpa, id, .invalid_params, "tool name is missing", null) };
         const tool = findTool(name) orelse return .{ .reply = try cp.serializeError(gpa, id, .invalid_params, "unknown tool", null) };
         const args = argv(arena, tool, params.get("arguments")) catch |e| return .{ .reply = try toolResult(gpa, id, switch (e) {
-            error.UnknownArgument => "error: unknown argument for this tool (see its input schema)",
+            error.UnknownArgument => try unknownArgumentText(arena, tool, params.get("arguments")),
             error.WrongType => "error: an argument has the wrong type (see the tool's input schema)",
             error.MissingArgument => "error: a required argument is missing",
             error.RelativePath => "error: file paths must be absolute (this server cannot know your working directory)",

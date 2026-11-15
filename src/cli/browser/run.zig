@@ -42,8 +42,9 @@ pub fn run(
     }
     while (args.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
 
-    const parsed = browser.parse(collected.items) catch |err| {
-        try writeUsage(stderr, err);
+    var diag: browser.Diag = .{};
+    const parsed = browser.parseDiag(collected.items, &diag) catch |err| {
+        try writeUsage(stderr, err, diag);
         return error.UnknownCommand;
     };
     switch (parsed) {
@@ -132,10 +133,55 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
     };
 }
 
+/// 파싱 실패의 이유(줄바꿈 없이) — 모르는 옵션·남는 인자·모르는 명령이면 그 낱말까지(M8: 전에는 「unknown option」 만 말해 어느 것이
+/// 틀렸는지 몰랐다). 첫 낱말(`unknown option`·`unknown subcommand`·`too many arguments`)은 그대로 둔다 — 이미 설치된 스킬이 그 글로 줄을 찾는다.
+/// 한 번짜리 CLI(`writeUsage`)·repl·`maru mcp` 가 모두 이것을 쓴다.
+pub fn writeParseReason(w: *std.Io.Writer, err: browser.ParseError, diag: browser.Diag) std.Io.Writer.Error!void {
+    switch (err) {
+        error.UnknownOption => if (diag.token) |t| {
+            try w.writeAll("unknown option ");
+            return browser.writeArgToken(w, t);
+        },
+        error.UnexpectedArgument => if (diag.token) |t| {
+            try w.writeAll("too many arguments: ");
+            try browser.writeArgToken(w, t);
+            return w.writeAll(" was not expected");
+        },
+        error.UnknownSubcommand => if (diag.command) |c| {
+            try w.writeAll("unknown subcommand ");
+            return browser.writeArgToken(w, c);
+        },
+        else => {},
+    }
+    try w.writeAll(usageReason(err));
+}
+
+/// 오류 머리 `maru browser <명령>: ` — 명령을 알 때만 이름을 붙인다(`--out` 판정의 `maru browser screenshot:` 과 같은 꼴).
+fn writeParseErrorHead(w: *std.Io.Writer, err: browser.ParseError, diag: browser.Diag) std.Io.Writer.Error!void {
+    if (err == error.MissingSubcommand or err == error.UnknownSubcommand or diag.command == null) return w.writeAll("maru browser: ");
+    var buf: [64]u8 = undefined;
+    const c = diag.command.?;
+    try w.print("maru browser {s}: ", .{buf[0..displaySafeName(c, &buf)]});
+}
+
+/// 명령 이름(알려진 명령만 오므로 ASCII 소문자·`-`)을 그대로 — 그 밖의 글자는 뺀다(방어).
+fn displaySafeName(name: []const u8, out: []u8) usize {
+    var n: usize = 0;
+    for (name) |ch| {
+        if (n == out.len) break;
+        if (std.ascii.isLower(ch) or ch == '-') {
+            out[n] = ch;
+            n += 1;
+        }
+    }
+    return n;
+}
+
 /// `maru browser` 파싱 실패 시 사유 + help를 stderr에 낸다(`writeSessionCliUsage` 동형).
-pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError) !void {
-    const reason = usageReason(err);
-    try stderr.print("maru browser: {s}\n\n", .{reason});
+pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError, diag: browser.Diag) !void {
+    try writeParseErrorHead(stderr, err, diag);
+    try writeParseReason(stderr, err, diag);
+    try stderr.writeAll("\n\n");
     try stderr.writeAll(browser.browser_help);
     try stderr.flush();
 }
@@ -1347,8 +1393,11 @@ fn replLoop(io: std.Io, allocator: std.mem.Allocator, reader: *LineReader, inter
 
 /// repl 명령 하나 — 성공이면 true. 파싱 실패는 도움말 전체 대신 이유 한 줄. `open` 은 출력을 받아 그대로 내고 연 탭을 고른다.
 fn replCommand(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8, current: *?u64, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !bool {
-    const parsed = browser.parse(argv) catch |e| {
-        try stderr.print("error: {s}\n", .{usageReason(e)});
+    var diag: browser.Diag = .{};
+    const parsed = browser.parseDiag(argv, &diag) catch |e| {
+        try stderr.writeAll("error: ");
+        try writeParseReason(stderr, e, diag);
+        try stderr.writeAll("\n");
         // 고른 탭이 없다 — 고르는 법을 알린다(W9f 적대 리뷰 4 회차).
         if (e == error.MissingSurface) try stderr.writeAll("hint: pick a tab with `use <id>` (ids are in `list`), or open one with `open`\n");
         try stderr.flush();
@@ -1994,4 +2043,52 @@ test "--out: 긴 조각과 링크 확장도 panic 없이 거절하고 255바이�
     var target: [300]u8 = undefined;
     const count = try tmp.dir.readLink(io, "long-target", &target);
     try std.testing.expectEqualSlices(u8, &long, target[0..count]);
+}
+
+// ── M8: 파싱 오류 글이 틀린 낱말을 말한다(한 번짜리 CLI·repl 이 같은 `writeParseReason` 을 쓴다) ─────────────────────────────
+
+fn usageFor(args: []const []const u8, buf: []u8) ![]const u8 {
+    var diag: browser.Diag = .{};
+    const err = if (browser.parseDiag(args, &diag)) |_| return error.TestExpectedError else |e| e;
+    var w = std.Io.Writer.fixed(buf);
+    try writeUsage(&w, err, diag);
+    return w.buffered();
+}
+
+test "M8: 모르는 옵션·남는 인자·모르는 명령은 그 낱말을 말하고, 명령을 알면 머리에 그 이름을 붙인다" {
+    var buf: [16 * 1024]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{ "click", "--surface", "1", "--selector", "a", "--valeu", "x" }, &buf), "maru browser click: unknown option '--valeu'\n"));
+    try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{ "list", "--surface", "1" }, &buf), "maru browser list: unknown option '--surface'\n"));
+    try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{ "snapshot", "--surface", "1", "--interactive", "yes" }, &buf), "maru browser snapshot: too many arguments: 'yes' was not expected\n"));
+    try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{"nosuchcmd"}, &buf), "maru browser: unknown subcommand 'nosuchcmd'\n"));
+    // 이름이 없는 이유는 지금 글 그대로(머리만 명령 이름).
+    try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{"get-url"}, &buf), "maru browser get-url: --surface <id> is required\n"));
+    try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{}, &buf), "maru browser: a subcommand is required\n"));
+}
+
+test "M8: 되비추는 낱말 — 옵션의 `=` 뒤 값은 싣지 않고, 보이지 않는 글자는 빼고, 64 바이트에서 자른다" {
+    var buf: [16 * 1024]u8 = undefined;
+    const secret = try usageFor(&.{ "emulate", "--surface", "1", "--zoom-json=hunter2" }, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, secret, "maru browser emulate: unknown option '--zoom-json'\n"));
+    try std.testing.expect(std.mem.indexOf(u8, secret, "hunter2") == null);
+    const esc = try usageFor(&.{ "get-url", "--surface", "1", "--\x1b[2J\u{202e}x" }, &buf);
+    const first = esc[0..std.mem.indexOfScalar(u8, esc, '\n').?];
+    try std.testing.expectEqualStrings("maru browser get-url: unknown option '--[2Jx'", first);
+    const long = array_repeat.repeat("x", 200);
+    const l = try usageFor(&.{ "get-url", "--surface", "1", long }, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, l, "maru browser get-url: too many arguments: '" ++ array_repeat.repeat("x", 64) ++ "'… was not expected\n"));
+    // 글자 경계에서 자른다(3 바이트 글자가 64 바이트에 걸쳐도 깨진 바이트를 내지 않는다).
+    const ko = array_repeat.repeat("가", 30); // 90 바이트
+    const k = try usageFor(&.{ "get-url", "--surface", "1", ko }, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, k, "maru browser get-url: too many arguments: '" ++ array_repeat.repeat("가", 21) ++ "'…"));
+}
+
+test "M8: repl 의 파싱 오류도 낱말을 말한다" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer err.deinit();
+    var current: ?u64 = 3;
+    try std.testing.expect(!try replCommand(std.testing.io, std.testing.allocator, &.{ "click", "--valeu", "x" }, &current, &out.writer, &err.writer));
+    try std.testing.expectEqualStrings("error: unknown option '--valeu'\n", err.written());
 }

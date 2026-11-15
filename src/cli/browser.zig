@@ -239,15 +239,15 @@ pub fn parseTraceDuration(v: []const u8) ParseError!u32 {
     return @intFromFloat(@round(ms));
 }
 
-fn parseTraceArgs(rest: []const []const u8) ParseError!TraceCmd {
+fn parseTraceArgs(rest: []const []const u8, diag: *Diag) ParseError!TraceCmd {
     var surface: ?u64 = null;
     var action: ?TraceCmd.Action = null;
     var cmd: TraceCmd = .{ .surface_id = 0, .action = .run };
     var screenshots_given = false;
     var i: usize = 0;
     if (rest.len > 0 and !std.mem.startsWith(u8, rest[0], "-")) {
-        action = std.meta.stringToEnum(TraceCmd.Action, rest[0]) orelse return error.UnexpectedArgument;
-        if (action.? == .read or action.? == .run) return error.UnexpectedArgument;
+        action = std.meta.stringToEnum(TraceCmd.Action, rest[0]) orelse return diag.unexpected(rest[0]);
+        if (action.? == .read or action.? == .run) return diag.unexpected(rest[0]);
         i = 1;
     }
     while (i < rest.len) {
@@ -279,8 +279,8 @@ fn parseTraceArgs(rest: []const []const u8) ParseError!TraceCmd {
             cmd.json = true;
             i += 1;
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
-        } else return error.UnexpectedArgument;
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
     }
     cmd.action = action orelse .run;
     const start_opts = cmd.reload or cmd.duration_ms != null or screenshots_given;
@@ -351,7 +351,7 @@ fn parseGeoSpec(v: []const u8) ParseError!EmulateCmd.Geo {
 }
 
 /// `emulate --surface <id> (...)`(W9e①). 무리마다 값·`--no-x`(지움)·MCP 의 JSON 중 하나만, `--clear`·`--get` 은 무리와 함께 주지 않는다.
-fn parseEmulateArgs(rest: []const []const u8) ParseError!EmulateCmd {
+fn parseEmulateArgs(rest: []const []const u8, diag: *Diag) ParseError!EmulateCmd {
     var surface: ?u64 = null;
     var cmd: EmulateCmd = .{ .surface_id = 0 };
     var action: ?EmulateCmd.Action = null;
@@ -445,7 +445,7 @@ fn parseEmulateArgs(rest: []const []const u8) ParseError!EmulateCmd {
                     ch.* = '-';
                 };
                 if (eq(head, flag)) break k;
-            } else return error.UnknownOption;
+            } else return diag.unknownOption(a);
             if (cmd.json[gi] != null) return error.InvalidEmulateArgs;
             const text = try optValue(rest, &i, head);
             // JSON 꼴인지만 여기서 본다(값의 뜻은 서버가 — 까닭과 함께).
@@ -454,8 +454,8 @@ fn parseEmulateArgs(rest: []const []const u8) ParseError!EmulateCmd {
             if (!(std.json.validate(fba.allocator(), text) catch false)) return error.InvalidEmulateArgs;
             cmd.json[gi] = text;
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
-        } else return error.UnexpectedArgument;
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
     }
     if (ua_text) |u| {
         try Set.change(EmulateCmd.UserAgent, &cmd.user_agent, .{ .set = .{ .ua = u, .platform = platform, .client_hints = hints } });
@@ -822,6 +822,18 @@ pub fn writeDisplaySafeJsonText(w: *std.Io.Writer, text: []const u8) std.Io.Writ
     }
 }
 
+/// 오류 글에 되비추는 인자 낱말(M8) — `'…'` 로 감싸서. 옵션이면 `=` 뒤 값은 버린다(`--passwrd=…` 처럼 값에 비밀이 있을 수 있고, 틀린 것은
+/// 이름이다). 보이지 않는 글자(제어·양방향)는 빼고 64 바이트(글자 경계)에서 잘라 `…` 를 붙인다 — 붙여 넣은 페이지 글이 화면을 속이지 못하게.
+pub fn writeArgToken(w: *std.Io.Writer, token: []const u8) std.Io.Writer.Error!void {
+    const head = if (std.mem.startsWith(u8, token, "-")) token[0 .. std.mem.indexOfScalar(u8, token, '=') orelse token.len] else token;
+    const cap = 64;
+    var end = @min(head.len, cap);
+    while (end > 0 and end < head.len and (head[end] & 0xC0) == 0x80) end -= 1;
+    var buf: [cap]u8 = undefined;
+    const n = displaySafe(head[0..end], &buf);
+    try w.print("'{s}'{s}", .{ buf[0..n], if (end < head.len) "…" else "" });
+}
+
 fn displaySafe(s: []const u8, out: []u8) usize {
     var n: usize = 0;
     var i: usize = 0;
@@ -846,22 +858,52 @@ fn displaySafe(s: []const u8, out: []u8) usize {
 
 // ══ 파서 ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
-/// `maru browser` 뒤 인자를 파싱한다. `--help`/`-h` 있으면 `.help`.
+/// 파싱 실패의 「무엇이」 — Zig 오류는 값을 싣지 못하므로, 부른 쪽이 넘긴 이 칸에 문제가 된 낱말을 적는다(M8 — 전에는
+/// `unknown option` 만 말하고 어느 옵션인지 몰랐다). 낱말은 `args` 의 조각을 그대로 가리킨다(복사하지 않는다 — `args` 가 사는 동안만 쓴다).
+pub const Diag = struct {
+    /// 첫 낱말(하위 명령 이름 — 모르는 명령이면 그 낱말). 인자가 없으면 null.
+    command: ?[]const u8 = null,
+    /// 모르는 옵션(`UnknownOption`)이나 남는 인자(`UnexpectedArgument`)의 낱말.
+    token: ?[]const u8 = null,
+
+    /// 낱말을 적고 오류를 돌려준다 — `return diag.unknownOption(a);` 한 줄로 쓰게(적는 것을 잊은 자리가 생기지 않게).
+    fn unknownOption(self: *Diag, a: []const u8) ParseError {
+        self.token = a;
+        return error.UnknownOption;
+    }
+    fn unexpected(self: *Diag, a: []const u8) ParseError {
+        self.token = a;
+        return error.UnexpectedArgument;
+    }
+};
+
+/// `maru browser` 뒤 인자를 파싱한다. `--help`/`-h` 있으면 `.help`. 실패한 낱말이 필요 없는 곳(MCP 의 인자 검사·시험)의 얇은 겉.
 pub fn parse(args: []const []const u8) ParseError!Command {
+    var diag: Diag = .{};
+    return parseDiag(args, &diag);
+}
+
+/// `parse` 와 같고, 실패하면 `diag` 에 문제의 낱말을 남긴다(오류 글이 그 낱말을 말하게 — `browser_run.writeParseError`).
+pub fn parseDiag(args: []const []const u8, diag: *Diag) ParseError!Command {
+    diag.* = .{ .command = if (args.len > 0) args[0] else null };
     if (hasHelpFlag(args)) return .help;
+    return parseInner(args, diag);
+}
+
+fn parseInner(args: []const []const u8, diag: *Diag) ParseError!Command {
     if (args.len == 0) return error.MissingSubcommand;
     const sub = args[0];
     const rest = args[1..];
     if (eq(sub, "repl")) {
-        const p = try parseSurfaceArg(rest);
-        if (p.arg != null) return error.UnexpectedArgument;
+        const p = try parseSurfaceArg(rest, diag);
+        if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .repl = .{ .surface = p.surface } };
     }
     if (eq(sub, "list")) {
         // 발견 — 대상 surface 불요(전부 나열). 남는 인자(옵션/위치)는 에러(오타 방지).
         if (rest.len != 0) {
-            if (std.mem.startsWith(u8, rest[0], "-")) return error.UnknownOption;
-            return error.UnexpectedArgument;
+            if (std.mem.startsWith(u8, rest[0], "-")) return diag.unknownOption(rest[0]);
+            return diag.unexpected(rest[0]);
         }
         return .{ .request = .list };
     }
@@ -886,129 +928,129 @@ pub fn parse(args: []const []const u8) ParseError!Command {
                 if (t == 0 or t > wait_max_timeout_ms) return error.InvalidTimeout;
                 timeout_ms = t;
             } else if (std.mem.startsWith(u8, a, "-")) {
-                return error.UnknownOption;
-            } else return error.UnexpectedArgument;
+                return diag.unknownOption(a);
+            } else return diag.unexpected(a);
         }
         return .{ .request = .{ .open = .{ .url = url, .timeout_ms = timeout_ms } } };
     }
     if (eq(sub, "close")) {
-        const p = try parseSurfaceArg(rest);
+        const p = try parseSurfaceArg(rest, diag);
         const s = p.surface orelse return error.MissingSurface;
-        if (p.arg != null) return error.UnexpectedArgument;
+        if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .request = .{ .close = .{ .surface_id = s } } };
     }
     if (eq(sub, "dialog")) {
-        const p = try parseSurfaceArg(rest);
+        const p = try parseSurfaceArg(rest, diag);
         const s = p.surface orelse return error.MissingSurface;
-        if (p.arg != null) return error.UnexpectedArgument;
+        if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .request = .{ .dialog = .{ .surface_id = s } } };
     }
-    if (eq(sub, "handle-dialog")) return .{ .request = .{ .handle_dialog = try parseHandleDialogArgs(rest) } };
-    if (eq(sub, "upload")) return .{ .request = .{ .upload = try parseUploadArgs(rest) } };
-    if (eq(sub, "network")) return .{ .request = .{ .network = try parseNetworkArgs(rest) } };
-    if (eq(sub, "network-request")) return .{ .request = .{ .network_request = try parseNetworkRequestArgs(rest) } };
-    if (eq(sub, "network-record")) return .{ .request = .{ .network_record = try parseNetworkRecordArgs(rest) } };
-    if (eq(sub, "network-block")) return .{ .request = .{ .network_block = try parseNetworkBlockArgs(rest) } };
-    if (eq(sub, "network-mock")) return .{ .request = .{ .network_mock = try parseNetworkMockArgs(rest) } };
-    if (eq(sub, "emulate")) return .{ .request = .{ .emulate = try parseEmulateArgs(rest) } }; // W9e①
-    if (eq(sub, "trace")) return .{ .trace = try parseTraceArgs(rest) }; // W9e②
+    if (eq(sub, "handle-dialog")) return .{ .request = .{ .handle_dialog = try parseHandleDialogArgs(rest, diag) } };
+    if (eq(sub, "upload")) return .{ .request = .{ .upload = try parseUploadArgs(rest, diag) } };
+    if (eq(sub, "network")) return .{ .request = .{ .network = try parseNetworkArgs(rest, diag) } };
+    if (eq(sub, "network-request")) return .{ .request = .{ .network_request = try parseNetworkRequestArgs(rest, diag) } };
+    if (eq(sub, "network-record")) return .{ .request = .{ .network_record = try parseNetworkRecordArgs(rest, diag) } };
+    if (eq(sub, "network-block")) return .{ .request = .{ .network_block = try parseNetworkBlockArgs(rest, diag) } };
+    if (eq(sub, "network-mock")) return .{ .request = .{ .network_mock = try parseNetworkMockArgs(rest, diag) } };
+    if (eq(sub, "emulate")) return .{ .request = .{ .emulate = try parseEmulateArgs(rest, diag) } }; // W9e①
+    if (eq(sub, "trace")) return .{ .trace = try parseTraceArgs(rest, diag) }; // W9e②
     if (eq(sub, "navigate")) {
-        const p = try parseSurfaceArg(rest);
+        const p = try parseSurfaceArg(rest, diag);
         const s = p.surface orelse return error.MissingSurface;
         const url = p.arg orelse return error.MissingUrl;
         return .{ .request = .{ .navigate = .{ .surface_id = s, .url = url } } };
     }
     if (eq(sub, "get-url")) {
-        const p = try parseSurfaceArg(rest);
+        const p = try parseSurfaceArg(rest, diag);
         const s = p.surface orelse return error.MissingSurface;
-        if (p.arg != null) return error.UnexpectedArgument;
+        if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .request = .{ .get_url = .{ .surface_id = s } } };
     }
     if (eq(sub, "exec")) {
-        return .{ .request = .{ .exec = try parseExecArgs(rest) } };
+        return .{ .request = .{ .exec = try parseExecArgs(rest, diag) } };
     }
     if (eq(sub, "get-cookies")) {
-        const p = try parseSurfaceArg(rest);
+        const p = try parseSurfaceArg(rest, diag);
         const s = p.surface orelse return error.MissingSurface;
-        if (p.arg != null) return error.UnexpectedArgument;
+        if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .request = .{ .get_cookies = .{ .surface_id = s } } };
     }
     if (eq(sub, "set-cookie")) {
-        const ca = try parseCookieArgs(rest);
+        const ca = try parseCookieArgs(rest, diag);
         const s = ca.surface orelse return error.MissingSurface;
         const name = ca.name orelse return error.MissingName;
         const value = ca.value orelse return error.MissingValue;
         return .{ .request = .{ .set_cookie = .{ .surface_id = s, .name = name, .value = value, .domain = ca.domain, .path = ca.path, .secure = ca.secure } } };
     }
     if (eq(sub, "delete-cookie")) {
-        const ca = try parseCookieArgs(rest);
+        const ca = try parseCookieArgs(rest, diag);
         const s = ca.surface orelse return error.MissingSurface;
         const name = ca.name orelse return error.MissingName;
         // --value/--secure는 delete엔 무의미 — 관대하게 무시(파서가 받아도 안 씀).
         return .{ .request = .{ .delete_cookie = .{ .surface_id = s, .name = name, .domain = ca.domain, .path = ca.path } } };
     }
     if (eq(sub, "get-local-storage")) {
-        const ca = try parseCookieArgs(rest);
+        const ca = try parseCookieArgs(rest, diag);
         const s = ca.surface orelse return error.MissingSurface;
         const key = ca.key orelse return error.MissingKey;
         return .{ .request = .{ .get_local_storage = .{ .surface_id = s, .key = key } } };
     }
     if (eq(sub, "set-local-storage")) {
-        const ca = try parseCookieArgs(rest);
+        const ca = try parseCookieArgs(rest, diag);
         const s = ca.surface orelse return error.MissingSurface;
         const key = ca.key orelse return error.MissingKey;
         const value = ca.value orelse return error.MissingValue;
         return .{ .request = .{ .set_local_storage = .{ .surface_id = s, .key = key, .value = value } } };
     }
     if (eq(sub, "remove-local-storage")) {
-        const ca = try parseCookieArgs(rest);
+        const ca = try parseCookieArgs(rest, diag);
         const s = ca.surface orelse return error.MissingSurface;
         const key = ca.key orelse return error.MissingKey;
         return .{ .request = .{ .remove_local_storage = .{ .surface_id = s, .key = key } } };
     }
     if (eq(sub, "clear-storage")) {
-        const p = try parseSurfaceArg(rest);
+        const p = try parseSurfaceArg(rest, diag);
         const s = p.surface orelse return error.MissingSurface;
-        if (p.arg != null) return error.UnexpectedArgument;
+        if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .request = .{ .clear_storage = .{ .surface_id = s } } };
     }
     if (eq(sub, "back") or eq(sub, "forward") or eq(sub, "reload")) {
-        const p = try parseSurfaceArg(rest);
+        const p = try parseSurfaceArg(rest, diag);
         const s = p.surface orelse return error.MissingSurface;
-        if (p.arg != null) return error.UnexpectedArgument;
+        if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .request = if (eq(sub, "back")) .{ .back = .{ .surface_id = s } } else if (eq(sub, "forward")) .{ .forward = .{ .surface_id = s } } else .{ .reload = .{ .surface_id = s } } };
     }
     if (eq(sub, "hover")) {
-        const aa = try parseActArgs(rest, .{});
+        const aa = try parseActArgs(rest, .{}, diag);
         const s = aa.surface orelse return error.MissingSurface;
         return .{ .request = .{ .hover = .{ .surface_id = s, .locator = try actLocator(aa) } } };
     }
     if (eq(sub, "press")) {
-        const aa = try parseActArgs(rest, .{ .key = true });
+        const aa = try parseActArgs(rest, .{ .key = true }, diag);
         const s = aa.surface orelse return error.MissingSurface;
         const key = aa.key orelse return error.MissingPressKey;
         const loc: ?Locator = if (aa.selector == null and aa.ref == null and aa.role == null and aa.by_text == null and aa.by_label == null and !aa.hasRoleOptions() and !aa.hasMatchOptions()) null else try actLocator(aa);
         return .{ .request = .{ .press = .{ .surface_id = s, .key = key, .locator = loc } } };
     }
     if (eq(sub, "click")) {
-        const aa = try parseActArgs(rest, .{});
+        const aa = try parseActArgs(rest, .{}, diag);
         const s = aa.surface orelse return error.MissingSurface;
         return .{ .request = .{ .click = .{ .surface_id = s, .locator = try actLocator(aa) } } };
     }
     if (eq(sub, "type")) {
-        const aa = try parseActArgs(rest, .{ .text = true });
+        const aa = try parseActArgs(rest, .{ .text = true }, diag);
         const s = aa.surface orelse return error.MissingSurface;
         const loc = try actLocator(aa);
         const text = aa.text orelse return error.MissingText;
         return .{ .request = .{ .type_text = .{ .surface_id = s, .locator = loc, .text = text } } };
     }
     if (eq(sub, "scroll")) {
-        const aa = try parseActArgs(rest, .{});
+        const aa = try parseActArgs(rest, .{}, diag);
         const s = aa.surface orelse return error.MissingSurface;
         return .{ .request = .{ .scroll = .{ .surface_id = s, .locator = try actLocator(aa) } } };
     }
     if (eq(sub, "wait")) {
-        const wa = try parseWaitArgs(rest);
+        const wa = try parseWaitArgs(rest, diag);
         const s = wa.surface orelse return error.MissingSurface;
         // 로케이터(role·text·label)면 visible(W9b②-3). `--selector` 는 `--visible` 이 있어도 selector 조건으로 보낸다(같은 뜻 — 옛 앱도 안다).
         const has_locator = wa.loc.role != null or wa.loc.by_text != null or wa.loc.by_label != null;
@@ -1069,9 +1111,9 @@ pub fn parse(args: []const []const u8) ParseError!Command {
                 scale = parseScale(a["--scale=".len..]) catch return error.InvalidScale;
                 i += 1;
             } else if (std.mem.startsWith(u8, a, "-")) {
-                return error.UnknownOption;
+                return diag.unknownOption(a);
             } else {
-                return error.UnexpectedArgument; // screenshot은 위치 인자 없음
+                return diag.unexpected(a); // screenshot은 위치 인자 없음
             }
         }
         const s = surface orelse return error.MissingSurface;
@@ -1111,9 +1153,9 @@ pub fn parse(args: []const []const u8) ParseError!Command {
                 selector = a["--selector=".len..];
                 i += 1;
             } else if (std.mem.startsWith(u8, a, "-")) {
-                return error.UnknownOption;
+                return diag.unknownOption(a);
             } else {
-                return error.UnexpectedArgument;
+                return diag.unexpected(a);
             }
         }
         const s = surface orelse return error.MissingSurface;
@@ -1137,9 +1179,9 @@ pub fn parse(args: []const []const u8) ParseError!Command {
                 clear = true;
                 i += 1;
             } else if (std.mem.startsWith(u8, a, "-")) {
-                return error.UnknownOption;
+                return diag.unknownOption(a);
             } else {
-                return error.UnexpectedArgument;
+                return diag.unexpected(a);
             }
         }
         const s = surface orelse return error.MissingSurface;
@@ -1148,7 +1190,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     return error.UnknownSubcommand;
 }
 
-fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
+fn parseExecArgs(rest: []const []const u8, diag: *Diag) ParseError!ExecCmd {
     var surface: ?u64 = null;
     var script: ?[]const u8 = null;
     var args_json: ?[]const u8 = null;
@@ -1192,13 +1234,13 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
             i += 1;
         } else if (eq(arg, "--")) {
             // 그 뒤 하나는 `-` 로 시작해도 식이다(W9f).
-            if (script != null or rest.len != i + 2) return if (rest.len == i + 1) error.MissingScript else error.UnexpectedArgument;
+            if (script != null or rest.len != i + 2) return if (rest.len == i + 1) error.MissingScript else diag.unexpected(if (script != null) rest[i + 1] else rest[i + 2]);
             script = rest[i + 1];
             i += 2;
         } else if (std.mem.startsWith(u8, arg, "-")) {
-            return error.UnknownOption;
+            return diag.unknownOption(arg);
         } else {
-            if (script != null) return error.UnexpectedArgument;
+            if (script != null) return diag.unexpected(arg);
             script = arg;
             i += 1;
         }
@@ -1218,7 +1260,7 @@ const Parsed = struct { surface: ?u64, arg: ?[]const u8 };
 
 /// `--surface <N>`(또는 `--surface=<N>`) + 위치 인자 **최대 1개**(url/script)를 뽑는다. 알 수 없는 `-`옵션·둘째 위치
 /// 인자는 에러. sessions.parseListArgs 규율(양형태 옵션, `-`프리픽스=옵션).
-fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
+fn parseSurfaceArg(rest: []const []const u8, diag: *Diag) ParseError!Parsed {
     var surface: ?u64 = null;
     var arg: ?[]const u8 = null;
     var i: usize = 0;
@@ -1233,13 +1275,13 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
             i += 1;
         } else if (eq(a, "--")) {
             // 그 뒤 하나는 `-` 로 시작해도 위치 인자다(W9f).
-            if (arg != null or rest.len > i + 2) return error.UnexpectedArgument;
+            if (arg != null or rest.len > i + 2) return diag.unexpected(if (arg != null and rest.len > i + 1) rest[i + 1] else if (rest.len > i + 2) rest[i + 2] else a);
             if (rest.len == i + 2) arg = rest[i + 1];
             i = rest.len;
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
+            return diag.unknownOption(a);
         } else {
-            if (arg != null) return error.UnexpectedArgument; // 둘째 위치 인자 금지
+            if (arg != null) return diag.unexpected(a); // 둘째 위치 인자 금지
             arg = a;
             i += 1;
         }
@@ -1248,7 +1290,7 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
 }
 
 /// `handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]`(W9c②).
-fn parseHandleDialogArgs(rest: []const []const u8) ParseError!@FieldType(Request, "handle_dialog") {
+fn parseHandleDialogArgs(rest: []const []const u8, diag: *Diag) ParseError!@FieldType(Request, "handle_dialog") {
     var surface: ?u64 = null;
     var accept: ?bool = null;
     var text: ?[]const u8 = null;
@@ -1277,8 +1319,8 @@ fn parseHandleDialogArgs(rest: []const []const u8) ParseError!@FieldType(Request
             if (t == 0 or t > max_dialog_token) return error.InvalidDialogToken;
             dialog = t;
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
-        } else return error.UnexpectedArgument;
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
     }
     return .{ .surface_id = surface orelse return error.MissingSurface, .accept = accept orelse return error.MissingAnswer, .text = text, .dialog = dialog };
 }
@@ -1304,7 +1346,7 @@ const WaitArgs = struct {
     loc: ActArgs = .{},
 };
 
-fn parseWaitArgs(rest: []const []const u8) ParseError!WaitArgs {
+fn parseWaitArgs(rest: []const []const u8, diag: *Diag) ParseError!WaitArgs {
     var r: WaitArgs = .{};
     var i: usize = 0;
     while (i < rest.len) {
@@ -1356,9 +1398,9 @@ fn parseWaitArgs(rest: []const []const u8) ParseError!WaitArgs {
             if (timeout == 0 or timeout > wait_max_timeout_ms) return error.InvalidTimeout;
             r.timeout_ms = timeout;
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
+            return diag.unknownOption(a);
         } else {
-            return error.UnexpectedArgument;
+            return diag.unexpected(a);
         }
     }
     return r;
@@ -1366,7 +1408,7 @@ fn parseWaitArgs(rest: []const []const u8) ParseError!WaitArgs {
 
 /// cookie/localStorage 명령 옵션(`--surface`·`--name`·`--key`·`--value`·`--domain`·`--path`·`--secure`)을 뽑는다. 위치
 /// 인자 금지, 알 수 없는 `-`옵션 에러. 각 값 옵션은 `--opt val`·`--opt=val` 양형태. 서브커맨드가 필요 필드만 검사(파서는 공유).
-fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
+fn parseCookieArgs(rest: []const []const u8, diag: *Diag) ParseError!CookieArgs {
     var r: CookieArgs = .{ .surface = null, .name = null, .key = null, .value = null, .domain = null, .path = null, .selector = null, .ref = null, .text = null, .secure = false };
     var i: usize = 0;
     while (i < rest.len) {
@@ -1393,9 +1435,9 @@ fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
         } else if (matchOpt(a, "--text")) {
             r.text = try optValue(rest, &i, "--text");
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
+            return diag.unknownOption(a);
         } else {
-            return error.UnexpectedArgument; // cookie/localStorage 명령은 위치 인자 없음
+            return diag.unexpected(a); // cookie/localStorage 명령은 위치 인자 없음
         }
     }
     return r;
@@ -1430,7 +1472,7 @@ const ActExtras = struct { text: bool = false, key: bool = false };
 
 /// `network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]`(W9d①).
 /// `--type` 은 쉼표로 여럿, 되풀이해도 된다. 값은 서버가 다시 본다 — 여기서도 보는 것은 틀린 인자를 연결 전에 알리려고다.
-fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
+fn parseNetworkArgs(rest: []const []const u8, diag: *Diag) ParseError!NetworkCmd {
     var surface: ?u64 = null;
     var cmd: NetworkCmd = .{ .surface_id = 0 };
     var i: usize = 0;
@@ -1489,8 +1531,8 @@ fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
             cmd.mocked = true;
             i += 1;
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
-        } else return error.UnexpectedArgument;
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
     }
     cmd.surface_id = surface orelse return error.MissingSurface;
     return cmd;
@@ -1498,7 +1540,7 @@ fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
 
 /// `network-request --surface <id> --req <n> [--body [--offset n] [--max-bytes n] [--out f]]`(W9d① — 번호는 `network` 가 준 것, W9d② 본문 —
 /// 본문 칸 셋은 `--body` 를 함의한다).
-fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!NetworkRequestCmd {
+fn parseNetworkRequestArgs(rest: []const []const u8, diag: *Diag) ParseError!NetworkRequestCmd {
     var surface: ?u64 = null;
     var req: ?u64 = null;
     var cmd: NetworkRequestCmd = .{ .surface_id = 0, .req = 0 };
@@ -1528,8 +1570,8 @@ fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!NetworkRequestCm
             if (v.len == 0) return error.MissingOutValue;
             cmd.out = v;
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
-        } else return error.UnexpectedArgument;
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
     }
     // 본문 칸(--offset·--max-bytes·--out)은 본문을 청한다는 뜻이다 — --body 를 빠뜨려도 받는다(MCP 의 인자 하나하나가 홀로도 통하게).
     if (cmd.offset != null or cmd.max_bytes != null or cmd.out != null) cmd.body = true;
@@ -1542,7 +1584,7 @@ fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!NetworkRequestCm
 }
 
 /// `network-record --surface <id> (--on | --off)`(W9d②).
-fn parseNetworkRecordArgs(rest: []const []const u8) ParseError!@FieldType(Request, "network_record") {
+fn parseNetworkRecordArgs(rest: []const []const u8, diag: *Diag) ParseError!@FieldType(Request, "network_record") {
     var surface: ?u64 = null;
     var on: ?bool = null;
     var i: usize = 0;
@@ -1555,15 +1597,15 @@ fn parseNetworkRecordArgs(rest: []const []const u8) ParseError!@FieldType(Reques
             on = eq(a, "--on");
             i += 1;
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
-        } else return error.UnexpectedArgument;
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
     }
     return .{ .surface_id = surface orelse return error.MissingSurface, .on = on orelse return error.MissingRecordSwitch };
 }
 
 /// `network-block --surface <id> (--add P... [--type t,..] | --remove P... | --rule N... | --clear | --list | --strict on|off)`(W9d③) — MCP 꼴
 /// `--action a [--pattern P...] [--rule N...] [--type t,..] [--on|--off]` 도 받는다. 패턴의 문법은 서버가 본다(`pattern_invalid:<why>`).
-fn parseNetworkBlockArgs(rest: []const []const u8) ParseError!NetworkBlockCmd {
+fn parseNetworkBlockArgs(rest: []const []const u8, diag: *Diag) ParseError!NetworkBlockCmd {
     var surface: ?u64 = null;
     var cmd: NetworkBlockCmd = .{ .surface_id = 0 };
     var action: ?NetworkBlockCmd.Action = null;
@@ -1622,8 +1664,8 @@ fn parseNetworkBlockArgs(rest: []const []const u8) ParseError!NetworkBlockCmd {
             const v = try optValue(rest, &i, "--action");
             try setAction(&action, std.meta.stringToEnum(NetworkBlockCmd.Action, v) orelse return error.InvalidBlockAction);
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
-        } else return error.UnexpectedArgument;
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
     }
     // `--rule` 만 주면 그 규칙을 지운다.
     if (action == null and cmd.rule_count > 0) action = .remove;
@@ -1642,7 +1684,7 @@ fn parseNetworkBlockArgs(rest: []const []const u8) ParseError!NetworkBlockCmd {
 
 /// `network-mock --surface <id> (--add P [응답 옵션] | --remove P | --rule N... | --clear | --list | --strict on|off)`(W9d④) — MCP 꼴
 /// `--action a [--pattern P] [--rule N...] [--type t,..] [--method m,..] [--on|--off]` 도 받는다. 패턴·응답의 검사는 서버가 한다.
-fn parseNetworkMockArgs(rest: []const []const u8) ParseError!NetworkMockCmd {
+fn parseNetworkMockArgs(rest: []const []const u8, diag: *Diag) ParseError!NetworkMockCmd {
     var surface: ?u64 = null;
     var cmd: NetworkMockCmd = .{ .surface_id = 0 };
     var action: ?NetworkBlockCmd.Action = null;
@@ -1728,8 +1770,8 @@ fn parseNetworkMockArgs(rest: []const []const u8) ParseError!NetworkMockCmd {
             const v = try optValue(rest, &i, "--action");
             try setAction(&action, std.meta.stringToEnum(NetworkBlockCmd.Action, v) orelse return error.InvalidMockAction);
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
-        } else return error.UnexpectedArgument;
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
     }
     if (action == null and cmd.rule_count > 0) action = .remove;
     cmd.action = action orelse return error.InvalidMockAction;
@@ -1746,7 +1788,7 @@ fn parseNetworkMockArgs(rest: []const []const u8) ParseError!NetworkMockCmd {
 }
 
 /// `upload --surface <id> <로케이터> [--] <file>...`(W9c③) — 로케이터 옵션은 click 과 같고, 위치 인자는 파일이다(`--` 뒤는 `-` 로 시작해도 파일).
-fn parseUploadArgs(rest: []const []const u8) ParseError!UploadCmd {
+fn parseUploadArgs(rest: []const []const u8, diag: *Diag) ParseError!UploadCmd {
     var opts: [64][]const u8 = undefined;
     var n_opts: usize = 0;
     var files: [max_upload_files][]const u8 = undefined;
@@ -1761,7 +1803,7 @@ fn parseUploadArgs(rest: []const []const u8) ParseError!UploadCmd {
         }
         if (!positional_only and std.mem.startsWith(u8, a, "-")) {
             // 값을 받는 옵션이면 다음 토큰도 옵션 쪽으로(`--by-label Resume`).
-            if (n_opts + 2 > opts.len) return error.UnexpectedArgument;
+            if (n_opts + 2 > opts.len) return diag.unexpected(a);
             opts[n_opts] = a;
             n_opts += 1;
             if (takesValue(a) and i + 1 < rest.len) {
@@ -1775,7 +1817,7 @@ fn parseUploadArgs(rest: []const []const u8) ParseError!UploadCmd {
         files[n_files] = a;
         n_files += 1;
     }
-    const aa = try parseActArgs(opts[0..n_opts], .{});
+    const aa = try parseActArgs(opts[0..n_opts], .{}, diag);
     const s = aa.surface orelse return error.MissingSurface;
     const loc = try actLocator(aa);
     if (n_files == 0) return error.MissingFiles;
@@ -1804,7 +1846,7 @@ pub fn freeUpload(gpa: std.mem.Allocator, cmd: UploadCmd) void {
     for (cmd.paths()) |p| gpa.free(p);
 }
 
-fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs {
+fn parseActArgs(rest: []const []const u8, extras: ActExtras, diag: *Diag) ParseError!ActArgs {
     var r: ActArgs = .{};
     var i: usize = 0;
     while (i < rest.len) {
@@ -1838,9 +1880,9 @@ fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs 
         } else if (extras.key and matchOpt(a, "--key")) {
             r.key = try optValue(rest, &i, "--key");
         } else if (std.mem.startsWith(u8, a, "-")) {
-            return error.UnknownOption;
+            return diag.unknownOption(a);
         } else {
-            return error.UnexpectedArgument;
+            return diag.unexpected(a);
         }
     }
     return r;
@@ -3990,6 +4032,95 @@ test "parse exec: args와 max result와 out을 순서 무관하게 적용" {
     try testing.expectError(error.InvalidMaxResultBytes, parse(&.{ "exec", "--surface", "5", "--max-result-bytes", "0", "1" }));
     try testing.expectError(error.InvalidMaxResultBytes, parse(&.{ "exec", "--surface", "5", "--max-result-bytes", "16777217", "1" }));
     try testing.expectError(error.MissingArgsValue, parse(&.{ "exec", "--surface", "5", "--args" }));
+}
+
+// ── M8: 모르는 옵션·남는 인자는 그 낱말을 말한다 ──────────────────────────────────────────────────────────────
+// 에이전트는 「unknown option」 만으로는 어느 옵션이 틀렸는지 몰라 추측으로 다시 쳤다. 낱말을 싣는 자리는 파서 곳곳(하위 파서
+// 열세 개)에 흩어져 있어 하나라도 `diag` 를 안 채우면 그 자리만 이름 없이 나간다 — 그래서 **자리마다 한 사례**를 표로 둔다.
+
+test "M8: 모르는 옵션·남는 인자는 자리마다 그 낱말을 Diag 에 남긴다" {
+    const Case = struct { args: []const []const u8, err: ParseError, token: []const u8 };
+    const cases = [_]Case{
+        // trace(동작 낱말·옵션·남는 인자)
+        .{ .args = &.{ "trace", "bogus", "--surface", "1" }, .err = error.UnexpectedArgument, .token = "bogus" },
+        .{ .args = &.{ "trace", "read", "--surface", "1" }, .err = error.UnexpectedArgument, .token = "read" },
+        .{ .args = &.{ "trace", "--surface", "1", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "trace", "stop", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        // emulate(MCP 꼴의 모르는 무리·옵션·남는 인자)
+        .{ .args = &.{ "emulate", "--surface", "1", "--zoom-json=1" }, .err = error.UnknownOption, .token = "--zoom-json=1" },
+        .{ .args = &.{ "emulate", "--surface", "1", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "emulate", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        // repl·list·open·close·dialog
+        .{ .args = &.{ "repl", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "repl", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "list", "--surface", "1" }, .err = error.UnknownOption, .token = "--surface" },
+        .{ .args = &.{ "list", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "open", "--surface", "3" }, .err = error.UnknownOption, .token = "--surface" },
+        .{ .args = &.{ "open", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "close", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "dialog", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        // 위치 인자 하나짜리(parseSurfaceArg)와 그것을 쓰는 명령
+        .{ .args = &.{ "get-url", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "get-cookies", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "clear-storage", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "back", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "navigate", "--surface", "1", "--bogus", "x" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "navigate", "--surface", "1", "a", "b" }, .err = error.UnexpectedArgument, .token = "b" },
+        .{ .args = &.{ "navigate", "--surface", "1", "--", "a", "b" }, .err = error.UnexpectedArgument, .token = "b" },
+        .{ .args = &.{ "navigate", "--surface", "1", "a", "--", "b" }, .err = error.UnexpectedArgument, .token = "b" },
+        // screenshot·snapshot·console(parse 안의 고리)
+        .{ .args = &.{ "screenshot", "--surface", "1", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "screenshot", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "snapshot", "--surface", "1", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "snapshot", "--surface", "1", "--interactive", "yes" }, .err = error.UnexpectedArgument, .token = "yes" },
+        .{ .args = &.{ "console", "--surface", "1", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "console", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        // exec(옵션·둘째 식·`--` 뒤 둘)
+        .{ .args = &.{ "exec", "--surface", "1", "--bogus", "1" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "exec", "--surface", "1", "a", "b" }, .err = error.UnexpectedArgument, .token = "b" },
+        .{ .args = &.{ "exec", "--surface", "1", "--", "a", "b" }, .err = error.UnexpectedArgument, .token = "b" },
+        .{ .args = &.{ "exec", "--surface", "1", "a", "--", "b" }, .err = error.UnexpectedArgument, .token = "b" },
+        // handle-dialog·wait·cookie 무리
+        .{ .args = &.{ "handle-dialog", "--surface", "1", "--accept", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "handle-dialog", "--surface", "1", "--accept", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "wait", "--surface", "1", "--ref", "n4" }, .err = error.UnknownOption, .token = "--ref" },
+        .{ .args = &.{ "wait", "--surface", "1", "--load", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "set-cookie", "--surface", "1", "--name", "n", "--value", "v", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "get-local-storage", "--surface", "1", "--key", "k", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        // network 무리
+        .{ .args = &.{ "network", "--surface", "1", "--body" }, .err = error.UnknownOption, .token = "--body" },
+        .{ .args = &.{ "network", "--surface", "1", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "network-request", "--surface", "1", "--req", "2", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "network-request", "--surface", "1", "--req", "2", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "network-record", "--surface", "9", "--on", "--yes" }, .err = error.UnknownOption, .token = "--yes" },
+        .{ .args = &.{ "network-record", "--surface", "9", "--on", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "network-block", "--surface", "9", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "network-block", "--surface", "9", "--list", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "network-mock", "--surface", "9", "--bogus" }, .err = error.UnknownOption, .token = "--bogus" },
+        .{ .args = &.{ "network-mock", "--surface", "9", "--list", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        // act·upload(upload 의 옵션은 act 파서가 본다)
+        .{ .args = &.{ "click", "--surface", "3", "--selector", "#b", "--valeu", "x" }, .err = error.UnknownOption, .token = "--valeu" },
+        .{ .args = &.{ "click", "--surface", "3", "--selector", "#b", "extra" }, .err = error.UnexpectedArgument, .token = "extra" },
+        .{ .args = &.{ "upload", "--surface", "1", "--selector", "#f", "--remember", "a.txt" }, .err = error.UnknownOption, .token = "--remember" },
+    };
+    for (cases) |c| {
+        var diag: Diag = .{};
+        const got = if (parseDiag(c.args, &diag)) |_| {
+            std.debug.print("M8: {s} 가 통과했다\n", .{c.args[0]});
+            return error.TestExpectedError;
+        } else |e| e;
+        errdefer std.debug.print("M8: {s} … → {s}, token={?s}\n", .{ c.args[0], @errorName(got), diag.token });
+        try testing.expectEqual(c.err, got);
+        try testing.expectEqualStrings(c.token, diag.token orelse "(none)");
+        try testing.expectEqualStrings(c.args[0], diag.command.?);
+    }
+    // upload 의 옵션 칸(64)이 넘친다 — 넘친 그 옵션.
+    var many: [70][]const u8 = undefined;
+    many[0] = "upload";
+    for (many[1..]) |*m| m.* = "--exact";
+    var diag: Diag = .{};
+    try testing.expectError(error.UnexpectedArgument, parseDiag(&many, &diag));
+    try testing.expectEqualStrings("--exact", diag.token.?);
 }
 
 test "parse: --help → .help(파싱보다 우선)" {

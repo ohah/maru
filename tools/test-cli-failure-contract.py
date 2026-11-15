@@ -558,7 +558,7 @@ def serve_script(sock, script, errors):
 
 
 def check_scripted_endpoint(cli, root, env, control, run, record):
-    """Answers that need an app, scripted through the endpoint: `maru mcp`'s screenshot image (M5)."""
+    """Answers that need an app, scripted through the endpoint: `maru mcp`'s screenshot image (M5) and which -32002 gets a hint (M7)."""
     sock = control / 'fixture.sock'
     sock.unlink(missing_ok=True)  # the earlier endpoint closed but left its file behind
     png = tiny_png()
@@ -581,6 +581,36 @@ def check_scripted_endpoint(cli, root, env, control, run, record):
     answer = json.loads(p.stdout.splitlines()[1])
     content = answer['result']['content'][0]
     assert not answer['result']['isError'] and content['type'] == 'image' and base64.b64decode(content['data']) == png, answer
+
+    # M7: a -32002 that names its reason (data.reason) gets no pane hint — the server already said why, and that rejection only
+    # comes after the pane check. Only the uniform rejection (no data, the default message) gets the fixed two-way hint;
+    # the CLI and `maru mcp` render through the same code.
+    def refusal(message, reason=None):
+        def frames(req):
+            error = {'code': -32002, 'message': message}
+            if reason:
+                error['data'] = {'reason': reason}
+            return [{'jsonrpc': '2.0', 'id': req['id'], 'error': error}]
+        return frames
+    reasoned = "recording response bodies needs this tab's network permission first — run maru browser network on this tab"
+    hint = 'hint: maru does not say why it refused'
+    errors = []
+    thread = serve_script(sock, [refusal(reasoned, 'needs_network_permission'), refusal('Unauthorized'),
+                                 refusal(reasoned, 'needs_network_permission'), refusal('Unauthorized')], errors)
+    p = run(['browser', 'network-record', '--surface', '1', '--on'], 1)
+    assert reasoned in p.stdout and 'hint:' not in p.stdout + p.stderr, (p.returncode, p.stdout, p.stderr)
+    p = run(['browser', 'get-url', '--surface', '1'], 1)
+    assert 'error: Unauthorized (-32002)' in p.stdout and hint in p.stdout and 'permission' in p.stdout, (p.returncode, p.stdout, p.stderr)
+    lines = [json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-06-18'}}),
+             json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'browser_network_record', 'arguments': {'surface': 1, 'on': True}}}),
+             json.dumps({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {'name': 'browser_get_url', 'arguments': {'surface': 1}}})]
+    p = subprocess.run([str(cli), 'mcp'], cwd=root, env=env, input='\n'.join(lines) + '\n', capture_output=True, text=True, timeout=15)
+    record(['mcp', '<-32002 with and without a reason>'], p.returncode, p.stdout, p.stderr)
+    thread.join(timeout=10)
+    assert not thread.is_alive() and not errors, errors
+    with_reason, uniform = [json.loads(line)['result'] for line in p.stdout.splitlines()[1:]]
+    assert with_reason['isError'] and reasoned in with_reason['content'][0]['text'] and 'hint:' not in with_reason['content'][0]['text'], with_reason
+    assert uniform['isError'] and hint in uniform['content'][0]['text'], uniform
 
 
 def check_out_preflight(cli, root, home, env, run, record):

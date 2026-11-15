@@ -24,6 +24,8 @@ pub const Context = struct {
     syntax_mod: *std.Build.Module,
     maru_mod: *std.Build.Module,
     build_options_test_mod: *std.Build.Module,
+    /// `src/main.zig` 를 다시 컴파일하는 복원 시험 exe 가 `maru --version` 값(build.zig.zon)을 받는 자리.
+    maru_version_mod: *std.Build.Module,
     exe: *std.Build.Step.Compile,
     session_host_tests: *std.Build.Step.Compile,
     run_core_tests: *std.Build.Step.Run,
@@ -5993,6 +5995,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .imports = &.{
                     .{ .name = "maru", .module = maru_mod },
                     .{ .name = "session_host_build_options", .module = restore_test_options.createModule() },
+                    .{ .name = "maru_version", .module = ctx.maru_version_mod },
                 },
             }),
         });

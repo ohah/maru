@@ -60,6 +60,8 @@ const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.
 const notification_runtime_contract = @import("platform/macos/session_host/release_adapter_notification_runtime_contract.zig");
 const notification_runtime_child_command = notification_runtime_contract.child_command;
 const session_host_build_options = @import("session_host_build_options");
+// `maru --version` 이 내는 값(build.zig.zon `.version` — 릴리스 태그·Info.plist 와 같은 단일 출처). build.zig 가 넣는다.
+const maru_version = @import("maru_version");
 const session_host_admin_cli = if (builtin.os.tag == .macos)
     @import("platform/macos/session_host/admin_cli.zig")
 else
@@ -395,6 +397,22 @@ fn dispatch(
     if (std.mem.eql(u8, command, notification_runtime_child_command)) {
         try runNotificationReleaseRuntimeChild(io, allocator, &args, stdout, stderr);
         return;
+    }
+
+    // 앱·소켓·HOME 없이 답한다 — 바깥 도구(에이전트 스킬)가 「설치된 maru 가 너무 옛 판인가」를 묻는 자리다.
+    // 단독 요청만 받는다: 뒤에 무엇이 붙으면 어느 요청을 따를지 추측하지 않고 usage 로 거절한다(`--help extra` 와 같다).
+    if (maru.cli.version.isCommand(command)) {
+        switch (maru.cli.version.parse(args.next())) {
+            .print => {
+                try maru.cli.version.write(stdout, maru_version.version);
+                try stdout.flush();
+                return;
+            },
+            .usage_error => {
+                try stderr.writeAll(maru.cli.version.usage);
+                return error.UnknownCommand;
+            },
+        }
     }
 
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
@@ -16469,6 +16487,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru runtime end <32-lower-hex-runtime-id> [--yes]
         \\  maru attach [--read-only | --take-over] <32-lower-hex-runtime-id>
         \\  maru trace anonymize <input.trace> [output.trace]
+        \\  maru --version
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
@@ -16502,6 +16521,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  browser    control web surfaces, storage, input and captures (asks for confirmation; `browser --help`)
         \\  mcp        serve the browser commands as MCP tools over stdio (for agents: `claude mcp add maru -- maru mcp`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
+        \\  --version  print this build's version as one line, `maru <version>` (also `maru version`; no app needed)
         \\
     );
     try writer.flush();

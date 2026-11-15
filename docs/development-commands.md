@@ -266,6 +266,13 @@ root `maru --help`/`maru -h`는 단독 요청으로 지원한다. `terminfo`와 
 인자 판정·실제 process 부작용·relay 회귀 검증을 실행한다. 새 help 요청은 cache 생성,
 stdin relay, host 시작 및 control socket 연결을 하지 않는다.
 
+`maru --version`(별칭 `maru version`)은 `maru <version>` 한 줄을 stdout 에 쓰고 exit 0이다. 값의 뜻은
+[배포 문서의 버전 정책](distribution.md#버전-정책)이 소유한다. 앱·control socket·HOME·cache 없이 답한다.
+단독 요청만 받는다 — `--version --help`·`--version extra`처럼 뒤에 무엇이 붙으면 stderr `usage: maru --version`과
+exit 1이다. 짧은 플래그(`-V`/`-v`)는 없고 하위 명령(`maru browser --version` 등)은 버전을 따로 내지 않는다.
+순수 판정은 `src/cli/version.zig`(`test-cli-failure-contract`), 실제 출력·zon 값 대조·HOME 무변경은
+`tools/test-cli-failure-contract.py`(`test-cli-failure-process`)가 검사한다.
+
 ### CLI 대상 옵션 단일 지정
 
 실행 요청의 `sessions list --window` 및 `editor lsp trust revoke/forget --volume`는

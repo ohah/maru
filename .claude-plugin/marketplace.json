@@ -1,0 +1,12 @@
+{
+  "name": "maru",
+  "owner": { "name": "ohah", "url": "https://github.com/ohah" },
+  "description": "Claude Code plugins for the Maru terminal.",
+  "plugins": [
+    {
+      "name": "maru-browser",
+      "source": "./plugins/maru-browser",
+      "description": "Drive Maru's built-in browser panes with the maru browser CLI."
+    }
+  ]
+}

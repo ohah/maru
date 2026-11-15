@@ -1,0 +1,10 @@
+{
+  "name": "maru-browser",
+  "version": "0.1.0",
+  "description": "Teach agents running inside a Maru terminal pane to drive Maru's browser panes with the maru browser CLI.",
+  "author": { "name": "ohah", "url": "https://github.com/ohah" },
+  "homepage": "https://github.com/ohah/maru/tree/main/plugins/maru-browser",
+  "repository": "https://github.com/ohah/maru",
+  "license": "MIT",
+  "keywords": ["maru", "browser", "terminal", "chromium", "automation"]
+}

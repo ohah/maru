@@ -12305,6 +12305,23 @@ pub fn build(b: *std.Build) void {
     const doc_links_step = b.step("check-doc-links", "Check cross-document links and section anchors");
     doc_links_step.dependOn(&run_doc_link_tests.step);
 
+    // maru-browser 에이전트 플러그인(`plugins/maru-browser/`)의 스킬 글 ↔ `maru browser` CLI 동기화 판정자
+    // (control-plane-browser.md §9.6.3). 스킬 예시를 **진짜 파서**에 넣어야 해서 `maru` 모듈을 쓴다. 새 mise 태스크를 만들지 않고
+    // `test` 에 매단다 — `check`·`check-without-boundaries` 둘 다 이미 `test` 를 포함하므로 check-task-split 이 지키는 두 목록이
+    // 그대로다. 스킬 `.md` 는 빌드 입력이 아니라 실행 중에 읽으므로 캐시된 통과를 재사용하지 않게 늘 다시 돌린다.
+    const plugin_skill_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/plugin_skill_sync.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    }) });
+    const run_plugin_skill_tests = b.addRunArtifact(plugin_skill_tests);
+    run_plugin_skill_tests.setCwd(b.path("."));
+    run_plugin_skill_tests.has_side_effects = true;
+    run_plugin_skill_tests.addArg("--maru-expect-tests=9");
+    b.step("test-plugin-skill", "Check the maru-browser agent plugin against the real maru browser parser and help").dependOn(&run_plugin_skill_tests.step);
+    test_step.dependOn(&run_plugin_skill_tests.step);
+
     // 문서에서 **코드로** 나가는 참조(`` `심볼`(파일.zig:1234) ``)를 지킨다 — 위 게이트가 문서 사이를
     // 보는 것과 짝이다. 좌표는 손으로 관리하는데 코드는 자라므로 조용히 썩는다(실측 2026-08-29: 41건,
     // 최대 3,911줄 차이). 같은 이유로 cwd를 루트에 고정한다 — 문서와 소스를 런타임에 읽는다.

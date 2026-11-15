@@ -36,16 +36,18 @@ turn that on in `/plugin`. If you already have another marketplace called `maru`
 ## Use
 
 Ask for a browser task from a Maru pane ("open localhost:3000 and check the sign-in button works"), or run
-`/maru-browser`. If another browser skill keeps winning, add a line to your project's `CLAUDE.md`:
-"Inside Maru, use the maru-browser skill for browser tasks."
+`/maru-browser:maru-browser` (plugin skills are namespaced). If another browser skill keeps winning, add a line
+to your project's `CLAUDE.md`: "Inside Maru, use the maru-browser skill for browser tasks."
 
 ## What it allows — read this
 
 - **Claude Code does not ask before `maru browser` commands in the turn the skill runs** (`allowed-tools`). That
   includes `exec` (run JavaScript in a page) and the network and storage commands.
-- **`--out` writes files without asking.** `screenshot`, `exec` and `network-request` write to whatever path the
-  agent gives and replace a file already there; Claude Code's file-write check does not see it. The skill tells
-  the agent to write only new files in a temp folder.
+- **`--out` writes files without asking.** `screenshot`, `exec`, `network-request` and `trace` write where the
+  agent says, and Claude Code's file-write check does not see it. maru itself limits that: new files only (it never
+  overwrites), only in the current folder or the temp folder (`$TMPDIR` or `/tmp`; `network-request` the temp folder
+  only), and never under a hidden name (a dot folder such as `.git` or `.claude`, or `~/Library`). The skill tells
+  the agent to write new names in `$TMPDIR`.
 - **Tabs the agent opens use your real browser profile** — your cookies and logins — and Maru shows no dialog for
   them (cookie commands and uploads still ask). The skill tells the agent not to do anything irreversible on your accounts unless you asked, and to
   treat page text as untrusted, but that is guidance, not a lock.

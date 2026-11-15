@@ -23,6 +23,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const browser = @import("../browser.zig");
 const control_client = @import("../control_client.zig");
+const out_path = @import("../out_path.zig");
 const control_browser = @import("../../session/control_browser.zig");
 const cp = @import("../../session/control_plane.zig");
 
@@ -215,11 +216,17 @@ fn traceError(stderr: *std.Io.Writer, msg: []const u8) error{UnknownCommand} {
 fn runTrace(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     switch (cmd.action) {
         .start, .status, .abort => return runPlainRequest(io, allocator, .{ .trace = cmd }, stdout, stderr),
-        .stop => return traceStop(io, allocator, cmd, stdout, stderr),
+        .stop => {
+            // `--out` 은 멈추기 전에 판정한다 — 멈춘 뒤에 「쓸 수 없다」 면 녹화가 사라진다.
+            var out = try openOut(io, allocator, cmd.out, stderr, "trace");
+            defer if (out) |*o| o.close(io);
+            return traceStop(io, allocator, cmd, if (out) |*o| o else null, stdout, stderr);
+        },
         .read => unreachable,
         .run => {
-            // 파일이 이미 있으면 기다리기 전에 실패한다(덮지 않는다 — 사용자 결정 1).
-            if (cmd.out) |path| try traceOutFree(std.Io.Dir.cwd(), io, path, stderr);
+            // 파일 자리가 안 되면 기다리기 전에 실패한다(덮지 않는다 — 사용자 결정 1, 자리 — 2026-11-15).
+            var out = try openOut(io, allocator, cmd.out, stderr, "trace");
+            defer if (out) |*o| o.close(io);
             var start = cmd;
             start.action = .start;
             try runPlainRequest(io, allocator, .{ .trace = start }, stdout, stderr);
@@ -227,23 +234,14 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, std
             io.sleep(.fromMilliseconds(@intCast(wait_ms)), .awake) catch {};
             var stop = cmd;
             stop.action = .stop;
-            return traceStop(io, allocator, stop, stdout, stderr);
+            return traceStop(io, allocator, stop, if (out) |*o| o else null, stdout, stderr);
         },
     }
 }
 
-const trace_out_exists = "the --out file already exists — maru never overwrites a trace file; pick a new name";
-
-/// `--out` 이 가리키는 곳에 무엇이 있으면 멈추기 전에 실패(심볼릭 링크도 — 따라가지 않는다). 쓰는 순간의 확인은 `writeNewFile` 의 link 가 한다.
-fn traceOutFree(dir: std.Io.Dir, io: std.Io, path: []const u8, stderr: *std.Io.Writer) !void {
-    _ = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
-    return traceError(stderr, trace_out_exists);
-}
-
 /// `trace stop [--out f] [--json]` — 멈추고(결과를 기다린다) 요약을 내고, `--out` 이면 거른 gzip 을 256 KiB 씩 당겨(요청마다 인가를 다시 본다)
-/// sha256 을 맞춘 뒤 **새 파일로만**(이름 없는 임시 파일 → link — 있으면 실패, 0600) 쓴다.
-fn traceStop(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
-    if (cmd.out) |path| try traceOutFree(std.Io.Dir.cwd(), io, path, stderr);
+/// sha256 을 맞춘 뒤 `out`(앞서 판정한 자리)에 **새 파일로만** 쓴다(`writeOut`).
+fn traceStop(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, out: ?*const OutTarget, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     const request_bytes = try browser.buildTraceRequest(allocator, cmd, .{ .number = 1 });
     defer allocator.free(request_bytes);
     const resp = try control_client.fetchResponse(io, allocator, request_bytes, stderr);
@@ -273,7 +271,8 @@ fn traceStop(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, st
         if (!ok) return error.UnknownCommand;
     }
     if (!done) return if (cmd.json) error.UnknownCommand else {};
-    const path = cmd.out orelse return;
+    const target = out orelse return;
+    const path = cmd.out.?;
     const file = result.object.get("file") orelse return traceError(stderr, "the trace has no file");
     if (file != .object) return traceError(stderr, "the trace has no file");
     const total: usize = @intCast(@max(0, (if (file.object.get("gz_bytes")) |v| (if (v == .integer) v.integer else -1) else -1)));
@@ -317,28 +316,152 @@ fn traceStop(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, st
     std.crypto.hash.sha2.Sha256.hash(bytes.items, &sha, .{});
     const hex = std.fmt.bytesToHex(sha, .lower);
     if (!std.mem.eql(u8, &hex, want_sha)) return traceError(stderr, "the trace file digest does not match — not written");
-    try writeNewFile(std.Io.Dir.cwd(), io, path, bytes.items, stderr);
+    writeOut(target, io, bytes.items) catch |e| return traceError(stderr, out_path.errorText(e));
     try stdout.print("wrote {s} ({d} bytes, gzip JSON — open it in Chrome DevTools' Performance panel)\n", .{ path, bytes.items.len });
     try stdout.flush();
 }
 
-/// 새 파일로만 쓴다 — 이름 없는 임시 파일(0600)에 다 쓰고 동기화한 뒤 **link** 로 그 이름을 붙인다: 무엇이 있으면(심볼릭 링크 포함 — 따라가지
-/// 않는다) `PathAlreadyExists` 로 실패하고, 끝까지 못 쓰면 이름이 생기지 않는다(`publishResult` 와 같은 원자적 길, 덮어쓰기만 없다 — 사용자 결정 1).
-fn writeNewFile(dir: std.Io.Dir, io: std.Io, path: []const u8, bytes: []const u8, stderr: *std.Io.Writer) !void {
-    // Windows 에는 0600 에 맞는 것이 없다(`publishResult` 의 주석) — 컨트롤 소켓이 없어 여기 닿지 않는다.
+// ── `--out` — 새 파일만, 자리 제한(사용자 결정 2026-11-15) ────────────────────────────────────────────────────
+//
+// 판정의 순수 절반(경로 모양·뿌리·숨은 이름·글)은 `out_path.zig` 가 갖고, 여기는 파일 시스템에 묻는 일만 한다:
+// 부모 폴더를 **먼저 열고** 그 fd 의 정규 경로(`F_GETPATH`·`/proc/self/fd`)로 판정한 뒤, **같은 fd** 에 임시 파일을 만들어
+// 다 쓰고 `link`(있으면 실패 — 대상 링크를 따라가지 않는다)로 이름을 붙인다. 판정한 폴더와 쓰는 폴더가 같은 inode 라
+// 확인과 쓰기 사이에 경로를 바꿔치는 길이 없다. 판정은 앱에 닿기 **전에** 한다(`openOut`) — 거절이 앱 실행 여부와
+// 무관하고, 승인 모달·trace 기다림 뒤에야 「쓸 수 없다」 가 나오지 않게.
+
+/// 판정을 마친 `--out` — 부모 폴더 fd 와 끝 이름(`path` 의 조각). 쓰기까지 들고 간다.
+const OutTarget = struct {
+    dir: std.Io.Dir,
+    leaf: []const u8,
+
+    fn close(self: *OutTarget, io: std.Io) void {
+        self.dir.close(io);
+    }
+};
+
+/// 뿌리(현재 폴더·`$TMPDIR`·`/tmp`)와 홈의 정규 경로 — 이 프로세스의 cwd·환경에서 모은다. 열 수 없는 것은 빠진다(그 뿌리
+/// 아래에는 못 쓴다 — 거절 쪽).
+const OutPlaces = struct {
+    cwd: ?[]u8 = null,
+    temps: [2]?[]u8 = .{ null, null },
+    home: ?[]u8 = null,
+    view: [2][]const u8 = undefined,
+
+    fn collect(io: std.Io, allocator: std.mem.Allocator) OutPlaces {
+        var r: OutPlaces = .{};
+        const cwd = std.Io.Dir.cwd();
+        r.cwd = canonicalDir(io, allocator, cwd, ".");
+        if (envAbsolute("TMPDIR")) |t| r.temps[0] = canonicalDir(io, allocator, cwd, t);
+        r.temps[1] = canonicalDir(io, allocator, cwd, "/tmp");
+        if (envAbsolute("HOME")) |h| r.home = canonicalDir(io, allocator, cwd, h);
+        return r;
+    }
+
+    fn places(self: *OutPlaces) out_path.Places {
+        var n: usize = 0;
+        for (self.temps) |o| if (o) |p| {
+            self.view[n] = p;
+            n += 1;
+        };
+        return .{ .cwd = self.cwd, .temps = self.view[0..n], .home = self.home };
+    }
+
+    fn deinit(self: *OutPlaces, allocator: std.mem.Allocator) void {
+        if (self.cwd) |p| allocator.free(p);
+        for (self.temps) |o| if (o) |p| allocator.free(p);
+        if (self.home) |h| allocator.free(h);
+    }
+};
+
+/// 절대 경로인 환경 변수 값(비었거나 상대 경로면 없는 것으로 — 상대 `$TMPDIR` 가 cwd 를 뜻하게 두지 않는다).
+fn envAbsolute(name: [*:0]const u8) ?[]const u8 {
+    const v = std.mem.span(std.c.getenv(name) orelse return null);
+    return if (v.len > 0 and v[0] == '/') v else null;
+}
+
+/// 폴더를 열어 그 fd 의 정규 경로(링크·`..`·대소문자가 풀린 철자). 못 열면 null.
+fn canonicalDir(io: std.Io, allocator: std.mem.Allocator, base: std.Io.Dir, path: []const u8) ?[]u8 {
+    var dir = base.openDir(io, path, .{}) catch return null;
+    defer dir.close(io);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = dir.realPath(io, &buf) catch return null;
+    return allocator.dupe(u8, buf[0..n]) catch null;
+}
+
+/// `--out <path>` 을 판정한다(쓰기 전, 앱에 닿기 전). 통과하면 부모 폴더를 연 채 돌려준다. `base` 는 상대 경로의 기준(제품은 cwd),
+/// `places` 는 정규 경로들.
+fn prepareOutIn(base: std.Io.Dir, io: std.Io, path: []const u8, places: out_path.Places) !OutTarget {
+    const parts = out_path.split(path) catch |e| switch (e) {
+        // 폴더를 뜻하는 꼴: 있는 폴더면 「폴더다」, 아니면 「폴더를 뜻한다」(W9d② 재검증 3 차 N-h1·N-h3 의 글 그대로).
+        error.DirectoryPath => {
+            var directory = base.openDir(io, path, .{}) catch return error.DirectoryPath;
+            directory.close(io);
+            return error.IsDir;
+        },
+        else => |other| return other,
+    };
+    // 부모 폴더는 이미 있어야 한다(만들지 않는다). 가운데 조각의 링크는 따른다 — 판정은 따라간 끝의 정규 경로로 한다.
+    var dir = try base.openDir(io, if (parts.dir.len == 0) "." else parts.dir, .{});
+    errdefer dir.close(io);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try dir.realPath(io, &buf);
+    try out_path.judge(buf[0..n], parts.leaf, places);
+    // 그 이름에 무엇이 있으면(파일·폴더·FIFO·장치·끊긴 링크) 쓰지 않는다. `readLink` 로 묻는다 — 따라가지 않고, FIFO 를 열지
+    // 않으며, Zig 0.17 Linux `statFile` 의 긴 조각 panic 길도 없다(끝 이름은 `split` 이 255 바이트로 막았다).
+    var link_probe: [1]u8 = undefined;
+    if (dir.readLink(io, parts.leaf, &link_probe)) |_| {
+        // 링크: 폴더를 가리키면 폴더처럼, 그 밖(파일·없는 대상)은 「링크다」(재검증 4 차 뒤 B10-1 의 글).
+        var directory = dir.openDir(io, parts.leaf, .{}) catch return error.OutputIsSymLink;
+        directory.close(io);
+        return error.IsDir;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        error.NotLink => {
+            var directory = dir.openDir(io, parts.leaf, .{}) catch return error.OutputExists;
+            directory.close(io);
+            return error.IsDir;
+        },
+        else => return err,
+    }
+    return .{ .dir = dir, .leaf = parts.leaf };
+}
+
+/// `--out` 이 있으면 이 프로세스의 cwd·`$TMPDIR`·`/tmp`·`$HOME` 으로 판정한다. 거절이면 `maru browser <label>: <까닭>` 한 줄과 exit 1.
+fn openOut(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8, stderr: *std.Io.Writer, label: []const u8) !?OutTarget {
+    const p = path orelse return null;
+    // 컨트롤 소켓이 없는 빌드(Windows)는 전처럼 「인스턴스 없음」 — comptime 이라 아래 POSIX 본문이 그 빌드에서 분석되지 않는다.
+    if (control_client.gate) |reason| return control_client.noInstance(stderr, reason);
+    var found: OutPlaces = .collect(io, allocator);
+    defer found.deinit(allocator);
+    return prepareOutIn(std.Io.Dir.cwd(), io, p, found.places()) catch |e| {
+        if (e == error.OutOfMemory) return e;
+        stderr.print("maru browser {s}: {s}\n", .{ label, out_path.errorText(e) }) catch {};
+        stderr.flush() catch {};
+        return error.UnknownCommand;
+    };
+}
+
+/// 판정한 자리에 **새 파일로만** 쓴다 — 같은 폴더의 임시 파일(0600)에 다 쓰고 `sync` 한 뒤 `link` 로 이름을 붙인다: 그 사이 누가 그 이름을
+/// 만들었으면(링크라도 — 따라가지 않는다) `OutputExists`, 끝까지 못 쓰면 이름이 생기지 않는다(부분 파일 없음).
+/// 0600 인 까닭: exec 결과·네트워크 본문·스크린샷에 쿠키·로그인한 페이지 내용이 들 수 있다(trace 와 같은 모드).
+fn writeOut(target: *const OutTarget, io: std.Io, bytes: []const u8) !void {
+    // **Windows에서는 도달할 수 없고, 도달해서도 안 된다** — `openOut` 이 컨트롤 소켓 게이트에서 먼저 끝난다. POSIX 의 0600 에
+    // 해당하는 것이 Windows 에는 없고(`Permissions` 가 ACL 을 나르는 enum 이라 `fromMode` 가 없다) 무엇으로 대체할지가 미결정이다
+    // (docs/windows-platform.md §8 "`publishBrowserResult`의 파일 권한"). 조용히 넓은 권한으로 쓰지 않고 여기서 시끄럽게 실패한다.
     if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
-    var af = dir.createFileAtomic(io, path, .{ .permissions = std.Io.File.Permissions.fromMode(0o600) }) catch
-        return traceError(stderr, "cannot create the --out file");
+    var af = try target.dir.createFileAtomic(io, target.leaf, .{ .permissions = std.Io.File.Permissions.fromMode(0o600) });
     defer af.deinit(io);
-    af.file.writeStreamingAll(io, bytes) catch return traceError(stderr, "writing the --out file failed");
-    af.file.sync(io) catch return traceError(stderr, "writing the --out file failed");
-    af.link(io) catch |e| return traceError(stderr, if (e == error.PathAlreadyExists) trace_out_exists else "writing the --out file failed");
+    try af.file.writeStreamingAll(io, bytes);
+    try af.file.sync(io);
+    af.link(io) catch |e| return if (e == error.PathAlreadyExists) error.OutputExists else e;
 }
 
 /// W9d②: `network-request --body --out <file>` — `browser.networkRequest` 를 `body_offset` 을 옮기며 되풀이해 본문을 모은다(글은 UTF-8 그대로,
-/// 바이너리는 base64 를 푼다). 다 모은 뒤에만 `publishResult`(0600·원자적)로 쓴다 — 중간에 실패하면 파일을 만들지 않는다. 받는 동안 본문이
-/// 바뀌면(크기가 다르다) 실패로 친다.
+/// 바이너리는 base64 를 푼다). 다 모은 뒤에만 `writeOut`(새 파일만·0600·원자적)으로 쓴다 — 중간에 실패하면 파일을 만들지 않는다. 받는 동안
+/// 본문이 바뀌면(크기가 다르다) 실패로 친다. 파일 자리는 첫 조각을 묻기 전에 판정한다(`openOut`).
 fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.NetworkRequestCmd, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var out = (try openOut(io, allocator, cmd.out, stderr, "network-request")).?;
+    defer out.close(io);
     var acc: BodyOut = .{ .marks = .init(allocator) };
     defer acc.deinit(allocator);
     var rounds: usize = 0;
@@ -378,7 +501,7 @@ fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.Netw
         }
     }
     const path = cmd.out.?;
-    publishResult(std.Io.Dir.cwd(), io, path, acc.body.items) catch |e| return bodyOutError(stderr, publishErrorText(e));
+    writeOut(&out, io, acc.body.items) catch |e| return bodyOutError(stderr, out_path.errorText(e));
     try stdout.print("body: {d} bytes{s}{s} → {s}\n", .{ acc.body.items.len, if (acc.binary) " (binary)" else "", acc.marks.written(), path });
     try stdout.flush();
 }
@@ -540,6 +663,9 @@ fn runExecuteScript(
         else => return err,
     };
     defer allocator.free(request_bytes);
+    // `--out` 은 앱에 닿기 전에 판정한다 — 승인 모달·스크립트 실행 뒤에야 「쓸 수 없다」 가 나오지 않게.
+    var out = try openOut(io, allocator, exec_cmd.out, stderr, "exec");
+    defer if (out) |*o| o.close(io);
     const fd = try control_client.connectSend(io, allocator, request_bytes, stderr);
     defer _ = std.c.close(fd);
 
@@ -585,8 +711,8 @@ fn runExecuteScript(
         return executeError(stderr, "the executeScript result is not strict JSON");
 
     if (exec_cmd.out) |path| {
-        publishResult(std.Io.Dir.cwd(), io, path, result.items) catch |e|
-            return executeError(stderr, publishErrorText(e));
+        writeOut(&out.?, io, result.items) catch |e|
+            return executeError(stderr, out_path.errorText(e));
         try stdout.print("executeScript: {d} bytes → {s}\n", .{ result.items.len, path });
     } else {
         try browser.writeDisplaySafeJsonText(stdout, result.items); // 터미널에 보이지 않는 글자를 내지 않는다(W9a③ 9 회차)
@@ -674,7 +800,7 @@ fn runWrappedResult(
 
 /// `maru browser screenshot`을 컨트롤 소켓에 왕복한다(§9.6·§9.5.7). 단일 응답이 아니라 **chunk 스트림**이라
 /// `control_client.fetchResponse`(첫 응답만)와 달리 `connectSend`로 열고 프레임을 고정 scratch로 검증·decode해 메모리에
-/// 누적한다. 최종 metadata와 PNG header까지 검증한 뒤에만 `publishResult`(원자적 `--out`) 또는 stdout으로 공개한다.
+/// 누적한다. 최종 metadata와 PNG header까지 검증한 뒤에만 `writeOut`(새 파일만·원자적 `--out`) 또는 stdout으로 공개한다.
 fn runScreenshot(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -685,6 +811,8 @@ fn runScreenshot(
     const c = std.c;
     const request_bytes = try browser.buildScreenshotRequestBytes(allocator, shot, .{ .number = 1 });
     defer allocator.free(request_bytes);
+    var out = try openOut(io, allocator, shot.out, stderr, "screenshot"); // 앱에 닿기 전에(exec 와 같다)
+    defer if (out) |*o| o.close(io);
     const fd = try control_client.connectSend(io, allocator, request_bytes, stderr);
     defer _ = c.close(fd);
 
@@ -721,8 +849,8 @@ fn runScreenshot(
     }
 
     if (shot.out) |path| {
-        publishResult(std.Io.Dir.cwd(), io, path, result.items) catch |e|
-            return screenshotError(stderr, publishErrorText(e));
+        writeOut(&out.?, io, result.items) catch |e|
+            return screenshotError(stderr, out_path.errorText(e));
         try stdout.print("screenshot: {d}x{d} PNG, {d} bytes → {s}\n", .{ validator.width, validator.height, result.items.len, path });
         try stdout.flush();
     } else {
@@ -742,80 +870,6 @@ fn validateJsonSlice(allocator: std.mem.Allocator, bytes: []const u8) bool {
         if (scanner.stackHeight() > 128) return false;
         if (token == .end_of_document) return true;
     }
-}
-
-/// 검증된 결과를 `target`에 **0600 원자적으로** 공개한다(검증-전-미노출 보존). 임시 파일 핸들이 write-only여도(macOS)
-/// 되읽지 않으므로 무방. `.replace=true`+`Atomic.replace`라 기존 target을 **덮어쓴다**(폴링/재실행 정상화 —
-/// 옛 `.link` no-clobber 회귀 수정). caller가 에러를 사용자 메시지로 매핑.
-/// `--out` 을 쓰지 못한 까닭의 글(W9d② 재검증 N-g2: 없는 폴더·폴더인 대상도 「atomically」 로만 말했다) — 흔한 것은 그 까닭을, 그 밖은 전처럼.
-/// 재검증 4 차 뒤 B10-1·B10-2: 심볼릭 링크인 대상, 파일 밑의 경로(`afile/x` — NotDir), 쓸 수 없는 이름(NUL — MCP 의 `out` 으로만 온다).
-fn publishErrorText(err: anyerror) []const u8 {
-    return switch (err) {
-        error.FileNotFound => "cannot write the output file: its directory does not exist",
-        error.IsDir => "cannot write the output file: the path is a directory",
-        error.DirectoryPath => "cannot write the output file: the path names a directory (it ends with /, . or ..)",
-        error.OutputIsSymLink => "cannot write the output file: the path is a symbolic link",
-        error.NotDir => "cannot write the output file: a part of its directory path is not a directory",
-        error.BadPathName => "cannot write the output file: the path is not a valid file name",
-        // W9d② 재검증 5 차 R10: 긴 이름·권한도 그 까닭을(전에는 「atomically」 — 쓰기 방식의 탓처럼 읽혔다).
-        error.NameTooLong => "cannot write the output file: a name in the path is too long",
-        error.AccessDenied, error.PermissionDenied => "cannot write the output file: permission denied",
-        else => "cannot publish the output file atomically",
-    };
-}
-
-/// W9d② 재검증 3 차 N-h1·N-h3: 폴더를 뜻하는 꼴의 경로인가 — `/` 로 끝나거나 마지막 조각이 `.`·`..` 다. 그런 `--out` 은 쓰기 전에 거절한다:
-/// `<폴더>/.`·`.` 은 rename 이 `EINVAL` 을 내 Debug 에서 멈췄고(std 가 프로그래머 오류로 친다) 임시 파일이 남았다, `/새이름/` 은 `newname`
-/// 이라는 파일이 됐다(폴더를 뜻한 경로가 조용히 파일이 됐다).
-fn directoryPath(path: []const u8) bool {
-    if (path.len == 0 or path[path.len - 1] == '/') return true;
-    const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |at| path[at + 1 ..] else path;
-    return std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..");
-}
-
-fn publishResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const u8) !void {
-    // **Windows에서는 도달할 수 없고, 도달해서도 안 된다.** 도달 불가인 이유: 이 경로는 컨트롤 소켓 왕복 뒤에만
-    // 오는데 `control_client.connectSend`가 Windows에서 "인스턴스 없음"으로 접는다. 도달하면 안 되는 이유: POSIX의
-    // `0o600`(소유자 전용)에 해당하는 것이 Windows에는 없고 — `Permissions`가 POSIX mode가 아니라 **ACL**을 나르는
-    // `FILE.ATTRIBUTE` enum이라 `fromMode`가 아예 없다 — 무엇으로 대체할지가 아직 미결정이기 때문이다
-    // (docs/windows-platform.md §8 "`publishBrowserResult`의 파일 권한": 부모 디렉터리 ACL 상속 vs 현재 사용자
-    // SID만 허용하는 명시 ACL).
-    //
-    // 그래서 `.default_file`로 조용히 넘기지 않는다. 그것은 부모 폴더의 ACL을 물려받는다는 뜻이고, 이 파일은
-    // 사용자가 `--out`으로 준 임의 경로라 공유 폴더·네트워크 드라이브면 보장이 사라진다. 컨트롤 플레인을
-    // 이식하는 사람이 이 결정을 잊으면 **조용히 넓은 권한으로 쓰이는 대신 여기서 시끄럽게 실패**해야 한다.
-    if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
-
-    // 폴더를 뜻하는 꼴(N-h1·N-h3)은 아무것도 만들기 전에 — 있는 폴더면 「폴더다」, 아니면 「폴더를 뜻한다」.
-    if (directoryPath(target)) {
-        var directory = dir.openDir(io, target, .{}) catch return error.DirectoryPath;
-        directory.close(io);
-        return error.IsDir;
-    }
-    // 재검증 4 차 뒤 B10-1: 마지막 조각이 심볼릭 링크면 쓰지 않는다 — rename 은 링크를 따르지 않아 링크를 지운 자리에 파일을 썼다(폴더를 가리키는
-    // 링크는 진짜 폴더처럼 거절되지 않고 사라졌다). 폴더를 가리키면 폴더처럼, 그 밖(파일·없는 대상)은 「링크다」 — 링크를 바꾸지도, 가리키는 파일을
-    // 덮지도 않는다(가리키는 파일에 쓰는 길은 고르지 않았다 — `--out` 이 남의 파일을 덮는 길이 생긴다). 가운데 조각의 링크(`<링크된 폴더>/x`)는
-    // 그대로 따른다. 확인과 rename 사이에 링크로 바뀌는 경쟁은 같은 사용자의 일이라 막지 않는다.
-    // Zig 0.17의 Linux statFile은 경로 조각의 NAMETOOLONG을 panic으로 처리한다.
-    // 링크 여부만 필요하므로 readLink를 쓴다. 한 바이트로도 링크임을 알 수 있고,
-    // 내용이 잘려도 상관없다. 이 경로는 긴 조각·중간 링크 확장의 오류도 반환한다.
-    var link_probe: [1]u8 = undefined;
-    if (dir.readLink(io, target, &link_probe)) |_| {
-        var directory = dir.openDir(io, target, .{}) catch return error.OutputIsSymLink;
-        directory.close(io);
-        return error.IsDir;
-    } else |err| switch (err) {
-        error.NotLink, error.FileNotFound, error.NotDir => {},
-        else => return err,
-    }
-    var af = try dir.createFileAtomic(io, target, .{
-        .permissions = std.Io.File.Permissions.fromMode(0o600),
-        .replace = true,
-    });
-    defer af.deinit(io);
-    try af.file.writeStreamingAll(io, bytes);
-    try af.file.sync(io);
-    try af.replace(io);
 }
 
 fn wrappedStreamError(stderr: *std.Io.Writer, cmd_label: []const u8) error{UnknownCommand} {
@@ -838,57 +892,187 @@ fn screenshotError(stderr: *std.Io.Writer, msg: []const u8) error{UnknownCommand
     return error.UnknownCommand;
 }
 
-// 이 테스트는 **POSIX 파일 모드가 있는 호스트**의 것이다. Windows에는 `0o600`에 해당하는 것이 없고
-// (`Permissions`가 mode가 아니라 ACL을 나르는 `FILE.ATTRIBUTE` enum이라 `toMode`가 없다), 무엇으로 대체할지가
-// 미결정이라 `publishResult` 자체가 거기서 `error.UnsupportedOnWindows`로 막혀 있다
-// (docs/windows-platform.md §8). **OS 이름이 아니라 없는 전제 그 자체로 skip한다** — `Permissions`에 `toMode`가
-// 생기는 날 저절로 깨어나야 한다(`connection_incident`의 `currentProcessId() == 0` skip과 같은 규율,
-// docs/layering-and-portability.md §4.1).
-test "publishResult: 0600 원자 공개 + 기존 파일 덮어쓰기(폴링 재실행 정상화)" {
-    if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
+// ── `--out` 가장자리 시험(2026-11-15) ────────────────────────────────────────────────────────────────────────────
+// 증명하는 것: 실제 파일 시스템에서 ① 있는 이름(파일·끊긴 링크·FIFO·판정 뒤에 생긴 것)은 덮지 않고 내용이 그대로다, ② 뿌리 밖(형제 폴더·
+// `..`·뿌리 밖을 가리키는 링크 폴더)과 숨은 자리(`.git`·숨은 폴더를 가리키는 링크·홈의 `Library`)는 아무것도 만들지 않는다, ③ 통과한 쓰기는
+// 0600 이고 임시 파일을 남기지 않는다. 에이전트가 묻지 않고 부르는 `--out` 이 셸 설정을 바꾸지 못하게 하는 마지막 관문이라 중요하다.
+//
+// 시험 폴더는 `std.testing.tmpDir`(`.zig-cache/tmp/…` — **점 조각이 있어** 모든 쓰기가 「숨은 자리」 가 된다) 대신 `/tmp` 아래에 만든다.
 
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+/// `/tmp/maru-out-test-<임의>` — 점 없는 정규 경로의 시험 뿌리.
+const OutTestRoot = struct {
+    dir: std.Io.Dir,
+    name_buf: [64]u8 = undefined,
+    name_len: usize = 0,
+    canon_buf: [std.fs.max_path_bytes]u8 = undefined,
+    canon_len: usize = 0,
 
-    try publishResult(tmp.dir, io, "result.bin", "first");
-    const stat = try tmp.dir.statFile(io, "result.bin", .{});
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+    fn init(io: std.Io) !OutTestRoot {
+        var r: OutTestRoot = .{ .dir = undefined };
+        var rnd: [8]u8 = undefined;
+        io.random(&rnd);
+        const name = try std.fmt.bufPrint(&r.name_buf, "/tmp/maru-out-test-{x}", .{std.mem.readInt(u64, &rnd, .little)});
+        r.name_len = name.len;
+        try std.Io.Dir.cwd().createDir(io, name, .default_dir);
+        r.dir = try std.Io.Dir.cwd().openDir(io, name, .{ .iterate = true });
+        r.canon_len = try r.dir.realPath(io, &r.canon_buf);
+        return r;
+    }
 
-    // 같은 경로에 재공개 = **덮어쓰기 성공**(옛 no-clobber 회귀 수정). 내용은 최신("second").
-    try publishResult(tmp.dir, io, "result.bin", "second");
-    var buf: [6]u8 = undefined;
-    const file = try tmp.dir.openFile(io, "result.bin", .{});
-    defer file.close(io);
-    const n = try file.readPositionalAll(io, &buf, 0);
-    try std.testing.expectEqualStrings("second", buf[0..n]);
+    fn canon(self: *const OutTestRoot) []const u8 {
+        return self.canon_buf[0..self.canon_len];
+    }
+
+    fn deinit(self: *OutTestRoot, io: std.Io) void {
+        self.dir.close(io);
+        std.Io.Dir.cwd().deleteTree(io, self.name_buf[0..self.name_len]) catch {};
+    }
+};
+
+/// 시험용: `root` 를 유일한 뿌리로(홈은 `home`) 판정하고 쓴다 — 제품의 `openOut` + `writeOut` 과 같은 길.
+fn publishInto(root: *const OutTestRoot, io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var t = try prepareOutIn(root.dir, io, path, .{ .cwd = root.canon() });
+    defer t.close(io);
+    try writeOut(&t, io, bytes);
 }
 
-test "W9e②: trace 파일 — 새 파일로만 0600, 있으면(심볼릭 링크도) 덮지 않고 실패, 멈추기 전 확인도 같다" {
+fn expectNames(dir: std.Io.Dir, io: std.Io, want: []const []const u8) !void {
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next(io)) |e| {
+        errdefer std.debug.print("unexpected entry: {s}\n", .{e.name});
+        for (want) |w| {
+            if (std.mem.eql(u8, w, e.name)) break;
+        } else return error.UnexpectedEntry;
+        n += 1;
+    }
+    try std.testing.expectEqual(want.len, n);
+}
+
+// 이 시험은 **POSIX 파일 모드가 있는 호스트**의 것이다(Windows 에는 0600 에 해당하는 것이 없다 — `writeOut` 의 주석).
+// OS 이름이 아니라 없는 전제 그 자체로 건너뛴다(`toMode` 가 생기는 날 저절로 깨어난다 — docs/layering-and-portability.md §4.1).
+test "--out: 새 파일만 0600 — 같은 이름은 덮지 않고(내용 그대로) 「already exists」, 임시 파일도 남기지 않는다" {
     if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var err_buf: [512]u8 = undefined;
-    var err_w: std.Io.Writer = .fixed(&err_buf);
-
-    try traceOutFree(tmp.dir, io, "t.json.gz", &err_w);
-    try writeNewFile(tmp.dir, io, "t.json.gz", "first", &err_w);
-    const stat = try tmp.dir.statFile(io, "t.json.gz", .{});
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
-    // 있으면 멈추기 전에도, 쓰는 순간에도 실패 — 내용은 그대로.
-    try std.testing.expectError(error.UnknownCommand, traceOutFree(tmp.dir, io, "t.json.gz", &err_w));
-    try std.testing.expectError(error.UnknownCommand, writeNewFile(tmp.dir, io, "t.json.gz", "second", &err_w));
-    try std.testing.expect(std.mem.indexOf(u8, err_w.buffered(), "never overwrites") != null);
+    var root = try OutTestRoot.init(io);
+    defer root.deinit(io);
+    try publishInto(&root, io, "result.bin", "first");
+    const st = try root.dir.statFile(io, "result.bin", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+    const again = if (publishInto(&root, io, "result.bin", "second")) |_| return error.TestUnexpectedResult else |e| e;
+    try std.testing.expectEqual(error.OutputExists, again);
+    try std.testing.expect(std.mem.indexOf(u8, out_path.errorText(again), "never overwrites") != null);
     var buf: [8]u8 = undefined;
-    const file = try tmp.dir.openFile(io, "t.json.gz", .{});
-    defer file.close(io);
-    try std.testing.expectEqualStrings("first", buf[0..try file.readPositionalAll(io, &buf, 0)]);
-    // 심볼릭 링크(가리키는 곳이 없어도)는 따라가지 않고 실패 — 링크가 가리킬 파일을 만들지 않는다.
-    try tmp.dir.symLink(io, "victim", "link.gz", .{});
-    try std.testing.expectError(error.UnknownCommand, traceOutFree(tmp.dir, io, "link.gz", &err_w));
-    try std.testing.expectError(error.UnknownCommand, writeNewFile(tmp.dir, io, "link.gz", "x", &err_w));
-    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "victim", .{}));
+    try std.testing.expectEqualStrings("first", try root.dir.readFile(io, "result.bin", &buf));
+    try expectNames(root.dir, io, &.{"result.bin"});
+}
+
+test "--out: 판정 뒤 쓰기 전에 그 이름이 생기면(경쟁) link 가 막는다 — 생긴 파일 그대로, 임시 파일 없음" {
+    if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
+    const io = std.testing.io;
+    var root = try OutTestRoot.init(io);
+    defer root.deinit(io);
+    var t = try prepareOutIn(root.dir, io, "late.json", .{ .cwd = root.canon() });
+    defer t.close(io);
+    try root.dir.writeFile(io, .{ .sub_path = "late.json", .data = "RACER" });
+    try std.testing.expectError(error.OutputExists, writeOut(&t, io, "MINE"));
+    // 판정 뒤 끊긴 링크로 바꿔치기해도 같다 — link 는 대상 링크를 따라가지 않는다(가리키는 자리에 아무것도 생기지 않는다).
+    var t2 = try prepareOutIn(root.dir, io, "late2.json", .{ .cwd = root.canon() });
+    defer t2.close(io);
+    try root.dir.symLink(io, "victim", "late2.json", .{});
+    try std.testing.expectError(error.OutputExists, writeOut(&t2, io, "MINE"));
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("RACER", try root.dir.readFile(io, "late.json", &buf));
+    try std.testing.expectError(error.FileNotFound, root.dir.statFile(io, "victim", .{}));
+    try expectNames(root.dir, io, &.{ "late.json", "late2.json" });
+}
+
+test "--out: 있는 이름은 무엇이든 거절 — 파일·끊긴 링크·FIFO(열지 않는다 — 멈추지 않는다)" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest else {
+        const io = std.testing.io;
+        var root = try OutTestRoot.init(io);
+        defer root.deinit(io);
+        try root.dir.writeFile(io, .{ .sub_path = "f", .data = "KEEP" });
+        try root.dir.symLink(io, "nowhere", "dead", .{});
+        const c = struct {
+            extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+        };
+        var fifo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fifo = try std.fmt.bufPrintSentinel(&fifo_buf, "{s}/pipe", .{root.canon()}, 0);
+        try std.testing.expectEqual(@as(c_int, 0), c.mkfifo(fifo, 0o600));
+        try std.testing.expectError(error.OutputExists, publishInto(&root, io, "f", "X"));
+        try std.testing.expectError(error.OutputIsSymLink, publishInto(&root, io, "dead", "X"));
+        try std.testing.expectError(error.OutputExists, publishInto(&root, io, "pipe", "X"));
+        try std.testing.expectError(error.FileNotFound, root.dir.statFile(io, "nowhere", .{}));
+        try expectNames(root.dir, io, &.{ "f", "dead", "pipe" });
+    }
+}
+
+test "--out: 뿌리 밖 — 형제 폴더(절대 경로)·`..`·뿌리 밖을 가리키는 링크 폴더는 아무것도 만들지 않는다; 뿌리 안 링크 폴더는 된다" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest else {
+        const io = std.testing.io;
+        var root = try OutTestRoot.init(io);
+        defer root.deinit(io);
+        try root.dir.createDir(io, "proj", .default_dir);
+        try root.dir.createDir(io, "other", .default_dir);
+        try root.dir.createDir(io, "proj/sub", .default_dir);
+        var proj = try root.dir.openDir(io, "proj", .{});
+        defer proj.close(io);
+        var proj_canon: [std.fs.max_path_bytes]u8 = undefined;
+        const pc = proj_canon[0..try proj.realPath(io, &proj_canon)];
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const other_abs = try std.fmt.bufPrint(&abs_buf, "{s}/other/x.png", .{root.canon()});
+        try proj.symLink(io, "../other", "lout", .{ .is_directory = true });
+        try proj.symLink(io, "sub", "lin", .{ .is_directory = true });
+        for ([_][]const u8{ other_abs, "../other/x.png", "../x.png", "lout/x.png", "sub/../../x.png" }) |p| {
+            errdefer std.debug.print("outside: {s}\n", .{p});
+            try std.testing.expectError(error.OutsideAllowed, prepareOutIn(proj, io, p, .{ .cwd = pc }));
+        }
+        var other = try root.dir.openDir(io, "other", .{ .iterate = true });
+        defer other.close(io);
+        try expectNames(other, io, &.{});
+        var t = try prepareOutIn(proj, io, "lin/y.png", .{ .cwd = pc });
+        defer t.close(io);
+        try writeOut(&t, io, "Y");
+        var buf: [4]u8 = undefined;
+        try std.testing.expectEqualStrings("Y", try proj.readFile(io, "sub/y.png", &buf));
+        // 쓸 수 없는 뿌리(`/`)만 있으면 어디도 안 된다.
+        try std.testing.expectError(error.OutsideAllowed, prepareOutIn(proj, io, "z.png", .{ .cwd = "/" }));
+    }
+}
+
+test "--out: 숨은 자리 — 끝 이름·`.git`·숨은 폴더를 가리키는 링크·홈의 Library(대소문자 무시)·cwd 자체가 숨은 폴더" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest else {
+        const io = std.testing.io;
+        var root = try OutTestRoot.init(io);
+        defer root.deinit(io);
+        try root.dir.createDir(io, ".git", .default_dir);
+        try root.dir.createDir(io, ".claude", .default_dir);
+        try root.dir.createDir(io, "Library", .default_dir);
+        try root.dir.createDir(io, "Library/LaunchAgents", .default_dir);
+        try root.dir.symLink(io, ".git", "visible", .{ .is_directory = true });
+        const home = root.canon(); // 이 뿌리를 홈으로 — cwd=$HOME 인 경우
+        for ([_][]const u8{ ".zshrc", ".git/hooks-x", "visible/x", "Library/LaunchAgents/x.plist", "LIBRARY/LaunchAgents/x.plist", "library/x" }) |p| {
+            errdefer std.debug.print("hidden: {s}\n", .{p});
+            try std.testing.expectError(error.HiddenPath, prepareOutIn(root.dir, io, p, .{ .cwd = root.canon(), .home = home }));
+        }
+        // `cd .claude` 뒤 — 뿌리 자체가 숨은 폴더 아래.
+        var dot = try root.dir.openDir(io, ".claude", .{});
+        defer dot.close(io);
+        var dot_canon: [std.fs.max_path_bytes]u8 = undefined;
+        const dc = dot_canon[0..try dot.realPath(io, &dot_canon)];
+        try std.testing.expectError(error.HiddenPath, prepareOutIn(dot, io, "settings.local.json", .{ .cwd = dc, .home = home }));
+        // 아무것도 생기지 않았다.
+        for ([_][]const u8{ ".git", ".claude", "Library/LaunchAgents" }) |d| {
+            var sub = try root.dir.openDir(io, d, .{ .iterate = true });
+            defer sub.close(io);
+            try expectNames(sub, io, &.{});
+        }
+        // 대조: 홈 바로 밑의 보이는 이름은 된다.
+        var t = try prepareOutIn(root.dir, io, "shot.png", .{ .cwd = root.canon(), .home = home });
+        defer t.close(io);
+        try writeOut(&t, io, "P");
+    }
 }
 
 test "validateJsonSlice: 완결 strict JSON만 통과하고 빈 입력·깊은 중첩은 막는다" {
@@ -1338,7 +1522,7 @@ test "W9f 적대 리뷰 5 회차: 터미널에서 Ctrl-D 로 끝내면 프롬프
 
 // ── W9d② v20 A R10(적대 검증 — --out): 모든 파싱 오류 안내는 영어이고 그 명령을 말한다, --out 은 1 MiB 본문(글자 경계에서 잘린 64 KiB 조각)을
 // 그대로 모으고 바이너리 조각(패딩 포함)을 푼다, 서버가 알린 크기보다 덜 모은 채 끝나거나 조각 사이에 글·바이너리가 바뀌면 파일을 쓰지 않는다,
-// 파일은 0600 이고 대상이 심볼릭 링크면 링크를 바꾼다(가리키는 파일은 그대로).
+// 파일은 0600 이고 대상이 심볼릭 링크면 쓰지 않는다(재검증 4 차 뒤 B10-1).
 
 test "W9d② v20 A R10: 파싱 오류 안내는 모두 영어다(한글이 없다)" {
     const names = comptime @typeInfo(browser.ParseError).error_set.error_names.?;
@@ -1457,16 +1641,16 @@ test "W9d② v20 A R10: --out 은 조각 사이에 글·바이너리가 바뀌�
 test "W9d② v20 A R10(재검증 4 차 뒤 B10-1 로 바꿈): --out 의 공개는 0600 이고, 대상이 심볼릭 링크면 쓰지 않는다 — 링크도 가리키던 파일도 그대로" {
     if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var tmp = try OutTestRoot.init(io);
+    defer tmp.deinit(io);
     try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "KEEP" });
     try tmp.dir.symLink(io, "victim", "link", .{});
-    try std.testing.expectError(error.OutputIsSymLink, publishResult(tmp.dir, io, "link", "BODY"));
+    try std.testing.expectError(error.OutputIsSymLink, publishInto(&tmp, io, "link", "BODY"));
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "victim", &buf));
     const st = try tmp.dir.statFile(io, "link", .{ .follow_symlinks = false });
     try std.testing.expectEqual(std.Io.File.Kind.sym_link, st.kind);
-    try publishResult(tmp.dir, io, "plain", "BODY");
+    try publishInto(&tmp, io, "plain", "BODY");
     const sp = try tmp.dir.statFile(io, "plain", .{ .follow_symlinks = false });
     try std.testing.expectEqual(std.Io.File.Kind.file, sp.kind);
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), sp.permissions.toMode() & 0o777);
@@ -1475,24 +1659,24 @@ test "W9d② v20 A R10(재검증 4 차 뒤 B10-1 로 바꿈): --out 의 공개�
 test "W9d② 재검증 N-g2: --out 이 없는 폴더·폴더인 대상이면 그 까닭을 말한다(아무것도 쓰지 않는다), 그 밖의 실패는 전의 글" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const missing = if (publishResult(tmp.dir, io, "no-such-dir/body.bin", "BODY")) |_| return error.TestUnexpectedResult else |e| e;
-    try std.testing.expectEqualStrings("cannot write the output file: its directory does not exist", publishErrorText(missing));
+    var tmp = try OutTestRoot.init(io);
+    defer tmp.deinit(io);
+    const missing = if (publishInto(&tmp, io, "no-such-dir/body.bin", "BODY")) |_| return error.TestUnexpectedResult else |e| e;
+    try std.testing.expectEqualStrings("cannot write the output file: its directory does not exist — create it first or write under $TMPDIR", out_path.errorText(missing));
     try tmp.dir.createDir(io, "target", .default_dir);
-    const dir_target = if (publishResult(tmp.dir, io, "target", "BODY")) |_| return error.TestUnexpectedResult else |e| e;
-    try std.testing.expectEqualStrings("cannot write the output file: the path is a directory", publishErrorText(dir_target));
+    const dir_target = if (publishInto(&tmp, io, "target", "BODY")) |_| return error.TestUnexpectedResult else |e| e;
+    try std.testing.expectEqualStrings("cannot write the output file: the path is a directory", out_path.errorText(dir_target));
     var it = (try tmp.dir.openDir(io, "target", .{ .iterate = true })).iterate();
     try std.testing.expect((try it.next(io)) == null);
-    try std.testing.expectEqualStrings("cannot write the output file: permission denied", publishErrorText(error.AccessDenied));
-    try std.testing.expectEqualStrings("cannot publish the output file atomically", publishErrorText(error.NoSpaceLeft));
+    try std.testing.expectEqualStrings("cannot write the output file: permission denied", out_path.errorText(error.AccessDenied));
+    try std.testing.expectEqualStrings("cannot publish the output file atomically", out_path.errorText(error.NoSpaceLeft));
 }
 
 test "W9d② 재검증 3 차 N-h1·N-h3: --out 이 `<폴더>/.`·`.`·`..`·`/`·`<폴더>/` 면 「폴더다」, 없는 `<새이름>/`·`<파일>/` 이면 「폴더를 뜻한다」 — 멈추지 않고 아무것도 남기지 않는다" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var tmp = try OutTestRoot.init(io);
+    defer tmp.deinit(io);
     try tmp.dir.createDir(io, "adir", .default_dir);
     try tmp.dir.writeFile(io, .{ .sub_path = "afile", .data = "KEEP" });
     const is_dir = "cannot write the output file: the path is a directory";
@@ -1509,12 +1693,12 @@ test "W9d② 재검증 3 차 N-h1·N-h3: --out 이 `<폴더>/.`·`.`·`..`·`/`�
         .{ .path = "afile/", .text = names_dir },
         .{ .path = "no-such-dir/.", .text = names_dir },
     }) |case| {
-        const err = if (publishResult(tmp.dir, io, case.path, "BODY")) |_| {
+        const err = if (publishInto(&tmp, io, case.path, "BODY")) |_| {
             std.debug.print("N-h1/N-h3: {s} was written\n", .{case.path});
             return error.TestUnexpectedResult;
         } else |e| e;
         errdefer std.debug.print("N-h1/N-h3: {s} -> {s}\n", .{ case.path, @errorName(err) });
-        try std.testing.expectEqualStrings(case.text, publishErrorText(err));
+        try std.testing.expectEqualStrings(case.text, out_path.errorText(err));
     }
     // 아무것도 남기지 않았다 — 임시 파일도, `newname` 파일도.
     var names: usize = 0;
@@ -1529,9 +1713,9 @@ test "W9d② 재검증 3 차 N-h1·N-h3: --out 이 `<폴더>/.`·`.`·`..`·`/`�
     try std.testing.expect((try sub.next(io)) == null);
     var buf: [8]u8 = undefined;
     try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "afile", &buf));
-    // 폴더를 뜻하지 않는 꼴은 전처럼 쓴다(점으로 시작하는 이름·가운데의 `.` 조각).
-    try publishResult(tmp.dir, io, ".hidden", "B1");
-    try publishResult(tmp.dir, io, "adir/./x.json", "B2");
+    // 폴더를 뜻하지 않는 꼴은 쓴다(가운데의 `.` 조각). 점으로 시작하는 이름은 2026-11-15 부터 숨은 이름이라 거절한다(전에는 썼다).
+    try std.testing.expectError(error.HiddenPath, publishInto(&tmp, io, ".hidden", "B1"));
+    try publishInto(&tmp, io, "adir/./x.json", "B2");
     try std.testing.expectEqualStrings("B2", try tmp.dir.readFile(io, "adir/x.json", &buf));
 }
 
@@ -1637,13 +1821,13 @@ test "W9d② v20f 16: --out boundaries (N4) — exact sizes end, short and long 
     }
 }
 
-// 재검증 4 차 뒤 B10-1·B10-2(검증자 B R10 의 관찰 시험을 단언으로): screenshot·exec·network-request 의 `--out` 은 모두 `publishResult` 를 거친다
+// 재검증 4 차 뒤 B10-1·B10-2(검증자 B R10 의 관찰 시험을 단언으로): screenshot·exec·network-request·trace 의 `--out` 은 모두 `openOut`·`writeOut` 을 거친다
 // (`run.zig` 의 세 부름) — 셋이 같은 규칙이다.
 test "W9d② 재검증 4 차 뒤 B10-1·B10-2: --out 이 심볼릭 링크(폴더·파일·끊긴 것)면 쓰지 않고 그 까닭을, 파일 밑·NUL 경로도 그 까닭을 — 아무것도 바꾸지 않는다" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var tmp = try OutTestRoot.init(io);
+    defer tmp.deinit(io);
     try tmp.dir.createDir(io, "adir", .default_dir);
     try tmp.dir.writeFile(io, .{ .sub_path = "afile", .data = "KEEP" });
     try tmp.dir.symLink(io, "adir", "ldir", .{ .is_directory = true });
@@ -1661,12 +1845,12 @@ test "W9d② 재검증 4 차 뒤 B10-1·B10-2: --out 이 심볼릭 링크(폴더
         .{ .path = "afile/x", .text = "cannot write the output file: a part of its directory path is not a directory" },
         .{ .path = "a\x00b", .text = "cannot write the output file: the path is not a valid file name" },
     }) |case| {
-        const err = if (publishResult(tmp.dir, io, case.path, "BODY")) |_| {
+        const err = if (publishInto(&tmp, io, case.path, "BODY")) |_| {
             std.debug.print("B10: {s} was written\n", .{case.path});
             return error.TestUnexpectedResult;
         } else |e| e;
         errdefer std.debug.print("B10: {s} -> {s}\n", .{ case.path, @errorName(err) });
-        try std.testing.expectEqualStrings(case.text, publishErrorText(err));
+        try std.testing.expectEqualStrings(case.text, out_path.errorText(err));
     }
     // 아무것도 바뀌지 않았다 — 링크는 링크, 폴더는 비었고, 파일은 그대로, 다른 이름은 없다.
     for ([_][]const u8{ "ldir", "lfile", "ldead", "lldir" }) |l| {
@@ -1682,15 +1866,15 @@ test "W9d② 재검증 4 차 뒤 B10-1·B10-2: --out 이 심볼릭 링크(폴더
     while (try it.next(io)) |_| names += 1;
     try std.testing.expectEqual(@as(usize, 6), names);
     // 가운데 조각의 링크는 따른다 — 링크된 폴더 안에는 쓴다.
-    try publishResult(tmp.dir, io, "ldir/x.json", "B");
+    try publishInto(&tmp, io, "ldir/x.json", "B");
     try std.testing.expectEqualStrings("B", try tmp.dir.readFile(io, "adir/x.json", &buf));
 }
 
 test "W9d② 재검증 5 차 R10(v20k): --out 공격 — 링크 고리·긴 이름·링크된 폴더 밑의 링크·끊긴 가운데 링크·폴더 링크 뒤 /. — 저마다 까닭의 글, 가리키는 파일은 그대로" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var tmp = try OutTestRoot.init(io);
+    defer tmp.deinit(io);
     try tmp.dir.createDir(io, "adir", .default_dir);
     try tmp.dir.symLink(io, "loop", "loop", .{});
     try tmp.dir.symLink(io, "adir", "ldir", .{ .is_directory = true });
@@ -1702,7 +1886,7 @@ test "W9d② 재검증 5 차 R10(v20k): --out 공격 — 링크 고리·긴 이�
     const cases = [_]struct { []const u8, []const u8 }{
         .{ "loop", "cannot write the output file: the path is a symbolic link" },
         .{ "ldir/lf", "cannot write the output file: the path is a symbolic link" },
-        .{ "ldead/x", "cannot write the output file: its directory does not exist" },
+        .{ "ldead/x", "cannot write the output file: its directory does not exist — create it first or write under $TMPDIR" },
         .{ "ldir/.", "cannot write the output file: the path is a directory" },
         .{ "ldir/..", "cannot write the output file: the path is a directory" },
         .{ "ldir/./lf", "cannot write the output file: the path is a symbolic link" },
@@ -1711,33 +1895,33 @@ test "W9d② 재검증 5 차 R10(v20k): --out 공격 — 링크 고리·긴 이�
         .{ "adir/f/", "cannot write the output file: the path names a directory (it ends with /, . or ..)" },
     };
     for (cases) |c| {
-        const e = if (publishResult(tmp.dir, io, c[0], "BODY")) |_| return error.TestUnexpectedResult else |e| e;
-        try std.testing.expectEqualStrings(c[1], publishErrorText(e));
+        const e = if (publishInto(&tmp, io, c[0], "BODY")) |_| return error.TestUnexpectedResult else |e| e;
+        try std.testing.expectEqualStrings(c[1], out_path.errorText(e));
     }
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "adir/f", &buf));
 }
 
-test "publishResult: 긴 조각과 링크 확장도 panic 없이 거절하고 255바이트 이름은 보존한다" {
+test "--out: 긴 조각과 링크 확장도 panic 없이 거절하고 255바이트 이름은 보존한다" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var tmp = try OutTestRoot.init(io);
+    defer tmp.deinit(io);
     var long: [300]u8 = undefined;
     @memset(&long, 'a');
-    try std.testing.expectError(error.NameTooLong, publishResult(tmp.dir, io, &long, "BODY"));
+    try std.testing.expectError(error.NameTooLong, publishInto(&tmp, io, &long, "BODY"));
     // 최종 링크는 원래 계약대로 링크 오류이며, 중간 링크의 긴 대상은 이름 오류다.
     try tmp.dir.symLink(io, &long, "long-target", .{});
-    try std.testing.expectError(error.OutputIsSymLink, publishResult(tmp.dir, io, "long-target", "BODY"));
-    try std.testing.expectError(error.NameTooLong, publishResult(tmp.dir, io, "long-target/result", "BODY"));
+    try std.testing.expectError(error.OutputIsSymLink, publishInto(&tmp, io, "long-target", "BODY"));
+    try std.testing.expectError(error.NameTooLong, publishInto(&tmp, io, "long-target/result", "BODY"));
     var suffix: [304]u8 = undefined;
     @memcpy(suffix[0..300], &long);
     @memcpy(suffix[300..], "/out");
-    try std.testing.expectError(error.NameTooLong, publishResult(tmp.dir, io, &suffix, "BODY"));
+    try std.testing.expectError(error.NameTooLong, publishInto(&tmp, io, &suffix, "BODY"));
     @memcpy(suffix[300..], "/../");
-    try std.testing.expectError(error.DirectoryPath, publishResult(tmp.dir, io, &suffix, "BODY"));
-    try std.testing.expectError(error.NameTooLong, publishResult(tmp.dir, io, long[0..256], "BODY"));
-    try publishResult(tmp.dir, io, long[0..255], "KEEP");
+    try std.testing.expectError(error.DirectoryPath, publishInto(&tmp, io, &suffix, "BODY"));
+    try std.testing.expectError(error.NameTooLong, publishInto(&tmp, io, long[0..256], "BODY"));
+    try publishInto(&tmp, io, long[0..255], "KEEP");
     var bytes: [8]u8 = undefined;
     try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, long[0..255], &bytes));
     var target: [300]u8 = undefined;

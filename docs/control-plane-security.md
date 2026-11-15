@@ -340,3 +340,7 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 - **포워딩을 안 쓴다.** `direct-streamlocal` opt-in 대신 SSH **`exec` 채널**을 쓴다 — 우리 코어가 그 채널 타입을 모르고, 써도 원격 쪽 버전·정책을 우리 코드가 볼 수 없다.
 - **신뢰 등급은 데스크톱 클라이언트와 동등**(조회·구독·세션 전환·생성·`browser.*`). 폰은 이미 셸 열쇠를 들고 있어 좁혀도 실질 노출이 안 준다. 예외는 `command=`/`ForceCommand` 로 셸을 제한한 키인데, 그 서버에서는 `hello` 가 안 와 **축이 애초에 안 열린다**.
 - **§8 의 per-surface capability 규칙은 원격에서도 그대로**다 — 등급이 같다는 말이지 인가를 건너뛴다는 말이 아니다.
+
+### 8.8 CLI 가 쓰는 파일(`--out`)
+- `maru browser` 의 `--out`(exec·screenshot·network-request·trace, repl·`maru mcp` 포함)은 **새 파일만**, **현재 폴더·`$TMPDIR`·`/tmp` 아래만**, **숨은 이름(점으로 시작하는 조각·`~/Library`) 금지**다 — 판정은 앱에 닿기 전에 한다. 에이전트가 묻지 않고 부를 수 있는 명령(`Bash(maru browser *)`)이 셸 설정·자동 시작 자리를 쓰거나 사용자 파일을 덮지 못하게 하는 경계다. 단일 출처는 [`browser.*` 코어와 CLI §9.6 「`--out` 규칙」](control-plane-browser.md).
+- 남는 것: 현재 폴더 안의 보이는 새 이름(예: 하위 폴더의 `CLAUDE.md`·`Makefile`)은 막지 않는다 — 사용자가 고른 「현재 폴더」 허용의 범위다.

@@ -13,6 +13,7 @@
 //!   ③ 스킬의 「쓸 수 있나」 점검이 쓰는 help 검사(`grep '^  open '`)가 help 에 **정확히 한 줄** 맞는다(ATTACK A19).
 //!   ④ 스킬 안 상대 링크가 살아 있고, 참조 파일은 모두 SKILL.md 에서 한 단계로 걸린다.
 //!   ⑤ 매니페스트 둘(plugin.json·marketplace.json)과 SKILL.md 앞머리가 서로 맞는다(이름·경로·semver·version 은 한 곳).
+//!   ⑥ 스킬이 요구하는 최소 maru 버전이 한 곳뿐이고, 이 저장소가 내는 maru(`build.zig.zon` `.version`) 이하다.
 //!
 //! **공허하게 통과하지 않는다**(project-rules 「못 찾으면 실패」·pr-checklist 「판정자 규율」): 추출한 예시 수와 help 명령
 //! 수에 하한을 단언하고, 코드 표시 밖 산문에 `maru browser` 가 나오면 실패한다 — 모든 명령이 ①을 지나게 하려고.
@@ -20,6 +21,8 @@
 
 const std = @import("std");
 const browser = @import("maru").cli.browser;
+/// 이 트리가 빌드하는 maru 의 버전(`build.zig.zon` `.version` — `maru --version` 이 내는 값과 같은 단일 출처).
+const maru_version: []const u8 = @import("maru_version").version;
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
@@ -66,6 +69,8 @@ const Scan = struct {
     help_greps: std.ArrayList([]const u8) = .empty,
     /// 규칙 위반(보고 문장).
     problems: std.ArrayList([]const u8) = .empty,
+    /// `maru X.Y.Z` 꼴 인라인 코드(버전 언급) — ⑥이 최소 버전을 찾는다.
+    versions: std.ArrayList(struct { file: []const u8, line: usize, version: []const u8 }) = .empty,
 };
 
 fn isSpace(c: u8) bool {
@@ -276,6 +281,9 @@ fn scanMarkdown(arena: std.mem.Allocator, scan: *Scan, commands: []const []const
             } else null;
             if (close) |c| {
                 const span = std.mem.trim(u8, line[open_end..c], " ");
+                if (std.mem.startsWith(u8, span, "maru ") and isSemver(span[5..])) {
+                    try scan.versions.append(arena, .{ .file = file, .line = line_no, .version = span[5..] });
+                }
                 try takeCommand(arena, scan, commands, file, line_no, span, true);
                 try prose.append(arena, ' ');
                 i = c + n;
@@ -596,6 +604,52 @@ test "⑤ 매니페스트 둘과 SKILL.md 앞머리가 서로 맞는다" {
     if (fm.get("allowed-tools")) |tools| try std.testing.expectEqualStrings("Bash(maru browser *)", tools);
 }
 
+// ── ⑥ 최소 maru 버전 ─────────────────────────────────────────────────────────────────────────────────
+
+fn semverLess(a: []const u8, b: []const u8) bool {
+    var ia = std.mem.splitScalar(u8, a, '.');
+    var ib = std.mem.splitScalar(u8, b, '.');
+    for (0..3) |_| {
+        const x = std.fmt.parseInt(u64, ia.next().?, 10) catch unreachable;
+        const y = std.fmt.parseInt(u64, ib.next().?, 10) catch unreachable;
+        if (x != y) return x < y;
+    }
+    return false;
+}
+
+test "⑥ 스킬의 최소 maru 버전은 SKILL.md 한 곳이고, 이 저장소의 maru 버전 이하다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const got = try scanPlugin(arena);
+
+    // `maru 0.0.0` 은 최소가 아니라 「버전을 매기기 전 소스 빌드」의 언급이다(점검의 갈래 하나).
+    var minimum: ?[]const u8 = null;
+    var count: usize = 0;
+    for (got.scan.versions.items) |v| {
+        if (std.mem.eql(u8, v.version, "0.0.0")) continue;
+        count += 1;
+        std.debug.print("plugin skill: 최소 버전 언급 {s}:{d} maru {s}\n", .{ v.file, v.line, v.version });
+        if (!std.mem.eql(u8, v.file, skill_path)) {
+            std.debug.print("최소 버전은 SKILL.md 에만 둔다 — {s}:{d}\n", .{ v.file, v.line });
+            return error.MinimumOutsideSkill;
+        }
+        minimum = v.version;
+    }
+    // 한 곳 — 둘이면 하나만 고쳐 갈린다. 없으면 점검이 무엇과 비교하는지 잃는다.
+    if (count != 1) {
+        std.debug.print("최소 maru 버전(`maru X.Y.Z` 인라인 코드, 0.0.0 제외)이 {d} 곳이다 — 1 곳이어야 한다\n", .{count});
+        return error.MinimumNotSingle;
+    }
+    try std.testing.expect(isSemver(maru_version));
+    // 이 저장소가 아직 내지 않은 maru 를 요구하면 모든 사용자가 「갱신하라」를 받는다. `0.0.0` 도 예외 없이 비교한다 —
+    // 버전을 매기기 전 트리에 이 스킬이 들어가면 바로 그 일이 난다(§9.6.3).
+    if (semverLess(maru_version, minimum.?)) {
+        std.debug.print("스킬은 maru {s} 이상을 요구하는데 이 트리의 build.zig.zon 은 {s} 다 — 버전을 올리는 PR 이 먼저 들어가야 한다\n", .{ minimum.?, maru_version });
+        return error.MinimumAboveThisTree;
+    }
+}
+
 // ── 스캐너 자체 ───────────────────────────────────────────────────────────────────────────────────────────
 // 위 판정이 「아무것도 못 찾아 초록」이 되지 않는지를 작은 글로 직접 잰다(ATTACK A15).
 
@@ -646,6 +700,10 @@ test "스캐너: 인라인 코드 — 한 낱말 명령은 언급, 인자가 있
     try std.testing.expectEqual(@as(usize, 0), scan.problems.items.len);
     try std.testing.expectEqual(@as(usize, 2), scan.examples.items.len);
     try std.testing.expect(scan.mentioned.contains("close") and scan.mentioned.contains("list"));
+    const vs = try scanText(arena, "Needs `maru 0.1.0`; `maru 0.0.0` is a source build; `maru X.Y.Z` is not a version.\n");
+    try std.testing.expectEqual(@as(usize, 2), vs.versions.items.len);
+    try std.testing.expectEqualStrings("0.1.0", vs.versions.items[0].version);
+    try std.testing.expect(semverLess("0.9.9", "0.10.0") and !semverLess("0.1.0", "0.1.0") and semverLess("0.0.0", "0.1.0"));
     // 인자가 있는데 파서가 거절하면 위반이다(`close` 는 `--surface` 가 필수).
     try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "`close --now`\n")).problems.items.len);
 }

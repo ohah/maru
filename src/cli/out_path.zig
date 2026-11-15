@@ -10,6 +10,7 @@
 //! 1. 이름(끝 조각)이 파일 이름 꼴이어야 한다 — `/` 로 끝나거나 `.`·`..` 면 폴더를 뜻하고, NUL·255 바이트 초과는 못 쓴다.
 //! 2. 부모 폴더의 정규 경로가 **뿌리**(현재 폴더·`$TMPDIR`·`/tmp`) 아래여야 한다. 현재 폴더는 `/` 나 `$HOME` 의 조상이면
 //!    뿌리가 못 된다(사람이 우연히 서 있는 자리다). 임시 폴더는 `/` 만 아니면 된다(정해진 자리다).
+//!    `network-request` 는 임시 폴더만(`Places.temp_only` — 본문이 서버가 정한 바이트 그대로라서, 사용자 결정 2026-11-15).
 //! 3. 정규 경로의 **어느 조각도** 점으로 시작하면 안 되고(끝 이름도), `$HOME/Library` 는 숨은 폴더로 친다.
 //! 「새 파일만」 은 파일 시스템이 판정한다(`link(2)` 의 EEXIST) — 여기서는 그 오류의 글만 둔다.
 //!
@@ -35,6 +36,8 @@ pub const JudgeError = error{
     OutsideAllowed,
     /// 정규 경로나 끝 이름에 숨은 조각이 있다.
     HiddenPath,
+    /// `temp_only` 인데 임시 폴더 아래가 아니다(현재 폴더 안이어도).
+    TempOnly,
 };
 
 /// `path` 를 부모 폴더 부분과 끝 이름으로 나눈다. `dir` 이 빈 글이면 현재 폴더, `/x` 면 `/`.
@@ -74,6 +77,9 @@ pub const Places = struct {
     temps: []const []const u8 = &.{},
     /// 없으면 홈 규칙(Library·cwd 의 조상 판정)은 건너뛴다 — 점 규칙은 그대로.
     home: ?[]const u8 = null,
+    /// 임시 폴더만 뿌리로 친다(`cwd` 는 보지 않는다) — `network-request --out`(사용자 결정 2026-11-15): 본문은 서버가 정한 바이트
+    /// 그대로라 프로젝트에 `conftest.py`·`Makefile`·`CLAUDE.md` 처럼 도구가 읽는 파일을 만들 수 있다.
+    temp_only: bool = false,
 };
 
 /// 현재 폴더가 뿌리가 될 수 있는가 — 절대 경로이고 `/` 가 아니며 `home` 의 조상이 아니다(대소문자 무시 — 조상 판정이 철자
@@ -94,10 +100,10 @@ pub fn usableTemp(root: []const u8) bool {
 /// 정규 부모 경로 `parent` 의 `leaf` 에 써도 되는가.
 pub fn judge(parent: []const u8, leaf: []const u8, places: Places) JudgeError!void {
     // 자리가 먼저다 — 뿌리 밖의 숨은 이름(`~/.zshrc`)은 「밖」 이 사람에게 더 쓸모 있는 까닭이다.
-    const in_cwd = if (places.cwd) |c| usableCwd(c, places.home) and under(parent, c) else false;
+    const in_cwd = if (places.temp_only) false else if (places.cwd) |c| usableCwd(c, places.home) and under(parent, c) else false;
     if (!in_cwd) for (places.temps) |t| {
         if (usableTemp(t) and under(parent, t)) break;
-    } else return error.OutsideAllowed;
+    } else return if (places.temp_only) error.TempOnly else error.OutsideAllowed;
     if (hidden(leaf)) return error.HiddenPath;
     var parts = std.mem.tokenizeScalar(u8, parent, '/');
     while (parts.next()) |part| if (hidden(part)) return error.HiddenPath;
@@ -119,6 +125,7 @@ pub fn errorText(err: anyerror) []const u8 {
     return switch (err) {
         error.OutputExists => "cannot write the output file: something already exists there — maru never overwrites; pick a new name",
         error.OutsideAllowed => "cannot write the output file: it must be in the current folder or the temp folder ($TMPDIR or /tmp) — write it there",
+        error.TempOnly => "cannot write the output file: network-request --out writes only under the temp folder ($TMPDIR or /tmp), not the current folder — write it there",
         error.HiddenPath => "cannot write the output file: its path has a hidden part (a name starting with a dot, or ~/Library) — pick a visible folder, for example under $TMPDIR",
         error.FileNotFound => "cannot write the output file: its directory does not exist — create it first or write under $TMPDIR",
         error.IsDir => "cannot write the output file: the path is a directory",
@@ -284,6 +291,24 @@ test "judge: cwd 가 홈이면 dotfile·~/Library 는 거절, 보이는 폴더�
     try testing.expectError(error.HiddenPath, judge(home, ".zshrc", .{ .cwd = home }));
 }
 
+test "judge: temp_only(network-request) — 현재 폴더 안도 거절하고 임시 폴더만 받는다, 숨은 규칙은 그대로" {
+    const places: Places = .{ .cwd = "/Users/me/proj", .temps = &.{ "/private/var/folders/x/T", "/private/tmp" }, .home = "/Users/me", .temp_only = true };
+    try testing.expectError(error.TempOnly, judge("/Users/me/proj", "body.json", places));
+    try testing.expectError(error.TempOnly, judge("/Users/me/proj/sub", "conftest.py", places));
+    try testing.expectError(error.TempOnly, judge("/usr/bin", "x", places));
+    try testing.expectError(error.TempOnly, judge("/Users/me", ".zshrc", places)); // 자리가 먼저
+    try judge("/private/var/folders/x/T", "body.json", places);
+    try judge("/private/tmp/maru-shots", "b.bin", places);
+    try testing.expectError(error.HiddenPath, judge("/private/tmp/.x", "b.bin", places));
+    try testing.expectError(error.HiddenPath, judge("/private/tmp", ".b", places));
+    // 쓸 수 없는 임시 뿌리(`/`)는 그대로 무시 — cwd 로 돌아가지 않는다.
+    try testing.expectError(error.TempOnly, judge("/Users/me/proj", "x", .{ .cwd = "/Users/me/proj", .temps = &.{"/"}, .temp_only = true }));
+    // 같은 자리라도 temp_only 가 아니면 현재 폴더에 쓴다(exec·screenshot·trace).
+    var other = places;
+    other.temp_only = false;
+    try judge("/Users/me/proj/sub", "conftest.py", other);
+}
+
 test "judge: 뿌리 밖과 숨은 이름이 겹치면 「밖」 을 먼저 말한다" {
     try testing.expectError(error.OutsideAllowed, judge("/Users/me", ".zshrc", .{ .cwd = "/Users/me/proj", .home = "/Users/me" }));
 }
@@ -293,6 +318,7 @@ test "errorText: 까닭마다 한 줄, 새 규칙은 $TMPDIR 또는 새 이름�
         .{ error.OutputExists, "new name" },
         .{ error.OutsideAllowed, "$TMPDIR" },
         .{ error.HiddenPath, "$TMPDIR" },
+        .{ error.TempOnly, "$TMPDIR" },
         .{ error.FileNotFound, "$TMPDIR" },
         .{ error.IsDir, "is a directory" },
         .{ error.DirectoryPath, "names a directory" },

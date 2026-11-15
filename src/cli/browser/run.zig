@@ -218,14 +218,14 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, cmd: browser.TraceCmd, std
         .start, .status, .abort => return runPlainRequest(io, allocator, .{ .trace = cmd }, stdout, stderr),
         .stop => {
             // `--out` 은 멈추기 전에 판정한다 — 멈춘 뒤에 「쓸 수 없다」 면 녹화가 사라진다.
-            var out = try openOut(io, allocator, cmd.out, stderr, "trace");
+            var out = try openOut(io, allocator, cmd.out, stderr, "trace", .cwd_or_temp);
             defer if (out) |*o| o.close(io);
             return traceStop(io, allocator, cmd, if (out) |*o| o else null, stdout, stderr);
         },
         .read => unreachable,
         .run => {
             // 파일 자리가 안 되면 기다리기 전에 실패한다(덮지 않는다 — 사용자 결정 1, 자리 — 2026-11-15).
-            var out = try openOut(io, allocator, cmd.out, stderr, "trace");
+            var out = try openOut(io, allocator, cmd.out, stderr, "trace", .cwd_or_temp);
             defer if (out) |*o| o.close(io);
             var start = cmd;
             start.action = .start;
@@ -429,14 +429,20 @@ fn prepareOutIn(base: std.Io.Dir, io: std.Io, path: []const u8, places: out_path
     return .{ .dir = dir, .leaf = parts.leaf };
 }
 
+/// `--out` 이 쓸 수 있는 자리 — 현재 폴더와 임시 폴더(exec·screenshot·trace), 또는 임시 폴더만(network-request — 본문은 서버가 정한
+/// 바이트 그대로라 프로젝트에 도구가 읽는 파일(`conftest.py`·`Makefile`·`CLAUDE.md`)을 만들 수 있다; 사용자 결정 2026-11-15).
+const OutWhere = enum { cwd_or_temp, temp_only };
+
 /// `--out` 이 있으면 이 프로세스의 cwd·`$TMPDIR`·`/tmp`·`$HOME` 으로 판정한다. 거절이면 `maru browser <label>: <까닭>` 한 줄과 exit 1.
-fn openOut(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8, stderr: *std.Io.Writer, label: []const u8) !?OutTarget {
+fn openOut(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8, stderr: *std.Io.Writer, label: []const u8, where: OutWhere) !?OutTarget {
     const p = path orelse return null;
     // 컨트롤 소켓이 없는 빌드(Windows)는 전처럼 「인스턴스 없음」 — comptime 이라 아래 POSIX 본문이 그 빌드에서 분석되지 않는다.
     if (control_client.gate) |reason| return control_client.noInstance(stderr, reason);
     var found: OutPlaces = .collect(io, allocator);
     defer found.deinit(allocator);
-    return prepareOutIn(std.Io.Dir.cwd(), io, p, found.places()) catch |e| {
+    var places = found.places();
+    places.temp_only = where == .temp_only;
+    return prepareOutIn(std.Io.Dir.cwd(), io, p, places) catch |e| {
         if (e == error.OutOfMemory) return e;
         stderr.print("maru browser {s}: {s}\n", .{ label, out_path.errorText(e) }) catch {};
         stderr.flush() catch {};
@@ -463,7 +469,7 @@ fn writeOut(target: *const OutTarget, io: std.Io, bytes: []const u8) !void {
 /// 바이너리는 base64 를 푼다). 다 모은 뒤에만 `writeOut`(새 파일만·0600·원자적)으로 쓴다 — 중간에 실패하면 파일을 만들지 않는다. 받는 동안
 /// 본문이 바뀌면(크기가 다르다) 실패로 친다. 파일 자리는 첫 조각을 묻기 전에 판정한다(`openOut`).
 fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.NetworkRequestCmd, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
-    var out = (try openOut(io, allocator, cmd.out, stderr, "network-request")).?;
+    var out = (try openOut(io, allocator, cmd.out, stderr, "network-request", .temp_only)).?;
     defer out.close(io);
     var acc: BodyOut = .{ .marks = .init(allocator) };
     defer acc.deinit(allocator);
@@ -667,7 +673,7 @@ fn runExecuteScript(
     };
     defer allocator.free(request_bytes);
     // `--out` 은 앱에 닿기 전에 판정한다 — 승인 모달·스크립트 실행 뒤에야 「쓸 수 없다」 가 나오지 않게.
-    var out = try openOut(io, allocator, exec_cmd.out, stderr, "exec");
+    var out = try openOut(io, allocator, exec_cmd.out, stderr, "exec", .cwd_or_temp);
     defer if (out) |*o| o.close(io);
     const fd = try control_client.connectSend(io, allocator, request_bytes, stderr);
     defer _ = std.c.close(fd);
@@ -814,7 +820,7 @@ fn runScreenshot(
     const c = std.c;
     const request_bytes = try browser.buildScreenshotRequestBytes(allocator, shot, .{ .number = 1 });
     defer allocator.free(request_bytes);
-    var out = try openOut(io, allocator, shot.out, stderr, "screenshot"); // 앱에 닿기 전에(exec 와 같다)
+    var out = try openOut(io, allocator, shot.out, stderr, "screenshot", .cwd_or_temp); // 앱에 닿기 전에(exec 와 같다)
     defer if (out) |*o| o.close(io);
     const fd = try control_client.connectSend(io, allocator, request_bytes, stderr);
     defer _ = c.close(fd);
@@ -1042,6 +1048,29 @@ test "--out: 뿌리 밖 — 형제 폴더(절대 경로)·`..`·뿌리 밖을 �
         // 쓸 수 없는 뿌리(`/`)만 있으면 어디도 안 된다.
         try std.testing.expectError(error.OutsideAllowed, prepareOutIn(proj, io, "z.png", .{ .cwd = "/" }));
     }
+}
+
+// 사용자 결정 2026-11-15: network-request 의 `--out` 은 임시 폴더만. 시험 뿌리를 **임시 폴더에서 빼고** 현재 폴더로만 주어 cwd 가 임시
+// 뿌리 뒤에 숨지 않게 한다(실제 `/tmp` 아래라도 여기서는 임시 뿌리가 아니다).
+test "--out: temp_only(network-request) — 현재 폴더에는 아무것도 만들지 않고, 임시 뿌리 아래에는 0600 새 파일" {
+    if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
+    const io = std.testing.io;
+    var root = try OutTestRoot.init(io);
+    defer root.deinit(io);
+    try root.dir.createDir(io, "sub", .default_dir);
+    for ([_][]const u8{ "body.json", "sub/conftest.py", "Makefile" }) |p| {
+        errdefer std.debug.print("temp_only cwd: {s}\n", .{p});
+        try std.testing.expectError(error.TempOnly, prepareOutIn(root.dir, io, p, .{ .cwd = root.canon(), .temp_only = true }));
+    }
+    var sub = try root.dir.openDir(io, "sub", .{ .iterate = true });
+    defer sub.close(io);
+    try expectNames(sub, io, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, out_path.errorText(error.TempOnly), "$TMPDIR") != null);
+    var t = try prepareOutIn(root.dir, io, "body.json", .{ .temps = &.{root.canon()}, .temp_only = true });
+    defer t.close(io);
+    try writeOut(&t, io, "BODY");
+    const st = try root.dir.statFile(io, "body.json", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
 }
 
 // 적대 검증 R14(변이 E5~E8 생존): 위 시험들은 뿌리를 **주입**하므로, 이 프로세스의 cwd·`/tmp`·`$HOME` 을 모으는 길이 깨져도(뿌리가 빠지면

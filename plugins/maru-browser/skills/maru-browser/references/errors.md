@@ -10,7 +10,8 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 | You see | Meaning | Do |
 |---|---|---|
 | `command not found` for `maru` | maru is not on PATH | Ask the user to run `maru install-cli` in a Maru pane. Stop. |
-| `unknown subcommand` or `unknown option`, then the whole help | A typo, or an older maru without that command or flag. The message does not name the option. | Check your `maru browser --help`. If it is not there, do not use it; tell the user their maru is older. |
+| `unknown subcommand 'x'` then a `commands (…):` line, or `unknown option '--x'` or `too many arguments: 'x' was not expected` then that command's help lines | A typo, or a command or flag your maru does not have. The message names the word. | Read the lines printed under it (or that command's `--help`, like `maru browser click --help`). If what you wanted is not there, do not use it; tell the user their maru is older. |
+| `screenshot: needs --out <file> …` | A screenshot without `--out` (maru never prints PNG bytes) | Add `--out "$TMPDIR/<new name>.png"`. |
 | `no running maru instance found.` | Maru is not running, its socket is stale, or a sandbox blocks the socket in `~/.cache/maru/control` | Stop and tell the user. Mention the sandbox if Maru is clearly running. |
 | `… (multiple maru instances found; selecting one is not supported yet).` | Two Maru apps (for example a dev build and the installed one), or a dead one's socket | Ask the user to quit one. |
 | `… cannot write the output file: something already exists there …` | `--out` names a file that exists; maru never overwrites | Use a new name. Do not delete the old file. |
@@ -21,9 +22,10 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 
 | You see | Meaning | Do |
 |---|---|---|
-| `error: Unauthorized (-32002)` with a `hint:` about the pane's foreground job | The request did not come from the Maru pane's foreground job (another terminal, tmux or screen inside the pane, a background `&` job), **or** the user declined the dialog, **or** the id is closed or unknown. Maru does not say which, on purpose. | Do not repeat. Run `maru browser list` to check the id. If you are inside tmux/screen, say so. Otherwise ask the user. |
+| `error: Unauthorized (-32002)` with `hint: maru does not say why it refused …` | The request did not come from the Maru pane's foreground job (another terminal, tmux or screen inside the pane, a background `&` job), **or** the tab lacks a permission the command needs (the user declined the dialog, or a command that never asks — `network-block` or `network-mock` with `--list`, `--remove` or `--clear`, `emulate` with `--get` or `--clear`, `network-record` with `--off` — before you held that permission), **or** the id is closed or unknown. Maru does not say which, on purpose. | Do not repeat. Run `maru browser list` to check the id. If you are inside tmux/screen, say so. If it was one of the commands that never ask, there is nothing of yours to list or clear there. Otherwise ask the user. |
 | `-32002` with a hint that only tabs this pane opened can be closed | `close` on a tab you did not open | Leave the user's tab open. |
-| `-32002` saying the tab needs its network permission first | `network-record`, `network-block` or `network-mock` before `network` was allowed on that tab (the foreground hint under it does not apply) | Run `network` on that tab first. |
+| `-32002` saying the tab needs its network permission first | `network-record`, `network-block` or `network-mock` before `network` was allowed on that tab (an older maru also prints the foreground hint under it — ignore that there) | Run `network` on that tab first. |
+| `-32002` saying a permission is gone, or that something works only on tabs the agent opened | The user took the permission back, or the command needs your own tab | Do not retry in a loop. Ask the user, or `open` a tab of your own. |
 | `error: the user declined the upload — nothing was uploaded (-32002)` | The user said no | Do not retry. Ask what they want. |
 | `error: maru closed the connection without answering …` | No answer to a dialog in time (about 2 minutes), too many connections, or Maru quit | Ask the user whether a dialog showed up. Retry at most once. |
 

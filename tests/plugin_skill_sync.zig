@@ -181,19 +181,34 @@ fn takeCommand(
 
         if (browser.parse(subst)) |cmd| {
             if (cmd == .help) {
-                // 도움말은 `maru browser --help` 그 꼴만 — 다른 꼴의 `.help`(`open --help`)는 구판에서도 exit 0 이라 점검에 못 쓴다.
-                if (!(subst.len == 1 and std.mem.eql(u8, subst[0], "--help"))) {
-                    try problem(arena, scan, "{s}:{d}: 도움말 예시는 `maru browser --help` 꼴만 쓴다 — {s}", .{ file, line_no, trimmed });
+                // 도움말은 두 꼴만 — 전역 `maru browser --help` 와 한 명령 `maru browser <명령> --help`(사용자 결정 D6). 한 명령 꼴은
+                // 구판 maru 에서 전역 help(exit 0)라 읽기 예시로는 해가 없지만, 구판을 거르는 **점검**(`| grep`)에는 전역 꼴만 쓴다.
+                const global = subst.len == 1 and std.mem.eql(u8, subst[0], "--help");
+                const one = cmd.help != null and subst.len == 2 and std.mem.eql(u8, subst[1], "--help");
+                if (!global and !one) {
+                    try problem(arena, scan, "{s}:{d}: 도움말 예시는 `maru browser --help`·`maru browser <명령> --help` 꼴만 쓴다 — {s}", .{ file, line_no, trimmed });
                     continue;
                 }
                 // `--help | grep … '<패턴>'` 이면 그 패턴을 ③이 본다.
                 if (seg_index + 1 < segments.len) {
                     const next = std.mem.trim(u8, segments[seg_index + 1], " \t\r");
                     if (try browser.splitLine(arena, next)) |gt| {
-                        if (gt.len >= 2 and std.mem.eql(u8, gt[0], "grep")) try scan.help_greps.append(arena, gt[gt.len - 1]);
+                        if (gt.len >= 2 and std.mem.eql(u8, gt[0], "grep")) {
+                            if (!global) {
+                                try problem(arena, scan, "{s}:{d}: help 점검(`| grep`)은 전역 `maru browser --help` 로만 한다 — {s}", .{ file, line_no, trimmed });
+                                continue;
+                            }
+                            try scan.help_greps.append(arena, gt[gt.len - 1]);
+                        }
                     }
                 }
+                if (one) try scan.mentioned.put(arena, subst[0], {});
             } else {
+                // 파서는 받지만 한 번짜리 CLI 가 보내기 전에 거절하는 꼴(`--out` 없는 screenshot — M5)도 위반이다.
+                if (browser.cliOutputRefusal(cmd)) |why| {
+                    try problem(arena, scan, "{s}:{d}: CLI 가 거절한다({s}) — {s}", .{ file, line_no, why, trimmed });
+                    continue;
+                }
                 try scan.mentioned.put(arena, subst[0], {});
             }
             try scan.examples.append(arena, .{ .file = file, .line = line_no, .text = trimmed, .args = subst });
@@ -675,7 +690,14 @@ test "스캐너: 틀린 옵션·코드 밖 명령·앞에 무언가 붙은 명�
     try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "```\nmaru browser click --surface 1 --reff n4\n```\n")).problems.items.len);
     try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "run maru browser list first\n")).problems.items.len);
     try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "`X=1 maru browser list`\n")).problems.items.len);
-    try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "`maru browser open --help`\n")).problems.items.len);
+    // 한 명령의 help 는 예시로 되지만(D6) 모르는 명령·그 밖의 꼴·한 명령 help 의 grep 점검은 위반이다.
+    try std.testing.expectEqual(@as(usize, 0), (try scanText(arena, "`maru browser open --help`\n")).problems.items.len);
+    try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "`maru browser nosuchcmd --help`\n")).problems.items.len);
+    try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "`maru browser open --url x --help`\n")).problems.items.len);
+    try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "```\nmaru browser open --help | grep -c '^  open '\n```\n")).problems.items.len);
+    // `--out` 없는 screenshot 은 파서는 받아도 CLI 가 거절한다(M5).
+    try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "```\nmaru browser screenshot --surface 12\n```\n")).problems.items.len);
+    try std.testing.expectEqual(@as(usize, 0), (try scanText(arena, "```\nmaru browser screenshot --surface 12 --out \"$TMPDIR/a.png\"\n```\n")).problems.items.len);
     try std.testing.expectEqual(@as(usize, 1), (try scanText(arena, "```sh\nmaru browser list\n")).problems.items.len); // 안 닫힌 펜스
 }
 

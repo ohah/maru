@@ -12,7 +12,7 @@ Maru is a macOS terminal with Chromium browser panes. From a Maru pane's shell y
 
 **`maru browser --help` is the source of truth.** This skill covers manners, lifetimes and recovery; the help
 lists every command and flag. If something here is not in your `--help`, your maru does not have it: do not
-use it and do not guess flags.
+use it and do not guess flags. `maru browser click --help` shows one command (an older maru shows the whole help).
 
 **In the turn this skill runs, Claude Code runs `maru browser` commands without asking.** You are the only
 check on what they do — read sections 3, 5 and 6 before you act.
@@ -73,8 +73,9 @@ Maru; if they allow it, your pane keeps control of that tab while it lives, what
 maru browser screenshot --surface 12 --out "$TMPDIR/maru-home-1.png"
 ```
 
-Always give a screenshot `--out`: without it the raw PNG bytes go to stdout, into your context. It captures
-the visible view only; look at the file with your file-reading tool.
+Always give a screenshot `--out`: maru refuses a screenshot without it (a build older than the minimum would
+print the raw PNG bytes into your context). It captures the visible view only; look at the file with your
+file-reading tool.
 
 `--out` (`screenshot`, `exec`, `network-request`, `trace`) writes without Claude Code asking, so maru limits it
 and refuses before it contacts the app:

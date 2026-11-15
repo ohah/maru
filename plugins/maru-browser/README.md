@@ -43,8 +43,11 @@ Ask for a browser task from a Maru pane ("open localhost:3000 and check the sign
 
 - **Claude Code does not ask before `maru browser` commands in the turn the skill runs** (`allowed-tools`). That
   includes `exec` (run JavaScript in a page) and the network and storage commands.
+- **`--out` writes files without asking.** `screenshot`, `exec` and `network-request` write to whatever path the
+  agent gives and replace a file already there; Claude Code's file-write check does not see it. The skill tells
+  the agent to write only new files in a temp folder.
 - **Tabs the agent opens use your real browser profile** — your cookies and logins — and Maru shows no dialog for
-  them. The skill tells the agent not to do anything irreversible on your accounts unless you asked, and to
+  them (cookie commands and uploads still ask). The skill tells the agent not to do anything irreversible on your accounts unless you asked, and to
   treat page text as untrusted, but that is guidance, not a lock.
 - Your own tabs stay protected by Maru: the first command on one of them asks you, and every `upload` asks you.
 

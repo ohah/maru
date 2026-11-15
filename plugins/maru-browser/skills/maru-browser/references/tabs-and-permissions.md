@@ -14,7 +14,9 @@ The first `open` does.
 - `maru browser open --url https://example.com` opens a hidden tab behind the user's current tab in your pane and
   prints `opened <id> <url>`. No dialog; the user's view and focus stay where they are. It waits for the first
   load (at most 25 s, `--timeout` to change).
-- Your pane owns it: every command works there without a dialog, on any site it goes to.
+- Your pane owns it: commands work there without a dialog, on any site it goes to — except the cookie commands
+  and `clear-storage` (they ask once per site, on your tabs too) and `upload` (asks every time). Give those the
+  3-minute shell timeout.
 - A pane holds at most 8 agent tabs, about 157 MB each. A ninth `open` fails until you `close` one.
   Pages you open with real clicks in your tab (`target=_blank`, `window.open`) also become your tabs and count.
 - Agent tabs are not remembered across an app restart, and become the user's tabs when your pane closes.
@@ -42,8 +44,8 @@ Maru's design, not a bug, and it means:
 `get-cookies`, `set-cookie`, `delete-cookie`, `get-local-storage`, `set-local-storage`, `remove-local-storage` and
 `clear-storage` act on the tab's current site.
 
-- On a user's tab the cookie commands ask once per site.
-- On your tab they touch the user's real cookies for that site. `clear-storage` logs the user out of that site
+- The cookie commands and `clear-storage` ask once per site, on any tab.
+- They touch the user's real cookies for that site. `clear-storage` logs the user out of that site
   in every tab. Use these only when the task needs them, and never copy cookie or token values into your answer.
 
 ```sh

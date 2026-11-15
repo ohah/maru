@@ -15,6 +15,7 @@ import struct
 import tempfile
 import threading
 import time
+import zlib
 from agent_events_stream_recovery import verify_recovery
 
 
@@ -415,6 +416,11 @@ def verify(cli, root):
     assert p.stderr.startswith("maru browser click: unknown option '--valeu'\n  click ") and len(p.stderr) < 2048, records[-1]
     p = run(['browser', 'snapshot', '--surface', '1', '--interactive', 'yes'], 1)
     assert "too many arguments: 'yes' was not expected" in p.stderr, records[-1]
+    # M5: a screenshot without --out is refused before the socket (PNG bytes never reach stdout — an agent's shell
+    # output is a pipe, so a terminal-only check would not protect it).
+    p = run(['browser', 'screenshot', '--surface', '1'], 1)
+    assert p.stderr.startswith('maru browser screenshot: needs --out <file>') and '$TMPDIR/shot-1.png' in p.stderr, records[-1]
+    assert not p.stdout and p.stderr.count('\n') == 1, records[-1]
     p = run(['browser', '--help'], 0)
     assert p.stdout.count('\n  open ') == 1 and len(p.stdout) > 8192, 'the global help keeps every command line'
     # `--out` refusals are judged before the socket too: a reachable endpoint must see no connection.
@@ -507,8 +513,74 @@ def verify(cli, root):
     assert sorted(os.listdir(out_nr)) == ['body.json'], os.listdir(out_nr)
     assert (out_nr / 'body.json').read_bytes() == b'hello'
     assert (out_nr / 'body.json').stat().st_mode & 0o777 == 0o600
+    check_scripted_endpoint(cli, root, env, control, run, record)
     (root / 'results.json').write_text(json.dumps(records, indent=2) + '\n')
     return len(records)
+
+
+def tiny_png(width=4, height=3):
+    """A valid RGB PNG (the CLI checks the IHDR size against the final frame)."""
+    raw = b''.join(b'\x00' + b'\xff\x00\x00' * width for _ in range(height))
+
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+def serve_script(sock, script, errors):
+    """Bind `sock` and answer one connection per item: each item maps the request to the frames sent back."""
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(sock))
+    listener.listen()
+    listener.settimeout(10)
+
+    def serve():
+        try:
+            for frames in script:
+                conn, _ = listener.accept()
+                with conn:
+                    conn.settimeout(10)
+                    f = conn.makefile('rb')
+                    json.loads(f.readline())  # auth
+                    req = json.loads(f.readline())
+                    conn.sendall(''.join(json.dumps(frame) + '\n' for frame in frames(req)).encode())
+                    f.close()
+        except Exception as exc:
+            errors.append(repr(exc))
+        finally:
+            listener.close()
+            sock.unlink()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
+def check_scripted_endpoint(cli, root, env, control, run, record):
+    """Answers that need an app, scripted through the endpoint: `maru mcp`'s screenshot image (M5)."""
+    sock = control / 'fixture.sock'
+    sock.unlink(missing_ok=True)  # the earlier endpoint closed but left its file behind
+    png = tiny_png()
+
+    def shot(req):
+        return [{'jsonrpc': '2.0', 'method': 'browser.screenshotChunk',
+                 'params': {'capture_id': 1, 'seq': 0, 'encoding': 'base64', 'data': base64.b64encode(png).decode()}},
+                {'jsonrpc': '2.0', 'id': req['id'],
+                 'result': {'capture_id': 1, 'seq_total': 1, 'bytes': len(png), 'width': 4, 'height': 3, 'format': 'png'}}]
+    errors = []
+    thread = serve_script(sock, [shot], errors)
+    # M5: the one-shot CLI refuses a screenshot without --out (checked before the socket, above), but `maru mcp` runs the
+    # same runner in-process and must still return the capture as an image result.
+    lines = [json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-06-18'}}),
+             json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'browser_screenshot', 'arguments': {'surface': 1}}})]
+    p = subprocess.run([str(cli), 'mcp'], cwd=root, env=env, input='\n'.join(lines) + '\n', capture_output=True, text=True, timeout=15)
+    record(['mcp', '<browser_screenshot through the endpoint>'], p.returncode, p.stdout, p.stderr)
+    thread.join(timeout=10)
+    assert not thread.is_alive() and not errors, errors
+    answer = json.loads(p.stdout.splitlines()[1])
+    content = answer['result']['content'][0]
+    assert not answer['result']['isError'] and content['type'] == 'image' and base64.b64decode(content['data']) == png, answer
 
 
 def check_out_preflight(cli, root, home, env, run, record):

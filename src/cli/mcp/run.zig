@@ -98,7 +98,7 @@ fn handle(io: std.Io, allocator: std.mem.Allocator, line: []const u8, stdout: *s
             };
             var args: SliceArgs = .{ .items = c.argv };
             var failed = false;
-            browser_run.run(io, allocator, &args, &out.writer, &err.writer) catch |e| {
+            browser_run.run(io, allocator, &args, &out.writer, &err.writer, .capture) catch |e| { // 바이트를 받아 이미지로 싣는다(M5 검사 밖)
                 failed = true;
                 if (err.written().len == 0 and out.written().len == 0) err.writer.print("error: {s}\n", .{@errorName(e)}) catch {};
             };

@@ -50,7 +50,7 @@ pub const browser_help =
     \\  (wait also takes --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>] [--visible]: wait until it is visible; Chromium tabs)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
     \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
-    \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG of the visible view (--rect region in view coordinates, --scale factor; omit for the whole view at device scale)
+    \\  screenshot  --surface <id> --out f [--rect x,y,w,h] [--scale s]   capture PNG of the visible view into a new file (--rect region in view coordinates, --scale factor; omit for the whole view at device scale)
     \\  back    --surface <id>                     go back in the tab's history (Chromium tabs; "not ok" when there is nothing to go back to)
     \\  forward --surface <id>                     go forward in the tab's history (Chromium tabs)
     \\  reload  --surface <id>                     reload the page (Chromium tabs)
@@ -646,6 +646,7 @@ pub const wait_max_timeout_ms: u32 = 25_000;
 /// 러너(`cli/browser/run.zig`) 핸들러 인자로 그대로 전달된다(익명 struct는 별개 타입이 되어 안 맞음).
 pub const ScreenshotCmd = struct {
     surface_id: u64,
+    /// 쓸 새 파일. null 은 `maru mcp` 만(바이트를 이미지 결과로) — 한 번짜리 CLI·repl 은 `cliOutputRefusal` 로 거절한다(M5).
     out: ?[]const u8,
     /// 선택 캡처 영역 `[x, y, width, height]`(CSS 포인트, §9.5.7). null=전체 가시 뷰포트.
     rect: ?[4]f64 = null,
@@ -895,6 +896,16 @@ pub fn parseDiag(args: []const []const u8, diag: *Diag) ParseError!Command {
         return .{ .help = args[0] };
     }
     return parseInner(args, diag);
+}
+
+/// 한 번짜리 CLI·repl 이 이 명령을 보내기 **전에** 거절할 까닭(한 줄) — 지금은 `--out` 없는 screenshot 하나(M5, 사용자 결정 D1:
+/// PNG 바이트를 stdout 에 내지 않는다 — 에이전트의 Bash 도구 stdout 은 파이프라 TTY 검사로는 지킬 수 없었다). 파서는 그 꼴을 그대로
+/// 받는다 — `maru mcp` 는 같은 러너로 바이트를 받아 이미지 결과로 싣고, 이 함수를 부르지 않는다(`browser_run.Sink.capture`).
+pub fn cliOutputRefusal(cmd: Command) ?[]const u8 {
+    return switch (cmd) {
+        .screenshot => |shot| if (shot.out == null) "needs --out <file> — maru does not print PNG bytes; write a new file, for example --out \"$TMPDIR/shot-1.png\", and open it with your file reader" else null,
+        else => null,
+    };
 }
 
 /// 파서가 아는 하위 명령인가 — 이름 하나만 넣어 「모르는 명령」 인지 묻는다(명령 목록을 따로 두지 않는다: 파서가 판정자다).
@@ -1166,7 +1177,8 @@ fn parseInner(args: []const []const u8, diag: *Diag) ParseError!Command {
         } } };
     }
     if (eq(sub, "screenshot")) {
-        // screenshot은 위치 인자 없음 — `--surface <id>` + 선택 `--out <file>`/`--rect x,y,w,h`/`--scale f`(생략=stdout·전체 뷰·기기 배율).
+        // screenshot은 위치 인자 없음 — `--surface <id>` + `--out <file>`(파서는 없어도 받는다 — 한 번짜리 CLI·repl 은 `cliOutputRefusal` 이
+        // 거절하고, MCP 는 바이트를 이미지로 싣는다) + 선택 `--rect x,y,w,h`/`--scale f`(생략=전체 뷰·기기 배율).
         var surface: ?u64 = null;
         var out: ?[]const u8 = null;
         var rect: ?[4]f64 = null;
@@ -4325,6 +4337,23 @@ test "M4: 명령 목록 한 줄은 help 의 명령 전부를 help 순서로 담�
     for (help_command_names) |n| try testing.expect(std.mem.indexOf(u8, line, n) != null);
 }
 
+// ── M5: `--out` 없는 screenshot ─────────────────────────────────────────────────────────────────────────────
+// 전에는 PNG 바이트를 stdout 에 냈다. 에이전트(Claude Code 의 Bash 도구)의 stdout 은 TTY 가 아니라 파이프라(실측) 「터미널일 때만
+// 거절」 은 에이전트를 지키지 못한다 — 그래서 한 번짜리 CLI·repl 은 늘 거절한다(사용자 결정 D1). MCP 는 같은 바이트를 이미지 결과로
+// 싣으므로 이 검사를 부르지 않는다(파서는 그대로 받는다).
+
+test "M5: --out 없는 screenshot 만 CLI 출력 검사에 걸린다 — 파서는 그대로 받는다(MCP 가 쓴다)" {
+    const bare = try parse(&.{ "screenshot", "--surface", "3" });
+    try testing.expect(bare.screenshot.out == null);
+    const why = cliOutputRefusal(bare).?;
+    try testing.expect(std.mem.indexOf(u8, why, "--out \"$TMPDIR/shot-1.png\"") != null);
+    try testing.expect(std.mem.indexOfScalar(u8, why, '\n') == null); // 한 줄
+    try testing.expect(cliOutputRefusal(try parse(&.{ "screenshot", "--surface", "3", "--out", "a.png" })) == null);
+    try testing.expect(cliOutputRefusal(try parse(&.{ "exec", "--surface", "3", "1" })) == null); // exec 의 stdout 은 글
+    try testing.expect(cliOutputRefusal(try parse(&.{ "get-url", "--surface", "3" })) == null);
+    try testing.expect(cliOutputRefusal(try parse(&.{"--help"})) == null);
+}
+
 test "parse: 에러 케이스" {
     try testing.expectError(error.MissingSubcommand, parse(&.{}));
     try testing.expectError(error.UnknownSubcommand, parse(&.{"bogus"}));
@@ -5045,7 +5074,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  (wait also takes --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>] [--visible]: wait until it is visible; Chromium tabs)
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
         \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
-        \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG of the visible view (--rect region in view coordinates, --scale factor; omit for the whole view at device scale)
+        \\  screenshot  --surface <id> --out f [--rect x,y,w,h] [--scale s]   capture PNG of the visible view into a new file (--rect region in view coordinates, --scale factor; omit for the whole view at device scale)
         \\  back    --surface <id>                     go back in the tab's history (Chromium tabs; "not ok" when there is nothing to go back to)
         \\  forward --surface <id>                     go forward in the tab's history (Chromium tabs)
         \\  reload  --surface <id>                     reload the page (Chromium tabs)

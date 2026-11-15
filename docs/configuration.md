@@ -188,7 +188,7 @@ file-panel.show-explorer-on-open = false
 | `cursor.color` | `#RRGGBB` | (없음) | 커서 칸 배경색을 테마와 **독립적으로** override(opt-in). 미지정이면 `theme.cursor`를 따른다. 형식 오류는 무시(미지정 유지) |
 | `cursor.text` | `#RRGGBB` | (없음) | 반전 블록 커서 **위 glyph 색** override(opt-in). 미지정이면 기존 동작(메인 터미널은 배경색, 사이드바 caret은 사이드바 배경색)을 따른다. 형식 오류는 무시 |
 | `cursor.unfocused` | `block`\|`hollow`\|`hidden` | `block` | 창이 **포커스를 잃었을 때** 커서. `block`(기본)=현행대로 채운 커서 유지, `hollow`=빈 사각형 테두리(외곽선 — 비활성 창임을 시각적으로, iTerm2/Terminal.app 관례), `hidden`=안 그림. 포커스 있으면 항상 `cursor.shape`대로. 그 외 값은 무시(기본 유지) |
-| `window.padding-top` | 정수(0~256) | `4` | 셀 그리드와 pane 가장자리 사이 **위** 여백(논리 pt, DPI 스케일). 탭 바·split divider·pane 배경 등 chrome은 사이드바 경계/창 가장자리까지 꽉 차고 셀 그리드만 들인다. 0이면 셀이 가장자리에 붙음. 범위 밖/비정수는 무시(기본 유지) |
+| `window.padding-top` | 정수(0~256) | `4` | 셀 그리드와 pane 가장자리 사이 **위** 여백(논리 pt, DPI 스케일). 탭 바·split divider·pane 배경 등 chrome은 사이드바 경계/창 가장자리까지 꽉 차고 셀 그리드만 들인다. **터미널 pane과 파일 뷰(markdown·html·pdf)에 적용**되고, **브라우저 pane은 받지 않는다**(본문을 가장자리까지 채운다 — 브라우저 여백 설정 키는 없다). 0이면 셀이 가장자리에 붙음. 범위 밖/비정수는 무시(기본 유지) |
 | `window.padding-right` | 정수(0~256) | `8` | 위와 같되 **오른쪽** 여백 |
 | `window.padding-bottom` | 정수(0~256) | `4` | 위와 같되 **아래** 여백 |
 | `window.padding-left` | 정수(0~256) | `8` | 위와 같되 **왼쪽** 여백 |

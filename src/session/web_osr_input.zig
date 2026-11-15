@@ -15,7 +15,8 @@ pub const MouseButton = message.MouseButton;
 pub const Target = struct {
     surface_id: u64,
     rect: Rect,
-    /// 분할 divider 에 맞닿은 가장자리(left=1·right=2·bottom=4 — `web_panel_layout.SurfaceLayout.seam_edges`).
+    /// resize target(분할 divider·도크 경계·사이드바 폭 조절 띠)에 맞닿은 가장자리(left=1·right=2·bottom=4 —
+    /// `web_panel_layout.SurfaceLayout.seam_edges`).
     seam_edges: u8 = 0,
     /// 가장자리별 divider 잡는 띠 폭(backing px). 이 띠 안의 클릭·hover 는 웹이 아니라 divider 것이다 — WKWebView 가
     /// hitTest 에서 통과시키는 것과 같은 자리(`WebPanelHitTestGeometry`).

@@ -15740,9 +15740,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         }
 
-        // 이 fixture는 window padding 0으로 돈다. 그래야 WKWebView가 seam까지 차올라 divider를 덮고,
-        // `isInDividerGrabBand`의 통과가 **실제로 시험된다** — padding이 divider를 노출하는 기본
-        // 구성에서는 애초에 웹뷰가 그 자리에 없어 아무것도 증명하지 못한다.
+        // WKWebView는 seam까지 차올라 divider를 덮으므로 `isInDividerGrabBand`의 통과가 **실제로 시험된다**.
+        // (예전에는 브라우저 본문에도 터미널 window padding이 걸려 기본 구성에서 divider가 padding 틈에 드러났고, 그래서
+        // 이 fixture가 padding 0으로 돌았다 — 2026-11-15 브라우저/터미널 여백 분리 뒤로 브라우저는 padding과 무관하다.
+        // 파일 뷰는 여전히 padding을 받으므로 파일 뷰로 이 판정을 돌리려면 padding 0이 필요하다.)
         let inPanel = panel.convert(local, from: view)
         webDividerHitTestOverPanel = panel.bounds.contains(inPanel)
 

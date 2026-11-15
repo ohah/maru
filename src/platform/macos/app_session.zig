@@ -57844,7 +57844,9 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expect(!surfaces.items[0].visible and !surfaces.items[1].visible);
     try std.testing.expect(surfaces.items[2].visible);
     try std.testing.expectEqual(web_panel_layout.PanelKind.browser, surfaces.items[2].panel_kind);
-    // 활성 web surface는 workspace 영역을 채우고, 도크와 맞닿은 오른쪽 seam을 그대로 받는다.
+    // 활성 web surface(파일 뷰 beta.html)는 workspace 영역을 채우고, 도크와 맞닿은 오른쪽 seam을 그대로 받는다.
+    // 파일 뷰는 터미널 padding 을 그대로 받으므로(2026-11-15 사용자 결정 — 0 은 브라우저만) 사이드바 폭 조절 띠가
+    // padding 틈 안에 있어 왼쪽 비트가 없다. 브라우저(items[0])는 아래 bottom 도크 단언에서 왼쪽 비트를 본다.
     try std.testing.expectEqual(@as(u8, 2), surfaces.items[2].seam_edges);
     const workspace_seam = pane_ops.dividerThicknessPx(session) + @max(@as(u32, 1), session.scale_milli / 1000);
     const workspace_web_chrome = web_panel_layout.contentRect(right.terminal, .{
@@ -57852,9 +57854,11 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
         .top = 2 * pane_ops.paneBarHeightPx(session),
         .right = workspace_seam,
     });
+    // 파일 뷰는 main 그대로 터미널 `window.padding-*` 을 받는다(2026-11-15 사용자 결정 — 0 은 브라우저 pane 만).
+    try std.testing.expect(session.window_padding_px.left > 0); // 제품 기본 padding 이 걸린 세션에서 재야 의미가 있다
     try std.testing.expectEqual(layout_math.insetRect(workspace_web_chrome, session.window_padding_px), surfaces.items[2].content_rect);
     // Native가 양보하는 edge band의 내부점은 반드시 같은 Zig resize target이어야 한다. 단일 10pt를 final frame에
-    // 다시 붙이면 padding만큼 target 밖 dead strip이 생겼던 회귀를 producer 실제 기하로 막는다.
+    // 다시 붙이면 target 밖 dead strip이 생겼던 회귀를 producer 실제 기하로 막는다.
     const scale: f64 = @as(f64, @floatFromInt(session.scale_milli)) / 1000.0;
     const workspace_surface = surfaces.items[2];
     const workspace_band_px = workspace_surface.divider_grab_bands_pt.right * scale;
@@ -57865,6 +57869,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
         @as(f64, @floatFromInt(workspace_surface.content_rect.x + workspace_surface.content_rect.w)) - workspace_band_px / 2,
         @floatFromInt(workspace_surface.content_rect.y + workspace_surface.content_rect.h / 2),
     ));
+    // 파일 뷰는 padding 이 사이드바 띠를 드러내므로 왼쪽 양보가 없다(main 과 같다).
+    try std.testing.expectEqual(@as(f64, 0), workspace_surface.divider_grab_bands_pt.left);
     try std.testing.expect(web_ops.webSurfacesPresent(session));
     try std.testing.expect(web_ops.hasWebSurface(session, session.fileEntryAt(1).?.surface_id));
 
@@ -57972,7 +57978,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(bottom.terminal.h + bottom.divider.h + bottom.dock.h, chrome_workspace.h);
     surfaces.clearRetainingCapacity();
     try web_ops.collectWebSurfaces(session, &surfaces);
-    try std.testing.expectEqual(@as(u8, 4), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음
+    try std.testing.expectEqual(@as(u8, 4 | 1), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음 + 왼쪽 사이드바 폭 조절 띠
 
     // titlebar 띠 우측 끝 단일 토글로 닫고 다시 연다(탭바 접기 버튼을 일원화 — 팽창 상태에도 토글 표시).
     try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, file_panel_ops.filePanelDockControlAction(session).?);
@@ -62469,8 +62475,12 @@ fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Alloca
     var saw = [3]bool{ false, false, false }; // left, right, bottom seam을 실제 밟았는지(non-vacuous)
     for (cur.items) |s| {
         var lr: ?maru.session.SplitRect = null;
+        var browser = false;
         for (leaves.items) |lf| for (lf.leaf.terms.items) |t| {
-            if (t.kind == .web and t.surfaceId() == s.surface_id) lr = lf.rect;
+            if (t.kind == .web and t.surfaceId() == s.surface_id) {
+                lr = lf.rect;
+                browser = web_ops.isBrowserTerm(t);
+            }
         };
         const rect = lr.?;
         const cr = s.content_rect;
@@ -62487,8 +62497,13 @@ fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Alloca
         try std.testing.expectEqual(rect.w - el - er, cr.w);
         try std.testing.expectEqual(rect.h - bar_h - addr_h - eb, cr.h);
         // seam_edges 비트마스크(L=1·R=2·B=4)는 inset이 걸린 가장자리와 정확히 일치해야 한다(Swift hitTest 통과의 단일 출처).
+        // 예외 하나: 사이드바에 맞닿은 맨 왼쪽 브라우저 leaf 는 시각 inset 없이 left 비트를 갖는다 — 브라우저 본문이 터미널 padding 없이
+        // 사이드바 경계에 붙어 폭 조절 띠(`onResizeEdge`)를 덮으므로 그 띠만큼 양보한다.
+        // 브라우저만 그렇다 — 파일 뷰는 padding 을 그대로 받아(사용자 결정 2026-11-15) 그 띠가 padding 틈 안에 있다.
+        const sidebar_edge = browser and !session.sidebar_collapsed and session.sidebar_width_px > 0 and rect.x == session.sidebar_width_px;
+        if (sidebar_edge) try std.testing.expect(s.divider_grab_bands_pt.left > 0);
         var expected_mask: u8 = 0;
-        if (el > 0) expected_mask |= 1;
+        if (el > 0 or sidebar_edge) expected_mask |= 1;
         if (er > 0) expected_mask |= 2;
         if (eb > 0) expected_mask |= 4;
         try std.testing.expectEqual(expected_mask, s.seam_edges);
@@ -62505,12 +62520,13 @@ test "웹 패널 옆 divider는 padding이 노출하든 webview가 통과시키�
 
     // (scale, window padding) 두 축을 함께 돈다. 기존 seam 검증은 padding 0 · 1x에서만 돌아
     // `half > padding` 구성과 Retina를 한 번도 밟지 않았다.
+    //
+    // 브라우저 pane 은 터미널 window padding 을 받지 않는다(2026-11-15 사용자 결정). 그래서 padding 값과 무관하게
+    // 웹뷰가 seam(dt+1pt)까지 차올라 grab 반폭을 덮고, **두 구성 모두** pass-through 밴드가 일해야 한다. 예전에는
+    // 제품 기본(2x 16px)에서 padding 이 divider 를 노출해 밴드가 0 이었다 — 그 전제가 이 결정으로 사라졌다.
     const Case = struct { scale: u32, pad: u32, expect_band: bool };
     for ([_]Case{
-        // 제품 기본: padding(2x에서 16px)이 grab 반폭(10.5px)보다 커서 divider가 padding 틈에
-        // 그대로 드러난다 → 통과시킬 것이 없고 밴드는 0이 맞다.
-        .{ .scale = 2000, .pad = 8, .expect_band = false },
-        // padding 0: 웹뷰가 seam까지 차올라 grab 밴드를 덮는다 → 이때만 pass-through가 일한다.
+        .{ .scale = 2000, .pad = 8, .expect_band = true },
         .{ .scale = 2000, .pad = 0, .expect_band = true },
     }) |case| {
         const session = try allocator.create(AppSession);
@@ -62545,14 +62561,16 @@ test "웹 패널 옆 divider는 padding이 노출하든 webview가 통과시키�
         }
         const web = seam_surface orelse return error.TestExpectedSeamSurface;
 
-        // ① 밴드 유무는 구성의 결과지 계약이 아니다. padding이 grab 반폭보다 크면 0이 맞다.
+        // ① 브라우저 본문은 padding 과 무관하게 seam 까지 차므로 밴드는 언제나 있다(예전에는 padding 이 grab 반폭보다
+        //    크면 divider 가 padding 틈에 드러나 밴드가 0 이었다 — 브라우저에선 2026-11-15 여백 분리로 사라졌다. 파일
+        //    뷰는 padding 을 받으므로 그 갈래가 아직 살지만, 이 시험은 브라우저만 만든다 → ② 는 회귀 그물로 남는다).
         const has_band = web.divider_grab_bands_pt.left > 0 or web.divider_grab_bands_pt.right > 0 or
             web.divider_grab_bands_pt.bottom > 0;
         try std.testing.expectEqual(case.expect_band, has_band);
 
-        // ② 밴드가 0인 구성에서는 divider 선이 웹뷰 **밖**에 있어야 한다 — 그래야 클릭이 웹뷰를
-        //    거치지 않고 아래 터미널 뷰에 닿는다. 이 둘 중 하나는 반드시 성립해야 하며, 둘 다
-        //    아니면 그 divider는 사용자가 영영 잡을 수 없다.
+        // ② 밴드가 0이면 divider 선이 웹뷰 **밖**에 있어야 한다 — 그래야 클릭이 웹뷰를 거치지 않고 아래
+        //    터미널 뷰에 닿는다. 이 둘 중 하나는 반드시 성립해야 하며, 둘 다 아니면 그 divider는 사용자가
+        //    영영 잡을 수 없다(지금 구성에서는 ①이 늘 참이라 이 단언은 회귀 그물로 남는다).
         const cr = web.content_rect;
         const inside_web = div_x >= @as(f64, @floatFromInt(cr.x)) and
             div_x < @as(f64, @floatFromInt(cr.x + cr.w)) and
@@ -62607,6 +62625,188 @@ test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클�
         const saw = try checkWebSeamInsets(session, seam, allocator);
         try std.testing.expect(saw[2]); // ★ 위 pane의 아래(가로 divider) seam을 실제 밟음 — bottom inset 잠금
     }
+}
+
+// 이 테스트가 증명하는 것: 터미널 `window.padding-*` 을 안 받는 것은 **브라우저 pane 만**이다(사용자 결정 2026-11-15).
+// 같은 pane 의 파일 뷰(markdown·html — html 은 `web_panel_kind == .browser` 지만 파일 Term)는 main 그대로 padding 을
+// 받고 사이드바 띠도 양보하지 않는다(띠가 padding 틈 안에 있다). kind 로 가르는 판정이 `isBrowserTerm` 하나라야
+// `.html` 파일 Term 이 브라우저로 새지 않는다.
+test "파일 뷰는 터미널 window padding 을 그대로 받고, 브라우저 pane 만 0 이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 1600, 1200, 2000);
+    session.window_padding_px = .{ .left = 16, .right = 16, .top = 8, .bottom = 8 };
+    try pane_ops.newWebTermInActivePane(session, .browser);
+    const browser_id = pane_ops.activePane(session).activeTerm().surfaceId();
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/w45-alpha.md", .markdown);
+    const md_id = pane_ops.activePane(session).activeTerm().surfaceId();
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/w45-beta.html", .html);
+    const html_id = pane_ops.activePane(session).activeTerm().surfaceId();
+
+    var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+    defer cur.deinit(allocator);
+    try web_ops.collectWebSurfaces(session, &cur);
+    const tr = session.termRect();
+    const bar_h = pane_ops.paneBarHeightPx(session);
+    // 셋 다 같은 단일 pane 이고 둘째 밴드(주소창/헤더)를 가진다 — padding 전 본문은 같다.
+    const chrome_rect = web_panel_layout.contentRect(tr, .{ .top = 2 * bar_h });
+    var seen: u8 = 0;
+    for (cur.items) |s| {
+        if (s.surface_id == browser_id) {
+            seen |= 1;
+            try std.testing.expectEqual(chrome_rect, s.content_rect); // 브라우저: 0
+            try std.testing.expectEqual(@as(u8, 1), s.seam_edges); // 사이드바 띠 양보
+            try std.testing.expect(s.divider_grab_bands_pt.left > 0);
+        } else if (s.surface_id == md_id or s.surface_id == html_id) {
+            seen |= if (s.surface_id == md_id) 2 else 4;
+            try std.testing.expectEqual(layout_math.insetRect(chrome_rect, session.window_padding_px), s.content_rect);
+            try std.testing.expectEqual(@as(u8, 0), s.seam_edges); // 띠는 padding 틈 안 — 양보 없음
+            try std.testing.expectEqual(@as(f64, 0), s.divider_grab_bands_pt.left);
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 7), seen);
+}
+
+// 이 테스트가 증명하는 것: `split.divider-thickness=0` 이어도 pane divider 는 **여전히 잡히는 target** 이다
+// (`dividerAtPoint` 는 두께와 무관하게 ±(cell/2+2) 를 잡는다). 브라우저 본문이 터미널 padding 없이 seam 까지 차므로, 두께 0
+// 에서 시각 seam(=0) 이 없어도 그 target 과 본문의 교집합만큼은 native/OSR 이 양보해야 한다 — 안 그러면 웹|웹 세로
+// divider 를 양쪽 페이지가 다 덮어 마우스로 영영 못 끈다(예전에는 padding 틈이 그 띠를 대신 드러내 줬다).
+test "divider 두께 0 에서도 브라우저 pane 은 divider 잡는 띠를 양보한다 — 브라우저|브라우저 split 을 끌 수 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 1600, 1200, 2000);
+    session.window_padding_px = .{ .left = 16, .right = 16, .top = 8, .bottom = 8 };
+    session.appearance.split_divider_thickness = 0;
+    try std.testing.expectEqual(@as(u32, 0), pane_ops.dividerThicknessPx(session));
+    session.dispatchAppAction(.split_horizontal);
+    session.dispatchAppAction(.new_web_tab);
+    pane_ops.focusPaneRelative(session, -1);
+    session.dispatchAppAction(.new_web_tab);
+
+    var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+    defer segs.deinit(allocator);
+    try pane_ops.layoutActiveTabDividers(session, &segs);
+    try std.testing.expectEqual(@as(usize, 1), segs.items.len);
+    const div_x: f64 = @floatFromInt(segs.items[0].pos);
+    const div_y: f64 = @floatFromInt(segs.items[0].bounds.y + segs.items[0].bounds.h / 2);
+
+    var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+    defer cur.deinit(allocator);
+    try web_ops.collectWebSurfaces(session, &cur);
+    const scale: f64 = 2.0;
+    var visible: usize = 0;
+    var covering: usize = 0;
+    for (cur.items) |s| {
+        if (!s.visible) continue;
+        visible += 1;
+        const target: OsrLayout = .{
+            .surface_id = s.surface_id,
+            .rect = s.content_rect,
+            .seam_edges = s.seam_edges,
+            .left_band_px = s.divider_grab_bands_pt.left * scale,
+            .right_band_px = s.divider_grab_bands_pt.right * scale,
+            .bottom_band_px = s.divider_grab_bands_pt.bottom * scale,
+        };
+        // divider 바로 양옆(target 안)의 점이 이 본문 안에 있으면, 페이지가 아니라 divider 것이어야 한다.
+        for ([_]f64{ div_x - 2, div_x + 1 }) |x| {
+            const cr = s.content_rect;
+            const inside = x >= @as(f64, @floatFromInt(cr.x)) and x < @as(f64, @floatFromInt(cr.x + cr.w));
+            if (!inside) continue;
+            covering += 1;
+            try std.testing.expect(maru.session.web_osr_input.hit(&.{target}, x, div_y) == null);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), visible);
+    try std.testing.expect(covering >= 2); // 두께 0 이라 양쪽 본문이 divider 에 바로 닿는다 — 판정이 실제로 돈다
+    // 그리고 그 자리를 누르면 divider 드래그가 시작된다.
+    session.mouse(1, div_x - 2, div_y, 0, 0);
+    try std.testing.expect(pane_ops.dividerCaptureActive(session));
+    session.mouse(3, div_x - 2, div_y, 0, 0);
+}
+
+// 이 테스트가 증명하는 것: 브라우저 pane 본문은 터미널 `window.padding-*` 을 받지 않아 탭 바·주소창 밴드
+// 아래를 가장자리까지 채우고(사용자 결정 2026-11-15 — 브라우저 여백과 터미널 기본 여백은 별개), 같은 세션의 터미널
+// grid 는 그 padding 을 그대로 받는다. 그리고 padding 이 사라지며 웹 본문이 덮게 된 **사이드바 폭 조절 띠**는
+// native/OSR 에 양보돼 실제 누름이 사이드바 폭 조절을 연다 — 양보 폭이 `onResizeEdge` 와 어긋나면 그 띠가 죽는다.
+// 사이드바를 접으면 잡을 경계가 없으니 양보도 없다(헛통과 방지).
+test "브라우저 pane 본문은 터미널 window padding 없이 가장자리까지 차고, 사이드바 폭 조절 띠는 양보한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 1600, 1200, 2000);
+    // 터미널 기본값(좌우 8·상하 4pt)을 2x 로 일부러 건다 — 웹이 이 값을 **안** 받는지가 시험 대상이다.
+    session.window_padding_px = .{ .left = 16, .right = 16, .top = 8, .bottom = 8 };
+    session.dispatchAppAction(.new_web_tab);
+    const web_id = pane_ops.activePane(session).activeTerm().surfaceId();
+
+    var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+    defer cur.deinit(allocator);
+    try web_ops.collectWebSurfaces(session, &cur);
+    var found: ?web_panel_layout.SurfaceLayout = null;
+    for (cur.items) |s| {
+        if (s.surface_id == web_id) found = s;
+    }
+    const web = found orelse return error.TestExpectedWebSurface;
+    const tr = session.termRect();
+    const bar_h = pane_ops.paneBarHeightPx(session);
+    try std.testing.expect(bar_h > 0);
+    // 단일 pane 이라 leaf == termRect. browser 본문 = 탭 바 + 주소창 밴드만 뺀 나머지 전부(좌·우·아래 0).
+    try std.testing.expectEqual(web_panel_layout.contentRect(tr, .{ .top = 2 * bar_h }), web.content_rect);
+    // 대조: 같은 세션의 터미널 grid 는 padding 을 계속 받는다(터미널 기본값 무변경).
+    const g = pane_ops.paneGeometry(session, tr);
+    try std.testing.expectEqual(layout_math.insetRect(g.body, session.window_padding_px), g.grid);
+    try std.testing.expectEqual(tr.x + 16, g.grid.x);
+
+    // 사이드바 폭 조절 띠: 웹 본문 왼쪽이 사이드바 경계와 같은 x 라 띠 전체를 양보한다.
+    try std.testing.expect(!session.sidebar_collapsed and session.sidebar_width_px == web.content_rect.x);
+    try std.testing.expectEqual(@as(u8, 1), web.seam_edges & 1);
+    const scale: f64 = 2.0;
+    const band_px = web.divider_grab_bands_pt.left * scale;
+    const cw = session.cell_width_px;
+    try std.testing.expect(cw > 0);
+    try std.testing.expectApproxEqAbs(chrome.components.sidebar.resizeEdgeMarginPx(cw), band_px, 1e-9);
+    const x0: f64 = @floatFromInt(web.content_rect.x);
+    const y_mid: f64 = @floatFromInt(web.content_rect.y + web.content_rect.h / 2);
+    try std.testing.expect(chrome.components.sidebar.onResizeEdge(x0 + band_px - 0.01, session.sidebar_width_px, cw));
+    try std.testing.expect(!chrome.components.sidebar.onResizeEdge(x0 + band_px, session.sidebar_width_px, cw));
+    // OSR 은 `osr_layouts` 를 이 값으로 만들고(`web.zig` driveOsr) 그 hit 가 띠를 뺀다 — 띠 안은 페이지가 아니다.
+    const target: OsrLayout = .{
+        .surface_id = web.surface_id,
+        .rect = web.content_rect,
+        .seam_edges = web.seam_edges,
+        .left_band_px = band_px,
+        .right_band_px = web.divider_grab_bands_pt.right * scale,
+        .bottom_band_px = web.divider_grab_bands_pt.bottom * scale,
+    };
+    try std.testing.expect(maru.session.web_osr_input.hit(&.{target}, x0 + 1, y_mid) == null);
+    try std.testing.expect(maru.session.web_osr_input.hit(&.{target}, x0 + band_px, y_mid) != null);
+    // 실제 누름이 사이드바 폭 조절 제스처를 연다.
+    session.mouse(1, x0 + 1, y_mid, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.sidebar_divider));
+    session.mouse(3, x0 + 1, y_mid, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.none));
+
+    // 사이드바를 접으면 경계가 없다 — 양보도 없다.
+    sidebar_ops.toggleSidebarCollapsed(session);
+    try std.testing.expect(session.sidebar_collapsed);
+    cur.clearRetainingCapacity();
+    try web_ops.collectWebSurfaces(session, &cur);
+    found = null;
+    for (cur.items) |s| {
+        if (s.surface_id == web_id) found = s;
+    }
+    const collapsed = found orelse return error.TestExpectedWebSurface;
+    try std.testing.expectEqual(@as(u8, 0), collapsed.seam_edges);
+    try std.testing.expectEqual(@as(f64, 0), collapsed.divider_grab_bands_pt.left);
+    try std.testing.expectEqual(web_panel_layout.contentRect(session.termRect(), .{ .top = 2 * bar_h }), collapsed.content_rect);
 }
 
 // [4e review 8] web scratch: web Term 있는 세션을 여러 tick 돌려도 영속 scratch(swap 후 옛 prev 버퍼 보유)가 누수/
@@ -80312,9 +80512,15 @@ test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown
         if (s.surface_id == browser.surfaceId()) browser_rect = s.content_rect;
     }
     try std.testing.expect(md_rect != null and browser_rect != null);
-    // 같은 pane·같은 leaf라 밴드 유무만 차이 → browser 본문이 정확히 bar_h만큼 더 내려간다.
-    try std.testing.expectEqual(md_rect.?.y + bar_h, browser_rect.?.y);
-    try std.testing.expectEqual(md_rect.?.h - bar_h, browser_rect.?.h);
+    // 같은 pane·같은 leaf라 밴드 유무와 padding 만 차이 — browser 본문은 정확히 bar_h만큼 더 내려가고, 터미널
+    // `window.padding-*` 은 markdown(파일 쪽 web Term)에만 걸린다(2026-11-15 사용자 결정 — 브라우저만 0). padding 을
+    // 되돌려 놓고 보면 밴드 차이만 남는다.
+    const pad = session.window_padding_px;
+    try std.testing.expect(pad.top > 0 and pad.left > 0); // 제품 기본 padding 이 걸린 세션이어야 두 갈래가 갈린다
+    try std.testing.expectEqual(md_rect.?.y - pad.top + bar_h, browser_rect.?.y);
+    try std.testing.expectEqual(md_rect.?.h + pad.top + pad.bottom - bar_h, browser_rect.?.h);
+    try std.testing.expectEqual(md_rect.?.x - pad.left, browser_rect.?.x);
+    try std.testing.expectEqual(md_rect.?.w + pad.left + pad.right, browser_rect.?.w);
 
     // 활성 browser 판정도 같은 술어를 공유한다(nav 단축키 게이트).
     try std.testing.expectEqual(browser.surfaceId(), web_ops.activeWebSurfaceId(session));

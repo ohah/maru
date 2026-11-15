@@ -71,7 +71,7 @@
 
 **FP16을 성립시키는 유일한 필수 수술이 이 절이다.** 나머지 슬라이스는 소유자 이동·삭제지만, 이 절만은 없던 동작을 새로 만든다.
 
-- **워크스페이스 전환이 파일 Term의 WKWebView를 파괴하면 안 된다(FP16 목표).** 현행 `collectWebSurfaces`(app_session/web.zig:206)는 활성 탭(=워크스페이스) pane 트리만 walk하므로, 집합에서 빠진 web surface가 `surfaceDiff.destroyed`로 dealloc된다 — 브라우저가 워크스페이스 전환 뒤 흰 페이지가 되는 현행 결함의 원인이다. 파일을 그대로 Term으로 옮기면 같은 경로가 **미저장 CM6 버퍼 유실**이 되므로 그대로는 출하할 수 없다.
+- **워크스페이스 전환이 파일 Term의 WKWebView를 파괴하면 안 된다(FP16 목표).** 현행 `collectWebSurfaces`(app_session/web.zig)는 활성 탭(=워크스페이스) pane 트리만 walk하므로, 집합에서 빠진 web surface가 `surfaceDiff.destroyed`로 dealloc된다 — 브라우저가 워크스페이스 전환 뒤 흰 페이지가 되는 현행 결함의 원인이다. 파일을 그대로 Term으로 옮기면 같은 경로가 **미저장 CM6 버퍼 유실**이 되므로 그대로는 출하할 수 없다.
 - **해법은 새 메커니즘이 아니라 walk 범위 확장**이다: walk를 **창의 전 탭**으로 넓히고, 비활성 워크스페이스의 web Term은 **zero rect + `visible=false`로 집합에 남긴다**. 이 "존재는 유지, 가시성만 끔" 패턴은 현행 도크 분기가 이미 쓰는 것을 옮기는 것뿐이다(접힌 도크 = zero rect + hidden, app_session.zig:14268~14270의 주석이 그 근거를 이미 적어 두었다).
 - **불변식: 가시성을 surface 존재와 결합하지 않는다.** 결합하면 전환 한 tick이 destroy를 만들고 편집 내용을 잃는다. 이 문장은 현행 도크 주석의 규칙을 워크스페이스로 승격한 것이다.
 - **적용 범위는 web Term 전체**(파일 + 브라우저). 파일만 보존하고 브라우저는 파괴하는 kind 분기는 두지 않는다 — 같은 결함을 kind로 나눌 근거가 없고, 브라우저 흰 페이지도 함께 해소된다(§1).

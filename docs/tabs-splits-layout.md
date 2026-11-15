@@ -112,12 +112,15 @@ raw rect를 leaf rect로 나눈다. 각 leaf에서는 L4 `AppSession.paneGeometr
 한 번 계산한다. `body`는 상단 pane tab bar만 제거한 실제 본문 외곽이고, `grid`는 body에 `window.padding-x/y`(기본 좌우
 8pt·상하 4pt)를 saturating inset하되 과대 값에서도 origin/end를 body 내부에 clamp한 셀 그리드 rect다. `bar`가 없으면 body=leaf다. PTY grid·셀 렌더 origin·마우스 cell
 hit-test·IME 후보창은 `.grid`를 공유하고, 실제 입력 영역을 표시하는 focus border는 `.body`를 공유해 padding을 border
-안쪽에 남긴다. WKWebView도 pane tab bar·browser address band·split seam 노출을 `web_panel_layout.contentRect`로 먼저
-제거한 본문에 같은 `layout_math.insetRect(window_padding_px)`를 적용한다. 파일 도크의 WKWebView도 그룹 tab/header를
-제거한 content rect에 같은 inset을 적용한다(**FP16 목표**: 파일이 워크스페이스 Term이 되면 도크는 탐색기 전용 GPU chrome이라
-WKWebView를 하나도 소유하지 않고, 파일 본문은 위의 web Term 경로 하나로 합쳐진다 — [file-panel.md](file-panel.md) §7).
-따라서 terminal grid와 웹 콘텐츠는 같은 수준의 여백을 갖되 tab/header와
-split·dock divider 자체는 padding 때문에 안쪽으로 밀리지 않는다. `paneBarRect`/`paneTermRect`는 `PaneGeometry`
+안쪽에 남긴다. **`window.padding-*`는 터미널 셀 그리드와 파일 뷰에 적용되고 브라우저 pane에는 적용되지 않는다.** 웹 Term은
+모두 pane tab bar·browser address band(파일은 헤더 밴드)·split/dock seam 노출을 `web_panel_layout.contentRect`로 먼저 제거한다.
+**파일 뷰**(markdown·html·pdf web Term)는 그 본문에 terminal grid와 같은 `layout_math.insetRect(window_padding_px)`를 적용해 같은
+여백 수준을 갖는다. **브라우저 pane**(`web.isBrowserTerm`)은 padding을 받지 않고 본문을 **가장자리까지** 채운다(2026-11-15 사용자
+결정 — 브라우저 여백과 터미널 기본 여백은 별개, 파일 뷰는 유지, 브라우저 여백 설정 키는 없다. 예전에는 브라우저에도 같은 inset을
+걸어 페이지 둘레에 테마 배경 틈이 보였다). 도크는 FP16 이후 탐색기 전용 GPU chrome이라 WKWebView를 소유하지 않고, 파일 본문은
+web Term 경로 하나다([file-panel.md](file-panel.md) §7). 브라우저 본문은 사이드바 경계에 바로 붙으므로 사이드바 폭 조절 띠를
+divider pass-through와 같은 band로 양보한다([web-panel.md](web-panel.md) §5). tab/header와 split·dock divider 자체는 어느 쪽에서도
+padding 때문에 안쪽으로 밀리지 않는다. `paneBarRect`/`paneTermRect`는 `PaneGeometry`
 accessor일 뿐 bar/padding 산술을 복제하지 않는다. focus border의 상태·z-order·테마와 비-key/OOM fail-close 계약은
 [file-panel-dock-ui.md §3.4](file-panel-dock-ui.md#34-terminal파일-도크-입력-포커스-표시왕복)를 단일 출처로 둔다.
 

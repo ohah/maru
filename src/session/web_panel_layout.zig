@@ -124,9 +124,10 @@ pub const SurfaceLayout = struct {
     content_rect: Rect,
     /// 이 tick에 화면에 보여야 하는가(활성 탭). false면 존재하되 hidden(상태 유지).
     visible: bool,
-    /// 이 web 본문 rect의 어느 가장자리가 split divider(형제 pane 경계)에 맞닿는가 — 비트마스크(left=1·right=2·bottom=4,
-    /// top은 탭 바라 divider 없음). Swift가 WKWebView hitTest에서 그 가장자리 근처 클릭/hover를 **통과**시켜 아래 터미널
-    /// 뷰의 divider 드래그·resize 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭을 분리 — WKWebView가 native라 안 삼키게).
+    /// 이 web 본문 rect의 어느 가장자리가 resize target(형제 pane divider·도크 경계·사이드바 폭 조절 띠)에 맞닿는가 —
+    /// 비트마스크(left=1·right=2·bottom=4, top은 탭 바라 없음). 사이드바 띠는 맨 왼쪽 **브라우저** leaf 의 left 비트로만 온다
+    /// (브라우저 본문은 터미널 padding 없이 사이드바 경계에 붙어 그 띠를 덮는다 — 파일 뷰는 padding 틈 안이라 없다). Swift가 WKWebView hitTest에서, OSR 은 `web_osr_input.hit`
+    /// 에서 그 가장자리 band 안 클릭/hover를 **통과**시켜 아래 Metal 뷰의 resize 드래그·커서가 잡게 한다.
     seam_edges: u8 = 0,
     /// 최종 content rect와 실제 Zig divider hit target의 가장자리별 교집합 폭(logical pt). 0이면 그 edge의
     /// native pass-through를 끈다. 단일 전역 폭을 쓰면 비대칭 padding에서 dead strip이 생기므로 edge별이다.

@@ -271,7 +271,8 @@ stdin relay, host 시작 및 control socket 연결을 하지 않는다.
 단독 요청만 받는다 — `--version --help`·`--version extra`처럼 뒤에 무엇이 붙으면 stderr `usage: maru --version`과
 exit 1이다. 짧은 플래그(`-V`/`-v`)는 없고 하위 명령(`maru browser --version` 등)은 버전을 따로 내지 않는다.
 순수 판정은 `src/cli/version.zig`(`test-cli-failure-contract`), 실제 출력·zon 값 대조·HOME 무변경은
-`tools/test-cli-failure-contract.py`(`test-cli-failure-process`)가 검사한다.
+`tools/test-cli-failure-contract.py`(`test-cli-failure-process`)가 검사한다. 같은 스크립트가 `maru mcp` 의 `initialize`
+응답 `serverInfo.version` 도 zon 값과 대조한다(같은 `maru_version` 모듈).
 
 ### CLI 대상 옵션 단일 지정
 

@@ -4,9 +4,9 @@
 //! 물을 길이 help 글뿐이었다. 버전 한 줄이면 비교할 수 있다.
 //!
 //! 버전 **값**은 여기서 정하지 않는다. 단일 출처는 `build.zig.zon` 의 `.version` 이고(릴리스 태그·Info.plist 가
-//! 같은 값을 쓴다 — docs/distribution.md 「버전 정책」), `build.zig` 가 그것을 `maru_version` 빌드 옵션으로
-//! `main.zig` 에 넘기고 `main.zig` 가 `write` 에 인자로 준다. 이 모듈이 빌드 옵션을 직접 import 하지 않는 것은
-//! `maru` 모듈이 wasm·코어와 공유되기 때문이다 — 빌드 시스템과 결합하는 자리는 디스패처 하나로 둔다.
+//! 같은 값을 쓴다 — docs/distribution.md 「버전 정책」), `build.zig` 가 그것을 `maru_version` 모듈로 내린다. XTVERSION
+//! (`terminal/core.zig`)과 `maru mcp`(`cli/mcp.zig`)는 그 모듈을 직접 읽지만, 이 모듈은 `main.zig` 가 `write` 에 **인자로**
+//! 주는 꼴을 둔다 — 한 줄 형식을 임의의 값으로 시험할 수 있게(아래 시험).
 //!
 //! 앱·컨트롤 소켓·HOME·캐시를 건드리지 않는다. 앱이 안 떠 있어도, 샌드박스 안에서도 답해야 하는 질문이다.
 
@@ -65,7 +65,7 @@ test "version CLI: output is exactly one line maru <version>" {
     try write(&writer, "1.2.3");
     try std.testing.expectEqualStrings("maru 1.2.3\n", writer.buffered());
 
-    // 값은 인자 그대로다 — 이 모듈이 다른 상수로 바꿔 치지 않는다(placeholder `0.0.0` 도 그대로 낸다).
+    // 값은 인자 그대로다 — 이 모듈이 다른 상수로 바꿔 치지 않는다(bump 전 판의 `0.0.0` 도 그대로 낸다).
     writer = .fixed(&buf);
     try write(&writer, "0.0.0");
     try std.testing.expectEqualStrings("maru 0.0.0\n", writer.buffered());

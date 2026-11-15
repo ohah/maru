@@ -75,7 +75,7 @@ esctest는 black-box로 응답을 *질의해 추론*하지만, Maru는 white-box
 |---|---|---|
 | DA1 `CSI c` / `CSI 0 c` | `CSI ? 6 c`(VT102) | xterm ctlseqs (Primary DA), DEC STD 070 |
 | DA2 `CSI > c` | `CSI > 1 ; 10 ; 0 c` | xterm ctlseqs (Secondary DA) |
-| XTVERSION `CSI > q`(Ps=0) | `DCS > \| maru 0.0.0 ST` | xterm ctlseqs (XTVERSION) |
+| XTVERSION `CSI > q`(Ps=0) | `DCS > \| maru <version> ST`(`<version>` = `build.zig.zon` `.version`) | xterm ctlseqs (XTVERSION) |
 | XTGETTCAP `DCS + q <hex> ST` | 캡별 `DCS 1 + r <hex>=<hex값> ST`(알면) / `DCS 0 + r <hex> ST`(모름) | xterm ctlseqs (XTGETTCAP) |
 | DSR `CSI 5 n` | `CSI 0 n`(OK) | ECMA-48 8.3.35 (DSR) |
 | CPR `CSI 6 n` | `CSI row ; col R`(1-indexed) | ECMA-48 8.3.14 (CPR) |
@@ -120,8 +120,9 @@ XTWINOPS(`CSI Ps t`)는 **보고형만** 답한다 — 14=텍스트 영역 픽�
 XTVERSION은 단말 **자기식별**의 백본이다. DA1/DA2가 범용 VT102/VT220 신원만 주는 것과 달리
 `DCS > | maru <version> ST`로 "이 단말은 maru다"를 이름으로 알려, terminfo 파일이 원격에 없어도
 capability를 런타임 질의로 감지하는 도구(tmux/nvim 등)가 maru를 식별할 수 있게 한다. 이름/버전은
-`core.zig`의 `terminal_name`/`terminal_version` 단일 출처에서 조립한다. 버전의 정식 단일 출처는
-`build.zig.zon`의 `.version`이고, 현재는 둘 다 `0.0.0` placeholder다(릴리스 시 함께 올린다).
+`core.zig`의 `terminal_name`/`terminal_version` 단일 출처에서 조립한다. `terminal_version` 은 상수가 아니라
+`build.zig.zon`의 `.version` 을 빌드가 내려 준 `maru_version` 모듈 값이다(`maru --version`·`maru mcp` 와 같은 모듈 —
+[배포 문서의 버전 정책](distribution.md#버전-정책)). 그래서 conformance 시험도 숫자를 들고 있지 않고 그 모듈 값과 대조한다.
 
 XTGETTCAP은 자기식별의 **두 번째 채널**이다 — terminfo/termcap 캡을 hex로 질의하면 캡별로 답한다.
 maru가 정직하게 지원하는 캡만 안다고 답한다: `TN`(terminfo 이름 `xterm-maru` — `core.zig`의

@@ -11,6 +11,9 @@ const test_selection_env = @import("../tools/test_runner_selection_env.zig");
 var array_repeat_module: ?*std.Build.Module = null;
 var type_info_fields_module: ?*std.Build.Module = null;
 var macos_spawn_module: ?*std.Build.Module = null;
+/// `build.zig.zon` `.version` 을 담은 값-전용 모듈(`pub const version: []const u8`). `maru --version`·XTVERSION
+/// (`src/terminal/core.zig` `terminal_version`)·`maru mcp` `serverInfo` 가 **같은 이 하나**를 읽는다(docs/distribution.md 「버전 정책」).
+var maru_version_module: ?*std.Build.Module = null;
 
 pub fn setMacosSpawnModule(module: *std.Build.Module) void {
     macos_spawn_module = module;
@@ -24,6 +27,10 @@ pub fn setTypeInfoFieldsModule(module: *std.Build.Module) void {
     type_info_fields_module = module;
 }
 
+pub fn setMaruVersionModule(module: *std.Build.Module) void {
+    maru_version_module = module;
+}
+
 fn collectModules(
     b: *std.Build,
     module: *std.Build.Module,
@@ -31,7 +38,7 @@ fn collectModules(
     type_fields_module: ?*std.Build.Module,
     modules: *std.array_hash_map.Auto(*std.Build.Module, void),
 ) void {
-    if (module == repeat_module or module == type_fields_module or modules.contains(module)) return;
+    if (module == repeat_module or module == type_fields_module or module == maru_version_module or modules.contains(module)) return;
     modules.putNoClobber(b.graph.arena, module, {}) catch @panic("OOM");
     for (module.import_table.values()) |dependency| {
         collectModules(b, dependency, repeat_module, type_fields_module, modules);
@@ -41,10 +48,15 @@ fn collectModules(
 /// Shares compatibility helpers and the native spawn boundary across one compile graph.
 /// Multiple source modules in a single graph must share one imported module for a source file;
 /// relative imports of the helper would otherwise claim the same file from several modules.
+///
+/// `maru_version` 도 같은 길로 준다 — 터미널 코어(L1)가 XTVERSION 에 빌드 버전을 싣기 때문이다. 코어는 이미 빌드가 주는
+/// 이름 모듈(`array_repeat`·`png_codec`) 없이는 컴파일되지 않으므로 새 결합이 아니고, 이 모듈은 import·OS·I/O 가 0 인
+/// 값 하나라 어느 층에도 속하지 않는다. 코어를 컴파일하는 그래프(제품·cross·wasm·mobile·시험)는 전부 `attachPngCodec`
+/// 이나 `addProjectTest` 를 거쳐 여기 닿으므로 host 마다 값을 넣어 줄 필요가 없다(docs/distribution.md 「버전 정책」).
 pub fn attachArrayRepeatImports(b: *std.Build, root: *std.Build.Module) void {
     const repeat_module = array_repeat_module;
     const type_fields_module = type_info_fields_module;
-    if (repeat_module == null and type_fields_module == null and macos_spawn_module == null) return;
+    if (repeat_module == null and type_fields_module == null and macos_spawn_module == null and maru_version_module == null) return;
     var modules: std.array_hash_map.Auto(*std.Build.Module, void) = .empty;
     collectModules(b, root, repeat_module, type_fields_module, &modules);
     for (modules.keys()) |module| {
@@ -53,6 +65,7 @@ pub fn attachArrayRepeatImports(b: *std.Build, root: *std.Build.Module) void {
         // One owner avoids duplicate-file modules when a focused bounded-process
         // test and the full Maru facade both use the native spawn boundary.
         if (macos_spawn_module) |spawn_module| if (module != spawn_module) module.addImport("macos_spawn", spawn_module);
+        if (maru_version_module) |version_module| module.addImport("maru_version", version_module);
     }
 }
 

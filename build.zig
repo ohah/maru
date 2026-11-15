@@ -294,6 +294,18 @@ pub fn build(b: *std.Build) void {
     support.setTypeInfoFieldsModule(b.createModule(.{
         .root_source_file = b.path("src/compat/type_info_fields.zig"),
     }));
+    // 빌드 버전 — 단일 출처는 `build.zig.zon` `.version` 이다. 릴리스 태그 대조(`check-release-version`)와 생성
+    // Info.plist 가 같은 값을 쓴다(docs/distribution.md 「버전 정책」). **모듈은 이 하나뿐이다**: `maru --version`
+    // (`src/main.zig`)·XTVERSION(`src/terminal/core.zig` `terminal_version`)·`maru mcp` `serverInfo`(`src/cli/mcp.zig`)가
+    // 같은 것을 읽는다. 코어가 쓰므로 위 compat 모듈과 같이 그래프마다 붙인다(`support.attachArrayRepeatImports`) —
+    // `maru` 루트(제품·cross·wasm·mobile)는 `attachPngCodec` 이, 시험은 `addProjectTest` 가 그 길을 탄다. 그래서 이 줄이
+    // 그 둘보다 **먼저** 와야 한다. `src/main.zig` 를 컴파일하는 자리의 명시 import(아래 `maru_version_mod`)도 같은 모듈이다.
+    const maru_version_mod = blk: {
+        const opts = b.addOptions();
+        opts.addOption([]const u8, "version", build_zig_zon.version);
+        break :blk opts.createModule();
+    };
+    support.setMaruVersionModule(maru_version_mod);
 
     // **가짜 언어 서버**(tooling §8.2a 관측점) — `LSPB*` 가 `zig-out/bin/maru-fake-lsp` 를 `MARU_LSP_SERVER_OVERRIDE` 로 끼운다.
     // 그 판정자를 돌리는 run 스텝마다(`test-editor`·macOS 집계 샤드) 이 설치 단계에 의존해 판정자가 돌 때 늘 그 자리에 있다.
@@ -801,14 +813,6 @@ pub fn build(b: *std.Build) void {
     const session_host_product_options = b.addOptions();
     session_host_product_options.addOption(bool, "allow_validation_only_restore", false);
     const session_host_build_options_mod = session_host_product_options.createModule();
-    // `maru --version` 이 내는 값. 단일 출처는 `build.zig.zon` `.version` 이다 — 릴리스 태그 대조
-    // (`check-release-version`)와 생성 Info.plist 가 같은 값을 쓴다(docs/distribution.md 「버전 정책」).
-    // `src/main.zig` 를 컴파일하는 **모든** 자리가 이 모듈을 import 해야 한다(제품 exe·check-targets·
-    // 업그레이드 ReleaseFast exe·TBPROBE 시험·session-host 복원 시험 exe). 순수 절반(`src/cli/version.zig`)은
-    // 값을 인자로 받으므로 `maru` 모듈(wasm·코어와 공유)은 빌드 옵션을 모른다.
-    const maru_version_options = b.addOptions();
-    maru_version_options.addOption([]const u8, "version", build_zig_zon.version);
-    const maru_version_mod = maru_version_options.createModule();
 
     const exe = b.addExecutable(.{
         .name = "maru",
@@ -2013,8 +2017,8 @@ pub fn build(b: *std.Build) void {
 
     // 앱 버전(build.zig.zon .version)을 build_options로 노출 — app host(app_session)가
     // @import("build_options").version으로 읽어 인앱 새 버전 안내에 쓴다(distribution.md). app host lib과
-    // 그 계약 테스트 모듈 양쪽에 같은 모듈을 주입한다. core(VT)는 빌드 시스템 비결합 원칙이라 app host
-    // 경로에만 쓴다(core.zig의 terminal_version 상수는 별개).
+    // 그 계약 테스트 모듈 양쪽에 같은 모듈을 주입한다. 값은 위 `maru_version_mod` 와 같은 zon 값이다(코어의
+    // XTVERSION 은 그쪽 모듈을 읽는다).
     // W9c③: 에이전트 업로드의 확인 모달을 환경변수(`MARU_TEST_UPLOAD_DECISION`)로 대신 답하는 길 — **시험 빌드에만** 들어간다(cdp 스모크가
     // `-Dweb-upload-test-decision=true` 로 앱을 만든다). 기본(배포본)은 거짓이라 그 환경변수를 읽는 코드가 comptime 으로 빠진다 — 모달이
     // 업로드의 유일한 관문이다(docs/plans/web-osr-backend.md 「W9c③ 결정」).

@@ -139,6 +139,11 @@ expect_edit "code=true runtime=true web=false packages=true docs=false" terminfo
 expect "code=false runtime=false web=false packages=false docs=true" docs/architecture.md
 expect "code=false runtime=false web=false packages=false docs=true" AGENTS.md .claude/settings.json LICENSE
 
+# 에이전트 플러그인의 스킬 글은 `.md` 라도 code 축이다 — `zig build test` 의 동기화 판정자가 그 글을 CLI 파서에 넣는다.
+# docs 로 떨어지면 그 판정자가 CI 에서 안 돈다(이 분기를 넣기 전의 실제 동작). runtime 은 켜지 않는다(앱 동작과 무관).
+expect "code=true runtime=false web=false packages=false docs=false" plugins/maru-browser/skills/maru-browser/SKILL.md
+expect "code=true runtime=false web=false packages=false docs=false" .claude-plugin/marketplace.json plugins/maru-browser/.claude-plugin/plugin.json
+
 # Zig 변경은 Zig 게이트만 — web:check는 이 경로를 읽지 않는다.
 expect "code=true runtime=true web=false packages=true docs=false" src/core.zig
 expect "code=true runtime=true web=false packages=true docs=false" build.zig tests/boundary/imports.zig tools/perf/core.zig

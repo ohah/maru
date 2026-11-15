@@ -201,6 +201,19 @@ jobs:
       - name: 중간 커밋 판정자 자신을 검증한다
         if: ${{ github.event_name == 'pull_request' }}
         run: sh tools/ci/per-commit-boundaries.test.sh
+      # 에이전트 플러그인(plugins/<이름>/)을 고친 PR 이 그 `version` 을 올렸는가(docs/control-plane-browser.md §9.6.3).
+      # Claude Code 는 그 문자열로 캐시를 가르므로 안 올리면 사용자는 갱신해도 옛 스킬에 머문다. git 과 python3 만 쓰는
+      # 초 단위 판정이라 변경 분류(code/docs)와 무관하게 PR 마다 돈다 — 이 잡은 필수 체크라 실패하면 머지를 막는다.
+      # 판정자 자신을 먼저 검증한다(분류기·중간 커밋 판정자와 같은 이유 — 판정이 틀리면 게이트가 조용히 열린다).
+      - name: 플러그인 version 판정자 자신을 검증한다
+        if: ${{ github.event_name == 'pull_request' }}
+        run: sh tools/ci/plugin-version-bump.test.sh
+      - name: 플러그인을 고쳤으면 version 을 올렸는가
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: sh tools/ci/plugin-version-bump.sh "$BASE" "$HEAD"
       - name: macOS gate coverage and receipt failure controls
         run: python3 -m unittest discover -s tools/ci -p test_macos_shards.py
       - name: 중간 커밋도 경계 게이트를 통과하는가

@@ -113,6 +113,13 @@ while IFS= read -r path; do
 		code=true
 		runtime=true
 		;;
+	# **에이전트 플러그인**(plugins/·루트 .claude-plugin/ — control-plane-browser.md §9.6.3). 스킬 글은 `.md` 지만
+	# 문서가 아니다: `zig build test` 의 동기화 판정자(tests/plugin_skill_sync.zig)가 그 글의 명령을 진짜 CLI 파서에
+	# 넣는다. 아래 `*.md` 규칙에 먼저 걸리면 docs 축만 켜져 그 판정자가 CI 에서 안 돈다 — 그래서 **그 규칙보다 앞에**
+	# 둔다(case 는 첫 일치). 앱의 런타임 동작은 바꾸지 않으므로 runtime(macOS 잡)은 켜지 않는다.
+	plugins/* | .claude-plugin/*)
+		code=true
+		;;
 	# 문서·라이선스와 에이전트 로컬 설정. 제품 빌드에도 파이프라인에도 들어가지 않는다.
 	# docs/*.md는 check-config-docs와 check-doc-links가 런타임에 훑으므로 `check` job의 축소 실행이 계속 검증한다
 	# (tests/config_docs/keys.zig·tests/doc_links/links.zig).

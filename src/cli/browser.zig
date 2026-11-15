@@ -6,15 +6,17 @@
 //!
 //! **auth·grant(§9.2 Model B)**: CLI는 `auth.self`(selector=`MARU_PANE_ID`·cap_nonce=null)만 보낸다 — browser 요청은
 //! 세션 cap이 없어 needs_grant→서버 held→**확인 모달**. 러너의 read는 사용자가 모달을 클릭할 때까지 블록(승인=응답
-//! 렌더·거부=`Unauthorized`·무응답 timeout=EOF). 대상 `--surface N`은 필수(에이전트는 `maru sessions list`로 web
-//! surface_id 발견). 확장(screenshot·act·set/delete)은 서브커맨드 dispatch에 한 줄씩.
+//! 렌더·거부=`Unauthorized`·무응답 timeout=EOF). 대상 `--surface N`은 필수(`list`·`open` 제외 — 에이전트는 `maru browser list`로 web
+//! surface_id 발견 — `maru sessions list`는 self scope라 형제 web 패널이 안 보인다, §9.6.1). 확장(screenshot·act·set/delete)은
+//! 서브커맨드 dispatch에 한 줄씩. 이 help 의 명령 목록은 에이전트 스킬 플러그인이 시험으로 따라간다(§9.6.3 — `tests/plugin_skill_sync.zig`).
 //!
 //! **L2 순수**: std + control_plane(1a)만. 소켓/OS 0(파싱·wire만 — I/O는 `cli/control_client.zig`·`cli/browser/run.zig`).
 
 const std = @import("std");
 const cp = @import("../session/control_plane.zig");
 
-/// `maru browser --help`. 구현된 서브커맨드만 노출한다(§11 help gate — 정직성). 대상 surface는 `maru sessions list`로 발견.
+/// `maru browser --help`. 구현된 서브커맨드만 노출한다(§11 help gate — 정직성). 대상 surface는 `maru browser list`로 발견.
+/// 명령 줄의 모양(두 칸 들여쓰기 + 이름)과 `open` 줄은 maru-browser 스킬의 점검이 기대어 있다 — 바꾸면 `zig build test-plugin-skill`.
 pub const browser_help =
     \\usage: maru browser <command> [--surface <id>] [args]
     \\

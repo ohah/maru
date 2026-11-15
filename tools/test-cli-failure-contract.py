@@ -47,9 +47,9 @@ def verify(cli, root):
         records.append(entry)
         (root / 'results.json').write_text(json.dumps(records, indent=2) + '\n')
 
-    def run(args, expected):
+    def run(args, expected, cwd=None):
         try:
-            p = subprocess.run([str(cli), *args], cwd=root, env=env, capture_output=True, text=True, timeout=15)
+            p = subprocess.run([str(cli), *args], cwd=cwd or root, env=env, capture_output=True, text=True, timeout=15)
         except subprocess.TimeoutExpired as exc:
             record(args, None, exc.stdout, exc.stderr, 'timeout')
             raise
@@ -114,6 +114,7 @@ def verify(cli, root):
     run(['trace', 'anonymize', 'in.trace', 'out.trace'], 0)
     assert output.read_text().startswith('maru.trace.v1')
     assert run(['trace', 'anonymize', 'in.trace'], 0).stdout.startswith('maru.trace.v1')
+    check_out_preflight(cli, root, home, env, run, record)
     help_text = run(['--help'], 0).stdout
     for command in ['incidents', 'control', 'agent-events', 'agent-hooks', 'browser', '--version']:
         assert '  ' + command + ' ' in help_text, command
@@ -403,6 +404,13 @@ def verify(cli, root):
                 for second in [['--volume', 'a'], ['--volume=A'], ['--volume', 'b'], ['--volume=b'], ['--volume=0'], ['--volume=0a']]:
                     p = run([*namespace, 'trust', verb, '/fixture/repository', *first, *second], 1)
                     assert '--volume may only be specified once' in p.stderr
+    # `--out` refusals are judged before the socket too: a reachable endpoint must see no connection.
+    out_keep = root / 'out-fixture' / 'keep.json'
+    for verb in [['exec', '--surface', '1', '--out', 'keep.json', '1'], ['screenshot', '--surface', '1', '--out', 'keep.json'],
+                 ['network-request', '--surface', '1', '--req', '7', '--out', '.hidden'], ['trace', 'stop', '--surface', '1', '--out', '/maru-out-x']]:
+        p = run(['browser', *verb], 1, cwd=root / 'out-fixture')
+        assert 'cannot write the output file' in p.stderr, records[-1]
+    assert out_keep.read_text() == 'KEEP OUT\n'
     # A reachable endpoint exists: rejection must happen before even auth is sent.
     listener.settimeout(0.05)
     try:
@@ -436,6 +444,14 @@ def verify(cli, root):
     wire_seen = []
     # Empty wrapped results are successful, not protocol failures.
     plans += [(['browser', 'snapshot', '--surface', '1'], 'success', {'snapshot': {'tree': []}}), (['browser', 'console', '--surface', '1'], 'success', {'console': []})]
+    # `--out` through the fake endpoint: the whole body lands as a new 0600 file; a server error or a short body leaves no file
+    # (and no temporary file) behind.
+    out_nr = root / 'nr'
+    out_nr.mkdir()
+    out_args = ['browser', 'network-request', '--surface', '1', '--req', '7', '--out']
+    plans += [(out_args + ['nr/body.json'], 'success', {'body_state': 'captured', 'body_size': 5, 'body_encoding': 'utf-8', 'body': 'hello'}),
+              (out_args + ['nr/err.json'], 'error', None),
+              (out_args + ['nr/short.json'], 'short', {'body_state': 'captured', 'body_size': 9, 'body_encoding': 'utf-8', 'body': 'hello'})]
     errors = []
 
     def serve():
@@ -475,8 +491,71 @@ def verify(cli, root):
                     assert auth['params'] == {}, auth
     thread.join(timeout=10)
     assert not thread.is_alive() and not errors, errors
+    assert sorted(os.listdir(out_nr)) == ['body.json'], os.listdir(out_nr)
+    assert (out_nr / 'body.json').read_bytes() == b'hello'
+    assert (out_nr / 'body.json').stat().st_mode & 0o777 == 0o600
     (root / 'results.json').write_text(json.dumps(records, indent=2) + '\n')
     return len(records)
+
+
+def check_out_preflight(cli, root, home, env, run, record):
+    """`maru browser … --out` (2026-11-15): a new file only, under the current folder or the temp folder, never through a
+    hidden name. These run with no app at all — the refusal must not depend on a running instance, so it has to happen
+    before the CLI looks for the control socket (a passing path ends in 'no running maru instance found' instead)."""
+    fixture = root / 'out-fixture'
+    fixture.mkdir()
+    (fixture / '.git').mkdir()
+    (fixture / 'sub').mkdir()
+    (fixture / 'keep.json').write_text('KEEP OUT\n')
+    (fixture / 'dangling').symlink_to('nowhere')
+    (home / 'Library' / 'LaunchAgents').mkdir(parents=True)
+
+    def state():
+        snap = {}
+        for base in [fixture, home]:
+            for p in [base, *base.rglob('*')]:
+                st = p.lstat()
+                snap[str(p)] = (st.st_mode, os.readlink(p) if p.is_symlink() else p.read_bytes() if p.is_file() else None)
+        return snap
+
+    def with_out(verb, path):
+        # exec takes its expression last; the others take --out anywhere.
+        return ['browser', verb[0], *verb[1:-1], '--out', path, verb[-1]] if verb[0] == 'exec' else ['browser', *verb, '--out', path]
+
+    verbs = [['exec', '--surface', '1', '1'], ['screenshot', '--surface', '1'], ['network-request', '--surface', '1', '--req', '7'],
+             ['trace', 'stop', '--surface', '1'], ['trace', '--surface', '1', '--duration', '1s']]
+    refusals = [('keep.json', 'already exists'), ('dangling', 'symbolic link'), ('sub', 'is a directory'), ('sub/', 'is a directory'),
+                ('.zshrc', 'hidden part'), ('.git/x', 'hidden part'), ('sub/.envrc', 'hidden part'),
+                (str(home / '.zshenv'), 'hidden part'), (str(home / 'Library/LaunchAgents/x.plist'), 'hidden part'),
+                (str(home / 'LIBRARY/LaunchAgents/x.plist'), 'hidden part'),
+                ('/usr/bin/maru-out-x', 'current folder or the temp folder'), ('/maru-out-x', 'current folder or the temp folder'),
+                ('missing/x', 'directory does not exist')]
+    before = state()
+    for verb in verbs:
+        for path, reason in refusals:
+            p = run(with_out(verb, path), 1, cwd=fixture)
+            assert reason in p.stderr and 'no running maru instance' not in p.stderr and not p.stdout, (path, p.stderr)
+    # From the home folder: dotfiles and ~/Library stay closed, a visible name passes the check.
+    for path, reason in [('.zshrc', 'hidden part'), ('Library/LaunchAgents/y.plist', 'hidden part')]:
+        p = run(with_out(verbs[1], path), 1, cwd=home)
+        assert reason in p.stderr, (path, p.stderr)
+    # Passing paths reach the socket lookup (no app here) and create nothing.
+    for path, cwd in [('sub/new.png', fixture), ('shot.png', home), (str(fixture / 'sub' / 'abs.png'), fixture)]:
+        p = run(with_out(verbs[1], path), 1, cwd=cwd)
+        assert 'no running maru instance found' in p.stderr, (path, p.stderr)
+    # `maru mcp` passes `out`/`file_path` to the same runner in-process.
+    calls = [{'name': 'browser_network_request', 'arguments': {'surface': 1, 'req': 7, 'out': '.zshrc'}},
+             {'name': 'browser_trace_stop', 'arguments': {'surface': 1, 'file_path': str(home / 'Library/LaunchAgents/x.plist')}},
+             {'name': 'browser_trace_stop', 'arguments': {'surface': 1, 'file_path': '/maru-out-x.json.gz'}}]
+    lines = [json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-06-18'}})]
+    lines += [json.dumps({'jsonrpc': '2.0', 'id': i + 2, 'method': 'tools/call', 'params': c}) for i, c in enumerate(calls)]
+    p = subprocess.run([str(cli), 'mcp'], cwd=fixture, env=env, input='\n'.join(lines) + '\n', capture_output=True, text=True, timeout=15)
+    record(['mcp', '<out refusals>'], p.returncode, p.stdout, p.stderr)
+    answers = [json.loads(line) for line in p.stdout.splitlines()][1:]
+    assert len(answers) == 3, p.stdout
+    for answer, reason in zip(answers, ['hidden part', 'hidden part', 'current folder or the temp folder']):
+        assert answer['result']['isError'] and reason in answer['result']['content'][0]['text'], answer
+    assert state() == before, 'a refused or unanswered --out changed files'
 
 
 def main():

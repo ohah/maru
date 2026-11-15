@@ -1678,6 +1678,11 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 `--surface N`/`--surface=N` 혼용 반복도 요청 전송 전에 exit 1이다.
 `test-cli-failure-contract`와 실제 process 검증은 대상이 필요한 17개 verb를 대조한다.
 
+`maru browser … --out`의 새 파일·자리·숨은 이름 규칙([§9.6 「`--out` 규칙」](control-plane-browser.md))은
+`test-cli-failure-contract`가 순수 판정(`src/cli/out_path.zig`)과 실제 파일 시스템(`/tmp` 아래 시험 폴더 — `.zig-cache` 는 점
+조각이라 쓰지 않는다)으로, 실제 process 검증이 앱 없이 다섯 명령·`maru mcp` 의 거절, 가짜 소켓이 있어도 연결하지 않음,
+가짜 소켓으로 받은 본문의 0600 새 파일과 실패 시 파일 없음을 대조한다.
+
 프로젝트 바꾸기 열린 문서 단일 파일 적용·자동 저장·Undo·공유 뷰·할당 실패 판정: `mise exec -- zig build test-editor-project-replace-apply` ([범위](plans/editor-project-replace-apply.md)). macOS 전용 CI에도 연결한다. 실제 버튼·완료 알림·Esc 후 Cmd+Z·Cmd+S는 `python3 tools/editor-project-search-app/run.py --replace-apply --disk-files 2`로 제품 AppKit/Metal 경로에서 검사한다.
 
 디스크 단일 파일 바꾸기(S4b)의 실제 AppKit 버튼→자동 저장→Undo→재저장은

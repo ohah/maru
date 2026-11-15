@@ -206,6 +206,20 @@ pub fn webFramePt(self: *const AppSession, rect_px: maru.session.SplitRect) web_
     return web_panel_layout.pxTopLeftToPtBottomLeft(rect_px, self.backing_height_px, self.scale_milli);
 }
 
+/// 사이드바 폭 조절 판정(`chrome.components.sidebar.onResizeEdge`)이 잡는 띠 — backing px, 사이드바 경계에서 터미널
+/// 쪽으로 `resizeEdgeMarginPx` 폭, 창 전체 높이. mouse down 이 그 판정을 거는 조건(펼침·폭>0)과 같을 때만 있다 —
+/// 접힘이면 판정 자체가 꺼지므로 양보할 것도 없다. 폭은 down 경로와 같은 placeholder 규칙으로 고른다(두 벌 금지).
+fn sidebarResizeTarget(self: *const AppSession) ?web_panel_layout.RectF64 {
+    if (self.sidebar_collapsed or self.sidebar_width_px == 0) return null;
+    const cw = if (self.cell_width_px > 0) self.cell_width_px else app_session_mod.placeholder_cell_width_px;
+    return .{
+        .x = @floatFromInt(self.sidebar_width_px),
+        .y = 0,
+        .w = chrome.components.sidebar.resizeEdgeMarginPx(cw),
+        .h = @floatFromInt(self.backing_height_px),
+    };
+}
+
 pub fn webSurfacesPresent(self: *AppSession) bool {
     return workspace_ops.windowHasWebTerm(self) or file_panel_ops.dockHasLiveSurface(self);
 }
@@ -232,6 +246,7 @@ pub fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layou
         const seam: u32 = if (dt == 0) 0 else dt + @max(@as(u32, 1), self.scale_milli / 1000);
         const tr = self.termRect();
         const dg = dock_ops.dockGeometry(self);
+        const sidebar_target = sidebarResizeTarget(self);
         for (self.web_leaf_rects_scratch.items) |lr| {
             for (lr.leaf.terms.items, 0..) |term, i| {
                 if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
@@ -239,9 +254,12 @@ pub fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layou
                 // WKWebView가 분할선을 덮지 않게 한다(작은 시각 gap). top seam은 탭 바(bar_h ≫ seam)가 이미 덮으므로 불요.
                 // seam_edges 비트마스크(L=1·R=2·B=4)를 함께 실어 Swift가 그 가장자리 근처 클릭/hover를 통과시키게 한다
                 // (넓은 grab 폭 — 시각 gap과 분리). left/right는 x축, bottom은 top-left px 기준 아래(y 큰 쪽).
-                // **`seam > 0`으로 게이트**: divider 숨김(split.divider-thickness=0 → seam=0)이면 잡을 divider가 없어
-                // inset도 seam_edges도 0으로 둔다 — 안 그러면 Swift hitTest가 잡을 것 없는 가장자리서 클릭을 헛통과한다
-                // (10차 review 기각 항목이나 정합상 게이트). seam==0이라 inset.left=seam이 0이어도 비트는 안 세운다.
+                // **브라우저 pane 의 형제 seam 비트는 `seam` 과 무관하다**: divider 숨김(split.divider-thickness=0 → seam=0)
+                // 이어도 `dividerAtPoint` 는 두께와 무관하게 ±(cell/2+2) 를 잡는 **살아 있는 target** 이다. 파일 뷰는 터미널
+                // padding 을 받아 그 띠가 padding 틈에 드러나므로 main 그대로 `seam > 0` 게이트를 둔다. 브라우저는 seam 까지
+                // 차므로 시각 inset(=0) 없이 비트와 교집합 band 만 내 양보한다(안 그러면 웹|웹 divider 를 양쪽 페이지가 덮어
+                // 못 끈다). band 는 실제 target 과의 교집합이라 헛통과가 없다. 도크 경계는 두께 0 이면 `dg.divider` 자체가
+                // 0 폭이라 종류와 무관하게 기존 게이트 그대로다.
                 // 7e-1b: browser(비신뢰) 웹 패널은 탭 바 바로 아래에 읽기전용 주소창 밴드(현재 URL)를 두므로 top inset을
                 // bar_h + addr_h로 늘려 WKWebView 본문을 그만큼 더 내린다 → 밴드 영역이 웹뷰에서 비워지고, 탭 바 collect
                 // 루프가 그 밴드에 배경 quad + URL 셀을 그린다(밴드 y = [bar_h, bar_h+addr_h]가 웹뷰 top과 정확히 abut).
@@ -249,29 +267,51 @@ pub fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layou
                 // 없어 top=bar_h 유지(byte-identical). bar_h==0(chrome_minimal)이면 addr_h도 0이라 밴드 없음(탭 바와 동조).
                 // FP16d: 파일 Term도 탭 바 아래 헤더 밴드(breadcrumb + 모드 선택기)를 갖는다 — browser의
                 // 주소창 밴드와 **같은 경로**로 top inset을 한 줄 더 내린다(§3.1).
-                const addr_h: u32 = if (isBrowserTerm(term) or term.file_entry != null) bar_h else 0;
+                // 브라우저 pane 만 터미널 `window.padding-*` 없이 가장자리까지 찬다(2026-11-15 사용자 결정). 파일 뷰
+                // (markdown·html·pdf — html/pdf 는 `web_panel_kind == .browser` 지만 파일 Term)와 그 밖의 web Term 은 main
+                // 그대로 padding 을 받는다. 판정은 `isBrowserTerm` 하나 — 파일 Term 제외가 거기 있다.
+                const browser = isBrowserTerm(term);
+                const sibling_seam = seam > 0 or browser;
+                const addr_h: u32 = if (browser or term.file_entry != null) bar_h else 0;
                 var inset: web_panel_layout.ChromeInset = .{ .top = bar_h + addr_h };
                 var seam_edges: u8 = 0;
-                if (seam > 0 and lr.rect.x > tr.x) {
-                    inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
+                if (sibling_seam and lr.rect.x > tr.x) {
+                    inset.left = seam; // 왼쪽에 형제 pane(세로 divider) — 브라우저·두께 0 이면 seam=0(시각 inset 없음)
                     seam_edges |= 1;
                 }
                 const at_right_dock = dock_ops.dockVisible(self) and self.dock.side == .right and
                     lr.rect.x + lr.rect.w == tr.x + tr.w and dg.divider.w > 0;
-                if (seam > 0 and (lr.rect.x + lr.rect.w < tr.x + tr.w or at_right_dock)) {
+                if ((sibling_seam and lr.rect.x + lr.rect.w < tr.x + tr.w) or (seam > 0 and at_right_dock)) {
                     inset.right = seam; // 오른쪽 세로 divider
                     seam_edges |= 2;
                 }
                 const at_bottom_dock = dock_ops.dockVisible(self) and self.dock.side == .bottom and
                     lr.rect.y + lr.rect.h == tr.y + tr.h and dg.divider.h > 0;
-                if (seam > 0 and (lr.rect.y + lr.rect.h < tr.y + tr.h or at_bottom_dock)) {
+                if ((sibling_seam and lr.rect.y + lr.rect.h < tr.y + tr.h) or (seam > 0 and at_bottom_dock)) {
                     inset.bottom = seam; // 아래 가로 divider
                     seam_edges |= 4;
                 }
-                const content_rect = layout_math.insetRect(web_panel_layout.contentRect(lr.rect, inset), self.window_padding_px);
+                // 브라우저 본문에는 터미널 `window.padding-*`(셀 그리드 여백)을 적용하지 않는다 — 탭 바·주소창 밴드·seam 만
+                // 뺀 rect 를 가장자리까지 채운다(2026-11-15 사용자 결정: 브라우저 여백과 터미널 기본 여백은 별개, 파일 뷰는
+                // padding 유지). 예전에는 브라우저에도 `insetRect(window_padding_px)` 를 걸어 페이지 둘레에 테마 배경
+                // 틈(기본 좌우 8·상하 4pt)이 보였다. 터미널 grid 는 `paneGeometry` 가 따로 padding 을 받으므로 영향이 없다.
+                const chrome_rect = web_panel_layout.contentRect(lr.rect, inset);
+                const content_rect = if (browser) chrome_rect else layout_math.insetRect(chrome_rect, self.window_padding_px);
                 var grab_bands: web_panel_layout.DividerGrabBandsPt = .{};
                 if ((seam_edges & 1) != 0) {
                     grab_bands.left = pane_ops.dividerBandPt(self, content_rect, pane_ops.paneDividerTarget(self, lr.rect, .left), .left);
+                } else if (browser and sidebar_target != null) {
+                    const target = sidebar_target.?;
+                    // 사이드바 폭 조절 띠(`onResizeEdge` — 경계에서 터미널 쪽으로 cell/2+2 px)는 padding 안에 있어 웹 본문과
+                    // 안 겹쳤다(파일 뷰는 지금도 그렇다). 이제 맨 왼쪽 브라우저 본문이 그 띠를 덮고, OSR 누름(`osrMouseDown`)은 사이드바 판정보다
+                    // 먼저 돌며 WKWebView 는 frame 안 클릭을 삼킨다 — 그대로 두면 폭 조절이 죽는다. 그래서 pane divider 와 같은
+                    // 장치로 **띠와 본문의 교집합만** 양보한다(시각 inset 없음 — 드러낼 선이 없다). 경계에 안 닿는 leaf 는
+                    // 교집합이 0 이라 비트를 세우지 않는다(헛통과 방지 — `dividerPassThroughBandPx` 의 fail-close).
+                    const band = pane_ops.dividerBandPt(self, content_rect, target, .left);
+                    if (band > 0) {
+                        grab_bands.left = band;
+                        seam_edges |= 1;
+                    }
                 }
                 if ((seam_edges & 2) != 0) {
                     const target = if (at_right_dock)

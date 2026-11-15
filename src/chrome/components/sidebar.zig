@@ -99,8 +99,15 @@ pub fn inSidebar(x_px: f64, sidebar_width_px: u32) bool {
 pub fn onResizeEdge(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
     if (sidebar_width_px == 0 or cell_width_px == 0 or !std.math.isFinite(x_px)) return false;
     const edge: f64 = @floatFromInt(sidebar_width_px);
-    const margin = @as(f64, @floatFromInt(cell_width_px)) / 2 + 2;
-    return x_px >= edge and x_px < edge + margin;
+    return x_px >= edge and x_px < edge + resizeEdgeMarginPx(cell_width_px);
+}
+
+/// 사이드바 우측 경계 밴드가 터미널 쪽으로 들어가는 폭(backing px) — `onResizeEdge` 의 `[width, width + 이 값)`.
+/// 브라우저 pane 은 터미널 padding 없이 사이드바 경계에 바로 붙으므로, 그 본문이 이 밴드를 덮는 만큼을 native
+/// pass-through 로 양보해야 폭 조절이 산다(`app_session/web.zig` `collectWebSurfaces`). 그 계산과 이 판정이
+/// 다른 폭을 쓰면 「양보했는데 사이드바가 안 잡는」 죽은 띠가 생기므로 폭은 여기 한 곳만 소유한다.
+pub fn resizeEdgeMarginPx(cell_width_px: u32) f64 {
+    return @as(f64, @floatFromInt(cell_width_px)) / 2 + 2;
 }
 
 /// 사이드바 y(backing px) → row 인덱스(**가변 높이 누적** — 카드=card_slot_h·그룹 헤더=header_row_h). 사이드바 헤더
@@ -705,6 +712,10 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton�
     try std.testing.expect(!onResizeEdge(99, 100, 8)); // 사이드바 안쪽
     try std.testing.expect(!onResizeEdge(105, 100, 0)); // cell 0 → false(렌더 전; platform이 placeholder 적용)
     try std.testing.expect(!onResizeEdge(std.math.nan(f64), 100, 8)); // 비유한
+    // 밴드 폭은 resizeEdgeMarginPx 하나가 소유한다 — 웹 pane pass-through 폭과 같은 값이어야 죽은 띠가 없다.
+    try std.testing.expectEqual(@as(f64, 6), resizeEdgeMarginPx(8));
+    try std.testing.expect(onResizeEdge(100 + resizeEdgeMarginPx(9) - 0.01, 100, 9));
+    try std.testing.expect(!onResizeEdge(100 + resizeEdgeMarginPx(9), 100, 9));
     // slotAt: 가변 높이 누적. 카드만 rows(card_h=16·header_h 무관)로 옛 고정 동작을 그대로 재현(동작 보존).
     const vcard = Row{ .card = .{ .tab = 0, .label = "", .active = false } };
     const v3 = [_]Row{ vcard, vcard, vcard };

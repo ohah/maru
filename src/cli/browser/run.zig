@@ -1109,8 +1109,14 @@ test "--out: 숨은 자리 — 끝 이름·`.git`·숨은 폴더를 가리키는
         defer root.deinit(io);
         try root.dir.createDir(io, ".git", .default_dir);
         try root.dir.createDir(io, ".claude", .default_dir);
-        try root.dir.createDir(io, "Library", .default_dir);
-        try root.dir.createDir(io, "Library/LaunchAgents", .default_dir);
+        // 대소문자를 가르는 파일 시스템(Linux CI)에서는 `LIBRARY`·`library` 가 따로 없으면 부모 없음(FileNotFound)으로
+        // 먼저 거절되어 숨은 자리 판정까지 가지 않는다 — 셋 다 만든다(APFS 에서는 같은 폴더라 이미 있다).
+        for ([_][]const u8{ "Library", "Library/LaunchAgents", "LIBRARY", "LIBRARY/LaunchAgents", "library" }) |d| {
+            root.dir.createDir(io, d, .default_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+        }
         try root.dir.symLink(io, ".git", "visible", .{ .is_directory = true });
         const home = root.canon(); // 이 뿌리를 홈으로 — cwd=$HOME 인 경우
         for ([_][]const u8{ ".zshrc", ".git/hooks-x", "visible/x", "Library/LaunchAgents/x.plist", "LIBRARY/LaunchAgents/x.plist", "library/x" }) |p| {

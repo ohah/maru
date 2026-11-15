@@ -509,6 +509,9 @@ def check_out_preflight(cli, root, home, env, run, record):
     (fixture / 'keep.json').write_text('KEEP OUT\n')
     (fixture / 'dangling').symlink_to('nowhere')
     (home / 'Library' / 'LaunchAgents').mkdir(parents=True)
+    # A case-sensitive file system (Linux CI) has no `LIBRARY` unless it is made — the refusal would then be 'directory does
+    # not exist' before the hidden-part check. On APFS it is the same folder and already there.
+    (home / 'LIBRARY' / 'LaunchAgents').mkdir(parents=True, exist_ok=True)
 
     def state():
         snap = {}

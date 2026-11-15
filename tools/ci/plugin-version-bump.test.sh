@@ -25,9 +25,13 @@ manifest() { # <plugin> <version-json-value>
 	printf '{\n  "name": "%s",\n  "version": %s\n}\n' "$1" "$2" >"$work/plugins/$1/.claude-plugin/plugin.json"
 	g add "plugins/$1/.claude-plugin/plugin.json"
 }
+# 줄을 하나 덧붙여 내용을 바꾼다. `$RANDOM`·`date +%N` 을 쓰지 않는다 — CI(ubuntu)의 `sh` 는 dash 라 `$RANDOM` 이
+# 없고 `set -u` 에서 그 자리에서 죽는다(실측: 이 시험이 30 행에서 「RANDOM: parameter not set」 으로 멈췄다).
+edits=0
 touch_file() { # <path>
+	edits=$((edits + 1))
 	mkdir -p "$work/$(dirname "$1")"
-	echo "$(date +%s%N) $RANDOM" >>"$work/$1"
+	echo "edit $edits" >>"$work/$1"
 	g add "$1"
 }
 

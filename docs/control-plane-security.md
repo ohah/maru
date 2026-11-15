@@ -343,4 +343,5 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 
 ### 8.8 CLI 가 쓰는 파일(`--out`)
 - `maru browser` 의 `--out`(exec·screenshot·network-request·trace, repl·`maru mcp` 포함)은 **새 파일만**, **현재 폴더·`$TMPDIR`·`/tmp` 아래만**, **숨은 이름(점으로 시작하는 조각·`~/Library`) 금지**다 — 판정은 앱에 닿기 전에 한다. 에이전트가 묻지 않고 부를 수 있는 명령(`Bash(maru browser *)`)이 셸 설정·자동 시작 자리를 쓰거나 사용자 파일을 덮지 못하게 하는 경계다. 단일 출처는 [`browser.*` 코어와 CLI §9.6 「`--out` 규칙」](control-plane-browser.md).
-- 남는 것: 현재 폴더 안의 보이는 새 이름(예: 하위 폴더의 `CLAUDE.md`·`Makefile`)은 막지 않는다 — 사용자가 고른 「현재 폴더」 허용의 범위다.
+- `network-request --out` 은 **임시 폴더만**이다 — 본문은 서버가 정한 바이트 그대로라 현재 폴더에 두면 `conftest.py`·`Makefile`·`CLAUDE.md` 처럼 도구가 읽는 파일이 될 수 있다(사용자 결정 2026-11-15).
+- 남는 것: exec·screenshot·trace 는 현재 폴더 안의 보이는 새 이름을 막지 않는다(exec 결과는 strict JSON, screenshot 은 PNG, trace 는 gzip — 실행 코드가 되기 어렵다). 숨은 폴더 아래(`.claude/worktrees/x`)에서는 현재 폴더에 못 쓴다(받아들인 대가).

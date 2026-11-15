@@ -533,6 +533,8 @@ def check_out_preflight(cli, root, home, env, run, record):
     before = state()
     for verb in verbs:
         for path, reason in refusals:
+            if verb[0] == 'network-request' and reason == 'current folder or the temp folder':
+                reason = 'only under the temp folder'  # network-request's body goes to the temp folder only
             p = run(with_out(verb, path), 1, cwd=fixture)
             assert reason in p.stderr and 'no running maru instance' not in p.stderr and not p.stdout, (path, p.stderr)
     # From the home folder: dotfiles and ~/Library stay closed, a visible name passes the check.
@@ -543,6 +545,14 @@ def check_out_preflight(cli, root, home, env, run, record):
     for path, cwd in [('sub/new.png', fixture), ('shot.png', home), (str(fixture / 'sub' / 'abs.png'), fixture)]:
         p = run(with_out(verbs[1], path), 1, cwd=cwd)
         assert 'no running maru instance found' in p.stderr, (path, p.stderr)
+    # network-request --out is temp-folder only (user decision 2026-11-15: the body is the server's bytes). /usr/bin is a
+    # usable current folder but not a temp root, so the current folder cannot hide behind /tmp here; screenshot still passes.
+    p = run(['browser', 'network-request', '--surface', '1', '--req', '7', '--out', 'maru-out-x'], 1, cwd='/usr/bin')
+    assert 'only under the temp folder' in p.stderr and '$TMPDIR' in p.stderr and p.stderr.count('\n') == 1, p.stderr
+    p = run(with_out(verbs[1], 'maru-out-x'), 1, cwd='/usr/bin')
+    assert 'no running maru instance found' in p.stderr, p.stderr
+    p = run(['browser', 'network-request', '--surface', '1', '--req', '7', '--out', str(fixture / 'sub' / 'body.bin')], 1, cwd='/usr/bin')
+    assert 'no running maru instance found' in p.stderr, p.stderr  # an absolute path under /tmp is fine
     # `maru mcp` passes `out`/`file_path` to the same runner in-process.
     calls = [{'name': 'browser_network_request', 'arguments': {'surface': 1, 'req': 7, 'out': '.zshrc'}},
              {'name': 'browser_trace_stop', 'arguments': {'surface': 1, 'file_path': str(home / 'Library/LaunchAgents/x.plist')}},
@@ -555,6 +565,12 @@ def check_out_preflight(cli, root, home, env, run, record):
     assert len(answers) == 3, p.stdout
     for answer, reason in zip(answers, ['hidden part', 'hidden part', 'current folder or the temp folder']):
         assert answer['result']['isError'] and reason in answer['result']['content'][0]['text'], answer
+    p = subprocess.run([str(cli), 'mcp'], cwd='/usr/bin', env=env, capture_output=True, text=True, timeout=15,
+                       input=lines[0] + '\n' + json.dumps({'jsonrpc': '2.0', 'id': 9, 'method': 'tools/call', 'params': {
+                           'name': 'browser_network_request', 'arguments': {'surface': 1, 'req': 7, 'out': 'maru-out-x'}}}) + '\n')
+    record(['mcp', '<network-request out in cwd>'], p.returncode, p.stdout, p.stderr)
+    answer = json.loads(p.stdout.splitlines()[1])
+    assert answer['result']['isError'] and 'only under the temp folder' in answer['result']['content'][0]['text'], answer
     assert state() == before, 'a refused or unanswered --out changed files'
 
 

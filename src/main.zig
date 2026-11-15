@@ -373,7 +373,7 @@ fn dispatch(
     }
 
     if (std.mem.eql(u8, command, "browser")) {
-        try maru.cli.browser_run.run(io, allocator, &args, stdout, stderr);
+        try maru.cli.browser_run.run(io, allocator, &args, stdout, stderr, .process);
         return;
     }
 

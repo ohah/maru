@@ -27,6 +27,10 @@ const out_path = @import("../out_path.zig");
 const control_browser = @import("../../session/control_browser.zig");
 const cp = @import("../../session/control_plane.zig");
 
+/// 결과 바이트가 어디로 가나 — `process` 는 이 프로세스의 stdout(사람의 터미널이나 에이전트의 파이프), `capture` 는 부른 쪽이 받아
+/// 다른 꼴로 싣는다(`maru mcp` — screenshot 바이트를 이미지 결과로). `process` 만 `browser.cliOutputRefusal` 을 지킨다(M5).
+pub const Sink = enum { process, capture };
+
 /// `maru browser <cmd>` 진입점. `runSessionCli` 동형 — 인자 수집 → `browser.parse` → help/요청 분기.
 pub fn run(
     io: std.Io,
@@ -34,6 +38,7 @@ pub fn run(
     args: anytype,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
+    sink: Sink,
 ) !void {
     var collected: std.ArrayList([]const u8) = .empty;
     defer {
@@ -45,6 +50,13 @@ pub fn run(
     var diag: browser.Diag = .{};
     const parsed = browser.parseDiag(collected.items, &diag) catch |err| {
         try writeUsage(stderr, err, diag);
+        return error.UnknownCommand;
+    };
+    // 앱에 닿기 전에(`--out` 판정과 같은 자리) — 확인 창도 뜨지 않는다.
+    if (sink == .process) if (browser.cliOutputRefusal(parsed)) |why| {
+        try writeCommandHead(stderr, diag.command);
+        try stderr.print("{s}\n", .{why});
+        try stderr.flush();
         return error.UnknownCommand;
     };
     switch (parsed) {
@@ -156,9 +168,12 @@ pub fn writeParseReason(w: *std.Io.Writer, err: browser.ParseError, diag: browse
 
 /// 오류 머리 `maru browser <명령>: ` — 명령을 알 때만 이름을 붙인다(`--out` 판정의 `maru browser screenshot:` 과 같은 꼴).
 fn writeParseErrorHead(w: *std.Io.Writer, err: browser.ParseError, diag: browser.Diag) std.Io.Writer.Error!void {
-    if (err == error.MissingSubcommand or err == error.UnknownSubcommand or diag.command == null) return w.writeAll("maru browser: ");
+    return writeCommandHead(w, if (err == error.MissingSubcommand or err == error.UnknownSubcommand) null else diag.command);
+}
+
+fn writeCommandHead(w: *std.Io.Writer, command: ?[]const u8) std.Io.Writer.Error!void {
+    const c = command orelse return w.writeAll("maru browser: ");
     var buf: [64]u8 = undefined;
-    const c = diag.command.?;
     try w.print("maru browser {s}: ", .{buf[0..displaySafeName(c, &buf)]});
 }
 
@@ -1465,9 +1480,9 @@ fn replCommand(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u
             return true;
         },
         .screenshot => |shot| {
-            // 터미널에 PNG 바이트를 쏟지 않는다(W9f 적대 리뷰 4 회차).
-            if (shot.out == null and std.c.isatty(std.Io.File.stdout().handle) == 1) {
-                try stderr.writeAll("error: screenshot needs --out <file> here (the output is a terminal)\n");
+            // PNG 바이트를 내지 않는다 — 한 번짜리 CLI 와 같은 규칙(M5: 전에는 터미널일 때만 거절했다, W9f 적대 리뷰 4 회차).
+            if (browser.cliOutputRefusal(parsed)) |why| {
+                try stderr.print("error: {s}\n", .{why});
                 try stderr.flush();
                 return false;
             }
@@ -2150,4 +2165,38 @@ test "M4: --help 의 글 — 명령이면 그 명령, 없으면 전역, repl 이
     try writeHelp(&w, "repl");
     try std.testing.expect(std.mem.startsWith(u8, w.buffered(), repl_help));
     try std.testing.expect(std.mem.endsWith(u8, w.buffered(), browser.browser_help));
+}
+
+test "M5: 한 번짜리 CLI 는 --out 없는 screenshot 을 앱에 닿기 전에 거절한다(Sink.process)" {
+    // 거절은 소켓을 찾기 전이라 이 시험은 어떤 maru 에도 연결하지 않는다(capture 갈래는 연결하므로 여기서 돌리지 않는다 — 실제 바이너리
+    // 하네스가 가짜 끝점으로 MCP 이미지를 본다).
+    const Args = struct {
+        items: []const []const u8,
+        i: usize = 0,
+        fn next(self: *@This()) ?[]const u8 {
+            if (self.i == self.items.len) return null;
+            defer self.i += 1;
+            return self.items[self.i];
+        }
+    };
+    var args: Args = .{ .items = &.{ "screenshot", "--surface", "3" } };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.UnknownCommand, run(std.testing.io, std.testing.allocator, &args, &out.writer, &err.writer, .process));
+    try std.testing.expectEqualStrings("", out.written());
+    try std.testing.expect(std.mem.startsWith(u8, err.written(), "maru browser screenshot: needs --out <file> — maru does not print PNG bytes;"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, err.written(), "\n"));
+}
+
+test "M5: repl 도 --out 없는 screenshot 을 늘 거절한다(출력이 터미널이 아니어도)" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer err.deinit();
+    var current: ?u64 = 3;
+    try std.testing.expect(!try replCommand(std.testing.io, std.testing.allocator, &.{ "screenshot", "--surface", "3" }, &current, &out.writer, &err.writer));
+    try std.testing.expect(std.mem.startsWith(u8, err.written(), "error: needs --out <file>"));
+    try std.testing.expectEqualStrings("", out.written());
 }

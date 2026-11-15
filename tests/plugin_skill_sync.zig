@@ -112,24 +112,11 @@ fn shellSegments(arena: std.mem.Allocator, line: []const u8) !?[]const []const u
     return segs.items;
 }
 
-/// `browser_help` 의 명령 이름들 — `commands:` 다음 줄부터 빈 줄까지, **두 칸 들여쓰기 + 소문자로 시작하는 낱말**인 줄의
-/// 첫 낱말(`  (click/type/… also take …)` 같은 덧붙임 줄은 괄호로 시작해 빠진다). 문자열 위치가 아니라 줄의 모양으로 찾는다.
+/// `browser_help` 의 명령 이름들 — 줄 모양 규칙(`commands:` 절의 「두 칸 + 소문자로 시작하는 낱말」)은 `browser.help_command_names` 한 곳이
+/// 소유한다(하위 명령 help 와 모르는 명령의 목록도 그것을 쓴다 — 같은 규칙을 이 시험에 또 두면 두 벌이 갈린다). 추출이 틀렸는지는 ② 가 파서로 본다.
 fn helpCommands(arena: std.mem.Allocator) ![]const []const u8 {
-    var names: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.splitScalar(u8, browser.browser_help, '\n');
-    var in_commands = false;
-    while (it.next()) |raw| {
-        if (!in_commands) {
-            if (std.mem.eql(u8, raw, "commands:")) in_commands = true;
-            continue;
-        }
-        if (raw.len == 0) break;
-        if (raw.len < 3 or !std.mem.startsWith(u8, raw, "  ") or !std.ascii.isLower(raw[2])) continue;
-        const rest = raw[2..];
-        const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
-        try names.append(arena, rest[0..sp]);
-    }
-    return names.items;
+    _ = arena;
+    return browser.help_command_names;
 }
 
 fn isHelpCommand(commands: []const []const u8, word: []const u8) bool {

@@ -48,10 +48,8 @@ pub fn run(
         return error.UnknownCommand;
     };
     switch (parsed) {
-        .help => {
-            // `repl --help` 는 repl 의 명령(use·exit·help)부터(W9f 적대 리뷰 4 회차 — 안에서 help 를 쳐야만 보였다).
-            if (collected.items.len > 0 and std.mem.eql(u8, collected.items[0], "repl")) try stdout.writeAll(repl_help);
-            try stdout.writeAll(browser.browser_help);
+        .help => |topic| {
+            try writeHelp(stdout, topic);
             try stdout.flush();
         },
         .request => |req| try runRequest(io, allocator, req, stdout, stderr),
@@ -177,12 +175,38 @@ fn displaySafeName(name: []const u8, out: []u8) usize {
     return n;
 }
 
-/// `maru browser` 파싱 실패 시 사유 + help를 stderr에 낸다(`writeSessionCliUsage` 동형).
+/// `--help` 의 글 — 주제가 없으면 전역 help, `repl` 이면 repl 의 명령(use·exit·help)부터 전역 help 까지(W9f 적대 리뷰 4 회차 — 안에서
+/// help 를 쳐야만 보였다; repl 안에서 모든 명령을 쓰므로 전역 목록이 필요하다), 그 밖은 그 명령의 help(M4).
+fn writeHelp(w: *std.Io.Writer, topic: ?[]const u8) std.Io.Writer.Error!void {
+    if (topic) |t| {
+        if (!std.mem.eql(u8, t, "repl")) {
+            if (try browser.writeCommandHelp(w, t)) return;
+        } else try w.writeAll(repl_help);
+    }
+    try w.writeAll(browser.browser_help);
+}
+
+/// 파싱 실패의 이유 줄 뒤에 붙는 안내 — 모르는 명령이면 명령 목록 한 줄, 명령을 알면 그 명령의 help 몇 줄(사용자 결정 D2: 전에는 전역
+/// help 9.4 KB 를 통째로 냈다 — 오타 하나에 에이전트 맥락이 그만큼 찼다). 명령이 없으면(`maru browser` 맨몸) 아무것도 — 부른 쪽이 정한다.
+fn writeParseFollowUp(w: *std.Io.Writer, err: browser.ParseError, diag: browser.Diag) std.Io.Writer.Error!void {
+    switch (err) {
+        error.MissingSubcommand => {},
+        error.UnknownSubcommand => try browser.writeCommandList(w),
+        else => if (diag.command) |c| {
+            _ = try browser.writeCommandHelp(w, c);
+        },
+    }
+}
+
+/// `maru browser` 파싱 실패 시 사유 + 안내를 stderr에 낸다(`writeSessionCliUsage` 동형). 명령 없이 부르면(`maru browser`) 전역 help.
 pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError, diag: browser.Diag) !void {
     try writeParseErrorHead(stderr, err, diag);
     try writeParseReason(stderr, err, diag);
-    try stderr.writeAll("\n\n");
-    try stderr.writeAll(browser.browser_help);
+    try stderr.writeAll("\n");
+    if (err == error.MissingSubcommand) {
+        try stderr.writeAll("\n");
+        try stderr.writeAll(browser.browser_help);
+    } else try writeParseFollowUp(stderr, err, diag);
     try stderr.flush();
 }
 
@@ -1400,13 +1424,14 @@ fn replCommand(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u
         try stderr.writeAll("\n");
         // 고른 탭이 없다 — 고르는 법을 알린다(W9f 적대 리뷰 4 회차).
         if (e == error.MissingSurface) try stderr.writeAll("hint: pick a tab with `use <id>` (ids are in `list`), or open one with `open`\n");
+        try writeParseFollowUp(stderr, e, diag);
         try stderr.flush();
         return false;
     };
     switch (parsed) {
-        .help => {
-            try stdout.writeAll(repl_help);
-            try stdout.writeAll(browser.browser_help);
+        .help => |topic| {
+            // 안에서 `click --help` 는 그 명령, 맨 `--help` 는 repl 의 명령부터 전역 help 까지(이 repl 안이므로).
+            try writeHelp(stdout, topic orelse "repl");
             try stdout.flush();
             return true;
         },
@@ -2090,5 +2115,39 @@ test "M8: repl 의 파싱 오류도 낱말을 말한다" {
     defer err.deinit();
     var current: ?u64 = 3;
     try std.testing.expect(!try replCommand(std.testing.io, std.testing.allocator, &.{ "click", "--valeu", "x" }, &current, &out.writer, &err.writer));
-    try std.testing.expectEqualStrings("error: unknown option '--valeu'\n", err.written());
+    // D2: 이유 한 줄 뒤에 그 명령의 help 몇 줄(전역 help 전체가 아니다).
+    try std.testing.expect(std.mem.startsWith(u8, err.written(), "error: unknown option '--valeu'\n  click "));
+    try std.testing.expect(std.mem.endsWith(u8, err.written(), browser.help_footer));
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "  navigate ") == null);
+}
+
+test "M4·D2: 파싱 오류 뒤에는 그 명령의 help 만, 모르는 명령은 명령 목록 한 줄, 맨 `maru browser` 만 전역 help" {
+    var buf: [16 * 1024]u8 = undefined;
+    const typo = try usageFor(&.{ "click", "--surface", "1", "--selector", "a", "--valeu", "x" }, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, typo, "maru browser click: unknown option '--valeu'\n  click "));
+    try std.testing.expect(std.mem.endsWith(u8, typo, browser.help_footer));
+    try std.testing.expect(typo.len < 1024); // 전에는 9.4 KB
+    const unknown = try usageFor(&.{"nosuchcmd"}, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, unknown, "maru browser: unknown subcommand 'nosuchcmd'\ncommands (maru browser <command> --help shows one): list "));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, unknown, "\n"));
+    const bare = try usageFor(&.{}, &buf);
+    try std.testing.expect(std.mem.endsWith(u8, bare, browser.browser_help));
+    // `nosuchcmd --help` 도 모르는 명령이다(rc 1 — 전에는 전역 help 를 rc 0 으로 냈다).
+    const unknown_help = try usageFor(&.{ "nosuchcmd", "--help" }, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, unknown_help, "maru browser: unknown subcommand 'nosuchcmd'\n"));
+}
+
+test "M4: --help 의 글 — 명령이면 그 명령, 없으면 전역, repl 이면 repl 의 명령부터 전역까지" {
+    var buf: [16 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeHelp(&w, "open");
+    try std.testing.expect(std.mem.startsWith(u8, w.buffered(), "  open "));
+    try std.testing.expect(w.buffered().len < 512);
+    w = std.Io.Writer.fixed(&buf);
+    try writeHelp(&w, null);
+    try std.testing.expectEqualStrings(browser.browser_help, w.buffered());
+    w = std.Io.Writer.fixed(&buf);
+    try writeHelp(&w, "repl");
+    try std.testing.expect(std.mem.startsWith(u8, w.buffered(), repl_help));
+    try std.testing.expect(std.mem.endsWith(u8, w.buffered(), browser.browser_help));
 }

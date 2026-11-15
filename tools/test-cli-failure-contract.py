@@ -404,6 +404,19 @@ def verify(cli, root):
                 for second in [['--volume', 'a'], ['--volume=A'], ['--volume', 'b'], ['--volume=b'], ['--volume=0'], ['--volume=0a']]:
                     p = run([*namespace, 'trust', verb, '/fixture/repository', *first, *second], 1)
                     assert '--volume may only be specified once' in p.stderr
+    # M4·M8 (2026-11-16): a command's own --help, an unknown command and a named bad option are all answered before the
+    # socket (the endpoint below must still see no connection). A parse error prints that command's few help lines, not
+    # the whole 9 KB help; an unknown word with --help fails instead of printing the global help with exit 0.
+    p = run(['browser', 'open', '--help'], 0)
+    assert p.stdout.startswith('  open ') and 'maru browser --help' in p.stdout and len(p.stdout) < 1024 and not p.stderr, records[-1]
+    p = run(['browser', 'nosuchcmd', '--help'], 1)
+    assert "unknown subcommand 'nosuchcmd'" in p.stderr and ' open ' in p.stderr and not p.stdout, records[-1]
+    p = run(['browser', 'click', '--surface', '1', '--selector', 'a', '--valeu', 'x'], 1)
+    assert p.stderr.startswith("maru browser click: unknown option '--valeu'\n  click ") and len(p.stderr) < 2048, records[-1]
+    p = run(['browser', 'snapshot', '--surface', '1', '--interactive', 'yes'], 1)
+    assert "too many arguments: 'yes' was not expected" in p.stderr, records[-1]
+    p = run(['browser', '--help'], 0)
+    assert p.stdout.count('\n  open ') == 1 and len(p.stdout) > 8192, 'the global help keeps every command line'
     # `--out` refusals are judged before the socket too: a reachable endpoint must see no connection.
     out_keep = root / 'out-fixture' / 'keep.json'
     for verb in [['exec', '--surface', '1', '--out', 'keep.json', '1'], ['screenshot', '--surface', '1', '--out', 'keep.json'],

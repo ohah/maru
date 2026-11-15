@@ -288,14 +288,15 @@ release A/B의 실제 준비 상태와 남은 외부 gate는 [검증 매트릭�
 
 ## 버전 정책
 
-- 버전 단일 출처는 `build.zig.zon`의 `.version`이다(현재 `0.1.0` — 2026-11-15 사용자 결정으로 `0.0.0` placeholder 에서
-  올렸다. **태그·GitHub Release 는 아직 없다**).
+- 버전 단일 출처는 `build.zig.zon`의 `.version`이다(현재 `0.1.1` — 2026-11-15 사용자 결정으로 `0.0.0` placeholder 에서
+  `0.1.0` 으로, 2026-11-16 사용자 결정으로 `0.1.1` 로 올렸다: `maru browser` 의 안내 고침(한 명령 `--help`·이름을 말하는 파싱 오류·
+  `--out` 없는 screenshot 거절·`-32002` 안내)을 에이전트 스킬이 최소 버전으로 가를 수 있게. **태그·GitHub Release 는 아직 없다**).
 - 릴리스 시 `.version`을 올리고 태그(`v<버전>`)를 만든다. dmg 산출물 이름의 버전은 빌드 시
   생성된 `Info.plist`(`CFBundleShortVersionString`)에서 읽는다. 버전만 올리는 커밋은 태그를 만들지 않으므로
   `release.yml`(태그 `v*` push 전용)이 돌지 않는다.
 - **올릴 때 함께 바뀌는 커밋 산출물이 하나 있다** — `packages/core/wasm/maru-vt.wasm`. XTVERSION 응답에 버전이 박히므로
   (아래) `.version` 만 고치면 `check-wasm-sync` 가 실패한다. `zig build wasm-lib` 로 다시 만들어 같은 커밋에 넣는다
-  (0.0.0 → 0.1.0 실측: 271,833 바이트 중 1 바이트 차이).
+  (0.0.0 → 0.1.0·0.1.0 → 0.1.1 실측: 둘 다 271,833 바이트 중 1 바이트 차이).
 - 빌드는 이 값을 **모듈 하나**(`build.zig` 의 `maru_version` 옵션 모듈, `pub const version`)로 내리고, 세 채널이 같은 것을 읽는다:
   - `maru --version`(별칭 `maru version`) — `maru <version>` 한 줄(`src/main.zig` → `src/cli/version.zig`).
   - XTVERSION(`CSI > q` → `DCS > | maru <version> ST`) — `src/terminal/core.zig` 의 `terminal_version`([conformance-testing.md](conformance-testing.md)).
@@ -314,7 +315,7 @@ release A/B의 실제 준비 상태와 남은 외부 gate는 [검증 매트릭�
   - `0.0.0`: 2026-11-15 bump 전의 소스 빌드다. **순서가 없다** — 바깥 도구(에이전트 스킬 등)는 이 값으로 「너무 옛 판」을
     판정하지 말고 `--help` 글로 필요한 명령이 있는지 확인한다.
   - 그 밖의 `X.Y.Z`: 릴리스 `vX.Y.Z` 이거나, 그 bump 뒤 `main` 에서 만든 빌드다(절차가 bump 를 태그보다 먼저 하므로
-    `X.Y.Z` 의 기능은 적어도 들어 있다). 릴리스 빌드와 개발 빌드를 이 값만으로 가르지 않는다. **지금 `0.1.0` 은 태그가 없으므로
+    `X.Y.Z` 의 기능은 적어도 들어 있다). 릴리스 빌드와 개발 빌드를 이 값만으로 가르지 않는다. **지금 `0.1.0`·`0.1.1` 은 태그가 없으므로
     언제나 후자 — bump 뒤 `main` 빌드다.**
   - 명령 자체가 없으면(`unknown maru command: --version`, exit 1) 이 명령이 생기기 전 빌드다.
 - 인앱 새 버전 안내는 버전이 `0.0.0` 이면 확인하지 않는다(`startUpdateCheck` 가드 — 모든 릴리스보다 낮아 거짓 알림이 난다).

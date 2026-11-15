@@ -17,7 +17,7 @@ use it and do not guess flags. `maru browser click --help` shows one command (an
 **In the turn this skill runs, Claude Code runs `maru browser` commands without asking.** You are the only
 check on what they do — read sections 3, 5 and 6 before you act.
 
-## 1. Check you can use it — needs `maru 0.1.0` or later (once per session)
+## 1. Check you can use it — needs `maru 0.1.1` or later (once per session)
 
 ```sh
 maru --version                                  # → maru X.Y.Z

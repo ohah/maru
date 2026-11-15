@@ -25,8 +25,9 @@ maru browser network-request --surface 12 --req 7 --body
   `--page-size`. `--blocked` and `--mocked` show only requests your rules stopped or answered.
 - `network-request` shows one request: headers, redirects and the recorded response body. `--body` prints up to
   64 KiB per call (`--offset` for the next piece). A binary body needs `--out`.
-- **`network-request --surface <id> --req <n> --out <file>` replaces an existing file**, like `screenshot` and
-  `exec` (only `trace` refuses one). Write a new name into a temp folder.
+- `network-request --surface <id> --req <n> --out <file>` writes the whole body to a **new** file in the temp
+  folder only (`$TMPDIR` or `/tmp`) — the current folder is refused, and so is a name that already exists. Use a
+  fresh name such as `"$TMPDIR/maru-body-1.json"`; see section 4 of SKILL.md.
 
 ## Recording response bodies
 

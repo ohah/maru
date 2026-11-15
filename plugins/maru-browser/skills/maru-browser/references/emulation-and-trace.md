@@ -36,14 +36,14 @@ maru browser emulate --surface 12 --clear
 Only on tabs your pane opened. A hidden tab keeps rendering while it records.
 
 ```sh
-maru browser trace --surface 12 --duration 5s --out "${TMPDIR:-/tmp}/maru-shots/trace-$(date +%s).json.gz"
+maru browser trace --surface 12 --duration 5s --out "$TMPDIR/maru-trace-1.json.gz"
 ```
 
 - That one call starts, waits and stops. `trace start --surface <id>`, `trace stop --surface <id>`,
   `trace status --surface <id>` and `trace abort --surface <id>` split it up.
   `trace start --surface <id> --reload` reloads the page first, to trace a page load.
 - 1–30 s, 5 s by default. `stop` prints a summary; `--out` also writes the trace (gzip JSON for Chrome DevTools'
-  Performance panel) and never overwrites a file. Keep it in a temp folder, not the project.
+  Performance panel) to a new file only — the `--out` rules in section 4 of SKILL.md. Use a fresh name in `$TMPDIR`.
 - One trace at a time per browser (`trace_busy` — wait and retry once). The tab title shows ◔ while recording.
 - The trace is discarded if the user uses the tab, or another tab's frame shares its renderer process.
 - This is not `maru trace`, which is Maru's own terminal trace tool.

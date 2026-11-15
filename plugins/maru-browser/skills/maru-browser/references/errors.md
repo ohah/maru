@@ -13,6 +13,8 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 | `unknown subcommand` or `unknown option`, then the whole help | A typo, or an older maru without that command or flag. The message does not name the option. | Check your `maru browser --help`. If it is not there, do not use it; tell the user their maru is older. |
 | `no running maru instance found.` | Maru is not running, its socket is stale, or a sandbox blocks the socket in `~/.cache/maru/control` | Stop and tell the user. Mention the sandbox if Maru is clearly running. |
 | `… (multiple maru instances found; selecting one is not supported yet).` | Two Maru apps (for example a dev build and the installed one), or a dead one's socket | Ask the user to quit one. |
+| `… cannot write the output file: something already exists there …` | `--out` names a file that exists; maru never overwrites | Use a new name. Do not delete the old file. |
+| `… cannot write the output file: …` with `$TMPDIR` in it | `--out` is outside the current folder or the temp folder, under a hidden part (a dot name, `~/Library`), in a folder that does not exist, or `network-request` outside the temp folder | Write a new name straight into `$TMPDIR` — or `/tmp` if `$TMPDIR` is refused too. Do not work around it. |
 | `request too large: …` | One request is over 1 MiB (a very long `type` text or `exec` expression) | Send it in smaller pieces. |
 
 ## Refusals and permissions (`-32002`)

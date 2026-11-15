@@ -334,6 +334,8 @@ src/
 
 npm 라이브러리(`@maru/*`)는 루트 `packages/`에 둔다. `web/`과 분리하는 이유는 소유 주체가 다르기 때문이다 — `web/`은 **앱이 싣는** 파일 패널 콘텐츠이고, `packages/`는 **밖으로 배포하는** 패키지다. 워크스페이스 루트는 `packages/package.json`이고 하위에 `core`(wasm·바닐라 TS·렌더러)와 프레임워크 래퍼 `react`·`vue`·`svelte`·`lit`이 있다. 생성물 `packages/*/dist/`와 `packages/node_modules/`는 커밋하지 않지만, **`packages/core/wasm/maru-vt.wasm`은 커밋한다** — npm에 실려 나가는 배포 산출물이고 받는 쪽에 Zig 툴체인이 없다(소스와의 동기는 `check-wasm-sync`가 지킨다). `build.zig`의 `wasm-lib` step이 그 자리에 산출물을 놓는다. 계약은 [maru-term 라이브러리](maru-term-library.md)가 단일 출처다.
 
+에이전트 플러그인(Claude Code 플러그인)은 루트 `plugins/`에, 그 마켓플레이스 목록은 루트 `.claude-plugin/marketplace.json`에 둔다. `packages/`와 같은 이유로 루트다 — 앱이 싣지 않고 **사용자의 에이전트가 받아 가는 배포물**이다. `src/` 아래는 Zig 레이어 규칙(`check-boundaries`) 대상이라 맞지 않고, `tools/`는 개발 도구 자리다. 마켓플레이스 파일이 루트 `.claude-plugin/`에 있어야 `/plugin marketplace add ohah/maru` 한 줄로 설치된다. `src/plugin/`(앱 자신의 확장 경계)과는 무관하다. 지금은 `plugins/maru-browser/`(스킬 하나) 하나이고, 설계·동기화 시험·버전 규칙은 [control-plane-browser.md §9.6.3](control-plane-browser.md#963-에이전트-스킬-플러그인maru-browser)이 단일 출처다.
+
 루트의 `*.zig` 파일은 외부 import 경로를 안정화하는 facade다. 실제 구현은 위 하위 폴더에 목적별로 둔다.
 
 ## 테스트 구조

@@ -25,8 +25,8 @@ maru browser network-request --surface 12 --req 7 --body
   `--page-size`. `--blocked` and `--mocked` show only requests your rules stopped or answered.
 - `network-request` shows one request: headers, redirects and the recorded response body. `--body` prints up to
   64 KiB per call (`--offset` for the next piece). A binary body needs `--out`.
-- **`network-request --surface <id> --req <n> --out <file>` replaces an existing file** — unlike `screenshot` and
-  `trace`, which never overwrite. Write into a temp folder.
+- **`network-request --surface <id> --req <n> --out <file>` replaces an existing file**, like `screenshot` and
+  `exec` (only `trace` refuses one). Write a new name into a temp folder.
 
 ## Recording response bodies
 

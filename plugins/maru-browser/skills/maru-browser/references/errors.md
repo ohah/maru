@@ -30,7 +30,8 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 | You see | Meaning | Do |
 |---|---|---|
 | `(-32003)` | The tab went away after you were allowed | Run `maru browser list` again. |
-| `(-32004)`, maybe with `hint: N matching element(s) are hidden` | `wait` timed out (at most 25 s) | Take a snapshot, then fix the condition or the locator. |
+| `(-32004)` from `wait`, maybe with `hint: N matching element(s) are hidden` | The condition did not come true in time (at most 25 s) | Take a snapshot, then fix the condition or the locator. |
+| `(-32004)` from `click`, `type`, `press`, `hover` or `exec` | The page did not answer in time — the input or script **may already have run** | Do not repeat it. Take a snapshot and check what happened first. |
 | `(-32005)` | An `exec` result is over the limit | Return less, or use `--out` or `--max-result-bytes`. |
 | `(-32006)` with `script error (kind): name: message` | Your `exec` expression threw | Fix the expression. |
 | `(-32008)` with `[not a browser tab]`, `[engine=webkit]` or `[param=…]` | A file view or markdown panel, a WebKit tab, or a flag that engine lacks; `trace` on a user's tab | Use a Chromium tab of your own (`open`). |

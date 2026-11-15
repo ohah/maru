@@ -375,7 +375,10 @@ const OutPlaces = struct {
 
 /// 절대 경로인 환경 변수 값(비었거나 상대 경로면 없는 것으로 — 상대 `$TMPDIR` 가 cwd 를 뜻하게 두지 않는다).
 fn envAbsolute(name: [*:0]const u8) ?[]const u8 {
-    const v = std.mem.span(std.c.getenv(name) orelse return null);
+    return absoluteOrNull(std.mem.span(std.c.getenv(name) orelse return null));
+}
+
+fn absoluteOrNull(v: []const u8) ?[]const u8 {
     return if (v.len > 0 and v[0] == '/') v else null;
 }
 
@@ -1038,6 +1041,35 @@ test "--out: 뿌리 밖 — 형제 폴더(절대 경로)·`..`·뿌리 밖을 �
         try std.testing.expectEqualStrings("Y", try proj.readFile(io, "sub/y.png", &buf));
         // 쓸 수 없는 뿌리(`/`)만 있으면 어디도 안 된다.
         try std.testing.expectError(error.OutsideAllowed, prepareOutIn(proj, io, "z.png", .{ .cwd = "/" }));
+    }
+}
+
+// 적대 검증 R14(변이 E5~E8 생존): 위 시험들은 뿌리를 **주입**하므로, 이 프로세스의 cwd·`/tmp`·`$HOME` 을 모으는 길이 깨져도(뿌리가 빠지면
+// 현재 폴더에 못 쓴다 — 기능 회귀) 아무 시험도 몰랐다. 실제 바이너리 시험은 전부 `/tmp` 아래에서 돌아 임시 뿌리가 cwd 뿌리를 가렸다.
+test "--out: OutPlaces.collect 는 이 프로세스의 현재 폴더·/tmp·$HOME 을 정규 경로로 모으고, 상대·빈 환경 값은 뿌리로 받지 않는다" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest else {
+        const io = std.testing.io;
+        const ta = std.testing.allocator;
+        var found: OutPlaces = .collect(io, ta);
+        defer found.deinit(ta);
+        const want_cwd = canonicalDir(io, ta, std.Io.Dir.cwd(), ".").?;
+        defer ta.free(want_cwd);
+        try std.testing.expectEqualStrings(want_cwd, found.cwd.?);
+        const want_tmp = canonicalDir(io, ta, std.Io.Dir.cwd(), "/tmp").?;
+        defer ta.free(want_tmp);
+        const places = found.places();
+        var has_tmp = false;
+        for (places.temps) |t| has_tmp = has_tmp or std.mem.eql(u8, t, want_tmp);
+        try std.testing.expect(has_tmp);
+        if (envAbsolute("HOME")) |h| {
+            const want_home = canonicalDir(io, ta, std.Io.Dir.cwd(), h) orelse return;
+            defer ta.free(want_home);
+            try std.testing.expectEqualStrings(want_home, places.home.?);
+        }
+        try std.testing.expectEqual(@as(?[]const u8, null), absoluteOrNull(""));
+        try std.testing.expectEqual(@as(?[]const u8, null), absoluteOrNull("."));
+        try std.testing.expectEqual(@as(?[]const u8, null), absoluteOrNull("relative/dir"));
+        try std.testing.expectEqualStrings("/x", absoluteOrNull("/x").?);
     }
 }
 

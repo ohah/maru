@@ -24,6 +24,7 @@ pub const trace = @import("cli/trace.zig"); // `maru trace anonymize` — 캡처
 pub const agent_log_record = @import("cli/agent_log_record.zig");
 pub const lsp_trust = @import("cli/lsp_trust.zig"); // WT4b·TA2: `maru editor lsp trust list|revoke|forget|log` (legacy `maru lsp` alias) — 언어 서버 신뢰 조회·철회·잊기·감사 기록(파서·wire·렌더, 부여 없음)
 pub const control_relay = @import("cli/control_relay.zig"); // S10c: `maru control --stdio` — 폰이 SSH 채널로 컨트롤 플레인에 닿는 중계
+pub const version = @import("cli/version.zig"); // `maru --version`/`maru version` 의 순수 절반 — 값은 main.zig 가 빌드 옵션(build.zig.zon .version)으로 넘긴다
 pub const control_client = @import("cli/control_client.zig"); // cli/의 **유일한 impure 모듈** — 컨트롤 소켓 발견·connect·auth·왕복(sessions·browser 공유)
 
 test {

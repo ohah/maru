@@ -801,6 +801,14 @@ pub fn build(b: *std.Build) void {
     const session_host_product_options = b.addOptions();
     session_host_product_options.addOption(bool, "allow_validation_only_restore", false);
     const session_host_build_options_mod = session_host_product_options.createModule();
+    // `maru --version` 이 내는 값. 단일 출처는 `build.zig.zon` `.version` 이다 — 릴리스 태그 대조
+    // (`check-release-version`)와 생성 Info.plist 가 같은 값을 쓴다(docs/distribution.md 「버전 정책」).
+    // `src/main.zig` 를 컴파일하는 **모든** 자리가 이 모듈을 import 해야 한다(제품 exe·check-targets·
+    // 업그레이드 ReleaseFast exe·TBPROBE 시험·session-host 복원 시험 exe). 순수 절반(`src/cli/version.zig`)은
+    // 값을 인자로 받으므로 `maru` 모듈(wasm·코어와 공유)은 빌드 옵션을 모른다.
+    const maru_version_options = b.addOptions();
+    maru_version_options.addOption([]const u8, "version", build_zig_zon.version);
+    const maru_version_mod = maru_version_options.createModule();
 
     const exe = b.addExecutable(.{
         .name = "maru",
@@ -812,6 +820,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "maru", .module = maru_mod },
                 .{ .name = "syntax", .module = syntax_mod },
                 .{ .name = "session_host_build_options", .module = session_host_build_options_mod },
+                .{ .name = "maru_version", .module = maru_version_mod },
             },
         }),
     });
@@ -1912,6 +1921,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "maru", .module = cross_mod },
                 .{ .name = "syntax", .module = cross_syntax_mod },
                 .{ .name = "session_host_build_options", .module = session_host_product_options.createModule() },
+                .{ .name = "maru_version", .module = maru_version_mod },
             },
         });
         // **테스트가 아니라 실행 파일로 컴파일한다.** 테스트 빌드는 test 블록이 참조하는 것만 분석하므로
@@ -2217,6 +2227,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "maru", .module = maru_mod },
                 .{ .name = "syntax", .module = syntax_mod },
                 .{ .name = "session_host_build_options", .module = session_host_build_options_mod },
+                .{ .name = "maru_version", .module = maru_version_mod },
             },
         }),
     });
@@ -5579,6 +5590,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "maru", .module = maru_mod },
                 .{ .name = "syntax", .module = syntax_mod },
                 .{ .name = "session_host_build_options", .module = session_host_build_options_mod },
+                .{ .name = "maru_version", .module = maru_version_mod },
             },
         }),
         .filters = &.{"TBPROBE"},
@@ -12456,6 +12468,7 @@ pub fn build(b: *std.Build) void {
         .syntax_mod = syntax_mod,
         .maru_mod = maru_mod,
         .build_options_test_mod = build_options_test_mod,
+        .maru_version_mod = maru_version_mod,
         .exe = exe,
         .session_host_tests = session_host_tests,
         .run_core_tests = run_core_tests,

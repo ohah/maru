@@ -5,6 +5,7 @@ import base64
 import itertools
 import json
 import os
+import re
 from pathlib import Path
 import selectors
 import socket
@@ -61,6 +62,23 @@ def verify(cli, root):
         assert 'panic' not in p.stderr and 'stack trace' not in p.stderr, records[-1]
         return p
 
+    # `maru --version` / `maru version`: the value is build.zig.zon's .version (the release SSOT),
+    # read here from the source tree so a build that stops wiring it through is caught. It must
+    # answer without an app, socket, HOME or cache, so it runs first against an empty HOME.
+    zon = (Path(__file__).resolve().parent.parent / 'build.zig.zon').read_text()
+    zon_version = re.search(r'^\s*\.version\s*=\s*"([^"]+)"', zon, re.M).group(1)
+    for word in ['--version', 'version']:
+        p = run([word], 0)
+        assert p.stdout == f'maru {zon_version}\n' and p.stderr == '', records[-1]
+    # Only a lone request; whatever follows is a usage error on stderr, nothing on stdout.
+    for args in [['--version', '--help'], ['--version', 'extra'], ['version', '--version'], ['--version', '']]:
+        p = run(args, 1)
+        assert p.stdout == '' and p.stderr == 'usage: maru --version\n', records[-1]
+    # No short flag, and other spellings stay unknown commands.
+    for word in ['-V', '-v', '--Version', '--version=1']:
+        assert run([word], 1).stderr.startswith(f'unknown maru command: {word}\n'), records[-1]
+    assert not any(home.iterdir()) and not (root / 'cache').exists(), 'version request touched HOME or cache'
+
     link = home / '.local/bin/maru'
     link.parent.mkdir(parents=True)
     link.write_text('KEEP INSTALL\n')
@@ -85,8 +103,9 @@ def verify(cli, root):
     assert output.read_text().startswith('maru.trace.v1')
     assert run(['trace', 'anonymize', 'in.trace'], 0).stdout.startswith('maru.trace.v1')
     help_text = run(['--help'], 0).stdout
-    for command in ['incidents', 'control', 'agent-events', 'agent-hooks', 'browser']:
+    for command in ['incidents', 'control', 'agent-events', 'agent-hooks', 'browser', '--version']:
         assert '  ' + command + ' ' in help_text, command
+    assert '\n  maru --version\n' in help_text, 'usage list lacks maru --version'
     run(['editor', 'editor'], 1)
     # Provider overrides can escape a private HOME; pin both explicitly before hook calls.
     hooks = root / 'hook-fixture'

@@ -13,6 +13,9 @@ const cp = @import("../session/control_plane.zig");
 /// 최신으로 답한다(규약: 서버가 다른 판을 내면 클라이언트가 고른다).
 pub const protocol_versions = [_][]const u8{ "2025-06-18", "2024-11-05" };
 pub const server_name = "maru";
+/// `initialize` 의 `serverInfo.version` — 이 빌드의 버전(`build.zig.zon` `.version`, `maru --version`·XTVERSION 과 같은 모듈).
+/// 예전엔 고정 `"0"` 이라 클라이언트 로그에서 판을 가를 수 없었다.
+pub const server_version: []const u8 = @import("maru_version").version;
 
 /// 도구 인자 하나가 CLI 에서 어떤 모양인가.
 pub const ArgKind = enum {
@@ -551,7 +554,7 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
         s.objectField("name") catch |e| break :blk e;
         s.write(server_name) catch |e| break :blk e;
         s.objectField("version") catch |e| break :blk e;
-        s.write("0") catch |e| break :blk e;
+        s.write(server_version) catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.objectField("instructions") catch |e| break :blk e;
         s.write("Control the browser tabs of the maru terminal this agent runs in. Find tabs with browser_list or open one with browser_open, " ++
@@ -844,6 +847,24 @@ test "W9c①: initialize 의 안내는 Chromium 탭의 console 을 「아직 안
     // 첫 읽기 전에 사용자가 그 탭을 몰면 그 예외가 풀린다는 것도(4 회차 D).
     try testing.expect(std.mem.indexOf(u8, r, "unless the user clicked, typed or navigated in that tab before it") != null);
     try testing.expect(std.mem.indexOf(u8, r, "earlier lines are deleted") != null);
+}
+
+// `serverInfo` 는 MCP 클라이언트가 「어느 서버의 어느 판인가」를 보는 자리다(로그·진단). 전에는 고정 `"0"` 이라 설치된 maru 가
+// 몇 판이든 같았다. 값은 `maru --version`·XTVERSION 과 같은 단일 출처(`build.zig.zon` `.version` → `maru_version`)여야 한다 —
+// zon 과의 대조는 실제 프로세스로 `tools/test-cli-failure-contract.py` 가 한다(이 시험은 배선이 그 모듈을 쓰는지만 본다).
+test "version: initialize 의 serverInfo 는 이름 maru 와 빌드 버전(maru_version — build.zig.zon) 을 낸다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const r = (try handleLine(testing.allocator, arena_state.allocator(), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\",\"params\":{}}")).reply;
+    defer testing.allocator.free(r);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, r, .{});
+    defer parsed.deinit();
+    const info = parsed.value.object.get("result").?.object.get("serverInfo").?.object;
+    try testing.expectEqualStrings("maru", info.get("name").?.string);
+    const version = info.get("version").?.string;
+    try testing.expectEqualStrings(@import("maru_version").version, version);
+    // 문자열이 실제 판 모양인가 — 옛 고정값 `"0"` 같은 것이 다시 들어오면 여기서 깨진다.
+    _ = try std.SemanticVersion.parse(version);
 }
 
 test "W9f: JSON-RPC — initialize 는 아는 판으로, tools/list·ping·모르는 메서드·알림, tools/call 은 CLI 인자로" {

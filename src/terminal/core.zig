@@ -94,11 +94,22 @@ extern "kernel32" fn GetFileAttributesW(name: [*:0]const u16) callconv(.winapi) 
 
 /// 단말 자기식별의 단일 신원 출처. XTVERSION(CSI > q) 응답이 지금 이걸 쓰고, 이후 추가할 자체
 /// terminfo 생성과 XTGETTCAP(DCS + q) 응답도 같은 값을 재사용한다 — 이름/버전이 채널마다 어긋나지
-/// 않도록 한곳에서만 정의한다. 버전의 정식 단일 출처는 build.zig.zon의 `.version`이며, 지금은 둘 다
-/// "0.0.0" placeholder다. build_options로 연결하면 drift가 사라지지만, 순수 VT core를 빌드 시스템에
-/// 결합하지 않으려고(이식성·단위 테스트 격리) 지금은 상수로 둔다 — 릴리스가 생기면 이 값을 함께 올린다.
+/// 않도록 한곳에서만 정의한다. 버전은 여기서 정하지 않는다 — 단일 출처는 build.zig.zon의 `.version`이고,
+/// 빌드가 그것을 `maru_version` 모듈로 준다(`maru --version`·`maru mcp`와 **같은 모듈 하나**). 예전엔 별도 상수라
+/// 버전을 올릴 때 함께 올리는 것을 잊으면 어긋났다. 그 모듈은 import·OS·I/O가 없는 값 하나라 코어(L1)가 의존해도
+/// 위상이 흐려지지 않고, 코어를 컴파일하는 모든 그래프(제품·wasm·mobile·시험)에 `build/support.zig`가 붙인다
+/// (`array_repeat`·`png_codec`과 같은 길 — docs/distribution.md 「버전 정책」).
 pub const terminal_name = "maru";
-pub const terminal_version = "0.0.0";
+/// 이 빌드의 버전(위 설명의 `maru_version`). XTVERSION 응답은 `DCS > | maru <version> ST` 로 **PTY 입력 스트림**에 실린다. 버전에 ESC·제어 문자·공백이 섞이면
+/// DCS 가 중간에 끝나거나 그 뒤가 셸에 키 입력처럼 흘러든다. zon 의 semver 는 원래 그런 글자를 못 갖지만 그 전제를
+/// 여기서 컴파일 타임에 못박는다(어긋나면 빌드가 멈춘다). 파일 머리의 `comptime {}` 가 아니라 이 값의 초기화식에 두어
+/// 이 값을 **쓰는** 그래프만 `maru_version` 을 요구한다(코어를 손으로 `zig test` 하는 스크립트가 괜히 깨지지 않게).
+pub const terminal_version: []const u8 = blk: {
+    const v: []const u8 = @import("maru_version").version;
+    if (v.len == 0) @compileError("terminal_version is empty");
+    for (v) |c| if (c < 0x21 or c > 0x7e) @compileError("terminal_version must be printable ASCII without spaces");
+    break :blk v;
+};
 
 /// terminfo 항목의 primary 이름. XTGETTCAP의 `TN`(terminal name) 캡 응답에 쓴다. XTVERSION의 자유형
 /// 이름(`terminal_name` = "maru")과 달리, 이건 terminfo `TN`이라 `terminfo/maru.terminfo`의 primary
@@ -9919,8 +9930,14 @@ test "conformance: XTVERSION (CSI > q) reports terminal name and version over DC
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
     defer core.deinit();
     try core.write("\x1b[>q");
-    // 정확한 wire 바이트를 고정한다("추측 말고 캡처"): ESC P > | maru 0.0.0 ESC \.
-    try std.testing.expectEqualStrings("\x1bP>|maru 0.0.0\x1b\\", core.pendingResponse());
+    // 정확한 wire 바이트를 고정한다("추측 말고 캡처"): ESC P > | maru <version> ESC \. 버전은 이 시험이 숫자로
+    // 들고 있지 않는다 — `build.zig.zon` `.version` 이 `maru_version` 모듈로 들어온 값이 곧 답이다(올릴 때 시험을 안 고친다).
+    // zon 과 그 모듈이 같은 값이라는 것은 `maru --version`·`maru mcp` 를 실제로 띄워 대조하는 process 시험이 잰다.
+    try std.testing.expectEqualStrings("\x1bP>|maru " ++ @import("maru_version").version ++ "\x1b\\", core.pendingResponse());
+    // 옛 별도 상수(`"0.0.0"`)로 되돌아가면 깨진다 — 자기식별 값이 빌드 버전과 같은 것이어야 한다.
+    try std.testing.expectEqualStrings(@import("maru_version").version, terminal_version);
+    // XTVERSION 을 파싱하는 앱(버전으로 기능을 가르는 도구)이 읽을 수 있는 판 모양이다.
+    _ = try std.SemanticVersion.parse(terminal_version);
     core.clearResponse();
     // '>' 마커 시퀀스가 뒤따르는 SGR로 새지 않는다(DA2 격리 테스트와 같은 불변식).
     try core.write("\x1b[4m"); // underline on

@@ -77,6 +77,18 @@ def verify(cli, root):
     # No short flag, and other spellings stay unknown commands.
     for word in ['-V', '-v', '--Version', '--version=1']:
         assert run([word], 1).stderr.startswith(f'unknown maru command: {word}\n'), records[-1]
+    # `maru mcp` announces the same value as serverInfo.version (it used to be a fixed "0"). The
+    # initialize reply needs no app or socket, so stdin carries one request and then closes.
+    request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}\n'
+    try:
+        p = subprocess.run([str(cli), 'mcp'], cwd=root, env=env, input=request, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired as exc:
+        record(['mcp', '<initialize>'], None, exc.stdout, exc.stderr, 'timeout')
+        raise
+    record(['mcp', '<initialize>'], p.returncode, p.stdout, p.stderr)
+    assert p.returncode == 0 and p.stdout.count('\n') == 1, records[-1]
+    info = json.loads(p.stdout)['result']['serverInfo']
+    assert info == {'name': 'maru', 'version': zon_version}, records[-1]
     assert not any(home.iterdir()) and not (root / 'cache').exists(), 'version request touched HOME or cache'
 
     link = home / '.local/bin/maru'

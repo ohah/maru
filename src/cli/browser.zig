@@ -658,7 +658,8 @@ pub const Command = union(enum) {
     screenshot: ScreenshotCmd,
     /// `browser trace …`(W9e②) — 러너가 요청 하나 또는 여럿(한 번에·`stop --out`)을 낸다.
     trace: TraceCmd,
-    help,
+    /// `--help`·`-h` — 첫 낱말이 명령이면 그 이름(그 명령의 help), 아니면 null(전역 help). M4: 전에는 주제 없이 늘 전역이었다.
+    help: ?[]const u8,
     /// `browser repl [--surface <id>]`(W9f) — 줄마다 하위 명령을 읽어 돌린다. 고른 탭(`use <id>`·`open`)은 `--surface` 를 생략한다.
     repl: struct { surface: ?u64 },
 };
@@ -886,8 +887,101 @@ pub fn parse(args: []const []const u8) ParseError!Command {
 /// `parse` 와 같고, 실패하면 `diag` 에 문제의 낱말을 남긴다(오류 글이 그 낱말을 말하게 — `browser_run.writeParseError`).
 pub fn parseDiag(args: []const []const u8, diag: *Diag) ParseError!Command {
     diag.* = .{ .command = if (args.len > 0) args[0] else null };
-    if (hasHelpFlag(args)) return .help;
+    if (hasHelpFlag(args)) {
+        // 옵션이 앞에 온 꼴(`--help`·`--surface 1 click --help`)은 명령을 고르지 않았다 — 전역 help(지금까지와 같다, rc 0).
+        if (args.len == 0 or std.mem.startsWith(u8, args[0], "-")) return .{ .help = null };
+        // 모르는 낱말의 `--help` 는 「있다」 처럼 보이지 않게 실패한다(M4 — 전에는 전역 help 를 rc 0 으로 냈다).
+        if (!isCommand(args[0])) return error.UnknownSubcommand;
+        return .{ .help = args[0] };
+    }
     return parseInner(args, diag);
+}
+
+/// 파서가 아는 하위 명령인가 — 이름 하나만 넣어 「모르는 명령」 인지 묻는다(명령 목록을 따로 두지 않는다: 파서가 판정자다).
+fn isCommand(name: []const u8) bool {
+    var scratch: Diag = .{};
+    _ = parseInner(&.{name}, &scratch) catch |e| return e != error.UnknownSubcommand;
+    return true;
+}
+
+// ── M4: 하위 명령 help — `browser_help` 한 벌에서 뽑는다(두 번째 사본을 두지 않는다) ─────────────────────────────
+// 줄 규칙: commands 절(`commands:` 다음 줄부터 빈 줄까지)에서 명령 줄은 「두 칸 + 소문자로 시작하는 낱말」, 덧붙임 줄은
+// 「두 칸 + `(` + `a/b/…` + ` also take`」. 이 모양은 스킬의 점검(`grep '^  open '`)도 기대어 있다. 줄 모양이 바뀌면
+// 시험(「고아 줄 0」)이 빨개진다.
+
+/// 하위 명령 help 끝 줄 — 전역 규칙(`--surface` 한 번·확인 창)과 모든 명령은 전역 help 에 있다.
+pub const help_footer = "(rules for --surface and every command: maru browser --help)\n";
+
+/// `browser_help` 의 commands 절(줄들, 끝의 빈 줄 앞까지).
+fn commandsSection() []const u8 {
+    const head = "\ncommands:\n";
+    const start = (std.mem.indexOf(u8, browser_help, head) orelse unreachable) + head.len;
+    const end = std.mem.indexOfPos(u8, browser_help, start, "\n\n") orelse browser_help.len;
+    return browser_help[start..end];
+}
+
+/// 명령 줄이면 그 명령 이름(첫 낱말).
+fn commandOfLine(line: []const u8) ?[]const u8 {
+    if (line.len < 3 or !std.mem.startsWith(u8, line, "  ") or !std.ascii.isLower(line[2])) return null;
+    const rest = line[2..];
+    return rest[0 .. std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len];
+}
+
+/// 덧붙임 줄 `  (a/b/c also take …)` 이면 `a/b/c`.
+fn alsoTakeNames(line: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, line, "  (")) return null;
+    const end = std.mem.indexOf(u8, line, " also take") orelse return null;
+    return line[3..end];
+}
+
+/// help 의 명령 이름들(help 순서) — 모르는 명령 안내의 목록과 스킬 동기화 시험(`tests/plugin_skill_sync.zig`)이 쓴다.
+pub const help_command_names: []const []const u8 = blk: {
+    @setEvalBranchQuota(400_000);
+    var names: []const []const u8 = &.{};
+    var it = std.mem.splitScalar(u8, commandsSection(), '\n');
+    while (it.next()) |l| if (commandOfLine(l)) |n| {
+        names = names ++ &[_][]const u8{n};
+    };
+    const frozen: [names.len][]const u8 = names[0..names.len].*;
+    break :blk &frozen;
+};
+
+fn isHelpCommand(name: []const u8) bool {
+    for (help_command_names) |n| if (eq(n, name)) return true;
+    return false;
+}
+
+/// 한 명령의 help — 그 명령 줄, 그 이름이 든 덧붙임 줄, 줄에 `--out` 이 있으면 머리말의 `--out` 문단, 끝 줄. 모르는 이름이면 false.
+pub fn writeCommandHelp(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!bool {
+    var takes_out = false;
+    var found = false;
+    var it = std.mem.splitScalar(u8, commandsSection(), '\n');
+    while (it.next()) |l| if (commandOfLine(l)) |c| if (eq(c, name)) {
+        try w.print("{s}\n", .{l});
+        found = true;
+        takes_out = std.mem.indexOf(u8, l, "--out") != null;
+    };
+    if (!found) return false;
+    it = std.mem.splitScalar(u8, commandsSection(), '\n');
+    while (it.next()) |l| if (alsoTakeNames(l)) |list| {
+        var names = std.mem.splitScalar(u8, list, '/');
+        while (names.next()) |n| if (eq(n, name)) try w.print("{s}\n", .{l});
+    };
+    if (takes_out) {
+        // 머리말의 `--out f (…` 문단(빈 줄까지) — 새 파일만·자리 제한은 이 명령을 쓰기 전에 알아야 한다.
+        const start = std.mem.indexOf(u8, browser_help, "\n--out ").? + 1;
+        const end = std.mem.indexOfPos(u8, browser_help, start, "\n\n").? + 1;
+        try w.writeAll(browser_help[start..end]);
+    }
+    try w.writeAll(help_footer);
+    return true;
+}
+
+/// 모르는 명령일 때의 목록 한 줄(전역 help 9.4 KB 대신 — 사용자 결정 D2).
+pub fn writeCommandList(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.writeAll("commands (maru browser <command> --help shows one):");
+    for (help_command_names) |n| try w.print(" {s}", .{n});
+    try w.writeAll("\n");
 }
 
 fn parseInner(args: []const []const u8, diag: *Diag) ParseError!Command {
@@ -4126,6 +4220,109 @@ test "M8: 모르는 옵션·남는 인자는 자리마다 그 낱말을 Diag 에
 test "parse: --help → .help(파싱보다 우선)" {
     try testing.expect((try parse(&.{ "navigate", "--surface", "1", "--help" })) == .help);
     try testing.expect((try parse(&.{"-h"})) == .help);
+}
+
+// ── M4: 하위 명령의 `--help` ──────────────────────────────────────────────────────────────────────────────
+// 전에는 `open --help` 도 `nosuchcmd --help` 도 전역 help 9.4 KB 를 rc 0 으로 냈다 — 에이전트가 없는 명령을 「있다」 고 읽을 수 있었다.
+
+test "M4: --help 의 주제 — 첫 낱말이 명령이면 그 명령, 옵션이 앞이면 전역, 모르는 낱말이면 UnknownSubcommand" {
+    try testing.expectEqualStrings("open", (try parse(&.{ "open", "--help" })).help.?);
+    try testing.expectEqualStrings("network-request", (try parse(&.{ "network-request", "-h" })).help.?);
+    try testing.expectEqualStrings("trace", (try parse(&.{ "trace", "stop", "--help" })).help.?);
+    try testing.expectEqualStrings("click", (try parse(&.{ "click", "--help", "--valeu" })).help.?); // 도움말이 파싱 오류보다 앞
+    // 모르는 옵션 바로 뒤는 값으로 본다(지금 규칙 — `type --text -h` 와 같다): 도움말이 아니라 그 옵션의 오류다.
+    try testing.expectError(error.UnknownOption, parse(&.{ "click", "--valeu", "--help" }));
+    try testing.expectEqualStrings("repl", (try parse(&.{ "repl", "--help" })).help.?);
+    try testing.expect((try parse(&.{"--help"})).help == null);
+    try testing.expect((try parse(&.{"-h"})).help == null);
+    try testing.expect((try parse(&.{ "--help", "open" })).help == null);
+    // 옵션이 앞에 온 꼴(명령이 아니다)은 지금처럼 전역 help — rc 0 을 깨지 않는다.
+    try testing.expect((try parse(&.{ "--surface", "1", "click", "--help" })).help == null);
+    var diag: Diag = .{};
+    try testing.expectError(error.UnknownSubcommand, parseDiag(&.{ "nosuchcmd", "--help" }, &diag));
+    try testing.expectEqualStrings("nosuchcmd", diag.command.?);
+    try testing.expectError(error.UnknownSubcommand, parse(&.{ "help", "--help" }));
+}
+
+fn commandHelpText(name: []const u8, buf: []u8) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    if (!try writeCommandHelp(&w, name)) return error.NoHelp;
+    return w.buffered();
+}
+
+test "M4: 모든 help 명령에 제 줄이 정확히 하나 있고, commands 절의 모든 줄이 어느 명령의 help 에든 실린다(고아 줄 0)" {
+    try testing.expect(help_command_names.len >= 36);
+    var buf: [16 * 1024]u8 = undefined;
+    for (help_command_names) |name| {
+        // help 에서 뽑은 이름은 파서가 아는 명령이다(문자열이 아니라 파서로 확인).
+        if (parse(&.{name})) |_| {} else |e| try testing.expect(e != error.UnknownSubcommand);
+        const text = try commandHelpText(name, &buf);
+        var own: usize = 0;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |l| {
+            if (commandOfLine(l)) |c| {
+                // 다른 명령의 줄이 섞이지 않는다(`network` 에 `network-request` — 앞부분 일치가 아니다).
+                try testing.expectEqualStrings(name, c);
+                own += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 1), own);
+        try testing.expect(std.mem.endsWith(u8, text, help_footer));
+    }
+    var it = std.mem.splitScalar(u8, commandsSection(), '\n');
+    while (it.next()) |l| {
+        if (l.len == 0) continue;
+        const used = for (help_command_names) |name| {
+            const text = try commandHelpText(name, &buf);
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            if (while (lines.next()) |hl| {
+                if (eq(hl, l)) break true;
+            } else false) break true;
+        } else false;
+        if (!used) {
+            std.debug.print("M4: commands 절의 이 줄이 어느 명령의 help 에도 실리지 않는다: {s}\n", .{l});
+            return error.OrphanHelpLine;
+        }
+    }
+    // 덧붙임 줄의 이름은 모두 실제 명령이다.
+    it = std.mem.splitScalar(u8, commandsSection(), '\n');
+    var also: usize = 0;
+    while (it.next()) |l| if (alsoTakeNames(l)) |list| {
+        also += 1;
+        var names = std.mem.splitScalar(u8, list, '/');
+        while (names.next()) |n| try testing.expect(isHelpCommand(n));
+    };
+    try testing.expect(also >= 2);
+}
+
+test "M4: 하위 명령 help — 그 명령 줄, 그 명령을 이름으로 가리키는 덧붙임 줄, --out 을 받으면 --out 문단" {
+    var buf: [16 * 1024]u8 = undefined;
+    const hover = try commandHelpText("hover", &buf);
+    try testing.expect(std.mem.startsWith(u8, hover, "  hover "));
+    try testing.expect(std.mem.indexOf(u8, hover, "(click/type/scroll/hover/press also take") != null); // 덧붙임 줄은 hover 줄보다 앞에 있다 — 이름으로 묶는다
+    try testing.expect(std.mem.indexOf(u8, hover, "--out f (") == null);
+    const shot = try commandHelpText("screenshot", &buf);
+    try testing.expect(std.mem.indexOf(u8, shot, "--out f (exec, screenshot, network-request, trace) writes a new 0600 file only") != null);
+    try testing.expect(std.mem.indexOf(u8, shot, "also take") == null);
+    const wait = try commandHelpText("wait", &buf);
+    try testing.expect(std.mem.indexOf(u8, wait, "(wait also takes") != null);
+    try testing.expect(std.mem.indexOf(u8, wait, "(click/type") == null);
+    const net = try commandHelpText("network", &buf);
+    try testing.expect(std.mem.indexOf(u8, net, "network-request") == null);
+    var w = std.Io.Writer.fixed(&buf);
+    try testing.expect(!try writeCommandHelp(&w, "nosuchcmd"));
+    try testing.expect(!try writeCommandHelp(&w, "networ"));
+}
+
+test "M4: 명령 목록 한 줄은 help 의 명령 전부를 help 순서로 담는다" {
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeCommandList(&w);
+    const line = w.buffered();
+    try testing.expect(std.mem.startsWith(u8, line, "commands (maru browser <command> --help shows one): list navigate get-url "));
+    try testing.expect(std.mem.endsWith(u8, line, " repl\n"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+    for (help_command_names) |n| try testing.expect(std.mem.indexOf(u8, line, n) != null);
 }
 
 test "parse: 에러 케이스" {

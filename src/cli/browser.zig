@@ -2471,11 +2471,15 @@ const unsupported_by_engine_code: i64 = -32008;
 /// executeScript 의 스크립트 오류 — data 에 `{kind, name, message, stack, diagnostics_truncated}`.
 const script_error_code: i64 = -32006;
 const timeout_code: i64 = -32004;
+const close_hint = "hint: only tabs this pane opened with `browser open` can be closed\n";
+/// 균일 거절(`data` 없음 + 기본 글)의 안내 — 서버가 일부러 까닭을 숨기는 자리(§8.3 존재 oracle 금지)라 **고정 글**이고 응답의 무엇에도
+/// 기대지 않는다. 그 자리의 까닭은 둘 중 하나다: pane 의 foreground job 이 아니다, 또는 그 탭에서 이 명령에 필요한 권한이 없다(확인 창을
+/// 거부했다·묻지 않고 거절하는 명령 — `network-block --list` 처럼 아직 그 권한이 없으면 묻지 않는다). M7·D4b: 전에는 앞의 것만 말했다.
 const unauthorized_hint =
-    \\hint: browser requests are allowed from a command running in a maru pane's foreground job (an agent there,
-    \\      or your shell). Not from another terminal, inside tmux/screen, or a background job while another
-    \\      program holds the terminal. A refused confirmation dialog looks the same; the maru app log has the reason.
-    \\      A tab that was closed, or an id that is not in `browser list`, is refused the same way.
+    \\hint: maru does not say why it refused. Either this did not run from a maru pane's foreground job (another
+    \\      terminal, tmux/screen, a background job), or this tab lacks a permission the command needs: the dialog was
+    \\      declined, or the command never asks (like network-block --list or emulate --get before that permission).
+    \\      A closed tab or an id that is not in `browser list` is refused the same way.
     \\
 ;
 
@@ -2521,12 +2525,13 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             try writePageText(gpa, w, strField(d.object.get("message")), false);
             try w.writeAll("\n");
         };
-        // 1g(control-plane-security §8.4): 확인 모달 없이 거절되는 가장 흔한 이유는 「pane 밖에서 불렀다」다. 서버는 균일
-        // unauthorized 만 주므로(존재 oracle 금지) 이유를 묻지 않고 늘 같은 안내를 붙인다 — 서버 정보가 새지 않는다.
-        // W9b③: close 의 거절은 그 pane 이 연 탭이 아니어서다 — 일반 안내(pane 의 foreground job)는 이유를 가린다(적대 리뷰 1 회차).
-        // W9c③: 업로드 모달의 거부·물을 창 없음은 그 글이 이유다(「nothing was uploaded」) — 인가 안내를 붙이지 않는다.
-        if (e.code == unauthorized_code and !(kind == .upload and std.mem.indexOf(u8, e.message, "nothing was uploaded") != null))
-            try w.writeAll(if (kind == .close) "hint: only tabs this pane opened with `browser open` can be closed\n" else unauthorized_hint);
+        // 1g(control-plane-security §8.4): 서버가 까닭을 숨기는 균일 거절(`data` 없음 + 기본 글 `Unauthorized`)에만 고정 안내를 붙인다 —
+        // 서버 정보가 새지 않는다. 까닭이 붙은 거절(`data.reason` — 네트워크 권한 먼저·권한 철회·에이전트 탭에서만)과 사용자의 답인
+        // 업로드 거절은 그 글이 이유다 — 안내를 붙이면 틀린 방향을 가리킨다(M7: 전에는 모든 -32002 에 pane 안내를 붙였고, 업로드만
+        // 「nothing was uploaded」 글자 검사로 뺐다).
+        // W9b③: close 의 거절은 그 pane 이 연 탭이 아니어서다 — 일반 안내는 이유를 가린다(적대 리뷰 1 회차).
+        if (e.code == unauthorized_code and (e.data == null or e.data.? == .null) and std.mem.eql(u8, e.message, cp.ErrorCode.unauthorized.defaultMessage()))
+            try w.writeAll(if (kind == .close) close_hint else unauthorized_hint);
         // 로케이터 wait 의 시한 — 마지막 확인에 숨은 일치가 있었다(W9b②-3 적대 리뷰 1 회차 — data 에만 있어 보이지 않았다).
         if (e.code == timeout_code) if (e.data) |d| if (d == .object) if (d.object.get("hidden")) |h| if (h == .integer and h.integer > 0)
             try w.print("hint: {d} matching element(s) are hidden (not rendered, aria-hidden or off-page)\n", .{h.integer});
@@ -4354,6 +4359,55 @@ test "M5: --out 없는 screenshot 만 CLI 출력 검사에 걸린다 — 파서�
     try testing.expect(cliOutputRefusal(try parse(&.{"--help"})) == null);
 }
 
+// ── M7: `-32002` 의 안내 ─────────────────────────────────────────────────────────────────────────────────────
+// 전에는 모든 `-32002` 에 「pane 의 foreground job 이 아니다」 를 붙였다 — 까닭(`data.reason`)이 붙은 거절(네트워크 권한 먼저·
+// 권한이 철회됨·에이전트 탭에서만)은 이미 pane 확인을 지난 요청에서만 나므로 그 안내는 틀린 방향이었다. 이제 안내는 서버가 일부러
+// 까닭을 숨긴 균일 거절(`data` 없음 + 기본 글 `Unauthorized`)에만, 그리고 그 글은 두 가능성(pane 밖·권한 없음)을 함께 말한다(D4b).
+
+fn renderedError(json: []const u8, kind: ResponseKind, buf: []u8) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    try testing.expect(!try renderResponse(testing.allocator, json, kind, &w));
+    return w.buffered();
+}
+
+test "M7: 까닭이 붙은 -32002 에는 안내가 없고, 균일 거절에만 두 가능성을 말하는 안내가 붙는다" {
+    var buf: [4096]u8 = undefined;
+    const reasoned = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"recording response bodies needs this tab's network permission first — run maru browser network on this tab\",\"data\":{\"reason\":\"needs_network_permission\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"mocking responses runs code as this site — it needs this tab's control permission first\",\"data\":{\"reason\":\"needs_browser_permission\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the permission to block requests on this tab is gone — ask again\",\"data\":{\"reason\":\"needs_grant\"}}}",
+        // 까닭이 붙었으면 메시지가 기본 글이어도 안내하지 않는다(서버가 까닭을 이미 말했다).
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\",\"data\":{\"reason\":\"needs_grant\"}}}",
+        // 업로드의 거절 글(사용자의 답·물을 창 없음·부른 쪽이 떠남) — 기본 글이 아니다.
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the user declined the upload — nothing was uploaded\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"no maru window is open to ask the user — nothing was uploaded\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the program that asked is no longer in the foreground of its pane — nothing was uploaded\"}}",
+    };
+    for (reasoned) |json| for ([_]ResponseKind{ .network_record, .network_block, .network_mock, .emulate, .trace, .upload, .ok }) |kind| {
+        const out = try renderedError(json, kind, &buf);
+        errdefer std.debug.print("M7: {s} → {s}\n", .{ @tagName(kind), out });
+        try testing.expect(std.mem.indexOf(u8, out, "hint:") == null);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\n"));
+    };
+    const uniform = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\",\"data\":null}}",
+    };
+    for (uniform) |json| {
+        for ([_]ResponseKind{ .navigate, .network_block, .emulate, .upload, .ok }) |kind| {
+            const out = try renderedError(json, kind, &buf);
+            try testing.expectEqualStrings("error: Unauthorized (-32002)\n" ++ unauthorized_hint, out);
+        }
+        try testing.expectEqualStrings("error: Unauthorized (-32002)\n" ++ close_hint, try renderedError(json, .close, &buf));
+    }
+    // 두 가능성을 함께 말한다 — pane 밖과 권한 없음(묻지 않는 명령 포함). 서버의 무엇에도 기대지 않는 고정 글이다.
+    try testing.expect(std.mem.indexOf(u8, unauthorized_hint, "foreground") != null);
+    try testing.expect(std.mem.indexOf(u8, unauthorized_hint, "permission") != null);
+    // 다른 코드는 안내가 없다.
+    const other = try renderedError("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32003,\"message\":\"Unauthorized\"}}", .navigate, &buf);
+    try testing.expect(std.mem.indexOf(u8, other, "hint:") == null);
+}
+
 test "parse: 에러 케이스" {
     try testing.expectError(error.MissingSubcommand, parse(&.{}));
     try testing.expectError(error.UnknownSubcommand, parse(&.{"bogus"}));
@@ -6015,7 +6069,7 @@ test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 
     out.clearRetainingCapacity();
     const plain = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}";
     try testing.expect(!try renderResponse(testing.allocator, plain, .upload, &out.writer));
-    try testing.expect(std.mem.indexOf(u8, out.written(), "hint: browser requests are allowed") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "hint: maru does not say why it refused") != null);
 }
 
 test "W9c③ 적대 리뷰 1 회차 재현 R9c: upload 결과의 kept:false — 페이지가 받은 뒤 칸을 비웠다고 알리고 다시 올리지 말라고 한다" {

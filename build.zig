@@ -12309,16 +12309,19 @@ pub fn build(b: *std.Build) void {
     // (control-plane-browser.md §9.6.3). 스킬 예시를 **진짜 파서**에 넣어야 해서 `maru` 모듈을 쓴다. 새 mise 태스크를 만들지 않고
     // `test` 에 매단다 — `check`·`check-without-boundaries` 둘 다 이미 `test` 를 포함하므로 check-task-split 이 지키는 두 목록이
     // 그대로다. 스킬 `.md` 는 빌드 입력이 아니라 실행 중에 읽으므로 캐시된 통과를 재사용하지 않게 늘 다시 돌린다.
-    const plugin_skill_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
-        .root_source_file = b.path("tests/plugin_skill_sync.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "maru", .module = maru_mod }},
-    }) });
+    const plugin_skill_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/plugin_skill_sync.zig"),
+            .target = target,
+            .optimize = optimize,
+            // `maru_version` = `maru --version` 이 내는 build.zig.zon 값 — 스킬의 최소 버전이 이 트리보다 높지 않은지(⑥) 본다.
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "maru_version", .module = maru_version_mod } },
+        }),
+    });
     const run_plugin_skill_tests = b.addRunArtifact(plugin_skill_tests);
     run_plugin_skill_tests.setCwd(b.path("."));
     run_plugin_skill_tests.has_side_effects = true;
-    run_plugin_skill_tests.addArg("--maru-expect-tests=9");
+    run_plugin_skill_tests.addArg("--maru-expect-tests=10");
     b.step("test-plugin-skill", "Check the maru-browser agent plugin against the real maru browser parser and help").dependOn(&run_plugin_skill_tests.step);
     test_step.dependOn(&run_plugin_skill_tests.step);
 

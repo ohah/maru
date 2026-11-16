@@ -14168,7 +14168,7 @@ test "pane 동의문: 질문이 끝에 남고, pane 제목은 줄바꿈·제어 
 
 // 사용자 결정 2026-11-16: 탭 줄의 라벨 함수(`diffAwareLabel` — 사용자가 보는 제목의 단일 자리)가 에이전트 탭에만 ◈ 를 붙이고, 그 출처는 에이전트
 // 탭 표다 — 사람의 탭·철회한 탭(사람의 탭이 됐다)·pane 이 닫힌 탭에는 없다. 제품이 거는 콜백(`onAgentTabKnown`)을 그대로 건다.
-test "에이전트 탭 표지: 라벨이 에이전트 탭에만 ◈ 를 붙인다 — 사람의 탭·철회한 탭·pane 이 닫힌 탭에는 없다" {
+test "에이전트 탭 표지: 탭 줄 라벨과 사이드바 행이 에이전트 탭에만 ◈ 를 붙인다 — 사람의 탭·철회한 탭·pane 이 닫힌 탭에는 없다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -14198,6 +14198,13 @@ test "에이전트 탭 표지: 라벨이 에이전트 탭에만 ◈ 를 붙인�
     try std.testing.expect(try labelHas(session, pane, tab));
     try std.testing.expect(!try labelHas(session, pane, human));
     try std.testing.expect(!try labelHas(session, pane, shell)); // 터미널
+    // 사이드바 세션 목록의 행도 같은 표지를 앞에 단다(탭 제목이 보이는 다른 자리).
+    const sidebar = @import("app_session/sidebar.zig");
+    for (pane.terms.items) |t| {
+        const row = try sidebar.agentRowLabelOwned(session, t);
+        defer session.allocator.free(row);
+        try std.testing.expectEqual(t.surfaceId() == tab, std.mem.startsWith(u8, row, @import("app_session/tab.zig").agent_tab_mark_utf8 ++ " "));
+    }
     _ = maru_macos_control_revoke_browser_grant(shell, tab, 0); // 그 탭의 제어를 철회 — 사람의 탭이 된다
     try std.testing.expect(!try labelHas(session, pane, tab));
     try std.testing.expect(adoptAgentTab(shell, tab));

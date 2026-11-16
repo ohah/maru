@@ -1942,6 +1942,10 @@ pub fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
         // NOTE: 파일 패널 **헤더**는 같은 dirty를 `●`(U+25CF)로 그린다(`dock_layout.dirty_col`). 한 상태에 마커가
         // 둘이라 정합이 필요하면 그쪽과 맞춘다 — 사용자가 `*`를 지정했으므로 여기서는 그대로 둔다.
         const dirty = if (term.file_entry) |e| e.dirty else false;
+        // 사용자 결정 2026-11-16: 에이전트가 연 탭은 사용자의 로그인된 사이트를 쓴다 — 탭 줄처럼 이 목록에서도 `◈` 를 앞에 단다(위 `*` 와 같은
+        // 「행 앞이 상태」 자리). 출처는 탭 줄과 같은 콜백(app_host_abi 의 에이전트 탭 표 — 철회·pane 닫힘이면 빠진다).
+        const agent_tab = term.kind == .web and if (self.agent_tab_known_callback) |known| known(term.surface.id) else false;
+        if (agent_tab) return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ tab_ops.agent_tab_mark_utf8, label });
         if (!dirty) return self.allocator.dupe(u8, label);
         return std.fmt.allocPrint(self.allocator, "* {s}", .{label});
     }

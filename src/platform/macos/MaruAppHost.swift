@@ -9213,7 +9213,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // `MARU_WEB_OSR_TEST_REPORT` 파일에 적는다.
     // 대본 한 줄: `sleep ms` · `mouse kind fx fy dx dy button`(kind 1 누름·2 끌기·3 뗌·4 두 번·5 세 번, button 0 왼·1 가운데·
     // 2 오른) · `hover fx fy dx dy` · `wheel fx fy dx dy lines` · `aux fx fy dx dy buttonNumber` · `action 이름` ·
-    // `waitfile 경로`(그 파일이 생길 때까지 기다린다 — 다른 대본과 때를 맞춘다) · `revokegrants`(W9d① — 모든 browser grant 철회) ·
+    // `waitfile 경로`(그 파일이 생길 때까지 기다린다 — 다른 대본과 때를 맞춘다) · `revokegrants`(W9d① — 모든 browser grant 철회) · `grantsmenu`·`grantsmenu-pick 글`(pane 동의 — Browser Grants 메뉴의 줄 보고·고르기) ·
     // `key keyCode 글자 [원글자 수식자]`(글자는 U+ 16진, 없으면 -) — 키는 터미널 view 에 NSEvent 를 직접 넣는다(오버레이가
     // 열린 동안 `run_action` 은 무시되므로 Esc 로 닫는 데도 쓴다) · `ime keyCode 단계…`(W4c — 입력기 콜백을 한 트랜잭션
     // 안에서 직접 부른다). 좌표는 창 내용 view 의 (fx×폭 + dx, fy×높이 + dy) pt(왼쪽 위 원점).
@@ -9821,6 +9821,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case "revokegrants":
                 // W9d① 스모크: 메뉴 「Revoke All」 과 같은 ABI 로 모든 browser grant 를 철회한다(네트워크 기록이 지켜보기를 끄고 지우는지).
                 _ = maru_macos_control_revoke_all_browser_grants()
+            case "grantsmenu":
+                // pane 동의(2026-11-16) 실앱 확인: 「Browser Grants」 를 지금 상태로 다시 만들고 줄 제목을 보고에 남긴다(띄우지 않는다).
+                rebuildBrowserGrantsMenu(browserGrantsMenu)
+                Self.testReport("grantsmenu " + browserGrantsMenu.items.map { $0.isSeparatorItem ? "---" : $0.title }.joined(separator: " | "))
+            case "grantsmenu-pick" where line.count >= 2:
+                // 그 글자로 시작하는 줄을 사용자가 메뉴에서 고른 것처럼 실행한다(같은 action — 거부 지우기·허용 거두기).
+                rebuildBrowserGrantsMenu(browserGrantsMenu)
+                let prefix = line.dropFirst().joined(separator: " ")
+                if let i = browserGrantsMenu.items.firstIndex(where: { $0.title.hasPrefix(prefix) }) {
+                    browserGrantsMenu.performActionForItem(at: i)
+                    Self.testReport("grantsmenu-picked \(prefix)")
+                } else {
+                    Self.testReport("grantsmenu-missing \(prefix)")
+                }
             case "overlay":
                 // 오버레이(알림 토스트 포함)가 열려 있는가 — 마우스 게이트가 보는 그 집합.
                 Self.testReport("overlay \(anyOverlayOpen)")

@@ -7378,12 +7378,12 @@ fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_m
     pending.browser_pane = a.browser_pane;
 }
 
-/// 확인 모달을 기다리는 동안(최대 `grant_prompt_timeout`) 출처가 바뀌었을 수 있다 — 승인 뒤 재처리 전에 그 프로세스가 아직
-/// 같은 프로세스이고 foreground 인지 다시 본다. 아니면 pane 을 비워 그 요청은 unauthorized 가 된다(grant 는 승인대로 남는다).
 /// 시험 전용 출처 공급자 — 시험 프로세스에는 foreground 출처가 없어, 승인 뒤 재처리(`recheckSelfOrigin`)가 늘 pane 을 비운다. pane 동의 승인 뒤의
-/// open 이 탭 op 길로 가는지 재려면 「아직 foreground」 라고 답하는 공급자가 필요하다. 제품은 이 값을 쓰지 않는다(null).
+/// open 이 탭 op 길로 가는지 재려면 「아직 foreground」 라고 답하는 공급자가 필요하다. 제품 빌드는 이 값을 읽지 않는다(`builtin.is_test` 갈래).
 var test_recheck_provider: ?control_self_origin.Provider = null;
 
+/// 확인 모달을 기다리는 동안(최대 `grant_prompt_timeout`) 출처가 바뀌었을 수 있다 — 승인 뒤 재처리 전에 그 프로세스가 아직
+/// 같은 프로세스이고 foreground 인지 다시 본다. 아니면 pane 을 비워 그 요청은 unauthorized 가 된다(grant 는 승인대로 남는다).
 fn recheckSelfOrigin(pending: *control_server_mod.PendingRequest) void {
     if (pending.browser_pane == null) return;
     const provider = if (builtin.is_test) (test_recheck_provider orelse control_self_origin_macos.provider()) else control_self_origin_macos.provider();

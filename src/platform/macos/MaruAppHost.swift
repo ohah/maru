@@ -9364,6 +9364,60 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    /// 대본의 `linkclick` — 그 글이 든 링크의 자리를 `url_at` 으로 찾아(반 칸 간격으로 훑는다) 수식키 누름·뗌을 터미널 view 에 넣는다.
+    private func testLinkClick(_ needle: String, _ bits: Int32, _ content: NSView) {
+        guard let window, let session = appSession, let terminal = Self.firstTerminalView(in: window.contentView) else {
+            return Self.testReport("linkclick \(needle) no-window")
+        }
+        let scale = Double(archiveSmokeRenderScale(window))
+        var found: (x: Double, y: Double, kind: Int32)?
+        var y = 2.0
+        scan: while y < Double(terminal.bounds.height) {
+            var x = 2.0
+            while x < Double(terminal.bounds.width) {
+                var ptr: UnsafePointer<UInt8>? = nil
+                var len: size_t = 0
+                var kind: Int32 = 0
+                if maru_macos_app_session_url_at(session, x * scale, y * scale, bits, &ptr, &len, &kind) == Self.statusOK,
+                   let bytes = ptr, len > 0,
+                   String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self).contains(needle) {
+                    found = (x, y, kind)
+                    break scan
+                }
+                x += 3
+            }
+            y += 6
+        }
+        guard let found else { return Self.testReport("linkclick \(needle) none") }
+        var flags: NSEvent.ModifierFlags = []
+        if bits & 4 != 0 { flags.insert(.shift) }
+        if bits & 8 != 0 { flags.insert(.option) }
+        if bits & 16 != 0 { flags.insert(.control) }
+        if bits & 32 != 0 { flags.insert(.command) }
+        let local = NSPoint(x: found.x, y: Double(terminal.bounds.height) - found.y)
+        let inWindow = terminal.convert(local, to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: inWindow, modifierFlags: flags,
+                                                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                 context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
+            else { continue }
+            if type == .leftMouseDown { terminal.mouseDown(with: event) } else { terminal.mouseUp(with: event) }
+        }
+        Self.testReport("linkclick \(needle) at \(Int(found.x)) \(Int(found.y)) kind=\(found.kind)")
+    }
+
+    /// 대본의 `webclick` — 파일 패널 로컬 HTML 뷰의 요소 하나를 누른다(결과는 `webclick <선택자> clicked|none|error`).
+    private func testWebClick(_ selector: String) {
+        guard let panel = activeSurface?.webPanels.values.first(where: { $0.filePanelKind == 2 }) else {
+            return Self.testReport("webclick \(selector) no-panel")
+        }
+        let quoted = (try? JSONSerialization.data(withJSONObject: [selector])).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let script = "(function(){var e=document.querySelector(\(quoted)[0]);if(!e)return 'none';e.click();return 'clicked'})()"
+        panel.webView.evaluateJavaScript(script) { value, error in
+            Self.testReport("webclick \(selector) \(error == nil ? (value as? String ?? "?") : "error")")
+        }
+    }
+
     private func testDropLink(_ zone: String, _ url: String, _ content: NSView) {
         guard let window, let terminal = Self.firstTerminalView(in: window.contentView), let session = appSession else { return }
         var points = [Double](repeating: -1, count: 6)
@@ -9835,6 +9889,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 } else {
                     Self.testReport("grantsmenu-missing \(prefix)")
                 }
+            case "linkclick" where line.count >= 2:
+                // linkclick 글 [수식자] — 터미널 화면에서 그 글이 든 링크(자동 감지·OSC 8)를 찾아 수식키+누름·뗌을 터미널 view 에 넣는다
+                // (수식자는 `key` 와 같은 비트, 기본 cmd=32). 자리는 `url_at` 으로 찾는다 — 셸이 그린 줄의 칸을 대본이 셈하지 않게.
+                // 누름은 view 의 mouseDown → `handleUrlClick` 그대로라 링크를 어디에 여는지(Zig 정책·Swift 실행)가 제품 경로다.
+                testLinkClick(line[1], line.count >= 3 ? (Int32(line[2]) ?? 32) : 32, view)
+            case "webclick" where line.count >= 2:
+                // webclick 선택자 — 파일 패널의 로컬 HTML 뷰(`filePanelKind == 2`)에서 그 요소를 누른다(`element.click()` — 링크면 WebKit 이
+                // linkActivated 이동으로 delegate 에 넘긴다). Markdown 셸은 렌더 iframe 안이라 이 줄로 닿지 않는다.
+                testWebClick(line.dropFirst().joined(separator: " "))
             case "overlay":
                 // 오버레이(알림 토스트 포함)가 열려 있는가 — 마우스 게이트가 보는 그 집합.
                 Self.testReport("overlay \(anyOverlayOpen)")
@@ -11775,8 +11838,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 나머지 파일 경로는 기존 기본 앱, 웹/스킴 URL은 기본 브라우저로 연다.
         let url: URL? = (kind == 1) ? URL(fileURLWithPath: text) : URL(string: text)
         guard let url else { return false }
-        NSWorkspace.shared.open(url)
+        openLinkWithSystem(url)
         return true
+    }
+
+    /// 사용자가 누른 링크를 시스템 기본 앱으로 연다(터미널 링크·외부 링크 action 의 system 갈래). 시험 입력 대본이 도는 앱
+    /// (`MARU_WEB_OSR_TEST_INPUT`)은 열지 않고 보고에 `system-open <주소>` 로 적는다 — 격리 HOME 의 시험 앱이 사용자의 기본
+    /// 브라우저에 탭을 띄우지 않게 하고, 대본이 「시스템으로 빠졌다」를 그 줄로 본다.
+    private func openLinkWithSystem(_ url: URL) {
+        if Self.downloadsTestMode {
+            Self.testReport("system-open \(url.absoluteString)")
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     private func pastePasteboardText() {
@@ -12976,7 +13050,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // in-app 대상이 사라졌거나(요청과 drain 사이에 그 Term이 닫힘) load가 거부되면 시스템 브라우저로
             // 폴백한다 — 사용자가 누른 링크를 조용히 삼키지 않는다. kind==2(system)는 원래 이 경로다.
             if !delivered, let url = URL(string: target) {
-                NSWorkspace.shared.open(url)
+                openLinkWithSystem(url)
             }
         }
         // Phase 7e-1a: dirty한 browser 패널의 nav 상태(KVO 관측값)를 Zig에 push한다 — 핫패스라 navStateDirty만 push하고

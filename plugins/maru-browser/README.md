@@ -51,7 +51,7 @@ to your project's `CLAUDE.md`: "Inside Maru, use the maru-browser skill for brow
 - **Tabs the agent opens use your real browser profile** — your cookies and logins — and Maru shows no dialog for
   them (cookie commands and uploads still ask). The skill tells the agent not to do anything irreversible on your accounts unless you asked, and to
   treat page text as untrusted, but that is guidance, not a lock.
-- Your own tabs stay protected by Maru: the first command on one of them asks you, and every `upload` asks you.
+- Tabs you open in Maru yourself stay protected: the first command on one of them asks you, and every `upload` asks you.
 
 ## Sandbox
 
@@ -74,6 +74,7 @@ The skill folder (`skills/maru-browser/`) uses only portable Agent Skills fields
 The skill's commands are checked against the real CLI parser and help in `zig build test-plugin-skill`
 (part of `mise run test`). The rules block in section 5 of `SKILL.md` (between the `maru:agent-rules` markers) is
 built into the `maru` binary as the start of `maru mcp`'s instructions, so MCP agents read the same rules word for
-word: keep it free of command and tool names, flags and numbers — the test checks that too. Bump `version` in `.claude-plugin/plugin.json` whenever you change anything in this
+word: keep it free of command and tool names, flags and numbers (the test rejects `maru browser`, tool names, flags,
+inline code and digits). Bump `version` in `.claude-plugin/plugin.json` whenever you change anything in this
 folder — CI fails otherwise, because users stay on the cached version until it changes. Design notes:
 [control-plane-browser.md §9.6.3](../../docs/control-plane-browser.md#963-에이전트-스킬-플러그인maru-browser).

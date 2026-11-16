@@ -17,9 +17,10 @@
 //!   ⑦ SKILL.md 의 「규칙」 구역(`<!-- maru:agent-rules:begin -->` … `end`)이 정확히 하나, 코드 블록 밖, 비지 않았다 — 이 구역은
 //!      `maru mcp` 의 `instructions` 맨 앞에 **빌드 때 그대로** 심긴다(M10 — 규칙은 두 채널이 한 글).
 //!   ⑧ 실제 `initialize` 응답의 `instructions` 가 그 구역 글로 **바이트 그대로** 시작한다(배선을 잰다 — 상수가 아니라).
-//!   ⑩ 「your tab」 을 아무 데서도 쓰지 않는다 — CLI help 는 사람의 탭을, 스킬은 에이전트가 연 탭을 그렇게 불러 뜻이 반대였다(M10 D7).
-//!      플러그인 글·`maru browser --help`·`maru mcp` 의 instructions 와 도구 설명이 「the user's tabs」 와 「tabs you opened」 로 말한다.
-//!   ⑨ 그 구역에 표면 고유 낱말(`maru browser`·`browser_`·플래그·인라인 코드·숫자·`$`)이 없다 — MCP 와 CLI 가 같은 글을 읽는다.
+//!   ⑨ 그 구역에 표면 고유 낱말(`maru browser`·`maru mcp`·`browser_`·플래그·인라인 코드·숫자·`$`)이 없다 — MCP 와 CLI 가 같은 글을 읽는다.
+//!   ⑩ 「your tab」·「your own tab」 을 아무 데서도 쓰지 않는다 — CLI help 는 사람의 탭을, 스킬은 에이전트가 연 탭을 그렇게 불러 뜻이
+//!      반대였다(M10 D7). 플러그인 글·`maru browser --help`·`maru mcp` 의 응답(instructions·도구와 인자 설명)·`maru mcp --help` 가
+//!      「the user's tabs」 와 「tabs you opened」 로 말한다.
 //!
 //! **공허하게 통과하지 않는다**(project-rules 「못 찾으면 실패」·pr-checklist 「판정자 규율」): 추출한 예시 수와 help 명령
 //! 수에 하한을 단언하고, 코드 표시 밖 산문에 `maru browser` 가 나오면 실패한다 — 모든 명령이 ①을 지나게 하려고.
@@ -27,7 +28,7 @@
 
 const std = @import("std");
 const browser = @import("maru").cli.browser;
-/// `maru mcp` 의 순수 절반 — ⑦⑧ 이 표지 이름과 실제 `initialize` 응답을 여기서 얻는다.
+/// `maru mcp` 의 순수 절반 — ⑦⑧⑩ 이 표지 이름과 실제 `initialize`·`tools/list` 응답을 여기서 얻는다.
 const mcp = @import("maru").cli.mcp;
 /// 이 트리가 빌드하는 maru 의 버전(`build.zig.zon` `.version` — `maru --version` 이 내는 값과 같은 단일 출처).
 const maru_version: []const u8 = @import("maru_version").version;
@@ -750,9 +751,14 @@ test "⑧ 실제 initialize 응답의 instructions 가 SKILL.md 의 규칙 구�
         });
         return error.InstructionsDoNotStartWithRules;
     }
-    // 구역 뒤에는 이 서버만의 안내가 따로 온다(표면 고유 사실은 각자 — 구역이 instructions 전부가 되지 않는다).
-    try std.testing.expect(served.len > region.len);
-    try std.testing.expect(std.mem.indexOf(u8, served[region.len..], "browser_list") != null);
+    // 구역 뒤에는 빈 줄 하나와 이 서버만의 안내만 온다(표면 고유 사실은 각자) — 구분자가 빠지거나, 끝 표지 줄이 따라 실리거나,
+    // 다른 글이 덧붙으면 여기서 갈린다.
+    const tail = served[region.len..];
+    if (!std.mem.eql(u8, tail, "\n\n" ++ mcp.server_guidance)) {
+        std.debug.print("instructions 의 구역 뒤가 「빈 줄 + server_guidance」 가 아니다:\n{s}\n", .{tail[0..@min(tail.len, 200)]});
+        return error.InstructionsTailUnexpected;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, mcp.server_guidance, "browser_list") != null);
 }
 
 test "⑨ 규칙 구역에 표면 고유 낱말(명령·도구 이름·플래그·인라인 코드·숫자)이 없다" {
@@ -766,9 +772,38 @@ test "⑨ 규칙 구역에 표면 고유 낱말(명령·도구 이름·플래그
     }
 }
 
-/// 「your tab」(대소문자 무시)의 첫 자리. 사람에게 쓴 글이면 「사용자 탭」, 에이전트에게 쓴 글이면 「에이전트 탭」 이라 같은 말이 반대가 된다.
+/// 「your tab」·「your own tab」(대소문자 무시)의 첫 자리. 사람에게 쓴 글이면 「사용자 탭」, 에이전트에게 쓴 글이면 「에이전트 탭」 이라
+/// 같은 말이 반대가 된다.
 fn ambiguousTabWord(text: []const u8) ?usize {
-    return std.ascii.findIgnoreCase(text, "your tab");
+    return std.ascii.findIgnoreCase(text, "your tab") orelse std.ascii.findIgnoreCase(text, "your own tab");
+}
+
+/// `maru mcp` 가 실제로 내는 글 — `initialize` 의 instructions 와 `tools/list` 의 모든 문자열(도구·인자 설명). 돌려준 글은 `arena` 소유.
+fn servedMcpText(arena: std.mem.Allocator) ![]const u8 {
+    var all: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}",
+    }) |line| {
+        const reply = (try mcp.handleLine(std.testing.allocator, arena, line)).reply;
+        defer std.testing.allocator.free(reply);
+        // JSON 을 풀어 이스케이프(`\u…`) 뒤의 글을 본다.
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, reply, .{ .allocate = .alloc_always });
+        try collectStrings(arena, &all, v);
+    }
+    return all.items;
+}
+
+fn collectStrings(arena: std.mem.Allocator, out: *std.ArrayList(u8), v: std.json.Value) !void {
+    switch (v) {
+        .string => |s| {
+            try out.appendSlice(arena, s);
+            try out.append(arena, '\n');
+        },
+        .array => |a| for (a.items) |x| try collectStrings(arena, out, x),
+        .object => |o| for (o.values()) |x| try collectStrings(arena, out, x),
+        else => {},
+    }
 }
 
 test "⑩ 플러그인 글·CLI help·MCP 안내는 「your tab」 이라 쓰지 않는다 — 사용자 탭과 에이전트가 연 탭을 이름으로 가른다" {
@@ -784,14 +819,22 @@ test "⑩ 플러그인 글·CLI help·MCP 안내는 「your tab」 이라 쓰지
         std.debug.print("maru browser --help 가 「your tab」 이라 쓴다 — 에이전트는 자기 탭으로 읽는다\n", .{});
         bad += 1;
     }
-    if (ambiguousTabWord(mcp.instructions) != null) bad += 1;
-    for (&mcp.tools) |*t| if (ambiguousTabWord(t.description) != null) {
-        std.debug.print("{s} 설명이 「your tab」 이라 쓴다\n", .{t.name});
+    const served = try servedMcpText(arena);
+    // 공허한 통과를 막는다 — 응답에서 실제로 글을 모았는가(instructions·도구 설명이 다 들었는가).
+    try std.testing.expect(std.mem.indexOf(u8, served, mcp.agent_rules) != null);
+    try std.testing.expect(std.mem.indexOf(u8, served, "Print page console logs.") != null);
+    if (ambiguousTabWord(served)) |at| {
+        std.debug.print("maru mcp 의 응답이 「your tab」 이라 쓴다: …{s}…\n", .{served[at -| 60..@min(served.len, at + 60)]});
         bad += 1;
-    };
+    }
+    if (ambiguousTabWord(mcp.usage) != null) {
+        std.debug.print("maru mcp --help 가 「your tab」 이라 쓴다\n", .{});
+        bad += 1;
+    }
     try std.testing.expectEqual(@as(usize, 0), bad);
-    // 양성 대조 — 대소문자와 단·복수 모두 걸린다.
+    // 양성 대조 — 대소문자와 단·복수, 「your own tab」 모두 걸린다.
     try std.testing.expect(ambiguousTabWord("On Your tabs") != null and ambiguousTabWord("in your tab.") != null);
+    try std.testing.expect(ambiguousTabWord("work in your own tab") != null);
     try std.testing.expect(ambiguousTabWord("tabs you opened and the user's tabs") == null);
 }
 
@@ -809,7 +852,7 @@ test "스캐너: 규칙 구역 — 표지가 없거나·둘이거나·거꾸로�
     try std.testing.expectError(error.RegionEmpty, findRulesRegion(b ++ "\n\n" ++ e ++ "\n"));
     // 부정 판정자의 양성 대조 — 금지 낱말 하나하나가 실제로 걸린다.
     try std.testing.expect(surfaceToken("- Work in a tab you opened.") == null);
-    for ([_][]const u8{ "use maru browser open", "call browser_open", "pass --reload", "run `exec`", "up to 8 tabs", "in $TMPDIR" }) |bad| {
+    for ([_][]const u8{ "use maru browser open", "call browser_open", "pass --reload", "run `exec`", "up to 8 tabs", "in $TMPDIR", "add maru mcp" }) |bad| {
         try std.testing.expect(surfaceToken(bad) != null);
     }
 }

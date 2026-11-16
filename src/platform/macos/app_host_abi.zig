@@ -7765,16 +7765,31 @@ fn grantPromptMessage(buf: []u8, e: GrantPromptEntry, snapshot: control_surface.
 /// pane 동의문에 싣는 pane 제목의 표시 폭 상한(칸). 제목은 프로그램이 정한다(OSC) — 길이에 끝이 없고, 질문이 그 뒤에 온다.
 const agent_tabs_prompt_title_cols: u32 = 40;
 
+/// 동의문에 실을 pane 제목 — 제목은 pane 의 프로그램(묻는 에이전트 자신일 수 있다)이 OSC 로 정한다. 모달의 문장을 흔들 수 있는 글자는 공백으로
+/// 바꾼다: C0·C1 제어 글자(줄바꿈 — 모달의 줄을 바꾼다)와 **양방향·폭 0 서식 글자**(U+061C·U+200B–U+200F·U+202A–U+202E·U+2060–U+2064·
+/// U+2066–U+2069·U+FEFF — RLO 하나면 뒤따르는 「… Allow?」 까지 거꾸로 그려져 사용자가 읽는 질문이 바뀐다; 적대 리뷰 회차 R15). UTF-8 이
+/// 아니면 「?」. `out` 이 차면 글자 경계에서 멈춘다.
+fn agentTabsPromptTitle(out: []u8, title: []const u8) []const u8 {
+    const view = std.unicode.Utf8View.init(title) catch return "?";
+    var it = view.iterator();
+    var n: usize = 0;
+    while (it.nextCodepointSlice()) |bytes| {
+        const cp = std.unicode.utf8Decode(bytes) catch return "?";
+        const unsafe = cp < 0x20 or (cp >= 0x7F and cp <= 0x9F) or cp == 0x061C or (cp >= 0x200B and cp <= 0x200F) or
+            (cp >= 0x202A and cp <= 0x202E) or (cp >= 0x2060 and cp <= 0x2064) or (cp >= 0x2066 and cp <= 0x2069) or cp == 0xFEFF;
+        const piece: []const u8 = if (unsafe) " " else bytes;
+        if (n + piece.len > out.len) break;
+        @memcpy(out[n..][0..piece.len], piece);
+        n += piece.len;
+    }
+    return out[0..n];
+}
+
 /// pane 동의문(순수 — 판정자가 직접 잰다). 사용자 결정의 문장 그대로에 pane 제목을 더한다. 제목의 제어 글자(줄바꿈 등)는 공백으로 —
 /// 프로그램이 정한 글이 모달의 줄을 바꾸지 않게.
 fn agentTabsPromptText(buf: []u8, pane_title: []const u8) []const u8 {
     var clean_buf: [256]u8 = undefined;
-    const raw = pane_title[0..@min(pane_title.len, clean_buf.len)];
-    // 잘린 끝이 UTF-8 글자 가운데면 그 앞까지(잘린 바이트를 그리지 않게).
-    var cut = raw.len;
-    while (cut > 0 and cut < pane_title.len and (pane_title[cut] & 0xC0) == 0x80) cut -= 1;
-    for (raw[0..cut], 0..) |ch, i| clean_buf[i] = if (ch < 0x20 or ch == 0x7F) ' ' else ch;
-    const clean = std.mem.trim(u8, clean_buf[0..cut], " ");
+    const clean = std.mem.trim(u8, agentTabsPromptTitle(&clean_buf, pane_title), " ");
     var title_buf: [256]u8 = undefined;
     const shown = maru.chrome.components.overlay_input.elideMiddle(&title_buf, if (clean.len == 0) "?" else clean, agent_tabs_prompt_title_cols);
     return maru.i18n.format(buf, maru.i18n.t(.grant_prompt_agent_tabs), &.{.{ .s = shown }});
@@ -14051,6 +14066,63 @@ test "pane 동의: 답이 없으면 시한에 -32004 agent_tabs_unanswered 로 �
     try std.testing.expectEqual(@as(usize, 0), grant_prompt_queue.items.items.len);
 }
 
+// 적대 리뷰 변이 M20(살아남았다): 머리가 동의 항목이면 머리의 시한 쓸기가 뒤까지 쓸어 「줄 뒤 쓸기」 를 껐는지 아무도 못 봤다. 머리가 다른 grant
+// 모달(사용자 탭의 제어)일 때 그 뒤에 선 동의 항목의 시한이 지나면 — 연결을 답 없이 닫기 전에 -32004 로 답해야 한다.
+test "pane 동의: 다른 grant 모달 뒤에 줄 선 동의 항목도 시한이면 -32004 로 답한다(머리는 그대로)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const shell = session.tabs.items[0].panes.items[0].terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    const user_tab = try session_mod.web_ops.openAgentTab(session, shell, null); // 표에 올리지 않는다 — 사용자 탭 자리
+    var head: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.getUrl\",\"params\":{\"id\":1}}", .selector = null, .io = std.testing.io, .browser_pane = shell };
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    handleNeedsGrant(&control_server_storage, &refs, &head, .{ .pane = shell, .target = user_tab, .scope = .browser }, now_ns);
+    var behind = consentPending(shell);
+    consentAsk(&refs, &behind, shell);
+    try std.testing.expectEqual(@as(usize, 2), grant_prompt_queue.items.items.len);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(session.pending_confirm == .grant and session.pending_confirm.grant == grant_prompt_queue.items.items[0].async_id);
+    grant_prompt_queue.items.items[1].consent_deadline_ns = 1;
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    {
+        const m = try expectConsentAnswer(&behind, -32004, "agent_tabs_unanswered");
+        std.testing.allocator.free(m);
+    }
+    try std.testing.expectEqual(@as(usize, 1), grant_prompt_queue.items.items.len); // 머리(사용자 탭의 제어 모달)는 그대로
+    try std.testing.expect(head.response == null);
+    try std.testing.expect(session.pending_confirm == .grant);
+}
+
+// 적대 리뷰 변이 M22(살아남았다): `startAgentOpen` 의 동의 방어는 디스패치가 이미 본 것을 한 번 더 보는 자리라 정상 길에서는 닿지 않는다 — 동의
+// 없이 불리면 탭을 만들지 않고 균일 unauthorized 인지 직접 잰다(디스패치 검사를 지운 변이 M01 와 두 겹).
+test "pane 동의: 동의 없이 startAgentOpen 이 불리면 탭을 만들지 않는다(방어)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = consent_open_request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    startAgentOpen(&refs, id, shell, "{\"url\":\"https://e.test/\",\"timeout_ms\":25000}");
+    try expectPendingErrorCode(&pending, .unauthorized);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expectEqual(@as(usize, 0), agent_tabs.items.len);
+}
+
 test "pane 동의: 다른 pane 은 따로 묻는다 — 한 pane 의 허용·거부가 다른 pane 에 번지지 않는다, 같은 pane 의 줄 선 둘째는 첫 답을 따른다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
@@ -14163,6 +14235,11 @@ test "pane 동의문: 질문이 끝에 남고, pane 제목은 줄바꿈·제어 
         try std.testing.expect(std.mem.indexOf(u8, text, "◈") != null);
         const empty = agentTabsPromptText(&buf, "");
         try std.testing.expect(std.mem.indexOf(u8, empty, "(?)") != null);
+        // 적대 리뷰 R15: 양방향·폭 0 서식 글자(RLO·LRI·ZWJ·BOM)는 공백 — 질문이 거꾸로 그려지지 않게. 깨진 UTF-8 은 「?」.
+        const bidi = agentTabsPromptText(&buf, "safe\u{202E}?wollA \u{2066}x\u{2069}\u{200D}\u{FEFF}\u{061C}y\u{0085}z");
+        for ([_][]const u8{ "\u{202E}", "\u{2066}", "\u{2069}", "\u{200D}", "\u{FEFF}", "\u{061C}", "\u{0085}" }) |bad| try std.testing.expect(std.mem.indexOf(u8, bidi, bad) == null);
+        try std.testing.expect(std.mem.indexOf(u8, bidi, "safe") != null and std.mem.indexOf(u8, bidi, "y") != null);
+        try std.testing.expect(std.mem.indexOf(u8, agentTabsPromptText(&buf, "a\xffb"), "(?)") != null);
     }
 }
 

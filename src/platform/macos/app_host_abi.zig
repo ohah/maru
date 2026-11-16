@@ -1699,6 +1699,7 @@ pub export fn maru_macos_app_session_create(
     session.agent_page_tab_callback = onAgentPageTab; // W9b③: 에이전트 탭의 페이지가 연 새 탭
     session.agent_tab_room_callback = onAgentTabRoom;
     session.agent_pane_known_callback = onAgentPaneKnown;
+    session.agent_tab_known_callback = onAgentTabKnown; // 2026-11-16: 탭 줄의 에이전트 탭 표지 ◈
 
     out.* = session;
     return @backingInt(Status.ok);
@@ -9060,6 +9061,12 @@ fn onAgentPaneKnown(pane: u64) bool {
     return agentTabCount(pane) > 0;
 }
 
+/// 그 탭이 지금 에이전트 탭인가(`AppSession.agent_tab_known_callback` — 탭 줄의 ◈, 사용자 결정 2026-11-16). 표가 출처다 — 철회·pane 닫힘이면
+/// 사람의 탭이고 표지도 사라진다.
+fn onAgentTabKnown(tab: u64) bool {
+    return isAgentTab(tab);
+}
+
 /// 에이전트 탭의 페이지가 새 탭을 열려 한다 — 자리가 없으면 열지 않는다(`AppSession.agent_tab_room_callback`).
 fn onAgentTabRoom(pane: u64) bool {
     // pane 동의(2026-11-16)를 거둔 pane 의 남은 탭이 에이전트의 장으로 새 에이전트 탭(태어날 때 grant)을 만들지 않게 — 「자리가 없다」 와 같은 갈래.
@@ -14133,6 +14140,46 @@ test "pane 동의문: 질문이 끝에 남고, pane 제목은 줄바꿈·제어 
         const empty = agentTabsPromptText(&buf, "");
         try std.testing.expect(std.mem.indexOf(u8, empty, "(?)") != null);
     }
+}
+
+// 사용자 결정 2026-11-16: 탭 줄의 라벨 함수(`diffAwareLabel` — 사용자가 보는 제목의 단일 자리)가 에이전트 탭에만 ◈ 를 붙이고, 그 출처는 에이전트
+// 탭 표다 — 사람의 탭·철회한 탭(사람의 탭이 됐다)·pane 이 닫힌 탭에는 없다. 제품이 거는 콜백(`onAgentTabKnown`)을 그대로 건다.
+test "에이전트 탭 표지: 라벨이 에이전트 탭에만 ◈ 를 붙인다 — 사람의 탭·철회한 탭·pane 이 닫힌 탭에는 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    session.agent_tab_known_callback = onAgentTabKnown;
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const tab = try session_mod.web_ops.openAgentTab(session, shell, null);
+    const human = try session_mod.web_ops.openAgentTab(session, shell, null); // 표에 올리지 않으면 사람의 탭이다
+    try std.testing.expect(adoptAgentTab(shell, tab));
+    const labelHas = struct {
+        fn f(s: *AppSession, p: *session_mod.Pane, id: u64) !bool {
+            for (p.terms.items) |t| if (t.surfaceId() == id) {
+                const label = try s.diffAwareLabel(std.testing.allocator, t);
+                defer std.testing.allocator.free(label);
+                const m = @import("app_session/tab.zig").tabTitleMarker(label) orelse return false;
+                return std.mem.startsWith(u8, m, @import("app_session/tab.zig").agent_tab_mark_utf8);
+            };
+            return error.NoTab;
+        }
+    }.f;
+    try std.testing.expect(try labelHas(session, pane, tab));
+    try std.testing.expect(!try labelHas(session, pane, human));
+    try std.testing.expect(!try labelHas(session, pane, shell)); // 터미널
+    _ = maru_macos_control_revoke_browser_grant(shell, tab, 0); // 그 탭의 제어를 철회 — 사람의 탭이 된다
+    try std.testing.expect(!try labelHas(session, pane, tab));
+    try std.testing.expect(adoptAgentTab(shell, tab));
+    try std.testing.expect(try labelHas(session, pane, tab));
+    forgetAgentTab(shell); // 에이전트의 pane 이 닫혔다
+    try std.testing.expect(!try labelHas(session, pane, tab));
 }
 
 test "W9b③: close — 그 pane 이 연 탭만, cap 연결은 unauthorized, 물으면 떠나기 확인이 뜰 때 closed:false, 닫히면 closed:true, 창의 유일한 탭은 실패" {

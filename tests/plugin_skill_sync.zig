@@ -17,6 +17,8 @@
 //!   ⑦ SKILL.md 의 「규칙」 구역(`<!-- maru:agent-rules:begin -->` … `end`)이 정확히 하나, 코드 블록 밖, 비지 않았다 — 이 구역은
 //!      `maru mcp` 의 `instructions` 맨 앞에 **빌드 때 그대로** 심긴다(M10 — 규칙은 두 채널이 한 글).
 //!   ⑧ 실제 `initialize` 응답의 `instructions` 가 그 구역 글로 **바이트 그대로** 시작한다(배선을 잰다 — 상수가 아니라).
+//!   ⑩ 「your tab」 을 아무 데서도 쓰지 않는다 — CLI help 는 사람의 탭을, 스킬은 에이전트가 연 탭을 그렇게 불러 뜻이 반대였다(M10 D7).
+//!      플러그인 글·`maru browser --help`·`maru mcp` 의 instructions 와 도구 설명이 「the user's tabs」 와 「tabs you opened」 로 말한다.
 //!   ⑨ 그 구역에 표면 고유 낱말(`maru browser`·`browser_`·플래그·인라인 코드·숫자·`$`)이 없다 — MCP 와 CLI 가 같은 글을 읽는다.
 //!
 //! **공허하게 통과하지 않는다**(project-rules 「못 찾으면 실패」·pr-checklist 「판정자 규율」): 추출한 예시 수와 help 명령
@@ -762,6 +764,35 @@ test "⑨ 규칙 구역에 표면 고유 낱말(명령·도구 이름·플래그
         std.debug.print("{s}: 규칙 구역에 표면 고유 낱말 「{s}」 — 이 글은 MCP 에도 그대로 실린다. 그 사실은 구역 밖(스킬의 다른 절, mcp.zig `server_guidance`)에\n", .{ skill_path, t });
         return error.SurfaceTokenInRules;
     }
+}
+
+/// 「your tab」(대소문자 무시)의 첫 자리. 사람에게 쓴 글이면 「사용자 탭」, 에이전트에게 쓴 글이면 「에이전트 탭」 이라 같은 말이 반대가 된다.
+fn ambiguousTabWord(text: []const u8) ?usize {
+    return std.ascii.findIgnoreCase(text, "your tab");
+}
+
+test "⑩ 플러그인 글·CLI help·MCP 안내는 「your tab」 이라 쓰지 않는다 — 사용자 탭과 에이전트가 연 탭을 이름으로 가른다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var bad: usize = 0;
+    for (try pluginMarkdown(arena)) |f| if (ambiguousTabWord(f.text)) |at| {
+        std.debug.print("{s}:{d}: 「your tab」 — 「tabs you opened」(에이전트 탭) 또는 「the user's tabs」 로\n", .{ f.path, 1 + std.mem.count(u8, f.text[0..at], "\n") });
+        bad += 1;
+    };
+    if (ambiguousTabWord(browser.browser_help) != null) {
+        std.debug.print("maru browser --help 가 「your tab」 이라 쓴다 — 에이전트는 자기 탭으로 읽는다\n", .{});
+        bad += 1;
+    }
+    if (ambiguousTabWord(mcp.instructions) != null) bad += 1;
+    for (&mcp.tools) |*t| if (ambiguousTabWord(t.description) != null) {
+        std.debug.print("{s} 설명이 「your tab」 이라 쓴다\n", .{t.name});
+        bad += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), bad);
+    // 양성 대조 — 대소문자와 단·복수 모두 걸린다.
+    try std.testing.expect(ambiguousTabWord("On Your tabs") != null and ambiguousTabWord("in your tab.") != null);
+    try std.testing.expect(ambiguousTabWord("tabs you opened and the user's tabs") == null);
 }
 
 test "스캐너: 규칙 구역 — 표지가 없거나·둘이거나·거꾸로거나·코드 블록 안이거나·줄에 다른 글과 섞이거나·비면 오류, 표면 낱말은 걸린다" {

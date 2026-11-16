@@ -4,11 +4,11 @@ Chromium tabs only. Check the exact flags in `maru browser --help`.
 
 ## Permissions come in layers
 
-- On your tabs (`open`) nothing asks.
+- On tabs you opened (`open`) nothing asks.
 - On a user's tab, `network` asks once per site. `network-record`, `network-block` and `network-mock` need that
   network permission first (an error says so — run `network` on that tab), and `network-mock` also needs control
   of the tab. Each asks once per site.
-- You see requests made after the permission (on your tabs: since the tab was created, unless the user used it
+- You see requests made after the permission (on tabs you opened: since the tab was created, unless the user used it
   before your first read).
 - `Cookie`, `Set-Cookie` and `Authorization` values show only for sites whose cookie permission you also hold on
   that tab, and never when the user turned full network detail off. Request bodies are not recorded.

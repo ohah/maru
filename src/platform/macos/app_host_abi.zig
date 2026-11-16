@@ -14323,6 +14323,96 @@ test "에이전트 탭 표지: 탭 줄 라벨과 사이드바 행이 에이전�
     try std.testing.expect(!try labelHas(session, pane, tab));
 }
 
+/// 사이드바 draw list 에서 그 Term 행의 이름줄 ◈ 셀을 센다 — 전부·마젠타(`agent_tab_mark_color`)인 것.
+fn sidebarAgentMarkCells(session: *AppSession, term_id: u64) !struct { all: usize, magenta: usize, magenta_col: ?u16, depth: u8 } {
+    const sidebar = @import("app_session/sidebar.zig");
+    const tab_mod = @import("app_session/tab.zig");
+    sidebar.rebuildSidebar(session) catch {};
+    var dl = try sidebar.buildSidebarTitleDrawList(session);
+    defer dl.deinit(session.allocator);
+    // 그 Term 의 행(표시 슬롯) — 행은 인덱스만 든다(라이브 재조회).
+    var slot: ?usize = null;
+    var depth: u8 = 0;
+    for (session.sidebar_rows.items, 0..) |row, i| switch (row) {
+        .agent => |ar| {
+            const t = session.tabs.items[ar.tab].panes.items[ar.pane].terms.items[ar.term];
+            if (t.surfaceId() == term_id) {
+                slot = i;
+                depth = ar.depth;
+            }
+        },
+        else => {},
+    };
+    const want = slot orelse return error.NoSidebarRow;
+    var all: usize = 0;
+    var magenta: usize = 0;
+    var magenta_col: ?u16 = null;
+    for (dl.cells) |cell| {
+        if (cell.codepoint != tab_mod.agent_tab_mark) continue;
+        const d = maru.sidebar_glyph_rows.decode(cell.row);
+        if (d.slot != want or d.line_index != 0) continue;
+        all += 1;
+        if (std.meta.eql(cell.style.foreground, terminal.Color{ .rgb = tab_mod.agent_tab_mark_color })) {
+            magenta += 1;
+            magenta_col = cell.col;
+        }
+    }
+    return .{ .all = all, .magenta = magenta, .magenta_col = magenta_col, .depth = depth };
+}
+
+// 이 시험이 증명하는 것(#4731 의 남은 틈): 사이드바 세션 목록의 ◈ 는 **그 칸의 색**으로 갈린다 — 에이전트 탭 행의 ◈ 만 탭 줄과 같은 마젠타이고,
+// 제목이 「◈ Bank」 인 다른 행(프로그램이 OSC 로 정한 pane 제목 — 묻는 에이전트 자신일 수 있다; 사용자의 rename 도 같은 자리)의 ◈ 는 글자색이다.
+// 글자로는 둘이 같으므로(전에는 색도 같았다) 표지를 제목으로 흉내 내지 못하게 하는 것은 색이다 — 탭 줄과 같은 수단. 철회하면 표지도 사라진다.
+test "에이전트 탭 표지 ◈: 사이드바 세션 목록은 그 칸만 마젠타 — 제목 「◈ …」 의 ◈ 는 글자색" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    session.agent_tab_known_callback = onAgentTabKnown;
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell_term = pane.terms.items[0];
+    const shell = shell_term.surfaceId();
+    shell_term.surface.title = "\u{25C8} Bank"; // 프로그램이 정한 pane 제목(OSC 0/2) — 표지와 같은 글자로 시작한다
+    const tab = try session_mod.web_ops.openAgentTab(session, shell, null);
+    try std.testing.expect(adoptAgentTab(shell, tab));
+
+    const agent_row = try sidebarAgentMarkCells(session, tab);
+    try std.testing.expectEqual(@as(usize, 1), agent_row.all);
+    try std.testing.expectEqual(@as(usize, 1), agent_row.magenta);
+    // 「◈ Bank」 행의 ◈ 는 마젠타가 아니다(글자는 있다 — 판정이 공허하지 않다).
+    const spoof_row = try sidebarAgentMarkCells(session, shell);
+    try std.testing.expectEqual(@as(usize, 1), spoof_row.all);
+    try std.testing.expectEqual(@as(usize, 0), spoof_row.magenta);
+    // 에이전트 탭의 이름 자체가 ◈ 로 시작해도(rename — 행은 「◈ ◈ x」) maru 가 붙인 첫 칸만 마젠타다(슬롯만이 아니라 열까지 본다 — 적대 리뷰 B).
+    for (pane.terms.items) |t| if (t.surfaceId() == tab) {
+        t.surface.custom_name = try session.allocator.dupe(u8, "\u{25C8} x");
+    };
+    const renamed = try sidebarAgentMarkCells(session, tab);
+    try std.testing.expectEqual(@as(usize, 2), renamed.all);
+    try std.testing.expectEqual(@as(usize, 1), renamed.magenta);
+    try std.testing.expectEqual(agent_row.magenta_col, renamed.magenta_col);
+    // 그룹 안(행 들여쓰기가 있다)에서도 그 칸이다 — 열에 그룹 들여쓰기가 들어간다(depth 0 만 보면 그 항을 빼도 초록이었다).
+    @import("app_session/tab.zig").createGroupForTab(session, session.tabs.items[0]);
+    const grouped = try sidebarAgentMarkCells(session, tab);
+    try std.testing.expect(grouped.depth > 0);
+    try std.testing.expectEqual(@as(usize, 2), grouped.all);
+    try std.testing.expectEqual(@as(usize, 1), grouped.magenta);
+    try std.testing.expect(grouped.magenta_col.? > agent_row.magenta_col.?); // 들여쓴 만큼 오른쪽 — 판정이 공허하지 않다
+    const grouped_spoof = try sidebarAgentMarkCells(session, shell);
+    try std.testing.expectEqual(@as(usize, 1), grouped_spoof.all);
+    try std.testing.expectEqual(@as(usize, 0), grouped_spoof.magenta);
+    // 철회하면 사람의 탭 — 그 행에 maru 의 ◈ 가 없다(이름의 ◈ 하나만 글자색으로 남는다).
+    _ = maru_macos_control_revoke_browser_grant(shell, tab, 0);
+    const revoked = try sidebarAgentMarkCells(session, tab);
+    try std.testing.expectEqual(@as(usize, 1), revoked.all);
+    try std.testing.expectEqual(@as(usize, 0), revoked.magenta);
+}
+
 // 사용자 결정 2026-11-16: Browser Grants 메뉴의 pane 동의 줄(wire 7)을 거두면 그 pane 은 다시 묻고, 그 pane 이 연 에이전트 탭은 사람의 탭이 된다
 // (탭과 함께 생긴 권한은 그 뿌리와 함께 간다 — F3 와 같은 규칙). 다른 pane 의 동의·에이전트 탭은 그대로다.
 test "pane 동의 철회: 메뉴의 wire 7 로 거두면 그 pane 의 에이전트 탭이 사람의 탭이 되고 다른 pane 은 그대로다" {

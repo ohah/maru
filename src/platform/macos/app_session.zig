@@ -3082,7 +3082,9 @@ const QuitDecision = enum(u32) {
 
 /// 1e-confirm-2b: browser grant 확인 모달의 결정 latch(§9.2 Model B). named 타입이라 field·takeGrantDecision 반환이 같은
 /// 타입을 공유한다(익명 struct는 매 리터럴이 별개 타입이라 불가). app_host_abi.drainGrantPrompts가 async_id로 head와 대조.
-const GrantConfirmDecision = struct { async_id: u64, approved: bool };
+/// `by_user` — 사용자가 단추·키로 답했다(참) / 다른 상자가 덮어 닫혔다(거짓, `approved` 도 거짓). pane 동의(2026-11-16)는 사용자의 거부만
+/// 기억한다 — 신뢰 프롬프트(§8.2a)와 같은 규칙: 다른 모달이 덮은 것은 답이 아니다.
+const GrantConfirmDecision = struct { async_id: u64, approved: bool, by_user: bool = false };
 
 /// surface teardown 관찰 훅. AppSession은 컨트롤 서버를 import하지 않고 surface 수명만 알리며, macOS ABI 계층이
 /// pane-bound browser grant/wait 취소에 연결한다. null이면 순수/헤드리스 세션 동작은 기존과 동일하다.
@@ -11007,6 +11009,20 @@ pub const AppSession = struct {
         return d;
     }
 
+    /// pane 동의(2026-11-16): 답을 기다리던 동의 요청이 끝났다(시한·pane 사라짐) — 그 모달을 결정 없이 거둔다(다른 모달이면 그대로).
+    /// 이 창에 래치된 그 요청의 답도 버린다. 업로드의 `dismissUploadConfirm` 과 같은 모양이다.
+    pub fn dismissGrantConfirm(self: *AppSession, async_id: u64) void {
+        if (self.grant_confirm_decision) |d| if (d.async_id == async_id) {
+            self.grant_confirm_decision = null;
+        };
+        if (self.pending_confirm != .grant or self.pending_confirm.grant != async_id) return;
+        self.pending_confirm = .none;
+        self.chrome_host.confirm.dismiss();
+        if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return);
+        self.osr_grant_return = 0;
+        self.metal_dirty = true;
+    }
+
     /// W9c③: 에이전트의 파일 올리기 확인 모달(라벨 「허용」/「거부」). `lines` 는 파일마다 두 줄(`session.web_upload_display.fileLines`) —
     /// 복사해 둔다. grant 모달과 같은 규칙: 다른 오버레이·확인이 열려 있으면 띄우지 않고 false(app_host_abi 가 다음 tick 에 다시), 이미 이
     /// async_id 를 보이는 중이면 true. 비동기로 뜨므로 `guardAsync`(거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더), 모달이 키를 가져가는
@@ -13639,7 +13655,7 @@ pub const AppSession = struct {
                     .lsp_trust => editor_ops.lsp_client.answerTrust(self, true),
                     .lsp_trust_manage => editor_ops.lsp_client.answerManage(self, .primary),
                     .grant => |async_id| {
-                        self.grant_confirm_decision = .{ .async_id = async_id, .approved = true };
+                        self.grant_confirm_decision = .{ .async_id = async_id, .approved = true, .by_user = true };
                         if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return); // 모달이 닫혀 키가 돌아간다
                         self.osr_grant_return = 0;
                     },
@@ -13721,7 +13737,11 @@ pub const AppSession = struct {
             .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/grant)을 버린다.
                 // 신뢰 프롬프트는 **사용자의 취소만** 거부로 기억한다(§8.2a) — 다른 모달이 덮거나 앱이 끝나며 닫히는 것은 답이 아니다.
                 if (self.pending_confirm == .lsp_trust) editor_ops.lsp_client.answerTrust(self, false);
+                const user_denied_grant = self.pending_confirm == .grant; // 사용자의 「거부」 — 다른 상자가 덮은 것과 가른다(pane 동의의 기억)
                 self.cancelPendingConfirm();
+                if (user_denied_grant) if (self.grant_confirm_decision) |*d| {
+                    d.by_user = true;
+                };
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음

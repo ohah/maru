@@ -1628,6 +1628,8 @@ const Table = struct {
     perm_captured_surface_control: [:0]const u8,
     grant_scope_control: [:0]const u8,
     grant_prompt: [:0]const u8,
+    /// pane 동의(사용자 결정 2026-11-16) — 에이전트 탭은 사용자의 로그인된 사이트를 쓴다. {0} = pane 제목. 질문이 끝에 온다.
+    grant_prompt_agent_tabs: [:0]const u8,
     // ── 에이전트의 파일 올리기 확인(W9c③ — `app_host_abi` 가 문장을, `session/web_upload_display` 가 파일 줄을 만든다) ──
     upload_prompt: [:0]const u8,
     upload_count_one: [:0]const u8,
@@ -2621,6 +2623,7 @@ const en: Table = .{
     .perm_captured_surface_control = "Scroll and zoom the tab you share",
     .grant_scope_control = "control this browser (navigate, click, type, read)",
     .grant_prompt = "An agent wants to {0}. Target: {1}. Allow?",
+    .grant_prompt_agent_tabs = "The agent in this pane ({0}) wants to open browser tabs that use your logged-in sites (◈ marks them in the tab bar). Allow?",
     .upload_prompt = "An agent wants to upload {0} to {1}. The page gets each file's name and content. Allow only if you expect these files — every file is listed below, and Allow works only while the whole list is visible.",
     .upload_count_one = "1 file",
     .upload_count_many = "{0} files",
@@ -3919,6 +3922,7 @@ const ko: Table = .{
     .perm_captured_surface_control = "공유한 탭 스크롤·확대",
     .grant_scope_control = "이 브라우저(이동·클릭·입력·읽기)를 제어하려",
     .grant_prompt = "에이전트가 {0} 합니다. 대상: {1}. 허용하시겠습니까?",
+    .grant_prompt_agent_tabs = "이 pane 의 에이전트({0})가 로그인된 사이트를 쓰는 브라우저 탭을 열려고 합니다(탭 줄에 ◈ 표시). 허용하시겠습니까?",
     .upload_prompt = "에이전트가 {1} 에 {0} 을 올리려 합니다. 페이지는 각 파일의 이름과 내용을 받습니다. 이 파일들이 맞을 때만 허용하세요 — 아래에 모든 파일이 있고, 목록이 다 보일 때만 허용할 수 있습니다.",
     .upload_count_one = "파일 1 개",
     .upload_count_many = "파일 {0} 개",

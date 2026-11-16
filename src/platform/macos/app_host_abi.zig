@@ -7121,6 +7121,7 @@ fn onAppSessionSurfaceClosed(_: ?*anyopaque, surface_id: u64) void {
     }
     _ = control_cap_store.revokeSurface(surface_id);
     control_pane_grant_store.removeSurface(surface_id);
+    agent_tabs_denials.forget(surface_id); // pane 이 닫혔다 — 그 pane 의 거부 기억도(동의 grant 는 위 removeSurface 가)
     forgetAgentTab(surface_id);
     uploadForgetTab(surface_id); // W9c③: 그 탭의 사본을 지운다(탭이 닫힐 때까지 둔다 — 뒤로가기가 되살린다)
     syncNetworkWatch(); // W9d①: 그 pane 이 쥐던 다른 탭의 네트워크 grant 도 사라졌다
@@ -7198,6 +7199,9 @@ const GrantPromptEntry = struct {
     /// 묶인다 — 모달이 떠 있는 사이 탭이 다른 사이트로 가도 허용 범위는 본 사이트다.
     host: control_pane_grant.GrantHost = .{},
     host_captured: bool = false,
+    /// pane 동의(`browser_agent_tabs` — 사용자 결정 2026-11-16)의 답 시한(모노토닉 ns). 0 이면 동의 항목이 아니다. in-flight 시한보다
+    /// 먼저 와서, 연결을 답 없이 닫는 대신 「답이 없었다」(-32004)로 분명히 답하고 떠 있던 모달을 거둔다.
+    consent_deadline_ns: i128 = 0,
 };
 /// 대기 중 grant 확인 FIFO(**메인 스레드 전용**). bounded — max_in_flight와 정렬(연결당 held ≤1). deferRequest가
 /// in-flight를 bound하므로 이 큐는 그 미러(항목=held 요청). 서버 drain이 매 tick 결정+resolve.
@@ -7219,6 +7223,24 @@ const GrantPromptQueue = struct {
 var grant_prompt_queue: GrantPromptQueue = .{};
 /// 확인 응답 마감 — 사용자가 모달에 응답할 시간(2b). 2a 스텁은 즉시 결정하나, 이 마감이 reap 안전망(무응답 시 연결 닫힘).
 const grant_prompt_timeout_ns: i128 = 120 * std.time.ns_per_s;
+
+// ── pane 동의: 「이 pane 의 에이전트가 로그인된 사이트를 쓰는 탭을 열어도 되나」(사용자 결정 2026-11-16) ─────────────────────────────
+// 에이전트 탭은 사용자의 Chromium 쿠키 통을 그대로 쓴다. pane 이 처음 `browser.open` 할 때 한 번 묻는다 — 허용은 (pane, pane,
+// browser_agent_tabs) grant(그 pane 이 사는 동안, 메모리만), 거부는 `agent_tabs_denials` 에 한동안(`deny_quiet_ms`) 남아 그동안은 모달 없이
+// 거절한다. 시한·창 없음·다른 모달이 덮음은 사용자의 답이 아니라 기억하지 않는다(§8.2a 신뢰 프롬프트와 같은 규칙).
+const agent_tab_consent = maru.session.control_agent_tab_consent;
+var agent_tabs_denials: agent_tab_consent.DenyMemory = .{};
+/// 동의 항목의 in-flight 시한은 답 시한보다 이만큼 길다 — 그 사이 drain 이 -32004 로 먼저 답한다.
+const agent_tabs_reap_slack_ns: i128 = 5 * std.time.ns_per_s;
+
+/// 그 pane 이 에이전트 탭을 열어도 된다고 사용자가 허락했는가.
+fn agentTabsConsented(pane: u64) bool {
+    return control_pane_grant_store.authorizes(pane, pane, .browser_agent_tabs, null);
+}
+
+fn agentTabsNowMs() u64 {
+    return @intCast(@max(0, cdpNowMs()));
+}
 
 /// hello가 광고하는 현재 라이브 메서드(§4.1). browser method가 추가될 때 parseBrowserMethod와 함께 갱신하며, 아래
 /// 테스트가 모든 browser 항목이 실제 parser에 존재하는지와 `browser.wait` 발견성을 고정한다.
@@ -7357,9 +7379,14 @@ fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_m
 
 /// 확인 모달을 기다리는 동안(최대 `grant_prompt_timeout`) 출처가 바뀌었을 수 있다 — 승인 뒤 재처리 전에 그 프로세스가 아직
 /// 같은 프로세스이고 foreground 인지 다시 본다. 아니면 pane 을 비워 그 요청은 unauthorized 가 된다(grant 는 승인대로 남는다).
+/// 시험 전용 출처 공급자 — 시험 프로세스에는 foreground 출처가 없어, 승인 뒤 재처리(`recheckSelfOrigin`)가 늘 pane 을 비운다. pane 동의 승인 뒤의
+/// open 이 탭 op 길로 가는지 재려면 「아직 foreground」 라고 답하는 공급자가 필요하다. 제품은 이 값을 쓰지 않는다(null).
+var test_recheck_provider: ?control_self_origin.Provider = null;
+
 fn recheckSelfOrigin(pending: *control_server_mod.PendingRequest) void {
     if (pending.browser_pane == null) return;
-    const still = if (pending.peer_origin) |origin| control_self_origin.stillForeground(control_self_origin_macos.provider(), origin) else false;
+    const provider = if (builtin.is_test) (test_recheck_provider orelse control_self_origin_macos.provider()) else control_self_origin_macos.provider();
+    const still = if (pending.peer_origin) |origin| control_self_origin.stillForeground(provider, origin) else false;
     if (still) return;
     control_log.info("control: the approved browser request's caller is no longer in the pane's foreground — refused", .{});
     // `anchors` 의 불변식(셀렉터가 남으면 그것이 browser pane 과 같다)을 지킨다.
@@ -7403,7 +7430,7 @@ fn handleControlRequest(
         .subscribe => |s| handleSubscribe(server, pending, s),
         // 1e-confirm-2a: 미grant valid 요청 — 확인 수단 있으면 **틱 넘어 붙잡고**(deferRequest) 결정 대기(GrantPrompt 큐),
         //     drainGrantPrompts가 결정 시 grant+재구동 or unauthorized(§9.2 Model B). 수단 없으면 즉시 unauthorized(1c-1).
-        .needs_grant => |g| handleNeedsGrant(server, pending, g, now_ns),
+        .needs_grant => |g| handleNeedsGrant(server, refs, pending, g, now_ns),
         // WT4b: lsp.trust.* — 앱 전역 신뢰 표로 즉시 답한다(창이 없어도 — 표는 창의 것이 아니다).
         .lsp_trust => {
             // 감사 기록의 상대(계획 workspace-trust-audit TA2) — 이 요청 프레임을 쓴 프로세스(`LOCAL_PEERPID` 는 그 소켓을 마지막으로 다룬
@@ -7432,10 +7459,12 @@ fn grantDecisionSource() GrantDecision {
 /// 기다림). 결정: env 스텁(스모크)·실 확인 모달(프로덕션)·창 없으면 deny. deferRequest 실패(붙잡기 불가)=unauthorized. **메인 전용**.
 fn handleNeedsGrant(
     server: *control_server_mod.ControlServer,
+    refs: []const ControlSessionRef,
     pending: *control_server_mod.PendingRequest,
     g: control_browser.GrantRequest,
     now_ns: i128,
 ) void {
+    if (g.scope == .browser_agent_tabs) return handleAgentTabsConsent(server, refs, pending, g, now_ns);
     // **항상 붙잡는다**(2b): 결정은 drainGrantPrompts가 한다 — env 스텁(스모크) or 실 확인 모달(프로덕션) or 창 없으면
     // deny. 붙잡고 큐에 넣어 in-flight로 대기(마감 grant_prompt_timeout — 무응답 시 reap=연결 닫힘). deferRequest 실패
     // (TooManyInFlight)=붙잡기 불가 → unauthorized. (1c-1의 "env 없으면 즉시 unauthorized"는 2b서 모달 경로로 대체됨.)
@@ -7450,6 +7479,73 @@ fn handleNeedsGrant(
     };
 }
 
+/// pane 동의 요청 — 묻기 전에 곧 답할 수 있는 것은 곧 답한다(모달을 띄우지 않는다): Chromium 이 아님(-32008 — 예전처럼 모달 없이),
+/// 부른 pane 이 열린 창에 없음·탭 줄을 숨긴 창(어차피 열 수 없다), 거부 기억 중(-32002 agent_tabs_declined). 나머지는 붙잡고 모달 큐로.
+fn handleAgentTabsConsent(
+    server: *control_server_mod.ControlServer,
+    refs: []const ControlSessionRef,
+    pending: *control_server_mod.PendingRequest,
+    g: control_browser.GrantRequest,
+    now_ns: i128,
+) void {
+    const gpa = server.cross_gpa;
+    if (!session_mod.web_osr.enabled()) return server.resolveRequest(pending, control_browser.serializeUnsupportedByEngine(gpa, pending.request_bytes, .webkit) catch null);
+    const app = appSessionOwningSurface(refs, g.pane) orelse return server.resolveRequest(pending, control_browser.serializeBrowserResponseStatus(gpa, pending.request_bytes, .failed, agent_open_pane_missing) catch null);
+    if (app.tabsBlocked()) return server.resolveRequest(pending, control_browser.serializeBrowserResponseStatus(gpa, pending.request_bytes, .failed, agent_open_tabs_hidden) catch null);
+    if (agent_tabs_denials.quietRemaining(g.pane, agentTabsNowMs())) |ms| return server.resolveRequest(pending, control_browser.serializeAgentTabsDeclined(gpa, pending.request_bytes, ms) catch null);
+    const async_id = server.deferRequest(pending, now_ns + grant_prompt_timeout_ns + agent_tabs_reap_slack_ns) catch {
+        return server.resolveRequest(pending, control_browser.serializeUnauthorized(gpa, pending.request_bytes) catch null);
+    };
+    grant_prompt_queue.push(allocator, .{ .async_id = async_id, .pane = g.pane, .target = g.target, .scope = g.scope, .consent_deadline_ns = now_ns + grant_prompt_timeout_ns }) catch {
+        _ = server.completeInFlight(async_id, control_browser.serializeUnauthorized(gpa, pending.request_bytes) catch null);
+    };
+}
+
+/// pane 동의 항목을 답 없이 끝낸다 — `kind` 에 맞는 분명한 글로(거부 답은 `declineAgentTabs`).
+fn answerAgentTabs(server: *control_server_mod.ControlServer, async_id: u64, kind: enum { unanswered, pane_missing }) void {
+    const pending = server.inFlightPending(async_id) orelse return;
+    const gpa = server.cross_gpa;
+    const resp = switch (kind) {
+        .unanswered => control_browser.serializeAgentTabsUnanswered(gpa, pending.request_bytes),
+        .pane_missing => control_browser.serializeBrowserResponseStatus(gpa, pending.request_bytes, .failed, agent_open_pane_missing),
+    } catch null;
+    _ = server.completeInFlight(async_id, resp);
+}
+
+/// 사용자가 그 pane 의 동의를 거부했다 — 한동안 묻지 않게 기억하고 거부로 답한다. 요청이 이미 끝났어도(시한) 기억은 남긴다 — 사용자의 답이다.
+fn declineAgentTabs(server: *control_server_mod.ControlServer, e: GrantPromptEntry) void {
+    agent_tabs_denials.deny(e.pane, agentTabsNowMs());
+    const pending = server.inFlightPending(e.async_id) orelse return;
+    _ = server.completeInFlight(e.async_id, control_browser.serializeAgentTabsDeclined(server.cross_gpa, pending.request_bytes, agent_tab_consent.deny_quiet_ms) catch null);
+}
+
+/// 거부를 기억하는 중인 pane 의 줄 선 요청 — 기억을 늘리지 않고(사용자가 다시 답한 것이 아니다) 남은 시간으로 거부 답.
+fn declineAgentTabsQuiet(server: *control_server_mod.ControlServer, e: GrantPromptEntry) void {
+    const pending = server.inFlightPending(e.async_id) orelse return;
+    const ms = agent_tabs_denials.quietRemaining(e.pane, agentTabsNowMs()) orelse agent_tab_consent.deny_quiet_ms;
+    _ = server.completeInFlight(e.async_id, control_browser.serializeAgentTabsDeclined(server.cross_gpa, pending.request_bytes, ms) catch null);
+}
+
+/// 동의 모달이 떠 있던 창에서 그 모달을 결정 없이 거둔다(시한·pane 사라짐). 다른 모달이면 그대로다.
+fn dismissAgentTabsPrompt(refs: []const ControlSessionRef, async_id: u64) void {
+    for (refs) |ref| if (ref.app_session) |app| app.dismissGrantConfirm(async_id);
+}
+
+/// 시한이 지난 동의 항목을 큐에서 빼고 -32004 로 답한다(그 모달도 거둔다). 기억은 남기지 않는다(사용자가 정하지 않았다).
+/// `from` 앞의 항목은 보지 않는다 — 머리는 래치된 결정을 먼저 읽은 뒤에 본다(시한 직전의 답을 버리지 않게).
+fn expireAgentTabsPrompts(server: *control_server_mod.ControlServer, refs: []const ControlSessionRef, from: usize) void {
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    var i: usize = from;
+    while (i < grant_prompt_queue.items.items.len) {
+        const e = grant_prompt_queue.items.items[i];
+        if (e.consent_deadline_ns != 0 and e.consent_deadline_ns <= now_ns) {
+            _ = grant_prompt_queue.items.orderedRemove(i);
+            dismissAgentTabsPrompt(refs, e.async_id);
+            answerAgentTabs(server, e.async_id, .unanswered);
+        } else i += 1;
+    }
+}
+
 /// 1e-confirm-2a: 한 GrantPrompt를 결정에 따라 resolve. **승인** → grant 기록 + 요청 **재-dispatch**(이제 인가) → 라우팅
 /// (op=`pushBrowserOp`[**grant async_id 재사용** — 이미 in-flight라 재-defer 금지]·subscribe·immediate=completeInFlight).
 /// **거부** → unauthorized. reap된 async_id(마감·무응답)는 `inFlightPending` null → skip(이미 정리됨). **메인 전용**.
@@ -7460,6 +7556,20 @@ fn resolveGrantPrompt(
     snapshot: control_surface.CollectorSnapshot,
     now: u64,
 ) void {
+    resolveGrantPromptIn(server, &.{}, e, approved, snapshot, now);
+}
+
+/// `resolveGrantPrompt` 에 창 목록(`refs`)을 더한 판 — 승인 뒤 재디스패치된 `browser.open` 은 탭 op 길(`startTabOp`)로 가야 하고 그 길은
+/// 부른 pane 의 창을 찾는다(pane 동의 — 2026-11-16). 그 밖의 결과는 같다.
+fn resolveGrantPromptIn(
+    server: *control_server_mod.ControlServer,
+    refs: []const ControlSessionRef,
+    e: GrantPromptEntry,
+    approved: bool,
+    snapshot: control_surface.CollectorSnapshot,
+    now: u64,
+) void {
+    if (e.scope == .browser_agent_tabs and !approved) return declineAgentTabs(server, e);
     const pending = server.inFlightPending(e.async_id) orelse return; // reaped(마감) — 이미 정리됨
     if (!approved) {
         const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
@@ -7490,6 +7600,11 @@ fn resolveGrantPrompt(
             if (!server.updateInFlightDeadline(e.async_id, now_ns + browser_op_timeout_ns)) {
                 server.cross_gpa.free(op.arg);
                 return;
+            }
+            // pane 동의(2026-11-16) 뒤의 open 은 Swift op 큐가 아니라 탭 op 길이다(대상 탭이 아직 없다 — `enqueueTabOp` 와 같은 길).
+            if (op.method == .open or op.method == .close) {
+                defer server.cross_gpa.free(op.arg);
+                return startTabOp(refs, e.async_id, op);
             }
             pushBrowserOp(server, e.async_id, op);
         },
@@ -7542,12 +7657,19 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
         while (grant_prompt_queue.take()) |taken| {
             var e = taken;
             e.host = control_pane_grant.GrantHost.init(control_browser.targetHost(snapshot, e.target) orelse "");
-            resolveGrantPrompt(server, e, env == .approve, snapshot, now);
+            // pane 동의: 거부 기억 중이면(같은 pane 의 앞 요청이 방금 거부됐다) 다시 결정하지 않는다 — 모달 길과 같다.
+            if (e.scope == .browser_agent_tabs) if (agent_tabs_denials.quietRemaining(e.pane, agentTabsNowMs()) != null) {
+                declineAgentTabsQuiet(server, e);
+                continue;
+            };
+            resolveGrantPromptIn(server, refs, e, env == .approve, snapshot, now);
         }
         return;
     }
 
     // 2b 실 모달: head 하나만(한 번에 한 모달). 모달 띄울 AppSession + 사용자 결정 폴.
+    // pane 동의의 시한은 머리 뒤 항목도 본다 — 앞 모달 뒤에 줄 선 채 시한이 지나면 연결을 답 없이 닫기 전에 -32004 로 답한다.
+    expireAgentTabsPrompts(server, refs, 1);
     const head = grant_prompt_queue.items.items[0];
     // **dedup**(grant UX 경화): 이 (pane, target, scope)가 이미 grant됐으면(중복 요청·직전 결정) **모달 없이 승인 resolve**.
     //   같은 triple 두 요청이 연달아 held되면, 첫 모달 승인이 grant를 남기고 → 둘째는 여기서 짧게 접혀 두 번째 모달이 안 뜬다.
@@ -7556,22 +7678,41 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
     if (control_pane_grant_store.authorizes(head.pane, head.target, head.scope, control_browser.targetHost(snapshot, head.target))) {
         var e = grant_prompt_queue.take().?;
         e.host = control_pane_grant_store.hostOf(e.pane, e.target, e.scope).?;
-        return resolveGrantPrompt(server, e, true, snapshot, now);
+        return resolveGrantPromptIn(server, refs, e, true, snapshot, now);
+    }
+    // pane 동의(2026-11-16): 같은 pane 의 앞 요청을 방금 거부했다 — 줄 서 있던 다음 요청은 모달 없이 거부. 부른 pane 이 이미 닫혔으면(창을
+    // 닫았다) 다른 창에 대신 묻지 않는다.
+    if (head.scope == .browser_agent_tabs) {
+        if (agent_tabs_denials.quietRemaining(head.pane, agentTabsNowMs()) != null) return declineAgentTabsQuiet(server, grant_prompt_queue.take().?);
+        if (appSessionOwningSurface(refs, head.pane) == null) {
+            _ = grant_prompt_queue.take();
+            dismissAgentTabsPrompt(refs, head.async_id);
+            return answerAgentTabs(server, head.async_id, .pane_missing);
+        }
     }
     // **target-window 모달**(grant UX 경화): 모달을 **대상 web surface를 소유한 창**에 띄운다(멀티창서 엉뚱한 창에
     //   안 뜨게). 대상 surface가 어느 창에도 없으면(닫힘 등) firstAppSession 폴백. 둘 다 없으면(헤드리스) deny.
     const app = (appSessionOwningSurface(refs, head.target) orelse firstAppSession(refs)) orelse {
-        // 모달 띄울 창 없음(헤드리스·프로덕션 아님) → deny(hang 방지, reap 대기 없이 즉시).
+        // 모달 띄울 창 없음(헤드리스·프로덕션 아님) → deny(hang 방지, reap 대기 없이 즉시). pane 동의는 사용자의 답이 아니라 기억하지 않는다.
         _ = grant_prompt_queue.take();
+        if (head.scope == .browser_agent_tabs) return answerAgentTabs(server, head.async_id, .pane_missing); // 위에서 pane 의 창을 이미 봤다 — 방어
         return resolveGrantPrompt(server, head, false, snapshot, now);
     };
     // (1) 이전 tick에 띄운 모달의 사용자 결정을 폴(있으면 head를 resolve).
     if (app.takeGrantDecision()) |d| {
         if (d.async_id == head.async_id) {
+            // pane 동의: 다른 모달이 이 모달을 덮어 닫혔다(사용자의 답이 아니다) — 거부로 기억하지 않고 큐에 남겨 그 모달이 닫히면 다시 묻는다.
+            if (head.scope == .browser_agent_tabs and !d.approved and !d.by_user) return;
             _ = grant_prompt_queue.take();
-            return resolveGrantPrompt(server, head, d.approved, snapshot, now);
+            return resolveGrantPromptIn(server, refs, head, d.approved, snapshot, now);
         }
         // stale 결정(다른 async_id — 도달 어려움): 무시.
+    }
+    // pane 동의의 시한 — 위의 결정을 먼저 읽는다(시한 직전의 답을 버리지 않게). 머리가 빠졌으면 다음 tick 에 다음 항목.
+    if (head.consent_deadline_ns != 0) {
+        const before = grant_prompt_queue.items.items.len;
+        expireAgentTabsPrompts(server, refs, 0);
+        if (grant_prompt_queue.items.items.len != before) return;
     }
     // (2) 미결정: 모달 표시(idempotent — 이미 이 grant 보여주면 no-op·다른 모달 점유면 false로 다음 tick 재시도).
     //     처음 보인 순간의 호스트를 기록한다 — 문구의 URL 과 같은 snapshot 이라 사용자가 본 사이트와 같다.
@@ -7611,11 +7752,31 @@ fn appSessionOwningSurface(refs: []const ControlSessionRef, surface_id: u64) ?*A
 /// 1e-confirm-2b: 확인 모달 메시지(scope별 + target URL). 세션 소유 버퍼로 복사되므로(showGrantConfirm→copyOverlayMessage)
 /// 여기선 transient 스택 버퍼. browser=제어·browser_storage=쿠키/스토리지 읽기(로그인 토큰) 구분. URL은 snapshot서 조회.
 fn grantPromptMessage(buf: []u8, e: GrantPromptEntry, snapshot: control_surface.CollectorSnapshot) []const u8 {
+    // pane 동의(2026-11-16): 대상이 탭이 아니라 그 pane 이다 — pane 제목으로 어느 pane 인지 보인다.
+    if (e.scope == .browser_agent_tabs) return agentTabsPromptText(buf, if (snapshot.find(e.target)) |dto| dto.title else "");
     const url: []const u8 = if (snapshot.find(e.target)) |dto| (switch (dto.detail) {
         .web => |w| w.url orelse "", // WebMeta.url은 ?[]const u8(로드 전 null)
         else => "",
     }) else "";
     return grantPromptText(buf, e.scope, url);
+}
+
+/// pane 동의문에 싣는 pane 제목의 표시 폭 상한(칸). 제목은 프로그램이 정한다(OSC) — 길이에 끝이 없고, 질문이 그 뒤에 온다.
+const agent_tabs_prompt_title_cols: u32 = 40;
+
+/// pane 동의문(순수 — 판정자가 직접 잰다). 사용자 결정의 문장 그대로에 pane 제목을 더한다. 제목의 제어 글자(줄바꿈 등)는 공백으로 —
+/// 프로그램이 정한 글이 모달의 줄을 바꾸지 않게.
+fn agentTabsPromptText(buf: []u8, pane_title: []const u8) []const u8 {
+    var clean_buf: [256]u8 = undefined;
+    const raw = pane_title[0..@min(pane_title.len, clean_buf.len)];
+    // 잘린 끝이 UTF-8 글자 가운데면 그 앞까지(잘린 바이트를 그리지 않게).
+    var cut = raw.len;
+    while (cut > 0 and cut < pane_title.len and (pane_title[cut] & 0xC0) == 0x80) cut -= 1;
+    for (raw[0..cut], 0..) |ch, i| clean_buf[i] = if (ch < 0x20 or ch == 0x7F) ' ' else ch;
+    const clean = std.mem.trim(u8, clean_buf[0..cut], " ");
+    var title_buf: [256]u8 = undefined;
+    const shown = maru.chrome.components.overlay_input.elideMiddle(&title_buf, if (clean.len == 0) "?" else clean, agent_tabs_prompt_title_cols);
+    return maru.i18n.format(buf, maru.i18n.t(.grant_prompt_agent_tabs), &.{.{ .s = shown }});
 }
 
 /// 동의문에 넣는 URL 의 표시 폭 상한(칸). URL 은 길이에 끝이 없는데 문장에서 **질문이 URL 뒤에** 온다
@@ -8901,7 +9062,8 @@ fn onAgentPaneKnown(pane: u64) bool {
 
 /// 에이전트 탭의 페이지가 새 탭을 열려 한다 — 자리가 없으면 열지 않는다(`AppSession.agent_tab_room_callback`).
 fn onAgentTabRoom(pane: u64) bool {
-    return control_server_active and agentTabRoom(pane);
+    // pane 동의(2026-11-16)를 거둔 pane 의 남은 탭이 에이전트의 장으로 새 에이전트 탭(태어날 때 grant)을 만들지 않게 — 「자리가 없다」 와 같은 갈래.
+    return control_server_active and agentTabsConsented(pane) and agentTabRoom(pane);
 }
 
 /// 그 pane 의 에이전트 탭으로 등록하고 곧 제어하게 grant 를 넣는다(사용자 결정 2026-10-10). 상한·grant 표가 차면 거짓(아무것도 남기지 않는다).
@@ -8997,8 +9159,15 @@ fn enqueueTabOp(
         server.resolveRequest(pending, resp);
         return;
     };
+    startTabOp(refs, async_id, op);
+}
+
+/// 붙잡힌(in-flight) open·close 를 시작한다 — 새로 붙잡은 요청(`enqueueTabOp`)과 pane 동의 승인 뒤 재디스패치(`resolveGrantPromptIn`)가 함께 쓴다.
+/// `op.arg` 는 부른 쪽이 놓는다(여기서는 동기로 읽기만).
+fn startTabOp(refs: []const ControlSessionRef, async_id: u64, op: control_browser.BrowserOp) void {
     // Chromium 이 아니면 — 이 메서드는 Chromium 만(WebKit 은 걷어낼 예정, `-32008`).
     if (!session_mod.web_osr.enabled()) {
+        const server = &control_server_storage;
         const p = server.inFlightPending(async_id) orelse return;
         const resp = control_browser.serializeUnsupportedByEngine(server.cross_gpa, p.request_bytes, .webkit) catch null;
         _ = server.completeInFlight(async_id, resp);
@@ -9011,14 +9180,19 @@ fn enqueueTabOp(
     }
 }
 
+const agent_open_pane_missing = "the calling pane was not found in an open window";
+const agent_open_tabs_hidden = "this window hides its tab bar — a new tab could not be shown";
+
 fn startAgentOpen(refs: []const ControlSessionRef, async_id: u64, pane: u64, arg: []const u8) void {
     const parsed = std.json.parseFromSlice(struct { url: ?[]const u8 = null, timeout_ms: u32 }, allocator, arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
     defer parsed.deinit();
-    const app = appSessionOwningSurface(refs, pane) orelse return completeTabStatus(async_id, .failed, "the calling pane was not found in an open window");
+    const app = appSessionOwningSurface(refs, pane) orelse return completeTabStatus(async_id, .failed, agent_open_pane_missing);
+    // pane 동의(2026-11-16)는 디스패치가 이미 봤다 — 같은 tick 이라 사이에 바뀔 수 없지만, 이 함수가 동의 없이 불리면 열지 않는다(방어).
+    if (!agentTabsConsented(pane)) return completeTabStatus(async_id, .unauthorized, "");
     if (agentTabCount(pane) >= max_agent_tabs_per_pane) return completeTabStatus(async_id, .failed, "this pane already has 8 tabs it opened — close one first (browser close)");
     const tab = session_mod.web_ops.openAgentTab(app, pane, parsed.value.url) catch |e| return completeTabStatus(async_id, .failed, switch (e) {
-        error.TabsHidden => "this window hides its tab bar — a new tab could not be shown",
-        error.CallerNotFound => "the calling pane was not found in an open window",
+        error.TabsHidden => agent_open_tabs_hidden,
+        error.CallerNotFound => agent_open_pane_missing,
         error.OutOfMemory => "out of memory",
     });
     if (!adoptAgentTab(pane, tab)) {
@@ -11004,6 +11178,7 @@ pub export fn maru_macos_control_server_stop() void {
     // 1e-confirm-2a: 대기 grant 확인 큐 해제(엔트리는 값 타입 — arg 소유 없음, stop이 in-flight pending은 cancel).
     grant_prompt_queue.deinit(allocator);
     grant_prompt_queue = .{};
+    agent_tabs_denials.clear();
 }
 
 /// 5e-2b-2(**테스트 전용 훅**): env `MARU_TEST_BROWSER_CAP`이 설정됐을 때만 `surface_id`에 묶인 `browser` scope
@@ -13559,6 +13734,10 @@ fn w9b3Cleanup(ta: std.mem.Allocator, session: *AppSession) void {
     agent_tabs.clearAndFree(allocator);
     tab_runs.clearAndFree(allocator);
     control_pane_grant_store.clearAll();
+    agent_tabs_denials.clear();
+    grant_prompt_queue.deinit(allocator);
+    grant_prompt_queue = .{};
+    test_recheck_provider = null;
 }
 
 fn w9b3Result(pending: *control_server_mod.PendingRequest) !std.json.Parsed(std.json.Value) {
@@ -13587,6 +13766,7 @@ test "W9b③: open — 부른 pane 의 창에 뒤쪽 탭을 열고 grant·에이
     const request = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.open\",\"params\":{\"url\":\"https://e.test/\"}}";
     var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
     const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    try control_pane_grant_store.grant(.{ .pane = shell, .target = shell, .scope = .browser_agent_tabs }); // 2026-11-16: 이 pane 은 동의했다(디스패치가 본다)
     startAgentOpen(&refs, id, shell, "{\"url\":\"https://e.test/\",\"timeout_ms\":25000}");
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     const tab = pane.terms.items[1].surfaceId();
@@ -13631,6 +13811,328 @@ test "W9b③: open — 부른 pane 의 창에 뒤쪽 탭을 열고 grant·에이
     startAgentOpen(&refs, full_id, shell, "{\"timeout_ms\":25000}");
     try expectPendingErrorCode(&full, .internal_error);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+}
+
+// ── pane 동의(사용자 결정 2026-11-16): 에이전트 탭은 사용자의 로그인된 사이트를 쓴다 — pane 마다 처음 한 번 묻는다 ─────────────────────
+// 이 판정자들은 실 AppSession·실 모달(Zig chrome confirm)·실 ControlServer in-flight 로 잰다: 첫 open 은 모달, 허용은 그 pane 의 동의로 남아
+// 둘째 open 은 모달 없이, 거부는 한동안 모달 없이 거절(그 글이 이유를 말한다), 다른 모달이 덮은 것·시한·창 없음은 사용자의 답이 아니라
+// 기억하지 않는다. 다른 pane 은 따로 묻는다.
+
+/// 「아직 foreground」 라고 답하는 공급자(시험 전용 — `test_recheck_provider`). 출처의 pid·시작 시각·세션이 그대로면 통과한다.
+const ConsentFakeProvider = struct {
+    var dummy: u8 = 0;
+    fn lookup(_: *anyopaque, pid: i32) ?control_self_origin.ProcInfo {
+        return .{ .pid = pid, .ppid = 1, .pgid = 42, .uid = 501, .has_ctty = true, .tpgid = 42, .start_us = 7 };
+    }
+    fn sessionOf(_: *anyopaque, _: i32) ?i32 {
+        return 4242;
+    }
+    fn provider() control_self_origin.Provider {
+        return .{ .ctx = &dummy, .lookup = lookup, .session_of = sessionOf };
+    }
+    const origin: control_self_origin.Origin = .{ .ctty_pid = 4243, .ctty_start_us = 7, .sid = 4242 };
+};
+
+const consent_open_request = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.open\",\"params\":{\"url\":\"https://e.test/\"}}";
+
+fn consentPending(pane: u64) control_server_mod.PendingRequest {
+    return .{ .request_bytes = consent_open_request, .selector = null, .io = std.testing.io, .browser_pane = pane, .peer_origin = ConsentFakeProvider.origin };
+}
+
+/// 사용자가 모달의 단추·키로 답한다 — 컴포넌트는 스스로 닫힌 뒤 그 동작을 host 에 넘긴다(그 순서 그대로).
+fn consentUserAnswers(session: *AppSession, action: maru.chrome.host.HostAction) void {
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(action);
+}
+
+fn consentAsk(refs: []const ControlSessionRef, pending: *control_server_mod.PendingRequest, pane: u64) void {
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    handleNeedsGrant(&control_server_storage, refs, pending, .{ .pane = pane, .target = pane, .scope = .browser_agent_tabs }, now_ns);
+}
+
+/// 응답이 그 코드이고 `data.reason` 이 그것인가(메시지를 돌려준다 — 호출자가 놓는다).
+fn expectConsentAnswer(pending: *control_server_mod.PendingRequest, code: i64, reason: []const u8) ![]u8 {
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response, .{});
+    defer parsed.deinit();
+    const e = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(code, e.get("code").?.integer);
+    try std.testing.expectEqualStrings(reason, e.get("data").?.object.get("reason").?.string);
+    return std.testing.allocator.dupe(u8, e.get("message").?.string);
+}
+
+test "pane 동의: 첫 open 은 모달(pane 제목·로그인·◈ 를 말한다), 허용하면 동의가 남고 그 탭을 연다 — 둘째 open 은 묻지 않고 줄에 서지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    test_recheck_provider = ConsentFakeProvider.provider();
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    var pending = consentPending(shell);
+    consentAsk(&refs, &pending, shell);
+    try std.testing.expect(pending.response == null); // 붙잡혔다
+    try std.testing.expectEqual(@as(usize, 1), grant_prompt_queue.items.items.len);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(session.pending_confirm == .grant);
+    const msg = session.chrome_host.confirm.message;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "logged-in") != null or std.mem.indexOf(u8, msg, "로그인") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "◈") != null);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len); // 아직 열지 않았다
+    // 사용자가 「허용」.
+    consentUserAnswers(session, .confirm_accept);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(agentTabsConsented(shell));
+    try std.testing.expectEqual(@as(usize, 0), grant_prompt_queue.items.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len); // 승인 뒤 탭 op 길로 열었다(Swift op 큐가 아니다)
+    const tab = pane.terms.items[1].surfaceId();
+    try std.testing.expect(isAgentTab(tab));
+    try std.testing.expectEqual(@as(usize, 1), tab_runs.items.len);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = tab, .url = "https://e.test/" } });
+    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = tab, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&pending);
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(i64, @intCast(tab)), parsed.value.object.get("result").?.object.get("id").?.integer);
+    }
+    // 둘째 open — 디스패치가 동의를 본다(op), 모달 큐에 서지 않는다.
+    var grants_view = control_pane_grant_store;
+    switch (try control_browser.dispatchBrowser(std.testing.allocator, consent_open_request, .{ .surfaces = &.{}, .windows = &.{} }, &.{}, shell, &grants_view, 0)) {
+        .op => |op| std.testing.allocator.free(op.arg),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "pane 동의: 거부하면 그 글(declined·다시 묻지 않는 시간)로 답하고, 기억하는 동안 다음 open 은 모달 없이 곧 거절, 기억이 끝나면 다시 묻는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const shell = session.tabs.items[0].panes.items[0].terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    var first = consentPending(shell);
+    consentAsk(&refs, &first, shell);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(session.pending_confirm == .grant);
+    consentUserAnswers(session, .confirm_cancel); // 사용자의 「거부」(Esc 도 같다)
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    {
+        const m = try expectConsentAnswer(&first, -32002, "agent_tabs_declined");
+        defer std.testing.allocator.free(m);
+        try std.testing.expect(std.mem.indexOf(u8, m, "declined") != null and std.mem.indexOf(u8, m, "10 minutes") != null);
+    }
+    try std.testing.expect(!agentTabsConsented(shell));
+    // 기억하는 동안 — 붙잡지도 모달을 띄우지도 않는다.
+    var second = consentPending(shell);
+    consentAsk(&refs, &second, shell);
+    {
+        const m = try expectConsentAnswer(&second, -32002, "agent_tabs_declined");
+        std.testing.allocator.free(m);
+    }
+    try std.testing.expectEqual(@as(usize, 0), grant_prompt_queue.items.items.len);
+    try std.testing.expect(session.pending_confirm == .none);
+    // 기억이 끝났다 — 다시 묻는다.
+    agent_tabs_denials.entries[0].until_ms = 0;
+    var third = consentPending(shell);
+    consentAsk(&refs, &third, shell);
+    try std.testing.expect(third.response == null);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(session.pending_confirm == .grant);
+}
+
+test "pane 동의: 다른 모달이 덮어 닫힌 것은 거부가 아니다 — 기억하지 않고 줄에 남아 다시 묻는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const shell = session.tabs.items[0].panes.items[0].terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    var pending = consentPending(shell);
+    consentAsk(&refs, &pending, shell);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(session.pending_confirm == .grant);
+    session.requestResetAll(); // 사용자가 다른 확인 상자를 불렀다 — 동의 모달이 밀려난다
+    try std.testing.expect(session.pending_confirm == .reset);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(pending.response == null); // 거부로 답하지 않았다
+    try std.testing.expectEqual(@as(usize, 1), grant_prompt_queue.items.items.len);
+    try std.testing.expect(agent_tabs_denials.quietRemaining(shell, agentTabsNowMs()) == null);
+    consentUserAnswers(session, .confirm_cancel); // 그 상자를 닫는다
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(session.pending_confirm == .grant); // 다시 묻는다
+}
+
+test "pane 동의: 답이 없으면 시한에 -32004 agent_tabs_unanswered 로 답하고 모달을 거둔다 — 기억하지 않는다; 줄 뒤에 선 항목도 시한이면 답한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const shell = session.tabs.items[0].panes.items[0].terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    var head = consentPending(shell);
+    consentAsk(&refs, &head, shell);
+    var behind = consentPending(shell);
+    consentAsk(&refs, &behind, shell);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(session.pending_confirm == .grant);
+    // 뒤 항목의 시한만 지났다 — 머리는 그대로, 뒤만 답한다.
+    grant_prompt_queue.items.items[1].consent_deadline_ns = 1;
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    {
+        const m = try expectConsentAnswer(&behind, -32004, "agent_tabs_unanswered");
+        std.testing.allocator.free(m);
+    }
+    try std.testing.expect(session.pending_confirm == .grant);
+    // 머리의 시한.
+    grant_prompt_queue.items.items[0].consent_deadline_ns = 1;
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    {
+        const m = try expectConsentAnswer(&head, -32004, "agent_tabs_unanswered");
+        defer std.testing.allocator.free(m);
+        try std.testing.expect(std.mem.indexOf(u8, m, "nothing was opened") != null);
+    }
+    try std.testing.expect(session.pending_confirm == .none and !session.chrome_host.confirm.open);
+    try std.testing.expect(agent_tabs_denials.quietRemaining(shell, agentTabsNowMs()) == null);
+    try std.testing.expectEqual(@as(usize, 0), grant_prompt_queue.items.items.len);
+}
+
+test "pane 동의: 다른 pane 은 따로 묻는다 — 한 pane 의 허용·거부가 다른 pane 에 번지지 않는다, 같은 pane 의 줄 선 둘째는 첫 답을 따른다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const a = session.tabs.items[0].panes.items[0].terms.items[0].surfaceId();
+    // split — 새 pane 의 셸(동의 키가 다르다 — 사용자 확인 항목 「다른 pane 은 따로」).
+    try session_mod.pane_ops.splitActivePane(session, .horizontal);
+    const b = session.tabs.items[0].panes.items[1].terms.items[0].surfaceId();
+    try std.testing.expect(a != b);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    var a1 = consentPending(a);
+    var a2 = consentPending(a);
+    var b1 = consentPending(b);
+    consentAsk(&refs, &a1, a);
+    consentAsk(&refs, &a2, a);
+    consentAsk(&refs, &b1, b);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    consentUserAnswers(session, .confirm_cancel); // a 거부
+    drainGrantPrompts(&control_server_storage, &refs, 0); // a1 답
+    drainGrantPrompts(&control_server_storage, &refs, 0); // a2 — 모달 없이 거부(기억)
+    {
+        const m1 = try expectConsentAnswer(&a1, -32002, "agent_tabs_declined");
+        std.testing.allocator.free(m1);
+        const m2 = try expectConsentAnswer(&a2, -32002, "agent_tabs_declined");
+        std.testing.allocator.free(m2);
+    }
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(session.pending_confirm == .grant); // b 는 따로 묻는다
+    try std.testing.expectEqual(b, grant_prompt_queue.items.items[0].pane);
+    consentUserAnswers(session, .confirm_accept);
+    drainGrantPrompts(&control_server_storage, &refs, 0);
+    try std.testing.expect(agentTabsConsented(b) and !agentTabsConsented(a));
+    try std.testing.expect(agent_tabs_denials.quietRemaining(a, agentTabsNowMs()) != null and agent_tabs_denials.quietRemaining(b, agentTabsNowMs()) == null);
+}
+
+test "pane 동의: 묻지 않고 곧 답하는 갈래 — WebKit(-32008), 창에 없는 pane, 창이 사라진 줄 선 요청(기억 없음); pane 이 닫히면 동의·기억이 사라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const shell = session.tabs.items[0].panes.items[0].terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    // 엔진이 안 돈다(WebKit) — 묻지 않고 -32008.
+    var webkit = consentPending(shell);
+    consentAsk(&refs, &webkit, shell);
+    try expectPendingErrorCode(&webkit, .unsupported_by_engine);
+    try std.testing.expectEqual(@as(usize, 0), grant_prompt_queue.items.items.len);
+    try w9b3EngineRunning(ta);
+    // 창에 없는 pane — 묻지 않는다.
+    var missing = consentPending(shell + 999);
+    consentAsk(&refs, &missing, shell + 999);
+    try std.testing.expect(missing.response != null);
+    allocator.free(missing.response.?);
+    missing.response = null;
+    try std.testing.expectEqual(@as(usize, 0), grant_prompt_queue.items.items.len);
+    // 줄에 선 뒤 그 창이 없어졌다(창을 닫았다) — 다른 창에 대신 묻지 않고 곧 답한다, 기억하지 않는다.
+    var lonely = consentPending(shell);
+    consentAsk(&refs, &lonely, shell);
+    drainGrantPrompts(&control_server_storage, &.{}, 0);
+    try expectPendingErrorCode(&lonely, .internal_error);
+    try std.testing.expectEqual(@as(usize, 0), grant_prompt_queue.items.items.len);
+    try std.testing.expect(agent_tabs_denials.quietRemaining(shell, agentTabsNowMs()) == null);
+    // pane 이 닫히면 동의도 기억도 사라진다.
+    try control_pane_grant_store.grant(.{ .pane = shell, .target = shell, .scope = .browser_agent_tabs });
+    agent_tabs_denials.deny(shell + 1, agentTabsNowMs());
+    onAppSessionSurfaceClosed(null, shell);
+    onAppSessionSurfaceClosed(null, shell + 1);
+    try std.testing.expect(!agentTabsConsented(shell));
+    try std.testing.expect(agent_tabs_denials.quietRemaining(shell + 1, agentTabsNowMs()) == null);
+}
+
+test "pane 동의: 동의를 거둔 pane 의 탭은 에이전트의 장으로 새 에이전트 탭을 만들지 않는다(자리 없음), 동의가 있으면 자리를 본다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer control_pane_grant_store.clearAll();
+    try std.testing.expect(!onAgentTabRoom(5));
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 5, .scope = .browser_agent_tabs });
+    try std.testing.expect(onAgentTabRoom(5));
+    try std.testing.expect(!onAgentTabRoom(6)); // 다른 pane 의 동의는 아니다
+    control_pane_grant_store.revoke(5, 5, .browser_agent_tabs);
+    try std.testing.expect(!onAgentTabRoom(5));
+}
+
+test "pane 동의문: 질문이 끝에 남고, pane 제목은 줄바꿈·제어 글자를 지우고 줄인다(프로그램이 정한 글이 모달을 흔들지 않게)" {
+    const prev = maru.i18n.lang();
+    defer maru.i18n.setLang(prev);
+    const long_title = "claude\n" ++ array_repeat.repeat("가", 200) ++ "\x1b[31m";
+    for ([_]maru.i18n.Lang{ .en, .ko }) |lang| {
+        maru.i18n.setLang(lang);
+        var buf: [512]u8 = undefined;
+        const text = agentTabsPromptText(&buf, long_title);
+        try std.testing.expect(std.mem.endsWith(u8, text, if (lang == .en) "Allow?" else "허용하시겠습니까?"));
+        try std.testing.expect(std.mem.indexOfScalar(u8, text, '\n') == null and std.mem.indexOfScalar(u8, text, 0x1b) == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "claude") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "…") != null);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+        try std.testing.expect(std.mem.indexOf(u8, text, "◈") != null);
+        const empty = agentTabsPromptText(&buf, "");
+        try std.testing.expect(std.mem.indexOf(u8, empty, "(?)") != null);
+    }
 }
 
 test "W9b③: close — 그 pane 이 연 탭만, cap 연결은 unauthorized, 물으면 떠나기 확인이 뜰 때 closed:false, 닫히면 closed:true, 창의 유일한 탭은 실패" {
@@ -13844,7 +14346,11 @@ test "W9b③ 적대 리뷰 2 회차: 에이전트 탭 자리 — grant 표가 �
         control_server_active = false;
     }
     control_server_active = true;
+    try control_pane_grant_store.grant(.{ .pane = 3, .target = 3, .scope = .browser_agent_tabs }); // 2026-11-16: 동의한 pane 만 자리가 있다
     try std.testing.expect(onAgentTabRoom(3));
+    control_pane_grant_store.clearAll();
+    try std.testing.expect(!onAgentTabRoom(3)); // 동의가 없으면 자리가 없다
+    try control_pane_grant_store.grant(.{ .pane = 3, .target = 3, .scope = .browser_agent_tabs });
     control_server_active = false;
     try std.testing.expect(!onAgentTabRoom(3));
     control_server_active = true;

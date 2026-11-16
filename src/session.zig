@@ -76,6 +76,7 @@ pub const control_outbound = @import("session/control_outbound.zig"); // Track C
 pub const control_result = @import("session/control_result.zig"); // Track C 5f-5b: executeScript result-byte 예약·outbound 회계
 pub const control_lsp_trust = @import("session/control_lsp_trust.zig"); // WT4b: lsp.trust.* (언어 서버 신뢰 조회·철회·잊기) wire 절반 — 표는 L4
 pub const control_pane_grant = @import("session/control_pane_grant.zig"); // Track C 1e-confirm: pane-bound confirm-grant 저장소(Model B — grant를 tty-검증 pane 신원에 묶어 저장, §9.2)
+pub const control_agent_tab_consent = @import("session/control_agent_tab_consent.zig"); // 사용자 결정 2026-11-16: 에이전트 탭 pane 동의의 거부 기억(L2 순수 — 한동안 다시 묻지 않는다)
 pub const app_scheme = @import("session/app_scheme.zig"); // Phase 5c-1: maru-app:// 경로 샌드박스(traversal/whitelist, L2 순수) + CSP([web-panel.md] §7.1)
 pub const Capture = control_capture.Capture;
 pub const CaptureIdAllocator = control_capture.CaptureIdAllocator;

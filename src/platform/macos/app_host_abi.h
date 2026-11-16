@@ -28,7 +28,8 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* v258: W9d④ browser response-mocking summary for the Browser Grants menu. */
 /* v259: W9e① browser device-emulation summary for the Browser Grants menu. */
 /* v260: W9e② browser performance-trace summary for the Browser Grants menu. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 260u
+/* v261: grant scope wire 7 (browser_agent_tabs — per-pane consent to open agent tabs) in the Browser Grants menu. */
+#define MARU_MACOS_APP_HOST_ABI_VERSION 261u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);

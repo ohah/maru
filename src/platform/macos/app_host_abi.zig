@@ -204,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 260), abi_version);
+    try std.testing.expectEqual(@as(u32, 261), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -9044,6 +9044,14 @@ fn forgetAgentTab(surface_id: u64) void {
     }
 }
 
+/// 그 pane 의 에이전트 탭 항목만 뺀다(그 pane 자신은 살아 있다 — pane 동의 철회, 2026-11-16).
+fn forgetAgentTabsOf(pane: u64) void {
+    var i: usize = 0;
+    while (i < agent_tabs.items.len) {
+        if (agent_tabs.items[i].pane == pane) _ = agent_tabs.swapRemove(i) else i += 1;
+    }
+}
+
 /// 그 pane 이 에이전트 탭을 하나 더 가질 자리가 있는가 — 상한(8)과 grant 표(제어 grant 는 64 자리 안, 태어날 때 네트워크 grant 는 그 밖 —
 /// W9d① 적대 리뷰 1 회차 F6).
 fn agentTabRoom(pane: u64) bool {
@@ -11050,6 +11058,7 @@ fn grantScopeToWire(sc: control_capability.ScopeClass) u8 {
         .browser_network_block => 4, // W9d③
         .browser_network_mock => 5, // W9d④
         .browser_emulation => 6, // W9e①
+        .browser_agent_tabs => 7, // 2026-11-16 pane 동의(target 이 그 pane 자신)
         else => 0,
     };
 }
@@ -11062,6 +11071,7 @@ fn grantScopeFromWire(w: u8) ?control_capability.ScopeClass {
         4 => .browser_network_block,
         5 => .browser_network_mock,
         6 => .browser_emulation,
+        7 => .browser_agent_tabs,
         else => null,
     };
 }
@@ -11130,6 +11140,18 @@ pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, sc
                 _ = agent_tabs.swapRemove(i);
             } else i += 1;
         }
+    }
+    // pane 동의(2026-11-16)를 거두면 그 pane 의 에이전트 탭도 사람의 탭이 된다 — 탭과 함께 생긴 권한은 그 뿌리와 함께 간다(위 F3 과 같은 규칙).
+    // 각 탭의 `browser` 철회를 같은 길로 부른다(그 탭의 태어날 때 grant·지켜보기·대기가 함께 정리된다). 표를 바꾸며 돌지 않게 먼저 모은다.
+    if (removed and sc == .browser_agent_tabs) {
+        var tabs_buf: [max_agent_tabs_per_pane]u64 = undefined;
+        var n: usize = 0;
+        for (agent_tabs.items) |t| if (t.pane == pane and n < tabs_buf.len) {
+            tabs_buf[n] = t.tab;
+            n += 1;
+        };
+        for (tabs_buf[0..n]) |tab| _ = maru_macos_control_revoke_browser_grant(pane, tab, grantScopeToWire(.browser));
+        forgetAgentTabsOf(pane); // 제어 grant 가 이미 없던 탭(따로 철회됐다)도 표에서 뺀다
     }
     if (removed and control_server_active) {
         cancelBrowserWaitsForGrant(&control_server_storage, pane, target, sc);
@@ -13418,7 +13440,7 @@ test "쿠키 권한은 사이트에: 실행 직전 재확인은 grant 호스트�
     try std.testing.expectEqual(@as(usize, 0), maru_macos_control_taken_browser_op_required_host(&buf, buf.len));
 }
 
-test "grant scope wire round-trip: browser=0·browser_storage=1·browser_network=2·browser_network_body=3·browser_network_block=4·browser_network_mock=5·browser_emulation=6, 그 외 from-wire는 null" {
+test "grant scope wire round-trip: browser=0·browser_storage=1·browser_network=2·browser_network_body=3·browser_network_block=4·browser_network_mock=5·browser_emulation=6·browser_agent_tabs=7, 그 외 from-wire는 null" {
     try std.testing.expectEqual(@as(u8, 0), grantScopeToWire(.browser));
     try std.testing.expectEqual(@as(u8, 1), grantScopeToWire(.browser_storage));
     try std.testing.expectEqual(control_capability.ScopeClass.browser, grantScopeFromWire(0).?);
@@ -13433,7 +13455,9 @@ test "grant scope wire round-trip: browser=0·browser_storage=1·browser_network
     try std.testing.expectEqual(control_capability.ScopeClass.browser_network_mock, grantScopeFromWire(5).?);
     try std.testing.expectEqual(@as(u8, 6), grantScopeToWire(.browser_emulation)); // W9e①
     try std.testing.expectEqual(control_capability.ScopeClass.browser_emulation, grantScopeFromWire(6).?);
-    try std.testing.expect(grantScopeFromWire(7) == null); // 알 수 없는 wire → null(revoke가 0 반환)
+    try std.testing.expectEqual(@as(u8, 7), grantScopeToWire(.browser_agent_tabs)); // 2026-11-16 pane 동의 — 「control」(0)로 접히면 메뉴가 거두지 못한다
+    try std.testing.expectEqual(control_capability.ScopeClass.browser_agent_tabs, grantScopeFromWire(7).?);
+    try std.testing.expect(grantScopeFromWire(8) == null); // 알 수 없는 wire → null(revoke가 0 반환)
 }
 
 test "per-grant revoke export: count/grant_at 스냅샷 + 값기반 revoke_browser_grant(멱등)" {
@@ -14180,6 +14204,42 @@ test "에이전트 탭 표지: 라벨이 에이전트 탭에만 ◈ 를 붙인�
     try std.testing.expect(try labelHas(session, pane, tab));
     forgetAgentTab(shell); // 에이전트의 pane 이 닫혔다
     try std.testing.expect(!try labelHas(session, pane, tab));
+}
+
+// 사용자 결정 2026-11-16: Browser Grants 메뉴의 pane 동의 줄(wire 7)을 거두면 그 pane 은 다시 묻고, 그 pane 이 연 에이전트 탭은 사람의 탭이 된다
+// (탭과 함께 생긴 권한은 그 뿌리와 함께 간다 — F3 와 같은 규칙). 다른 pane 의 동의·에이전트 탭은 그대로다.
+test "pane 동의 철회: 메뉴의 wire 7 로 거두면 그 pane 의 에이전트 탭이 사람의 탭이 되고 다른 pane 은 그대로다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer agent_tabs.clearAndFree(allocator);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 5, .scope = .browser_agent_tabs });
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 6, .scope = .browser_agent_tabs });
+    try std.testing.expect(adoptAgentTab(5, 51));
+    try std.testing.expect(adoptAgentTab(5, 52));
+    try std.testing.expect(adoptAgentTab(6, 61));
+    // 메뉴가 보는 대로 — 동의 줄이 wire 7 로 나온다.
+    var found = false;
+    var i: u32 = 0;
+    while (i < maru_macos_control_browser_grant_count()) : (i += 1) {
+        var p: u64 = 0;
+        var t: u64 = 0;
+        var sc: u8 = 0;
+        _ = maru_macos_control_browser_grant_at(i, &p, &t, &sc);
+        if (p == 5 and t == 5) {
+            try std.testing.expectEqual(@as(u8, 7), sc);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 5, 7));
+    try std.testing.expect(!agentTabsConsented(5));
+    try std.testing.expect(!isAgentTab(51) and !isAgentTab(52));
+    try std.testing.expect(!control_pane_grant_store.hasGrant(5, 51, .browser) and !control_pane_grant_store.hasGrant(5, 52, .browser_network));
+    try std.testing.expect(agentTabsConsented(6) and isAgentTab(61) and control_pane_grant_store.hasGrant(6, 61, .browser));
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_revoke_browser_grant(5, 5, 7)); // 멱등
 }
 
 test "W9b③: close — 그 pane 이 연 탭만, cap 연결은 unauthorized, 물으면 떠나기 확인이 뜰 때 closed:false, 닫히면 closed:true, 창의 유일한 탭은 실패" {

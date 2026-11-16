@@ -14049,6 +14049,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let n = buf.withUnsafeMutableBufferPointer { maru_macos_control_browser_emulation_summary(pane, target, $0.baseAddress, $0.count) }
             let summary = String(decoding: buf[0..<Int(n)], as: UTF8.self)
             scopeDesc = summary.isEmpty ? "device emulation" : "device emulation (\(summary))"
+        // 7 = browser_agent_tabs(2026-11-16 — 그 pane 이 에이전트 탭을 열어도 된다는 동의, target 은 그 pane 자신). 철회하면 그 pane 은 다음 open 에서 다시
+        // 묻고, 그 pane 이 연 에이전트 탭은 사람의 탭이 된다(◈ 도 사라진다).
+        case 7: return "Revoke pane #\(pane) · open agent tabs (your logged-in sites)"
         default: scopeDesc = "control"
         }
         return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"

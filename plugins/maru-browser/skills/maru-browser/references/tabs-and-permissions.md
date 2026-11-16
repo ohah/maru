@@ -37,7 +37,7 @@ Maru's design, not a bug, and it means:
   it a shell timeout of at least 3 minutes.
 - Network, emulation and cookie commands ask again, once per site.
 - `close` refuses user tabs. Leave them as you found them (see "Leave nothing behind" in SKILL.md).
-- WebKit tabs (`engine=webkit`) and file views support fewer commands; you get `-32008`. Open your own tab.
+- WebKit tabs (`engine=webkit`) and file views support fewer commands; you get `-32008`. Open a tab of your own with `open`.
 
 ## Cookies and storage
 

@@ -12314,7 +12314,8 @@ pub fn build(b: *std.Build) void {
     // maru-browser 에이전트 플러그인(`plugins/maru-browser/`)의 스킬 글 ↔ `maru browser` CLI 동기화 판정자
     // (control-plane-browser.md §9.6.3). 스킬 예시를 **진짜 파서**에 넣어야 해서 `maru` 모듈을 쓴다. 새 mise 태스크를 만들지 않고
     // `test` 에 매단다 — `check`·`check-without-boundaries` 둘 다 이미 `test` 를 포함하므로 check-task-split 이 지키는 두 목록이
-    // 그대로다. 스킬 `.md` 는 빌드 입력이 아니라 실행 중에 읽으므로 캐시된 통과를 재사용하지 않게 늘 다시 돌린다.
+    // 그대로다. 스킬 `.md` 는 실행 중에 읽으므로 캐시된 통과를 재사용하지 않게 늘 다시 돌린다(SKILL.md 는 규칙 구역 때문에 빌드
+    // 입력이기도 하다 — 위 `setMaruBrowserSkillModule`; 참조 파일·README 는 아니다).
     const plugin_skill_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/plugin_skill_sync.zig"),

@@ -20,7 +20,8 @@ pub const server_version: []const u8 = @import("maru_version").version;
 /// M10: 클라이언트가 `instructions` 와 도구 설명 하나를 자르는 길이(UTF-16 단위). Claude Code 는 둘 다 4,096 자에서 자르고 뒤에
 /// 「… [truncated]」 를 붙인다(code.claude.com/docs/en/mcp.md 「Tool search for MCP server authors」 — tool search 로 나중에 실리는
 /// 도구는 16,384 자지만, tool search 가 꺼진 사용자에게는 처음부터 실려 4,096 자다). 시험의 상한이고, instructions 는 다른 클라이언트
-/// 몫으로 3,600 자 안팎을 목표로 둔다(사용자 결정 D4 2026-11-16).
+/// 몫으로 3,600 자 안팎을 목표로 둔다(사용자 결정 D4 2026-11-16). v2.1.296 전 Claude Code 는 2,048 자에서 잘랐다(같은 문서) — 그
+/// 판에서는 instructions 의 꼬리(`server_guidance` 대부분)와 긴 도구 설명의 꼬리를 잃는다. 규칙 구역을 앞에 두는 까닭의 하나다.
 pub const client_text_cap = 4096;
 
 /// 도구 인자 하나가 CLI 에서 어떤 모양인가.
@@ -127,7 +128,7 @@ pub const tools = [_]Tool{
         .{ .key = "text", .kind = .string, .flag = "--text", .description = "answer text for a prompt" },
         .{ .key = "dialog", .kind = .int, .flag = "--dialog", .description = "dialog token from browser_dialog", .min = 1, .max = 9_007_199_254_740_991 },
     }) },
-    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — the user has up to 2 minutes to answer, so allow the call 3 minutes); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
+    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — the user has up to 2 minutes to answer, so allow the call 3 minutes; on a user's tab you do not control yet the tab's own confirmation comes first, so make another call on it first, such as browser_snapshot); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
     .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests (shared-worker requests carry the same mark), and for attempts Chromium restarted (the retry is a separate, newer req). Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation, unless the user clicked, typed or navigated in that tab before your first read); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded; response bodies are recorded only while browser_network_record is on (each line then shows its body state). WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. dropped counts requests maru did not record because the page made them too fast or held too many unfinished; dropped_sw_inflight_cap counts service-worker requests not recorded because the site's service workers held too many unfinished fetches (sw_inflight_cap — 128 per origin of the worker, 512 in total; page requests are not affected). Service-worker requests of a site no tab shows any more stop counting toward that cap, but they still hold a slot: when the unfinished service-worker requests (counted and released together) fill 1024 slots, maru forgets the oldest released one: such a request stays in the list unfinished (its response and end are not recorded). Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
         .{ .key = "types", .kind = .string, .flag = "--type", .description = "request types separated by commas: document, iframe, stylesheet, script, image, font, xhr (fetch and XHR), media, worker, shared_worker, service_worker, prefetch, favicon, ping, csp_report, object, plugin, preload, other" },
         .{ .key = "method", .kind = .string, .flag = "--method", .description = "HTTP method, like GET or POST" },
@@ -640,7 +641,7 @@ pub fn agentRulesRegion(md: []const u8) RulesRegionError![]const u8 {
 pub const agent_rules: []const u8 = blk: {
     @setEvalBranchQuota(4_000_000);
     break :blk agentRulesRegion(@embedFile("maru_browser_skill_md")) catch |e|
-        @compileError("plugins/maru-browser/skills/maru-browser/SKILL.md 의 규칙 구역(" ++ agent_rules_begin ++ " … " ++ agent_rules_end ++ "): " ++ @errorName(e));
+        @compileError("plugins/maru-browser/skills/maru-browser/SKILL.md: the rules region (" ++ agent_rules_begin ++ " ... " ++ agent_rules_end ++ ") is broken: " ++ @errorName(e));
 };
 
 /// M10: 이 서버만의 안내 — 도구 이름·인자·숫자·수명처럼 **표면마다 다른 사실**. 도구 하나의 세부(권한의 층·보이는 범위·console 첫 읽기)는
@@ -650,10 +651,11 @@ pub const server_guidance =
     "Using these tools: find tabs with browser_list, or open a hidden tab of your own behind the user's with browser_open " ++
     "(no dialog; up to 8 per pane), then act on a tab by its id (surface). Prefer locators (role, by_text, by_label) or refs " ++
     "from browser_snapshot over CSS selectors; snapshot again after a navigation. Requests come from the maru pane this server " ++
-    "runs in; inside tmux or screen in that pane every request is refused. On a tab the user opened, the first call asks the user, " ++
+    "runs in; inside tmux or screen in that pane every request except browser_list is refused. On a tab the user opened, the first call asks the user, " ++
     "and the network, recording, blocking, mocking and emulation tools ask again once per site (each tool's description says which); " ++
-    "tabs you opened ask nothing except browser_upload. A call that asks the user waits for the answer (about 150 seconds at most, " ++
-    "with the action that follows), so allow it 3 minutes; if your client gives up sooner, the call still finishes and the next call " ++
+    "tabs you opened ask nothing except browser_upload. A call that asks the user waits for the answer (up to 2 minutes for a dialog, " ++
+    "then the action), so allow it 3 minutes. browser_upload on a user's tab you do not control yet would ask twice (the tab first), " ++
+    "so make another call on that tab first, such as browser_snapshot. If your client gives up sooner, the call still finishes and the next call " ++
     "waits for it, so check the tab before you repeat anything. Calls run one at a time. After a click, wait for something only the " ++
     "next page has: a load wait right after a click can still see the old page. CPU and network conditions set with browser_emulate " ++
     "last while this MCP connection runs. A tab's title shows ◉ while its response bodies are recorded, ⊘ with block rules, " ++
@@ -900,8 +902,8 @@ test "W9f: 도구 표의 모든 도구는 CLI 하위 명령이고, 필수 인자
 }
 
 test "W9c①·M10: browser_console 의 설명은 Chromium 탭의 console 을 「아직 안 됨」 이라 하지 않고, 무엇이 담기고 첫 읽기가 무엇을 지우는지 알린다" {
-    // M10: 이 규칙은 전에 `initialize` 의 `instructions` 에 있었다. instructions 는 Claude Code 가 4,096 자에서 자르고(앞에 스킬과 같은
-    // 규칙 덩어리가 온다) 도구 설명은 그 도구를 불러올 때 실리므로, 그 도구의 세부인 이 글은 설명으로 옮겼다 — 문장은 그대로다.
+    // M10: 이 규칙은 전에 `initialize` 의 `instructions` 에 있었다. instructions 는 Claude Code 가 4,096 자에서 자르고(맨 앞은 스킬의
+    // 규칙 구역이다) 도구 설명은 그 도구를 불러올 때 실리므로, 그 도구의 세부인 이 글은 설명으로 옮겼다 — 문장은 그대로다.
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const d = findTool("browser_console").?.description;
@@ -931,9 +933,7 @@ test "M10: agentRulesRegion — 표지 사이 줄들, 표지가 없거나·둘�
     try testing.expectError(error.RegionOrder, agentRulesRegion(e ++ "\nx\n" ++ b ++ "\n"));
     try testing.expectError(error.RegionMarkerNotAlone, agentRulesRegion("x " ++ b ++ "\ny\n" ++ e ++ "\n"));
     try testing.expectError(error.RegionEmpty, agentRulesRegion(b ++ "\n \n" ++ e ++ "\n"));
-    // 심긴 구역이 instructions 의 맨 앞이고 그 뒤에 이 서버의 안내가 온다.
-    try testing.expect(std.mem.startsWith(u8, instructions, agent_rules));
-    try testing.expect(std.mem.endsWith(u8, instructions, server_guidance));
+    // 심긴 구역과 응답의 대조(바이트 그대로·뒤의 안내)는 plugin_skill_sync ⑧ 이 실제 SKILL.md 와 응답으로 한다.
 }
 
 /// M10: `initialize` 가 **실제로 내는** `instructions`(JSON 을 푼 값). 판정자는 상수가 아니라 이 응답을 잰다 — 배선이 다른 글을
@@ -950,17 +950,45 @@ fn clientLength(text: []const u8) !usize {
     return std.unicode.calcUtf16LeLen(text);
 }
 
-test "M10: instructions 와 모든 도구 설명이 클라이언트 상한(client_text_cap) 안이다 — 넘으면 꼬리가 잘린다" {
+/// 클라이언트가 이 글을 자르는가(`client_text_cap` 초과).
+fn overClientCap(text: []const u8) !bool {
+    return try clientLength(text) > client_text_cap;
+}
+
+/// `tools/list` 가 **실제로 내는** 도구 설명들(이름 → 설명). 크기는 제공되는 글로 잰다.
+fn servedToolDescriptions(arena: std.mem.Allocator) ![]const std.json.Value {
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(r);
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, r, .{ .allocate = .alloc_always });
+    return v.object.get("result").?.object.get("tools").?.array.items;
+}
+
+test "M10: instructions 와 모든 도구 설명(실제 응답)이 클라이언트 상한(client_text_cap) 안이다 — 넘으면 꼬리가 잘린다" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const served = try servedInstructions(arena_state.allocator());
-    try testing.expect(try clientLength(served) <= client_text_cap);
-    for (&tools) |*t| {
-        if (try clientLength(t.description) > client_text_cap) {
-            std.debug.print("M10: {s} 설명이 {d} 자 — 상한 {d}\n", .{ t.name, try clientLength(t.description), client_text_cap });
+    const arena = arena_state.allocator();
+    const served = try servedInstructions(arena);
+    std.debug.print("M10: instructions {d} 자(상한 {d}, 목표 3600 안팎)\n", .{ try clientLength(served), client_text_cap });
+    if (try overClientCap(served)) {
+        std.debug.print("M10: instructions 가 {d} 자 — 상한 {d}. 규칙 구역(SKILL.md)이나 server_guidance 를 줄인다\n", .{ try clientLength(served), client_text_cap });
+        return error.TestUnexpectedResult;
+    }
+    const listed = try servedToolDescriptions(arena);
+    try testing.expectEqual(tools.len, listed.len);
+    for (listed) |t| {
+        const d = t.object.get("description").?.string;
+        if (try overClientCap(d)) {
+            std.debug.print("M10: {s} 설명이 {d} 자 — 상한 {d}\n", .{ t.object.get("name").?.string, try clientLength(d), client_text_cap });
             return error.TestUnexpectedResult;
         }
     }
+    // 양성 대조 — 셈이 UTF-16 단위이고(BMP 밖 글자는 2) 상한을 넘는 글이 실제로 걸린다.
+    try testing.expectEqual(@as(usize, 2), try clientLength("\u{1F600}"));
+    try testing.expectEqual(@as(usize, 1), try clientLength("◉"));
+    const at_cap: [client_text_cap]u8 = @splat('x');
+    try testing.expect(!try overClientCap(&at_cap));
+    try testing.expect(try overClientCap(&at_cap ++ "y"));
+    try testing.expect(try overClientCap(at_cap[1..] ++ "\u{1F600}"));
 }
 
 test "M10(D5): 사용자에게 묻는 호출의 시한 안내는 3 분 — instructions·업로드 설명·`maru mcp --help` 가 같은 숫자를 말한다" {
@@ -974,6 +1002,11 @@ test "M10(D5): 사용자에게 묻는 호출의 시한 안내는 3 분 — instr
     try testing.expect(std.mem.indexOf(u8, served, "tool timeout of at least 150") == null);
     const up = findTool("browser_upload").?.description;
     try testing.expect(std.mem.indexOf(u8, up, "allow the call 3 minutes") != null);
+    // 제어 권한이 없는 사용자 탭의 업로드는 확인이 둘(탭 → 업로드) — 3 분이 모자라지 않게 먼저 다른 호출로 제어를 받으라고 한다.
+    try testing.expect(std.mem.indexOf(u8, up, "make another call on it first") != null);
+    try testing.expect(std.mem.indexOf(u8, served, "would ask twice (the tab first)") != null);
+    // browser.list 는 ungated — tmux 안에서도 성공하므로 「모두 거절」 이 아니다.
+    try testing.expect(std.mem.indexOf(u8, served, "every request except browser_list is refused") != null);
     // 사람에게는 설정할 값을(도구 시한은 클라이언트 설정이다).
     try testing.expect(std.mem.indexOf(u8, usage, "tool timeout for this server to at least 3 minutes") != null);
 }

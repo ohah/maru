@@ -126,6 +126,7 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | 변경 경로 | `code` | `runtime` | `web` | `docs` |
 | --- | --- | --- | --- | --- |
 | `docs/configuration.md` | ✓ | ✓ | | |
+| `plugins/**`, `.claude-plugin/**` | ✓ | | | |
 | `docs/**`, `*.md`, `LICENSE`, `.claude/**` | | | | ✓ |
 | `src/**`, `tests/**`, `tools/**`(ci 제외), `terminfo/**`, `assets/**`, `build.zig`, `build.zig.zon` | ✓ | 주석 전용이면 ✗ | | |
 | `web/**` | | | ✓ | |
@@ -139,6 +140,8 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 **workflow-level `paths` 필터는 여전히 쓰지 않는다.** required 워크플로에 `paths`를 두면 무관한 PR에서 워크플로 자체가 트리거되지 않아 required 컨텍스트가 영원히 pending으로 머지를 막는다. 반면 job-level `if:`로 건너뛴 job은 GitHub이 `conclusion=skipped`로 **보고**하고 branch protection은 이를 통과로 취급한다. 그래서 `pull_request` 트리거는 모든 PR에 열어 두고 job 단위로 거른다.
 
 **`docs/configuration.md`는 문서가 아니라 빌드 입력이다.** `build.zig`가 anonymous import로 등록하고 `src/config/schema.zig`가 `@embedFile("config_doc_md")`로 컴파일 타임에 박아, 키 표에서 행을 지우거나 range 숫자를 틀리게 적으면 `zig build test`의 doc-drift 테스트 두 개가 깨진다. 그래서 이 파일만 `code` 축이다 — 문서로 분류하면 그 두 테스트를 건너뛴다. 앞으로 문서를 빌드 입력으로 추가하면 이 표에도 함께 올린다.
+
+**`plugins/**` 도 문서가 아니다.** 에이전트 스킬 글은 `zig build test` 의 동기화 판정자(`tests/plugin_skill_sync.zig`)가 그 명령을 진짜 CLI 파서에 넣고, SKILL.md 의 「규칙 구역」은 빌드 때 `maru mcp` 의 instructions 로 바이너리에 심긴다([control-plane-browser.md §9.6.3](control-plane-browser.md#963-에이전트-스킬-플러그인maru-browser)) — 그래서 `code` 축이다. `runtime` 은 켜지 않는다: 바뀌는 것은 `maru mcp` 의 글이고, 그것을 재는 판정자(`src/cli/mcp.zig`·plugin_skill_sync)는 ubuntu `check` 의 `zig build test` 가 돈다. macOS 잡에는 그 글을 보는 판정자가 없다.
 
 diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지를 꺼서 원본 삭제와 대상 추가를 **둘 다** 보게 한다(감지가 켜지면 새 경로만 나와 `src/foo.zig` → `docs/foo.md` 이동이 "문서 전용"으로 오판된다). `core.quotePath=false`는 비ASCII 경로가 `"docs/\355\225\234.md"`로 이스케이프돼 앞의 따옴표가 경로 매칭을 깨뜨리는 것을 막는다.
 

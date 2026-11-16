@@ -29,7 +29,8 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* v259: W9e① browser device-emulation summary for the Browser Grants menu. */
 /* v260: W9e② browser performance-trace summary for the Browser Grants menu. */
 /* v261: grant scope wire 7 (browser_agent_tabs — per-pane consent to open agent tabs) and the agent-tabs denial/title exports for the Browser Grants menu. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 261u
+/* v262: user decision 2026-11-16 (full agent access) — grant scope wire 7 and the four agent-tabs denial/title exports are removed. */
+#define MARU_MACOS_APP_HOST_ABI_VERSION 262u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);
@@ -2561,12 +2562,6 @@ uint32_t maru_macos_control_revoke_all_browser_grants(void);
 uint32_t maru_macos_control_browser_grant_count(void);
 uint32_t maru_macos_control_browser_grant_at(uint32_t index, uint64_t *out_pane, uint64_t *out_target, uint8_t *out_scope);
 uint32_t maru_macos_control_revoke_browser_grant(uint64_t pane, uint64_t target, uint8_t scope);
-// pane 동의(2026-11-16 — 거부·허용을 되돌리는 UI): 거부한 pane 의 수·i 번째 pane(1/0)·그 거부 지우기(1=지움, 다음 open 은 다시 묻는다)·
-// 그 pane 의 기억한 제목(결정 순간, 모달과 같은 규칙으로 거른 UTF-8 — 쓴 바이트 수, 없으면 0; 허용 줄 wire 7 도 쓴다). 메인 스레드 전용.
-uint32_t maru_macos_control_agent_tabs_denied_count(void);
-uint32_t maru_macos_control_agent_tabs_denied_at(uint32_t index, uint64_t *out_pane);
-uint32_t maru_macos_control_clear_agent_tabs_denial(uint64_t pane);
-size_t maru_macos_control_agent_tabs_pane_title(uint64_t pane, uint8_t *out, size_t out_cap);
 // W9d③: 그 pane 이 그 탭에 둔 요청 막기 규칙 수(반환)와 엄격 모드(out_strict 1/0) — "Browser Grants" 의 막기 줄 「request blocking (N rules[, strict])」.
 uint32_t maru_macos_control_browser_block_summary(uint64_t pane, uint64_t target, uint8_t *out_strict);
 // W9d④: 그 pane 이 그 탭에 둔 가짜 응답 규칙 수(반환)와 가짜 엄격 모드(out_strict 1/0) — "Browser Grants" 의 가짜 줄 「response mocking (N rules[, strict])」.

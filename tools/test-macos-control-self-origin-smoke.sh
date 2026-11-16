@@ -1,10 +1,10 @@
 #!/bin/sh
 # 컨트롤 플레인 1g(control-plane-security §8.4) 실측 — 서버가 붙은 프로세스의 출처(조상 사슬에서 자기 터미널의 foreground
-# 그룹에 속한 첫 조상 → 그 세션 → pane)를 스스로 찾는지, 그 pane 으로만 browser 확인 grant 를 묻는지 본다. 스모크 모드는 셸을 고정
-# 시험 셸로 바꾸므로 **일반 모드**로 띄우고(셸 = 이 대본이 쓴 pane 대본), 확인 모달은 `MARU_TEST_GRANT_DECISION=approve`
-# 로 자동 승인한다. 두 모드를 본다: 세션 유지(기본 — pane 에 `MARU_PANE_ID` 가 없다)와 세션 유지 끔(in-process — 있다).
+# 그룹에 속한 첫 조상 → 그 세션 → pane)를 스스로 찾는지, 그 pane 으로만 browser grant 를 주는지 본다. 스모크 모드는 셸을 고정
+# 시험 셸로 바꾸므로 **일반 모드**로 띄운다(셸 = 이 대본이 쓴 pane 대본). 확인 모달은 없다(사용자 결정 2026-11-16 「AI 가 모든 접근」 —
+# 신원 판정을 지난 pane 은 전권을 묻지 않고 받는다). 두 모드를 본다: 세션 유지(기본 — pane 에 `MARU_PANE_ID` 가 없다)와 세션 유지 끔(in-process — 있다).
 #
-#   pane 셸에서 직접                      → 허용(확인 grant 를 그 pane 으로 묻고 실행)
+#   pane 셸에서 직접                      → 허용(그 pane 으로 전권 grant 를 넣고 실행)
 #   pane 안 setsid 자식                   → 허용(Claude Code 의 Bash 도구 — 제어 터미널 없음, 조상 사슬로 pane 을 찾는다)
 #   pane 안 새 process group 자식          → 허용(Codex — 터미널은 있지만 foreground 아님, foreground 인 부모로 찾는다)
 #   셸이 쉬는 동안의 `&`                   → 허용(foreground 인 셸에서 나왔다)
@@ -83,7 +83,7 @@ run_mode() { # $1=이름 $2=session.keep-alive-after-quit
     printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = %s\n' "$root/pane.sh" "$2" > "$root/$mode.conf"
     # 앱의 control 디렉터리도 시험 홈으로(`XDG_CACHE_HOME` 이 먼저다 — 개발자 셸에 있으면 사용자의 control 디렉터리에 소켓을 연다).
     env HOME="$root/home-$mode" CFFIXED_USER_HOME="$root/home-$mode" XDG_CACHE_HOME="$root/home-$mode/.cache" MARU_SESSION_HOST_ROOT="$root/session-host-$mode" \
-        MARU_CONFIG="$root/$mode.conf" MARU_WEB_PANEL=1 MARU_TEST_GRANT_DECISION=approve MARU_SMOKE_OUT="$out" MARU_SMOKE_HOME="$root/home-$mode" \
+        MARU_CONFIG="$root/$mode.conf" MARU_WEB_PANEL=1 MARU_SMOKE_OUT="$out" MARU_SMOKE_HOME="$root/home-$mode" \
         "$app" > "$root/app-$mode.log" 2>&1 &
     app_pid=$!
     i=0

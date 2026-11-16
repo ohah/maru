@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const cp = @import("../session/control_plane.zig");
-/// 보이지 않는 글자 판정(중립 leaf — pane 동의 제목의 `sanitizeTitle` 과 같은 규칙)과 그것을 보이게 쓰는 꼴(편집기와 같은 `<U+XXXX>`).
+/// 보이지 않는 글자 판정(중립 leaf)과 그것을 보이게 쓰는 꼴(편집기와 같은 `<U+XXXX>`).
 const invisible_text = @import("../invisible_text.zig");
 const hazard = @import("../hazard.zig");
 

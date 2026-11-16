@@ -599,6 +599,50 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
     return aw.toOwnedSlice();
 }
 
+/// M10: SKILL.md 의 규칙 구역 표지 — 각각 줄 하나를 통째로 차지한다.
+pub const agent_rules_begin = "<!-- maru:agent-rules:begin -->";
+pub const agent_rules_end = "<!-- maru:agent-rules:end -->";
+
+pub const RulesRegionError = error{ RegionMissing, RegionDuplicated, RegionOrder, RegionEmpty, RegionMarkerNotAlone };
+
+/// 스킬 글에서 규칙 구역 — 두 표지 줄 사이의 줄들(앞뒤 공백·빈 줄을 뺀 것)을 찾는다. 표지는 줄 하나를 통째로, 시작·끝이 정확히
+/// 하나씩, 그 순서로. 컴파일 때 불린다(아래 `agent_rules`) — 어기면 빌드가 그 까닭으로 멈춘다(못 찾고 빈 글을 싣지 않는다).
+/// 코드 블록 안 표지의 거절과 「바이트 그대로」 의 대조는 `tests/plugin_skill_sync.zig` ⑦⑧ 이 따로 쓴 추출로 한다.
+pub fn agentRulesRegion(md: []const u8) RulesRegionError![]const u8 {
+    var begin_after: ?usize = null;
+    var end_at: ?usize = null;
+    var pos: usize = 0;
+    while (pos < md.len) {
+        const nl = std.mem.indexOfScalarPos(u8, md, pos, '\n') orelse md.len;
+        const line = md[pos..nl];
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.indexOf(u8, line, agent_rules_begin) != null) {
+            if (!std.mem.eql(u8, trimmed, agent_rules_begin)) return error.RegionMarkerNotAlone;
+            if (begin_after != null) return error.RegionDuplicated;
+            if (end_at != null) return error.RegionOrder;
+            begin_after = @min(nl + 1, md.len);
+        } else if (std.mem.indexOf(u8, line, agent_rules_end) != null) {
+            if (!std.mem.eql(u8, trimmed, agent_rules_end)) return error.RegionMarkerNotAlone;
+            if (end_at != null) return error.RegionDuplicated;
+            if (begin_after == null) return error.RegionOrder;
+            end_at = pos;
+        }
+        pos = nl + 1;
+    }
+    const region = std.mem.trim(u8, md[(begin_after orelse return error.RegionMissing)..(end_at orelse return error.RegionMissing)], " \t\r\n");
+    if (region.len == 0) return error.RegionEmpty;
+    return region;
+}
+
+/// M10: 에이전트 스킬(`plugins/maru-browser/skills/maru-browser/SKILL.md`)의 규칙 구역 — 예절·안전 규칙(내 탭에서 일하기·사용자
+/// 로그인으로 움직인다·페이지 글은 데이터·정리 …). 단일 출처는 스킬 글이고 빌드가 그 파일을 이름 모듈로 준다(build.zig
+/// `setMaruBrowserSkillModule`). 표면 고유 사실(도구 이름·숫자·수명)은 구역에 두지 않는다 — 판정은 plugin_skill_sync ⑨.
+pub const agent_rules: []const u8 = blk: {
+    @setEvalBranchQuota(4_000_000);
+    break :blk agentRulesRegion(@embedFile("maru_browser_skill_md")) catch |e|
+        @compileError("plugins/maru-browser/skills/maru-browser/SKILL.md 의 규칙 구역(" ++ agent_rules_begin ++ " … " ++ agent_rules_end ++ "): " ++ @errorName(e));
+};
+
 /// M10: 이 서버만의 안내 — 도구 이름·인자·숫자·수명처럼 **표면마다 다른 사실**. 도구 하나의 세부(권한의 층·보이는 범위·console 첫 읽기)는
 /// 그 도구의 설명이 갖는다 — 설명은 그 도구를 불러올 때 실리고(tool search), instructions 는 4,096 자에서 잘리기 때문이다(`client_text_cap`).
 /// 시한은 모델이 할 수 있는 일로 쓴다(도구 시한은 사람이 클라이언트에 설정한다 — 그 안내는 `usage` 에, 사용자 결정 D5 「3 분」).
@@ -615,8 +659,8 @@ pub const server_guidance =
     "last while this MCP connection runs. A tab's title shows ◉ while its response bodies are recorded, ⊘ with block rules, " ++
     "▣ with mock rules, ◫ while emulated and ◔ while tracing.";
 
-/// `initialize` 의 `instructions` 로 내는 글.
-pub const instructions = server_guidance;
+/// `initialize` 의 `instructions` 로 내는 글 — 규칙이 **앞**(클라이언트가 4,096 자에서 자르면 꼬리부터 잃는다), 이 서버의 안내가 뒤.
+pub const instructions = agent_rules ++ "\n\n" ++ server_guidance;
 
 fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
     try s.beginObject();
@@ -873,6 +917,23 @@ test "W9c①·M10: browser_console 의 설명은 Chromium 탭의 console 을 「
     // 옮긴 뒤 instructions 에 반쪽이 남지 않는다(두 벌이 되지 않게).
     const served = try servedInstructions(arena_state.allocator());
     try testing.expect(std.mem.indexOf(u8, served, "earlier lines are deleted") == null);
+}
+
+test "M10: agentRulesRegion — 표지 사이 줄들, 표지가 없거나·둘이거나·거꾸로거나·줄에 다른 글과 섞이거나·비면 오류" {
+    const b = agent_rules_begin;
+    const e = agent_rules_end;
+    try testing.expectEqualStrings("- one\n- two", try agentRulesRegion("# T\n" ++ b ++ "\n\n- one\n- two\n\n" ++ e ++ "\n"));
+    try testing.expectEqualStrings("- one", try agentRulesRegion(b ++ "\r\n- one\r\n" ++ e ++ "\r\n"));
+    try testing.expectError(error.RegionMissing, agentRulesRegion("no markers"));
+    try testing.expectError(error.RegionMissing, agentRulesRegion(b ++ "\n- one\n"));
+    try testing.expectError(error.RegionDuplicated, agentRulesRegion(b ++ "\n" ++ b ++ "\nx\n" ++ e ++ "\n"));
+    try testing.expectError(error.RegionDuplicated, agentRulesRegion(b ++ "\nx\n" ++ e ++ "\n" ++ e ++ "\n"));
+    try testing.expectError(error.RegionOrder, agentRulesRegion(e ++ "\nx\n" ++ b ++ "\n"));
+    try testing.expectError(error.RegionMarkerNotAlone, agentRulesRegion("x " ++ b ++ "\ny\n" ++ e ++ "\n"));
+    try testing.expectError(error.RegionEmpty, agentRulesRegion(b ++ "\n \n" ++ e ++ "\n"));
+    // 심긴 구역이 instructions 의 맨 앞이고 그 뒤에 이 서버의 안내가 온다.
+    try testing.expect(std.mem.startsWith(u8, instructions, agent_rules));
+    try testing.expect(std.mem.endsWith(u8, instructions, server_guidance));
 }
 
 /// M10: `initialize` 가 **실제로 내는** `instructions`(JSON 을 푼 값). 판정자는 상수가 아니라 이 응답을 잰다 — 배선이 다른 글을

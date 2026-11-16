@@ -72,6 +72,8 @@ The skill folder (`skills/maru-browser/`) uses only portable Agent Skills fields
 ## For Maru contributors
 
 The skill's commands are checked against the real CLI parser and help in `zig build test-plugin-skill`
-(part of `mise run test`). Bump `version` in `.claude-plugin/plugin.json` whenever you change anything in this
+(part of `mise run test`). The rules block in section 5 of `SKILL.md` (between the `maru:agent-rules` markers) is
+built into the `maru` binary as the start of `maru mcp`'s instructions, so MCP agents read the same rules word for
+word: keep it free of command and tool names, flags and numbers — the test checks that too. Bump `version` in `.claude-plugin/plugin.json` whenever you change anything in this
 folder — CI fails otherwise, because users stay on the cached version until it changes. Design notes:
 [control-plane-browser.md §9.6.3](../../docs/control-plane-browser.md#963-에이전트-스킬-플러그인maru-browser).

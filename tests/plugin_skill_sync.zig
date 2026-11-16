@@ -14,6 +14,10 @@
 //!   ④ 스킬 안 상대 링크가 살아 있고, 참조 파일은 모두 SKILL.md 에서 한 단계로 걸린다.
 //!   ⑤ 매니페스트 둘(plugin.json·marketplace.json)과 SKILL.md 앞머리가 서로 맞는다(이름·경로·semver·version 은 한 곳).
 //!   ⑥ 스킬이 요구하는 최소 maru 버전이 한 곳뿐이고, 이 저장소가 내는 maru(`build.zig.zon` `.version`) 이하다.
+//!   ⑦ SKILL.md 의 「규칙」 구역(`<!-- maru:agent-rules:begin -->` … `end`)이 정확히 하나, 코드 블록 밖, 비지 않았다 — 이 구역은
+//!      `maru mcp` 의 `instructions` 맨 앞에 **빌드 때 그대로** 심긴다(M10 — 규칙은 두 채널이 한 글).
+//!   ⑧ 실제 `initialize` 응답의 `instructions` 가 그 구역 글로 **바이트 그대로** 시작한다(배선을 잰다 — 상수가 아니라).
+//!   ⑨ 그 구역에 표면 고유 낱말(`maru browser`·`browser_`·플래그·인라인 코드·숫자·`$`)이 없다 — MCP 와 CLI 가 같은 글을 읽는다.
 //!
 //! **공허하게 통과하지 않는다**(project-rules 「못 찾으면 실패」·pr-checklist 「판정자 규율」): 추출한 예시 수와 help 명령
 //! 수에 하한을 단언하고, 코드 표시 밖 산문에 `maru browser` 가 나오면 실패한다 — 모든 명령이 ①을 지나게 하려고.
@@ -21,6 +25,8 @@
 
 const std = @import("std");
 const browser = @import("maru").cli.browser;
+/// `maru mcp` 의 순수 절반 — ⑦⑧ 이 표지 이름과 실제 `initialize` 응답을 여기서 얻는다.
+const mcp = @import("maru").cli.mcp;
 /// 이 트리가 빌드하는 maru 의 버전(`build.zig.zon` `.version` — `maru --version` 이 내는 값과 같은 단일 출처).
 const maru_version: []const u8 = @import("maru_version").version;
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
@@ -649,6 +655,131 @@ test "⑥ 스킬의 최소 maru 버전은 SKILL.md 한 곳이고, 이 저장소�
     if (semverLess(maru_version, minimum.?)) {
         std.debug.print("스킬은 maru {s} 이상을 요구하는데 이 트리의 build.zig.zon 은 {s} 다 — 버전을 올리는 PR 이 먼저 들어가야 한다\n", .{ minimum.?, maru_version });
         return error.MinimumAboveThisTree;
+    }
+}
+
+// ── ⑦⑧⑨ 「규칙」 구역 → `maru mcp` instructions (M10) ─────────────────────────────────────────────────────
+
+const RegionError = error{ RegionMissing, RegionDuplicated, RegionOrder, RegionInFence, RegionEmpty, RegionMarkerNotAlone };
+
+/// SKILL.md 에서 규칙 구역을 찾는다 — 표지 줄 사이의 줄들(앞뒤 공백 줄 제외). 표지는 **줄 하나를 통째로** 차지해야 하고, 시작·끝이
+/// 정확히 하나씩, 그 순서로, 코드 블록 밖에 있어야 한다. 하나라도 어기면 오류다 — 못 찾고 통과하지 않는다(project-rules).
+/// 바이너리의 추출(`mcp.zig` `agentRulesRegion`, 컴파일 때)과 **따로** 쓴 판이다 — 같은 함수를 부르면 그 함수의 틀림을 못 본다.
+fn findRulesRegion(text: []const u8) RegionError![]const u8 {
+    var begin_end: ?usize = null; // 시작 표지 줄 바로 뒤
+    var end_start: ?usize = null; // 끝 표지 줄의 첫 바이트
+    var in_fence = false;
+    var pos: usize = 0;
+    while (pos < text.len) {
+        const nl = std.mem.indexOfScalarPos(u8, text, pos, '\n') orelse text.len;
+        const line = text[pos..nl];
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.startsWith(u8, trimmed, "```") or std.mem.startsWith(u8, trimmed, "~~~")) in_fence = !in_fence;
+        for ([_][]const u8{ mcp.agent_rules_begin, mcp.agent_rules_end }, 0..) |marker, which| {
+            if (std.mem.indexOf(u8, line, marker) == null) continue;
+            if (!std.mem.eql(u8, trimmed, marker)) return error.RegionMarkerNotAlone;
+            if (in_fence) return error.RegionInFence;
+            if (which == 0) {
+                if (begin_end != null) return error.RegionDuplicated;
+                if (end_start != null) return error.RegionOrder;
+                begin_end = @min(nl + 1, text.len);
+            } else {
+                if (end_start != null) return error.RegionDuplicated;
+                if (begin_end == null) return error.RegionOrder;
+                end_start = pos;
+            }
+        }
+        pos = nl + 1;
+    }
+    const a = begin_end orelse return error.RegionMissing;
+    const b = end_start orelse return error.RegionMissing;
+    const region = std.mem.trim(u8, text[a..b], " \t\r\n");
+    if (region.len == 0) return error.RegionEmpty;
+    return region;
+}
+
+/// 구역에 있으면 안 되는 표면 고유 낱말. 같은 글이 CLI 스킬과 MCP 도구 양쪽에 실리므로, 한쪽의 명령 이름·플래그·숫자는 다른 쪽에서 틀린
+/// 말이 된다(예: CPU 조건의 수명은 CLI 에서는 에이전트 프로세스, MCP 에서는 그 연결 — §9.6.3). 숫자는 판마다 달라질 수 있는 동작 사실이다.
+fn surfaceToken(region: []const u8) ?[]const u8 {
+    for ([_][]const u8{ "maru browser", "browser_", "--", "`", "$", "maru mcp" }) |t| {
+        if (std.mem.indexOf(u8, region, t) != null) return t;
+    }
+    for (region) |c| if (std.ascii.isDigit(c)) return "숫자";
+    return null;
+}
+
+fn skillText(arena: std.mem.Allocator) ![]const u8 {
+    return std.Io.Dir.cwd().readFileAlloc(io, skill_path, arena, .limited(1024 * 1024));
+}
+
+test "⑦ SKILL.md 의 규칙 구역 표지가 정확히 하나씩, 그 순서로, 코드 블록 밖에 있고 구역이 비지 않았다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const region = findRulesRegion(try skillText(arena)) catch |e| {
+        std.debug.print("{s}: 규칙 구역({s} … {s})이 틀렸다: {s}\n", .{ skill_path, mcp.agent_rules_begin, mcp.agent_rules_end, @errorName(e) });
+        return e;
+    };
+    std.debug.print("plugin skill: 규칙 구역 {d} 바이트\n", .{region.len});
+    // 플러그인 글 중 표지가 있는 곳은 SKILL.md 하나 — 참조 파일에 사본이 생기면 어느 쪽이 심기는지 갈린다.
+    for (try pluginMarkdown(arena)) |f| {
+        if (std.mem.eql(u8, f.path, skill_path)) continue;
+        if (std.mem.indexOf(u8, f.text, mcp.agent_rules_begin) != null or std.mem.indexOf(u8, f.text, mcp.agent_rules_end) != null) {
+            std.debug.print("{s}: 규칙 구역 표지는 SKILL.md 에만 둔다\n", .{f.path});
+            return error.RegionOutsideSkill;
+        }
+    }
+}
+
+test "⑧ 실제 initialize 응답의 instructions 가 SKILL.md 의 규칙 구역 글로 바이트 그대로 시작한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const region = try findRulesRegion(try skillText(arena));
+    const reply = (try mcp.handleLine(std.testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")).reply;
+    defer std.testing.allocator.free(reply);
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, reply, .{ .allocate = .alloc_always });
+    const served = v.object.get("result").?.object.get("instructions").?.string;
+    if (!std.mem.startsWith(u8, served, region)) {
+        // 이 시험이 도는 트리의 SKILL.md 와 바이너리에 심긴 글이 다르다 — 빌드 배선(build.zig `maru_browser_skill_md`)이 다른 파일을 가리키거나,
+        // 추출 규칙(`mcp.agentRulesRegion`)이 이 시험의 것과 갈렸다.
+        std.debug.print("instructions 가 규칙 구역으로 시작하지 않는다.\n--- 구역({d} 바이트)\n{s}\n--- instructions 앞({d} 바이트)\n{s}\n", .{
+            region.len, region, @min(served.len, region.len), served[0..@min(served.len, region.len)],
+        });
+        return error.InstructionsDoNotStartWithRules;
+    }
+    // 구역 뒤에는 이 서버만의 안내가 따로 온다(표면 고유 사실은 각자 — 구역이 instructions 전부가 되지 않는다).
+    try std.testing.expect(served.len > region.len);
+    try std.testing.expect(std.mem.indexOf(u8, served[region.len..], "browser_list") != null);
+}
+
+test "⑨ 규칙 구역에 표면 고유 낱말(명령·도구 이름·플래그·인라인 코드·숫자)이 없다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const region = try findRulesRegion(try skillText(arena));
+    if (surfaceToken(region)) |t| {
+        std.debug.print("{s}: 규칙 구역에 표면 고유 낱말 「{s}」 — 이 글은 MCP 에도 그대로 실린다. 그 사실은 구역 밖(스킬의 다른 절, mcp.zig `server_guidance`)에\n", .{ skill_path, t });
+        return error.SurfaceTokenInRules;
+    }
+}
+
+test "스캐너: 규칙 구역 — 표지가 없거나·둘이거나·거꾸로거나·코드 블록 안이거나·줄에 다른 글과 섞이거나·비면 오류, 표면 낱말은 걸린다" {
+    const b = mcp.agent_rules_begin;
+    const e = mcp.agent_rules_end;
+    try std.testing.expectEqualStrings("- rule one\n- rule two", try findRulesRegion("# T\n" ++ b ++ "\n\n- rule one\n- rule two\n\n" ++ e ++ "\nafter\n"));
+    try std.testing.expectError(error.RegionMissing, findRulesRegion("# T\n- no markers\n"));
+    try std.testing.expectError(error.RegionMissing, findRulesRegion(b ++ "\n- open\n"));
+    try std.testing.expectError(error.RegionDuplicated, findRulesRegion(b ++ "\nx\n" ++ b ++ "\ny\n" ++ e ++ "\n"));
+    try std.testing.expectError(error.RegionDuplicated, findRulesRegion(b ++ "\nx\n" ++ e ++ "\ny\n" ++ e ++ "\n"));
+    try std.testing.expectError(error.RegionOrder, findRulesRegion(e ++ "\nx\n" ++ b ++ "\n"));
+    try std.testing.expectError(error.RegionInFence, findRulesRegion("```\n" ++ b ++ "\n```\nx\n" ++ e ++ "\n"));
+    try std.testing.expectError(error.RegionMarkerNotAlone, findRulesRegion("see " ++ b ++ "\nx\n" ++ e ++ "\n"));
+    try std.testing.expectError(error.RegionEmpty, findRulesRegion(b ++ "\n\n" ++ e ++ "\n"));
+    // 부정 판정자의 양성 대조 — 금지 낱말 하나하나가 실제로 걸린다.
+    try std.testing.expect(surfaceToken("- Work in a tab you opened.") == null);
+    for ([_][]const u8{ "use maru browser open", "call browser_open", "pass --reload", "run `exec`", "up to 8 tabs", "in $TMPDIR" }) |bad| {
+        try std.testing.expect(surfaceToken(bad) != null);
     }
 }
 

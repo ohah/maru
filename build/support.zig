@@ -14,6 +14,10 @@ var macos_spawn_module: ?*std.Build.Module = null;
 /// `build.zig.zon` `.version` 을 담은 값-전용 모듈(`pub const version: []const u8`). `maru --version`·XTVERSION
 /// (`src/terminal/core.zig` `terminal_version`)·`maru mcp` `serverInfo` 가 **같은 이 하나**를 읽는다(docs/distribution.md 「버전 정책」).
 var maru_version_module: ?*std.Build.Module = null;
+/// 에이전트 스킬 `plugins/maru-browser/skills/maru-browser/SKILL.md` 를 뿌리로 둔 embed 전용 모듈. `maru mcp` 의 `instructions`
+/// (`src/cli/mcp.zig`)가 `@embedFile("maru_browser_skill_md")` 로 그 「규칙」 구역을 심는다(M10 — 규칙의 단일 출처는 스킬 글).
+/// 컴파일되지 않는 값이라 `maru_version` 처럼 그래프마다 붙여도 비용이 없다.
+var maru_browser_skill_module: ?*std.Build.Module = null;
 
 pub fn setMacosSpawnModule(module: *std.Build.Module) void {
     macos_spawn_module = module;
@@ -31,6 +35,10 @@ pub fn setMaruVersionModule(module: *std.Build.Module) void {
     maru_version_module = module;
 }
 
+pub fn setMaruBrowserSkillModule(module: *std.Build.Module) void {
+    maru_browser_skill_module = module;
+}
+
 fn collectModules(
     b: *std.Build,
     module: *std.Build.Module,
@@ -38,7 +46,7 @@ fn collectModules(
     type_fields_module: ?*std.Build.Module,
     modules: *std.array_hash_map.Auto(*std.Build.Module, void),
 ) void {
-    if (module == repeat_module or module == type_fields_module or module == maru_version_module or modules.contains(module)) return;
+    if (module == repeat_module or module == type_fields_module or module == maru_version_module or module == maru_browser_skill_module or modules.contains(module)) return;
     modules.putNoClobber(b.graph.arena, module, {}) catch @panic("OOM");
     for (module.import_table.values()) |dependency| {
         collectModules(b, dependency, repeat_module, type_fields_module, modules);
@@ -53,10 +61,12 @@ fn collectModules(
 /// 이름 모듈(`array_repeat`·`png_codec`) 없이는 컴파일되지 않으므로 새 결합이 아니고, 이 모듈은 import·OS·I/O 가 0 인
 /// 값 하나라 어느 층에도 속하지 않는다. 코어를 컴파일하는 그래프(제품·cross·wasm·mobile·시험)는 전부 `attachPngCodec`
 /// 이나 `addProjectTest` 를 거쳐 여기 닿으므로 host 마다 값을 넣어 줄 필요가 없다(docs/distribution.md 「버전 정책」).
+/// `maru_browser_skill_md`(스킬 글)도 같은 까닭으로 같은 길이다 — `src/cli/mcp.zig` 를 컴파일하는 그래프가 곧 위 그래프들이다
+/// (control-plane-browser.md §9.6.3 「규칙 구역」).
 pub fn attachArrayRepeatImports(b: *std.Build, root: *std.Build.Module) void {
     const repeat_module = array_repeat_module;
     const type_fields_module = type_info_fields_module;
-    if (repeat_module == null and type_fields_module == null and macos_spawn_module == null and maru_version_module == null) return;
+    if (repeat_module == null and type_fields_module == null and macos_spawn_module == null and maru_version_module == null and maru_browser_skill_module == null) return;
     var modules: std.array_hash_map.Auto(*std.Build.Module, void) = .empty;
     collectModules(b, root, repeat_module, type_fields_module, &modules);
     for (modules.keys()) |module| {
@@ -66,6 +76,7 @@ pub fn attachArrayRepeatImports(b: *std.Build, root: *std.Build.Module) void {
         // test and the full Maru facade both use the native spawn boundary.
         if (macos_spawn_module) |spawn_module| if (module != spawn_module) module.addImport("macos_spawn", spawn_module);
         if (maru_version_module) |version_module| module.addImport("maru_version", version_module);
+        if (maru_browser_skill_module) |skill_module| module.addImport("maru_browser_skill_md", skill_module);
     }
 }
 

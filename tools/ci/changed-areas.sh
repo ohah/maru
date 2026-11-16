@@ -116,7 +116,9 @@ while IFS= read -r path; do
 	# **에이전트 플러그인**(plugins/·루트 .claude-plugin/ — control-plane-browser.md §9.6.3). 스킬 글은 `.md` 지만
 	# 문서가 아니다: `zig build test` 의 동기화 판정자(tests/plugin_skill_sync.zig)가 그 글의 명령을 진짜 CLI 파서에
 	# 넣는다. 아래 `*.md` 규칙에 먼저 걸리면 docs 축만 켜져 그 판정자가 CI 에서 안 돈다 — 그래서 **그 규칙보다 앞에**
-	# 둔다(case 는 첫 일치). 앱의 런타임 동작은 바꾸지 않으므로 runtime(macOS 잡)은 켜지 않는다.
+	# 둔다(case 는 첫 일치). 게다가 SKILL.md 의 「규칙」 구역은 빌드 때 `maru mcp` 의 instructions 로 바이너리에 심긴다(M10 —
+	# build.zig `setMaruBrowserSkillModule`) — 그 판정자(plugin_skill_sync ⑦⑧⑨·src/cli/mcp.zig)도 code 축의 `zig build test` 가 돈다.
+	# 앱의 런타임 동작은 바꾸지 않으므로 runtime(macOS 잡)은 켜지 않는다.
 	plugins/* | .claude-plugin/*)
 		code=true
 		;;

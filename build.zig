@@ -306,6 +306,12 @@ pub fn build(b: *std.Build) void {
         break :blk opts.createModule();
     };
     support.setMaruVersionModule(maru_version_mod);
+    // M10: `maru mcp` 의 `instructions` 맨 앞 「규칙」 구역의 단일 출처는 에이전트 스킬 글이다(사용자 결정 D2 2026-11-16). 스킬은
+    // src/ 밖(배포물 `plugins/`)이라 @embedFile 이 직접 못 읽어 이름 모듈로 준다 — 버전 모듈과 같은 길로 그래프마다(support).
+    // 구역 추출과 표지 검사는 `src/cli/mcp.zig` 가 컴파일 때 한다(표지가 틀리면 빌드가 멈춘다).
+    support.setMaruBrowserSkillModule(b.createModule(.{
+        .root_source_file = b.path("plugins/maru-browser/skills/maru-browser/SKILL.md"),
+    }));
 
     // **가짜 언어 서버**(tooling §8.2a 관측점) — `LSPB*` 가 `zig-out/bin/maru-fake-lsp` 를 `MARU_LSP_SERVER_OVERRIDE` 로 끼운다.
     // 그 판정자를 돌리는 run 스텝마다(`test-editor`·macOS 집계 샤드) 이 설치 단계에 의존해 판정자가 돌 때 늘 그 자리에 있다.
@@ -12321,7 +12327,7 @@ pub fn build(b: *std.Build) void {
     const run_plugin_skill_tests = b.addRunArtifact(plugin_skill_tests);
     run_plugin_skill_tests.setCwd(b.path("."));
     run_plugin_skill_tests.has_side_effects = true;
-    run_plugin_skill_tests.addArg("--maru-expect-tests=10");
+    run_plugin_skill_tests.addArg("--maru-expect-tests=14");
     b.step("test-plugin-skill", "Check the maru-browser agent plugin against the real maru browser parser and help").dependOn(&run_plugin_skill_tests.step);
     test_step.dependOn(&run_plugin_skill_tests.step);
 

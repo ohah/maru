@@ -1,7 +1,7 @@
 #!/bin/sh
 # W9b① 실측 — pane 안의 에이전트(이 대본이 띄운 pane 셸)가 Chromium(OSR) 탭을 DevTools 로 움직이는가(docs/plans/web-osr-backend.md
-# W9). 앱을 **일반 모드**로 띄운다(스모크 모드는 셸을 고정 시험 셸로 바꾼다). 확인 모달은 `MARU_TEST_GRANT_DECISION=approve` 로
-# 자동 승인한다. 시험 페이지는 `MARU_WEB_OSR_TEST_URL`(시작 브라우저 탭 — `MARU_WEB_PANEL=1`).
+# W9). 앱을 **일반 모드**로 띄운다(스모크 모드는 셸을 고정 시험 셸로 바꾼다). 확인 모달은 없다(사용자 결정 2026-11-16 「AI 가 모든
+# 접근」 — pane 의 요청은 전권을 묻지 않고 받는다). 시험 페이지는 `MARU_WEB_OSR_TEST_URL`(시작 브라우저 탭 — `MARU_WEB_PANEL=1`).
 #
 #   click-trusted   `maru browser click --selector '#b'` → ok, 페이지는 사람 클릭(`isTrusted`)으로 받는다(페이지가 서버로 보내는 신호
 #                   요청 `/hit?b-true` — `browser list` 의 제목은 페이지 제목이 아니라 탭 이름이다(WebKit 과 같다 — W9a 작성자 선택), 이동은 주소 칸으로 본다)
@@ -1481,7 +1481,7 @@ printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile 
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
-    MARU_TEST_GRANT_DECISION=approve MARU_SMOKE_OUT="$out" MARU_SMOKE_HOME="$root/home" MARU_WEB_OSR_TEST_INPUT="$root/hide.txt" \
+    MARU_SMOKE_OUT="$out" MARU_SMOKE_HOME="$root/home" MARU_WEB_OSR_TEST_INPUT="$root/hide.txt" \
     MARU_TEST_UPLOAD_DECISION="$root/updecision" \
     "$app" > "$root/app.log" 2>&1 &
 app_pid=$!

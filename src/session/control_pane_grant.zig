@@ -96,13 +96,16 @@ pub const PaneGrant = struct {
     }
 };
 
-/// bounded — 한 세션의 (pane × target × scope) grant 상한. 실무상 pane 소수 × surface 소수 × 2 scope라 넉넉.
-/// 초과=`error.Full`(호출자 방어 — 정상 사용선 도달 안 함). DoS-safe 고정 배열(allocator 불요). 에이전트 탭의 태어날 때 네트워크
-/// grant(`birth`)는 이 상한 밖에서 따로 센다 — 각각 그 탭의 제어 grant 와 짝이라 그 수도 `max_grants` 를 넘지 않는다.
-pub const max_grants: usize = 64;
+/// grant 를 가질 수 있는 (pane, 탭) 쌍의 수 — 표의 크기는 이것에서 나온다.
+pub const max_pairs: usize = 64;
+/// 「전권」(사용자 결정 2026-11-16 — `fullAccessPlan`)이 한 (pane, 탭) 쌍에 넣는 scope 들. 신원 판정을 지난 pane 은 그 탭에 이것을 모두 갖는다.
+pub const full_access_scopes = [_]capmod.ScopeClass{ .browser, .browser_storage, .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock, .browser_emulation };
+/// bounded — 한 세션의 (pane × target × scope) 보통 grant 상한: 쌍마다 전권의 일곱(`full_access_scopes`). 초과=`error.Full`(호출자는 그 요청을
+/// `grants_full` 로 분명히 실패시킨다). DoS-safe 고정 배열(allocator 불요). 에이전트 탭의 태어날 때 grant(`birth`)는 이 상한 밖에서 따로 센다.
+pub const max_grants: usize = full_access_scopes.len * max_pairs;
 /// 태어날 때의 grant 수 상한 — 에이전트 탭 하나에 다섯(네트워크 기록·본문 기록 — W9d② 사용자 결정 UB2, 요청 막기 — W9d③ 사용자 결정 D1, 가짜
-/// 응답 — W9d④ D1 그대로, 기기 흉내 — W9e① D1 그대로)이라 상한 안 grant 의 다섯 배.
-pub const max_birth_grants: usize = 5 * max_grants;
+/// 응답 — W9d④ D1 그대로, 기기 흉내 — W9e① D1 그대로)이라 쌍 상한의 다섯 배.
+pub const max_birth_grants: usize = 5 * max_pairs;
 /// 표의 실제 자리 수 — 상한 안의 grant 와 태어날 때의 grant 를 함께 담는다.
 pub const capacity: usize = max_grants + max_birth_grants;
 
@@ -182,6 +185,11 @@ pub const PaneGrantStore = struct {
         return changed;
     }
 
+    /// 보통 grant `n` 개를 더 둘 자리가 있는가(전권 계획을 반쯤 넣고 멈추지 않게 미리 본다).
+    pub fn normalRoom(self: *const PaneGrantStore, n: usize) bool {
+        return self.len + n <= capacity and self.len - self.birthCount() + n <= max_grants;
+    }
+
     /// (pane, target, scope) grant 가 **있는가만** 본다 — 인가에는 쓰지 않는다(`authorizes`). 메뉴·revoke·시험용.
     pub fn hasGrant(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass) bool {
         return self.findConst(pane, target, scope) != null;
@@ -254,6 +262,27 @@ pub const PaneGrantStore = struct {
         }
     }
 };
+
+/// **전권(사용자 결정 2026-11-16 원문 「그 권한요청 이런거 다 없애주세요 그냥 AI가 모든 접근 가능하게」)**: 신원 판정(1g)을 지난 pane 이 탭에
+/// 닿으면 그 탭에서 모든 browser scope 를 묻지 않고 갖는다. 이 함수는 그 (pane, 탭) 이 지금 문서(`current_host` — http(s) 호스트, 아니면 null)에서
+/// **아직 인가받지 못한** scope 마다 넣을 grant 를 `out` 에 담는다(이미 다 있으면 빈 것 — 같은 요청을 거듭해도 번호가 바뀌지 않는다).
+/// - 자리가 없으면 어느 호스트든(`any_host`) — 그 탭이 어디로 가든 다시 넣지 않는다.
+/// - 자리가 있는데 지금 호스트를 덮지 않으면(설정 `browser.agent-network-full` 을 끈 채 사용자가 탭을 몰아 좁혀진 자리 — `narrowAnyHost`) **지금
+///   호스트**로 — 예전에 사용자가 모달에서 「허용」 했을 때와 같은 값이다(좁힘의 뜻 — 끈 설정 아래에서는 사이트마다 새 동의 — 을 지킨다). 지금 문서가
+///   http(s) 가 아니면 넣지 않는다(덮을 호스트가 없다 — 그 요청은 디스패치가 지금처럼 답한다).
+/// 모두 `birth=false` 다 — 「탭과 함께 생긴 권한」(trace 등 에이전트 탭만의 것)은 `open` 이 따로 넣는다.
+pub fn fullAccessPlan(store: *const PaneGrantStore, pane: u64, target: u64, current_host: ?[]const u8, out: *[full_access_scopes.len]PaneGrant) []PaneGrant {
+    var n: usize = 0;
+    for (full_access_scopes) |scope| {
+        if (store.authorizes(pane, target, scope, current_host)) continue;
+        if (store.hasGrant(pane, target, scope)) {
+            const host = current_host orelse continue;
+            out[n] = .{ .pane = pane, .target = target, .scope = scope, .host = GrantHost.init(host) };
+        } else out[n] = .{ .pane = pane, .target = target, .scope = scope, .any_host = true };
+        n += 1;
+    }
+    return out[0..n];
+}
 
 // ══ 테스트(헤드리스, Linux CI 포함 — 순수 집합 로직) ═══════════════════════════════════════════════════════════
 const testing = std.testing;
@@ -434,16 +463,16 @@ test "W9d① 적대 리뷰 1 회차 재현 F1·F5: 네트워크 grant 를 다른
     try testing.expectEqualStrings("agent.test", store.hostOf(6, 12, .browser_network).?.slice());
 }
 
-test "W9d① 적대 리뷰 1 회차 재현 F6: 태어날 때 grant 는 64 자리 상한 밖에서 센다 — 보통 grant 64 개와 태어날 때 grant(탭마다 다섯 — W9d② 본문 기록·W9d③ 막기·W9d④ 가짜·W9e① 흉내) 320 개를 함께 담고, 그 넘어는 Full" {
+test "W9d① 적대 리뷰 1 회차 재현 F6: 태어날 때 grant 는 보통 grant 상한 밖에서 센다 — 보통 grant 상한만큼과 태어날 때 grant(탭마다 다섯 — W9d② 본문 기록·W9d③ 막기·W9d④ 가짜·W9e① 흉내) 320 개를 함께 담고, 그 넘어는 Full" {
     var store: PaneGrantStore = .{};
-    for (0..max_grants) |i| {
+    for (0..max_pairs) |i| {
         try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network, .any_host = true, .birth = true });
         try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network_body, .any_host = true, .birth = true });
         try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network_block, .any_host = true, .birth = true });
         try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network_mock, .any_host = true, .birth = true });
         try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_emulation, .any_host = true, .birth = true });
     }
-    try testing.expect(store.room(false)); // 태어날 때 grant 가 다 차도 사용자의 모달은 저장된다
+    try testing.expect(store.room(false)); // 태어날 때 grant 가 다 차도 보통 grant(전권)는 저장된다
     try testing.expect(!store.room(true));
     try testing.expectError(error.Full, store.grant(.{ .pane = 1, .target = 999, .scope = .browser_network, .any_host = true, .birth = true }));
     for (0..max_grants) |i| try store.grant(.{ .pane = 2, .target = 100 + i, .scope = .browser });
@@ -649,4 +678,66 @@ test "W9e①: browser_emulation grant 도 사이트에 묶인다 — 다른 호�
     try testing.expect(hostBound(.browser_emulation));
     const empty: PaneGrantStore = .{};
     try testing.expect(empty.birthRoom(5));
+}
+
+test "전권(사용자 결정 2026-11-16): 빈 표면 일곱 scope 모두 어느 호스트든, 다 있으면 빈 계획 — 거듭해도 번호가 그대로" {
+    var store: PaneGrantStore = .{};
+    var out: [full_access_scopes.len]PaneGrant = undefined;
+    const plan = fullAccessPlan(&store, 5, 11, "bank.test", &out);
+    try testing.expectEqual(full_access_scopes.len, plan.len);
+    for (plan, full_access_scopes) |g, scope| {
+        try testing.expect(g.any_host and !g.birth and g.pane == 5 and g.target == 11 and g.scope == scope);
+        try store.grant(g);
+    }
+    for (full_access_scopes) |scope| try testing.expect(store.authorizes(5, 11, scope, "other.test"));
+    const id_before = store.idOf(5, 11, .browser_network).?;
+    try testing.expectEqual(@as(usize, 0), fullAccessPlan(&store, 5, 11, "bank.test", &out).len);
+    try testing.expectEqual(@as(usize, 0), fullAccessPlan(&store, 5, 11, null, &out).len); // http 가 아닌 문서도 어느 호스트든이면 덮인다
+    try testing.expectEqual(id_before, store.idOf(5, 11, .browser_network).?);
+    // 다른 pane·다른 탭은 따로다.
+    try testing.expectEqual(full_access_scopes.len, fullAccessPlan(&store, 6, 11, "bank.test", &out).len);
+    try testing.expectEqual(full_access_scopes.len, fullAccessPlan(&store, 5, 12, "bank.test", &out).len);
+}
+
+test "전권: 이미 있는 자리는 건너뛰고 빠진 것만 — 에이전트 탭(태어날 때 다섯 + browser)은 쿠키 하나만 더한다" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    for ([_]capmod.ScopeClass{ .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock, .browser_emulation }) |scope| try store.grant(.{ .pane = 5, .target = 11, .scope = scope, .any_host = true, .birth = true });
+    var out: [full_access_scopes.len]PaneGrant = undefined;
+    const plan = fullAccessPlan(&store, 5, 11, "bank.test", &out);
+    try testing.expectEqual(@as(usize, 1), plan.len);
+    try testing.expectEqual(capmod.ScopeClass.browser_storage, plan[0].scope);
+    try testing.expect(plan[0].any_host);
+}
+
+test "전권: 좁혀진 자리(설정을 끈 채 사용자가 몬 탭)는 지금 호스트로 — 모달 허용과 같은 값, http 가 아니면 넣지 않는다" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network, .any_host = true, .birth = true });
+    try testing.expect(store.narrowAnyHost(11, GrantHost.init("first.test")));
+    var out: [full_access_scopes.len]PaneGrant = undefined;
+    const plan = fullAccessPlan(&store, 5, 11, "bank.test", &out);
+    var network: ?PaneGrant = null;
+    for (plan) |g| if (g.scope == .browser_network) {
+        network = g;
+    };
+    const g = network orelse return error.TestUnexpectedResult;
+    try testing.expect(!g.any_host and std.mem.eql(u8, g.host.slice(), "bank.test"));
+    // 좁혀진 사이트 안이면 이미 덮인다 — 넣지 않는다.
+    for (fullAccessPlan(&store, 5, 11, "www.first.test", &out)) |x| try testing.expect(x.scope != .browser_network);
+    // http(s) 가 아닌 문서 — 좁혀진 자리는 덮을 호스트가 없어 넣지 않는다(빈 자리의 scope 는 어느 호스트든으로 넣는다).
+    for (fullAccessPlan(&store, 5, 11, null, &out)) |x| {
+        try testing.expect(x.scope != .browser_network);
+        try testing.expect(x.any_host);
+    }
+}
+
+test "전권: 보통 grant 상한은 쌍마다 일곱 — normalRoom 이 계획 전체가 들어갈지 미리 본다, 태어날 때 grant 는 세지 않는다" {
+    var store: PaneGrantStore = .{};
+    for (0..max_pairs) |i| for (full_access_scopes) |scope| try store.grant(.{ .pane = 1, .target = 100 + i, .scope = scope, .any_host = true });
+    try testing.expect(!store.normalRoom(1));
+    try testing.expectError(error.Full, store.grant(.{ .pane = 2, .target = 1, .scope = .browser }));
+    try store.grant(.{ .pane = 1, .target = 999, .scope = .browser_network, .any_host = true, .birth = true }); // 태어날 때 자리는 따로
+    store.removeSurface(100);
+    try testing.expect(store.normalRoom(full_access_scopes.len));
+    try testing.expect(!store.normalRoom(full_access_scopes.len + 1));
 }

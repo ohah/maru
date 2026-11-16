@@ -1893,11 +1893,12 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
         notes[5] = .{ .text = root_line, .fit = .path };
         state.notes = notes;
     } else {
-        // 제품 브라우저 권한 동의문(`app_host_abi.zig` `grantPromptText`)과 같은 키·같은 버튼이다. URL 은 제품이 줄이는 폭 안의 길이다.
+        // 긴 질문 한 줄 — 제품 언어 서버 신뢰 질문(`editor/lsp.zig` `gateTrust`)과 같은 키·같은 버튼·같은 보호에 긴 이름을 넣는다(브라우저 권한
+        // 동의문이 이 자리를 쓰다가 사용자 결정 2026-11-16 「AI 가 모든 접근」 으로 걷혔다).
         var msg_buf: [512]u8 = undefined;
-        const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.grant_prompt), &.{ .{ .s = maru.i18n.t(.grant_scope_storage) }, .{ .s = "https://accounts.example.com/signin/continue" } }));
-        state.show(message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
-        state.guardAsync(maru.i18n.t(.grant_recheck)); // 제품 `showGrantConfirm` 과 같은 보호
+        const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = "typescript-language-server --stdio --log-level=4 (workspace: ~/Documents/workspace/maru)" }}));
+        state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
+        state.guardAsync(maru.i18n.t(.lsp_trust_recheck)); // 제품 `gateTrust` 와 같은 보호
     }
     const p: chrome.props.ChromeProps = .{ .metrics = .{
         .cell_width_px = scenario.cell_w_px,

@@ -62,7 +62,7 @@ pub fn hashNonce(nonce: Nonce) Hash {
 // ── scope 모델(§8.3) ──────────────────────────────────────────────────────────────────────────────────────
 /// capability scope 분류(§8.3). method↔scope 매핑(§6 line 111)이 이 category로 판정한다. metadata의 sub-scope
 /// (self|window|all)는 `Scope.metadata`가 `wm.MetadataScope`로 실어 나른다(1c/1d가 소비하는 그 타입).
-pub const ScopeClass = enum { metadata, bind, read_output, write, lifecycle, browser, browser_storage, browser_network, browser_network_body, browser_network_block, browser_network_mock, browser_emulation, browser_agent_tabs };
+pub const ScopeClass = enum { metadata, bind, read_output, write, lifecycle, browser, browser_storage, browser_network, browser_network_body, browser_network_block, browser_network_mock, browser_emulation };
 
 /// 단일 capability scope(§8.5 **single-scope 강제**: capability는 정확히 하나의 scope만 싣는다 — 이 union은 한
 /// 값이라 write+lifecycle 같은 복합 grant를 타입 수준에서 만들 수 없다). metadata는 `wm.MetadataScope`를 실어
@@ -103,10 +103,6 @@ pub const Scope = union(enum) {
     /// 때만 걸린다 — 사용자 결정 Q1), 상속 fd 로 발급하지 않는다. `browser` grant 는 요구하지 않는다(흉내는 페이지에서 코드를 돌리지 않는다 —
     /// 계획 §13 P1-9). `browser`·`browser_network*`·`browser_storage` 가 함의하지 않는 peer scope 다.
     browser_emulation,
-    /// `browser-agent-tabs`(사용자 결정 2026-11-16 — `browser.open`): 그 pane 의 에이전트가 **사용자의 로그인된 사이트를 쓰는** 탭을
-    /// 열어도 되는가. 에이전트 탭은 사용자의 Chromium 쿠키 통을 그대로 쓴다 — pane 마다 처음 한 번 묻고(확인 grant 의 target 은 그 pane
-    /// 자신), 그 pane 이 사는 동안 남는다. 상속 fd 로 발급하지 않는다(로그인을 쓰는 탭을 여는 힘이다).
-    browser_agent_tabs,
 
     pub fn class(self: Scope) ScopeClass {
         return switch (self) {
@@ -122,7 +118,6 @@ pub const Scope = union(enum) {
             .browser_network_block => .browser_network_block,
             .browser_network_mock => .browser_network_mock,
             .browser_emulation => .browser_emulation,
-            .browser_agent_tabs => .browser_agent_tabs,
         };
     }
 
@@ -133,7 +128,7 @@ pub const Scope = union(enum) {
     /// 쿠키=인증 토큰이라 상속 fd로 새면 same-uid untrusted 코드가 세션 자격증명을 탈취(write/lifecycle과 동급 위험).
     pub fn allowedViaInheritedFd(self: Scope) bool {
         return switch (self.class()) {
-            .write, .lifecycle, .browser_storage, .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock, .browser_emulation, .browser_agent_tabs => false,
+            .write, .lifecycle, .browser_storage, .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock, .browser_emulation => false,
             .metadata, .read_output, .bind, .browser => true,
         };
     }
@@ -184,9 +179,6 @@ pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     // browser.trace(W9e②): 성능 trace 는 그 탭의 네트워크 기록(요청 주소·시각)을 담는다 — 네트워크 grant(에이전트 탭은 탭과 함께 생긴 것)로 본다.
     // control_browser 가 그 grant 가 탭과 함께 생긴 것인지(에이전트 탭만 — 사용자 결정 4)와 `browser` grant 도 본다.
     if (m.core == .browser and eq(rest, "trace")) return .browser_network;
-    // browser-agent-tabs(사용자 결정 2026-11-16): `browser.open` 은 사용자의 로그인된 사이트를 쓰는 탭을 연다 — pane 마다 한 번 묻는 동의.
-    // 대상 탭이 없어 control_browser 가 pane 을 target 으로 쓴다. generic `browser.*` 보다 먼저.
-    if (m.core == .browser and eq(rest, "open")) return .browser_agent_tabs;
     // browser.*(§6 line 111 와일드카드) — 나머지 페이지 조작/관찰.
     if (m.core == .browser) return .browser;
     return null;
@@ -587,15 +579,12 @@ test "fd 발급 정책: browser_storage는 상속 fd로 발급 금지(D5 쿠키=
     try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_storage, null));
 }
 
-// 사용자 결정 2026-11-16: `browser.open` 은 사용자의 로그인된 사이트를 쓰는 탭을 연다 — 그 힘이 셸 서브트리 전체로 새는 상속 fd 로는
-// 나가지 않아야 한다(pane 마다 사용자가 한 번 허락한다). 매핑이 generic `browser` 로 떨어지면 `browser` cap 하나가 탭 열기까지 인가한다.
-test "browser_agent_tabs: browser.open 이 요구하는 scope 이고 상속 fd 로 발급하지 않는다" {
-    try testing.expect(!Scope.allowedViaInheritedFd(.browser_agent_tabs));
-    try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_agent_tabs, null));
-    try testing.expectEqual(ScopeClass.browser_agent_tabs, (Scope{ .browser_agent_tabs = {} }).class());
-    try testing.expectEqual(ScopeClass.browser_agent_tabs, methodRequiredScope("browser.open").?);
-    try testing.expectEqual(ScopeClass.browser, methodRequiredScope("browser.openX").?); // 이름이 같을 때만
-    try testing.expectEqual(ScopeClass.browser, methodRequiredScope("browser.close").?); // 닫기는 그 탭의 browser grant
+// 사용자 결정 2026-11-16(「AI 가 모든 접근」): pane 동의(`browser_agent_tabs` — 같은 날 #4731)를 걷었다. `browser.open` 은 다시 generic `browser`
+// 로 매핑된다 — 탭 열기는 cap 이 아니라 1g pane 신원으로만 열린다(control_browser 가 pane 이 없으면 균일 unauthorized).
+test "browser.open 은 generic browser scope — pane 동의 scope 는 없다" {
+    try testing.expectEqual(ScopeClass.browser, methodRequiredScope("browser.open").?);
+    try testing.expectEqual(ScopeClass.browser, methodRequiredScope("browser.close").?);
+    try testing.expect(!@hasField(ScopeClass, "browser_agent_tabs"));
 }
 
 test "W9e①: browser_emulation 도 상속 fd 로 발급하지 않는다(사용자 탭이 서버에 보이는 정체를 바꾼다)" {
@@ -670,7 +659,7 @@ test "method↔scope 매핑: §6 line 111의 모든 메서드가 올바른 categ
         .{ .m = "browser.networkMock", .want = .browser_network_mock }, // W9d④
         .{ .m = "browser.emulate", .want = .browser_emulation }, // W9e①
         .{ .m = "browser.emulateX", .want = .browser },
-        .{ .m = "browser.open", .want = .browser_agent_tabs }, // 2026-11-16 pane 동의
+        .{ .m = "browser.open", .want = .browser }, // 2026-11-16 pane 동의를 걷었다
         // localStorage는 eval 백엔드=base browser(exec와 동일 도달, D5 laundering-hole 불변)
         .{ .m = "browser.getLocalStorage", .want = .browser },
         .{ .m = "browser.setLocalStorage", .want = .browser },

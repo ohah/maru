@@ -3472,10 +3472,7 @@ pub fn browserOpFromRequest(
     if (eq(method.rest, "open")) {
         const pane = pane_selector orelse return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
         const p = parseOpenParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
-        // 사용자 결정 2026-11-16: 에이전트 탭은 사용자의 로그인된 사이트를 쓴다 — 그 pane 이 처음 열 때 한 번 묻는다. 동의는 (pane, pane,
-        // browser_agent_tabs) grant 다(대상 탭이 아직 없어 pane 자신이 target). 없으면 앱이 확인 모달로 묻는다(거부 기억·시한은 L4).
-        // 틀린 요청은 위에서 이미 invalid_params — 그 요청으로 모달을 띄우지 않는다.
-        if (!grants.authorizes(pane, pane, .browser_agent_tabs, null)) return .{ .needs_grant = .{ .pane = pane, .target = pane, .scope = .browser_agent_tabs } };
+        // 사용자 결정 2026-11-16(「AI 가 모든 접근」): pane 이 확인되면 묻지 않고 연다 — 같은 날의 pane 동의(#4731)를 걷었다.
         return .{ .op = .{ .surface_id = pane, .method = .open, .arg = try serializeOpenArg(gpa, p) } };
     }
 
@@ -3765,8 +3762,53 @@ fn ungrantedResult(gpa: std.mem.Allocator, id: cp.Id, pane_selector: ?u64, targe
     return .{ .err = try errorResponse(gpa, id, .unauthorized) };
 }
 
-/// pane 동의(사용자 결정 2026-11-16)의 답을 요청의 id 로 직렬화한다 — `data.reason`.
-fn serializeAgentTabsAnswer(gpa: std.mem.Allocator, request_bytes: []const u8, code: cp.ErrorCode, reason: []const u8, message: []const u8) std.mem.Allocator.Error![]u8 {
+/// **전권(사용자 결정 2026-11-16)**: 이 요청이 전권 grant(`control_pane_grant.fullAccessPlan`)를 넣을 탭 — `browser.*` 이고 탭을 대상으로 하며(`list`·
+/// `open` 은 탭이 없다) `id` 가 스냅샷의 **제어할 수 있는** web surface 인 요청의 그 id. 형식이 틀렸거나 없는 id·터미널·markdown 패널이면 null —
+/// 아무것도 넣지 않고 디스패치가 지금처럼 답한다(§8.3 균일 응답 — 없는 id 에 표가 바뀌지 않으니 존재 oracle 이 생기지 않는다). L4 가 신원 판정을
+/// 지난 pane(`browser_pane`)이 있을 때만 부른다.
+pub fn fullAccessTarget(gpa: std.mem.Allocator, request_bytes: []const u8, snapshot: cs.CollectorSnapshot) std.mem.Allocator.Error!?u64 {
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return null,
+    };
+    const method = cp.parseMethod(req.method);
+    if (method.core != .browser or eq(method.rest, "list") or eq(method.rest, "open")) return null;
+    const id = readIdParam(req.params) catch return null;
+    const dto = snapshot.find(id) orelse return null;
+    return switch (dto.detail) {
+        .web => |w| if (w.controllable) id else null,
+        else => null,
+    };
+}
+
+test "전권 대상: 제어할 수 있는 web 탭을 가리키는 browser.* 만 — list·open·터미널·markdown·없는 id·틀린 꼴·다른 네임스페이스는 null" {
+    const a = testing.allocator;
+    const click = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":12,\"selector\":\"h1\"}}";
+    try testing.expectEqual(@as(?u64, 12), try fullAccessTarget(a, click, fx_engine));
+    const cookies = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}";
+    try testing.expectEqual(@as(?u64, 11), try fullAccessTarget(a, cookies, fx_engine));
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.list\",\"params\":{\"id\":12}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"https://e.test/\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":10,\"selector\":\"h1\"}}", // 터미널
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":13,\"selector\":\"h1\"}}", // markdown
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":14,\"selector\":\"h1\"}}", // 파일 HTML 뷰
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":99,\"selector\":\"h1\"}}", // 없는 id
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":\"12\"}}", // 틀린 꼴
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":12}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"browser.click\",\"params\":{\"id\":12}}", // 알림(요청 아님)
+        "not json",
+    }) |req| try testing.expectEqual(@as(?u64, null), try fullAccessTarget(a, req, fx_engine));
+}
+
+/// 전권 grant 표(`control_pane_grant.max_grants` — pane·탭 쌍 64 개)가 찼다 — `-32603`, `reason:"grants_full"`. 신원 판정을 지난 pane 이라 숨길
+/// 것이 없다(균일 unauthorized 가 아니다 — 에이전트가 「권한이 없다」 로 읽고 사용자에게 묻지 않게). 탭을 닫으면 자리가 난다.
+pub fn serializeGrantsFull(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error![]u8 {
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return errorResponse(gpa, .null, .internal_error),
@@ -3778,20 +3820,8 @@ fn serializeAgentTabsAnswer(gpa: std.mem.Allocator, request_bytes: []const u8, c
     };
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
-    try data.put(gpa, "reason", .{ .string = reason });
-    return cp.serializeError(gpa, req.id, code, message, .{ .object = data });
-}
-
-/// pane 동의를 사용자가 거부했다(또는 그 pane 의 거부를 기억하는 중이다 — 그 pane 이 사는 동안, 사용자가 메뉴에서 지울 때까지) — `-32002`,
-/// `reason:"agent_tabs_declined"`. 글은 에이전트가 사용자에게 말할 것을 준다(다시 시도해도 모달이 뜨지 않는다 — 조르지 않게), 그리고 사용자가
-/// 되돌리는 자리(Browser Grants 메뉴)를 말한다.
-pub fn serializeAgentTabsDeclined(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error![]u8 {
-    return serializeAgentTabsAnswer(gpa, request_bytes, .unauthorized, "agent_tabs_declined", "the user declined browser tabs for this pane (they would use the user's logged-in sites) — nothing was opened, and maru will not ask again while this pane is open unless the user undoes it in the Browser Grants menu; tell the user instead of retrying");
-}
-
-/// pane 동의 모달에 답이 없었다(시한) — `-32004`, `reason:"agent_tabs_unanswered"`. 기억은 남기지 않는다(사용자가 정하지 않았다).
-pub fn serializeAgentTabsUnanswered(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error![]u8 {
-    return serializeAgentTabsAnswer(gpa, request_bytes, .timeout, "agent_tabs_unanswered", "the user did not answer whether this pane may open browser tabs (2 minutes) — nothing was opened");
+    try data.put(gpa, "reason", .{ .string = "grants_full" });
+    return cp.serializeError(gpa, req.id, .internal_error, "maru keeps browser access for at most 64 pane-and-tab pairs and they are all in use — close tabs that are no longer needed, then retry", .{ .object = data });
 }
 
 /// W9d②: 본문 기록 전에 네트워크 권한이 없다 — `-32002` 에 `data.reason:"needs_network_permission"`(확인 모달 없이).
@@ -5859,57 +5889,20 @@ test "W9b②-3: wait visible 의 결과 — 로케이터면 {ok, matched, ambigu
 
 // ── W9b③: 탭 열기·닫기 ─────────────────────────────────────────────────────────────────────────────────────
 
-// 사용자 결정 2026-11-16: 에이전트 탭은 사용자의 로그인된 사이트를 쓴다 — pane 마다 처음 한 번 묻는다. 동의는 (pane, pane,
-// browser_agent_tabs) grant 다. 동의가 없으면 needs_grant(앱이 모달을 띄운다), 있으면 곧 op. 틀린 요청은 동의 전에 invalid_params —
-// 그 요청으로 사용자에게 모달을 띄우지 않는다. 다른 pane 의 동의는 타지 못한다(1g 가 찾은 pane 이 키다).
-test "pane 동의: browser.open 은 동의가 없으면 needs_grant(pane, pane, browser_agent_tabs), 있으면 op — 다른 pane 의 동의는 타지 못한다" {
+// 사용자 결정 2026-11-16(「AI 가 모든 접근」): pane 이 확인되면 open 은 곧 op — pane 동의(같은 날 #4731)를 걷었다. 틀린 요청은 여전히
+// invalid_params, pane 을 못 찾은 연결(cap 만 든 것 포함)은 균일 unauthorized 다.
+test "전권: browser.open 은 pane 이 확인되면 묻지 않고 op — grant 가 없어도, 다른 pane 이어도; pane 이 없으면 균일 unauthorized" {
     var grants: cpg.PaneGrantStore = .{};
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"https://example.com/\"}}";
-    switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, 10, &grants, 0)) {
-        .needs_grant => |g| {
-            try testing.expectEqual(@as(u64, 10), g.pane);
-            try testing.expectEqual(@as(u64, 10), g.target); // 대상 탭이 없다 — pane 자신
-            try testing.expectEqual(capmod.ScopeClass.browser_agent_tabs, g.scope);
-        },
-        .op => |op| {
-            testing.allocator.free(op.arg);
-            return error.TestUnexpectedResult;
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    // 다른 pane(11)의 동의 · 그 pane 의 다른 scope grant 로는 열리지 않는다.
-    try grants.grant(.{ .pane = 11, .target = 11, .scope = .browser_agent_tabs });
-    try grants.grant(.{ .pane = 10, .target = 10, .scope = .browser });
-    switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, 10, &grants, 0)) {
-        .needs_grant => |g| try testing.expectEqual(@as(u64, 10), g.pane),
-        .op => |op| {
-            testing.allocator.free(op.arg);
-            return error.TestUnexpectedResult;
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    // 동의가 있으면 곧 op.
-    try grants.grant(.{ .pane = 10, .target = 10, .scope = .browser_agent_tabs });
-    switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, 10, &grants, 0)) {
+    for ([_]u64{ 10, 11 }) |pane| switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, pane, &grants, 0)) {
         .op => |op| {
             defer testing.allocator.free(op.arg);
             try testing.expectEqual(BrowserMethod.open, op.method);
-            try testing.expectEqual(@as(u64, 10), op.surface_id);
+            try testing.expectEqual(pane, op.surface_id);
         },
         else => return error.TestUnexpectedResult,
-    }
-    // 동의를 거두면 다시 묻는다.
-    grants.revoke(10, 10, .browser_agent_tabs);
-    switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, 10, &grants, 0)) {
-        .needs_grant => {},
-        .op => |op| {
-            testing.allocator.free(op.arg);
-            return error.TestUnexpectedResult;
-        },
-        else => return error.TestUnexpectedResult,
-    }
-    // 동의가 있어도 pane 을 못 찾은 연결은 균일 unauthorized 다(동의는 pane 의 것이다).
-    try grants.grant(.{ .pane = 10, .target = 10, .scope = .browser_agent_tabs });
+    };
+    try testing.expectEqual(@as(usize, 0), grants.len); // open 은 표를 보지도 바꾸지도 않는다(탭의 grant 는 L4 가 연 뒤에 넣는다)
     var buf: [1]capmod.Capability = undefined;
     switch (try dispatchBrowser(testing.allocator, req, fx_engine, capsSlice(&buf, browserCap(10)), null, &grants, 0)) {
         .err => |e| {
@@ -5924,7 +5917,7 @@ test "pane 동의: browser.open 은 동의가 없으면 needs_grant(pane, pane, 
     }
 }
 
-test "pane 동의: 틀린 open 요청은 동의가 없어도 needs_grant 가 아니라 invalid_params(모달을 띄우지 않는다)" {
+test "전권: 틀린 open 요청은 invalid_params" {
     var grants: cpg.PaneGrantStore = .{};
     for ([_][]const u8{
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"file:///etc/passwd\"}}",
@@ -5943,37 +5936,20 @@ test "pane 동의: 틀린 open 요청은 동의가 없어도 needs_grant 가 아
     };
 }
 
-test "pane 동의의 답: 거부는 -32002 agent_tabs_declined(pane 수명 — 시간 없음, 되돌리는 자리를 말한다), 무응답은 -32004 agent_tabs_unanswered" {
-    const req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.open\",\"params\":{}}";
-    {
-        const w = try serializeAgentTabsDeclined(testing.allocator, req);
-        defer testing.allocator.free(w);
-        var p = try std.json.parseFromSlice(std.json.Value, testing.allocator, w, .{});
-        defer p.deinit();
-        const e = p.value.object.get("error").?.object;
-        try testing.expectEqual(@as(i64, -32002), e.get("code").?.integer);
-        try testing.expectEqual(@as(i64, 9), p.value.object.get("id").?.integer);
-        const d = e.get("data").?.object;
-        try testing.expectEqualStrings("agent_tabs_declined", d.get("reason").?.string);
-        try testing.expect(d.get("retry_after_ms") == null); // 시간이 지나 풀리지 않는다 — 그 pane 이 사는 동안(사용자 결정)
-        const msg = e.get("message").?.string;
-        try testing.expect(std.mem.indexOf(u8, msg, "declined") != null);
-        try testing.expect(std.mem.indexOf(u8, msg, "while this pane is open") != null);
-        try testing.expect(std.mem.indexOf(u8, msg, "Browser Grants") != null); // 사용자가 되돌리는 자리
-        try testing.expect(std.mem.indexOf(u8, msg, "logged-in") != null); // 무엇을 거절했는지
-    }
-    {
-        const w = try serializeAgentTabsUnanswered(testing.allocator, req);
-        defer testing.allocator.free(w);
-        try testing.expect(std.mem.indexOf(u8, w, "\"code\":-32004") != null);
-        try testing.expect(std.mem.indexOf(u8, w, "\"reason\":\"agent_tabs_unanswered\"") != null);
-        try testing.expect(std.mem.indexOf(u8, w, "nothing was opened") != null);
-    }
+test "전권: 표가 차면 -32603 grants_full — 무엇을 하면 되는지 말한다(균일 unauthorized 가 아니다)" {
+    const w = try serializeGrantsFull(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.click\",\"params\":{\"id\":12}}");
+    defer testing.allocator.free(w);
+    var p = try std.json.parseFromSlice(std.json.Value, testing.allocator, w, .{});
+    defer p.deinit();
+    const e = p.value.object.get("error").?.object;
+    try testing.expectEqual(@as(i64, -32603), e.get("code").?.integer);
+    try testing.expectEqual(@as(i64, 9), p.value.object.get("id").?.integer);
+    try testing.expectEqualStrings("grants_full", e.get("data").?.object.get("reason").?.string);
+    try testing.expect(std.mem.indexOf(u8, e.get("message").?.string, "close tabs") != null);
 }
 
-test "W9b③: browser.open 은 부른 pane(1g)이 대상 — pane 이 없으면 unauthorized, 주소·키·시한이 틀리면 invalid_params, 동의가 있으면 곧 op" {
+test "W9b③: browser.open 은 부른 pane(1g)이 대상 — pane 이 없으면 unauthorized, 주소·키·시한이 틀리면 invalid_params, pane 이 있으면 곧 op" {
     var grants: cpg.PaneGrantStore = .{};
-    try grants.grant(.{ .pane = 10, .target = 10, .scope = .browser_agent_tabs }); // 2026-11-16: 이 pane 은 이미 동의했다
     const ok_cases = [_]struct { bytes: []const u8, arg: []const u8 }{
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"https://example.com/a?b=1\"}}", .arg = "{\"url\":\"https://example.com/a?b=1\",\"timeout_ms\":25000}" },
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"timeout_ms\":500}}", .arg = "{\"timeout_ms\":500}" },

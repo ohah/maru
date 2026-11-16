@@ -2411,23 +2411,6 @@ private func runBrowserBoundedResultSmokeClient(socketPath: String, sid: UInt64,
     return (structured, awaitArgs, strictCsp, navigation, tamper, byteBoundary, tooLarge, executionError, serializationError, depthOK && depthFail ? "true" : "false", stream)
 }
 
-// 1e-confirm-1c-2(테스트 전용 — 배경 스레드): **cap 없이** browser.navigate가 pane confirm-grant 흐름으로 성공하는지
-// 자동 증명한다. auth.self는 **cap_nonce 없이** selector(=surface_id)만 보내 self-origin으로 인증하고, browser.navigate를
-// 날린다 → 서버: 세션 cap 0 → needs_grant → handleNeedsGrant(env MARU_TEST_GRANT_DECISION 스텁) → approve면 grant 기록 +
-// 재-dispatch → op → drainBrowserOps 실행 → complete. 반환="true"(응답 ok)·"unexpected:…"·"error:…". 요청마다 새 연결(5e 스모크와 동형).
-// **1g(control-plane-security §8.4) 뒤로는 늘 unauthorized 다** — 서버는 셀렉터를 믿지 않고 붙은 프로세스의 출처에서 pane 을
-// 찾는데, 붙는 쪽이 앱 자신이라 어느 pane 의 자손도 아니다. 확인 grant 경로의 실측은 pane 안에서 실제 CLI 를 부르는
-// `tools/test-macos-control-self-origin-smoke.sh` 가 대신한다.
-private func runBrowserGrantSmokeClient(socketPath: String, sid: UInt64, navigateURL: String) -> String {
-    // cap_nonce 없는 auth.self(selector만) — 무-cap 세션. wire는 Zig parseAuthFrame(cap_nonce optional)을 미러링.
-    let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid)}}"
-    let navReq = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":\(sid),\"url\":\"\(navigateURL)\"}}"
-    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: navReq) {
-    case .ok(let line): return (browserCtlResult(line)?["ok"] as? Bool == true) ? "true" : "unexpected:\(line.prefix(120))"
-    case .err(let why): return why
-    }
-}
-
 // 5f-0b-3c/5f-3(테스트 전용): **지속 연결**로 subscribe→navigate(새 URL)→executeScript(alert)로 여러 이벤트 소스를 실제로
 // 발화시키고, 서버-발신 `browser.*` notification이 오는지 **집합으로 수집**한다. url KVO=navigated·isLoading KVO=loadState·
 // WKUIDelegate=dialog가 각 실 소스에서 pushEvent→outbound→writer→소켓 파이프라인을 타는지 자동 확인(3b 소켓·pushEvent
@@ -5419,9 +5402,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var runningBrowserCallbacks: [UInt64: [UInt64: BrowserCallbackLifetime]] = [:]
     // ReleaseSafe bounded smoke에서만 채우는 pump 기여 시간. 제품 실행은 배열 append조차 하지 않는다.
     private var browserResultPumpSamplesMs: [Double] = []
-    // 1e-confirm-1c-2(MARU_TEST_GRANT_DECISION): **무-cap** browser.navigate가 pane confirm-grant 흐름(needs_grant→env approve→grant→op)으로 성공하는지("true"/진단).
-    private var didKickGrantSmoke = false
-    private nonisolated(unsafe) var browserGrantNavigateOkStore = "pending"
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
@@ -8123,7 +8103,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         drainBrowserOps() // 5e-2b-2: 인가된 browser op을 WKWebView로 실행 + 완료 콜백(reap 포함, 매 tick).
         drainConsoleBuffers() // §9.5.9: capture-active 패널의 page ring을 throttled로 서버 버퍼에 옮김(네비 넘어 보존).
         maybeRunBrowserControlSmoke() // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 1회 kick(무설정=무동작).
-        maybeRunGrantSmoke() // 1e-confirm-1c-2 테스트 전용(MARU_TEST_GRANT_DECISION): 무-cap browser.navigate가 grant 흐름으로 성공하는지 1회 kick.
         // Mermaid native hot path는 allocation-free Zig gate 뒤에서만 helper completion 최대 8개와 action 하나를
         // 처리한다. process/signature/pipe I/O는 coordinator executor가 맡고 display tick은 accepted SVG를
         // 사전 할당 버퍼로 one-shot 이동해 대기 중 WebKit reply만 해소한다.
@@ -8621,49 +8600,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func browserBoundedResults() -> (structured: String, awaitArgs: String, strictCsp: String, navigation: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String, stream: String) {
         browserCtlLock.lock(); defer { browserCtlLock.unlock() }
         return (browserCtlBoundedStructuredStore, browserCtlBoundedAwaitArgsStore, browserCtlBoundedStrictCspStore, browserCtlBoundedNavigationStore, browserCtlBoundedTamperStore, browserCtlBoundedByteBoundaryStore, browserCtlBoundedTooLargeStore, browserCtlBoundedExecutionErrorStore, browserCtlBoundedSerializationErrorStore, browserCtlBoundedDepthStore, browserCtlBoundedStreamStore)
-    }
-
-    /// 1e-confirm-1c-2(**테스트 전용, MARU_TEST_GRANT_DECISION**): **무-cap** browser.navigate가 pane confirm-grant 흐름으로
-    /// 성공하는지 1회 kick한다. cap 발급 없이 auth.self(selector만)+navigate → 서버가 needs_grant → env 결정(approve면
-    /// grant 기록+재구동→op→ok / deny면 unauthorized). 배경 큐(메인 tick이 계속 돌며 drainBrowserOps로 op 완료). env
-    /// 미설정=무동작(프로덕션 무영향). MARU_TEST_BROWSER_CAP과 독립 — grant 스모크는 그 env 없이 이것만 켜고 돌린다.
-    /// 1g 뒤로는 이 클라이언트가 pane 밖(앱 자신)이라 늘 거절된다(`runBrowserGrantSmokeClient` 주석).
-    private func maybeRunGrantSmoke() {
-        guard !didKickGrantSmoke, controlServerStarted else { return }
-        // 무-cap navigate를 보내 grant 흐름을 유발한다. MARU_TEST_GRANT_DECISION(스텁 auto 결정 — 스모크 게이트) 또는
-        // MARU_TEST_GRANT_PROMPT(**결정 env 없이 실 확인 모달**을 띄우는 손 테스트 트리거) 중 하나면 kick. 둘 다 없으면
-        // 무동작(프로덕션). PROMPT는 **일반 모드도 허용**(창이 떠 있는 채로 모달을 띄워 사용자가 클릭 — 스모크 60초 auto-quit 불필요).
-        let env = ProcessInfo.processInfo.environment
-        let hasDecision = env["MARU_TEST_GRANT_DECISION"] != nil
-        let hasPrompt = env["MARU_TEST_GRANT_PROMPT"] != nil
-        guard hasDecision || hasPrompt else { return }
-        guard smokeMode || hasPrompt else { return } // DECISION(auto)은 스모크 전용, PROMPT(모달 손테)는 일반 모드도
-        var target: (surfaceId: UInt64, url: String)?
-        for surface in windows + (quick.map { [$0] } ?? []) {
-            if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 && $0.filePanelKind == 0 }) {
-                target = (wp.surfaceId, MaruWebPanelView.browserFixtureURL)
-                break
-            }
-        }
-        guard let t = target else { return } // 패널 아직 — 다음 tick 재시도.
-        didKickGrantSmoke = true
-        var pathBuf = [UInt8](repeating: 0, count: 512)
-        let pathLen = pathBuf.withUnsafeMutableBufferPointer { maru_macos_control_socket_path($0.baseAddress, $0.count) }
-        guard pathLen > 0 else { storeGrantSmokeResult("error:socket-path"); return }
-        let socketPath = String(decoding: pathBuf[0 ..< pathLen], as: UTF8.self)
-        DispatchQueue.global().async { [weak self] in
-            let r = runBrowserGrantSmokeClient(socketPath: socketPath, sid: t.surfaceId, navigateURL: t.url)
-            self?.storeGrantSmokeResult(r)
-        }
-    }
-
-    private nonisolated func storeGrantSmokeResult(_ v: String) {
-        browserCtlLock.lock(); browserGrantNavigateOkStore = v; browserCtlLock.unlock()
-    }
-
-    private func grantSmokeResult() -> String {
-        browserCtlLock.lock(); defer { browserCtlLock.unlock() }
-        return browserGrantNavigateOkStore
     }
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가
@@ -9876,7 +9812,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 // W9d① 스모크: 메뉴 「Revoke All」 과 같은 ABI 로 모든 browser grant 를 철회한다(네트워크 기록이 지켜보기를 끄고 지우는지).
                 _ = maru_macos_control_revoke_all_browser_grants()
             case "grantsmenu":
-                // pane 동의(2026-11-16) 실앱 확인: 「Browser Grants」 를 지금 상태로 다시 만들고 줄 제목을 보고에 남긴다(띄우지 않는다).
+                // 실앱 확인: 「Browser Grants」 를 지금 상태로 다시 만들고 줄 제목을 보고에 남긴다(띄우지 않는다).
                 rebuildBrowserGrantsMenu(browserGrantsMenu)
                 Self.testReport("grantsmenu " + browserGrantsMenu.items.map { $0.isSeparatorItem ? "---" : $0.title }.joined(separator: " | "))
             case "grantsmenu-pick" where line.count >= 2:
@@ -14050,8 +13986,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 이걸 꺼내 그 grant 하나만 취소한다(값 기반 — 인덱스 시프트에 안전).
     private struct GrantRef { let pane: UInt64; let target: UInt64; let scope: UInt8 }
 
-    /// "Revoke All"(§9.2 revoke UX) — 부여한 **모든** pane-bound 브라우저 제어 권한을 취소한다(앱-전역 grant store, 세션
-    /// 무관). 이후 browser 요청은 다시 확인 모달을 거친다. Zig가 단일 출처(control_pane_grant_store).
+    /// "Revoke All"(§9.2 revoke UX) — **모든** pane-bound 브라우저 grant 를 거둔다(앱-전역 grant store, 세션 무관). 사용자 결정 2026-11-16
+    /// (「AI 가 모든 접근」) 뒤로는 묻지 않으므로 다음 요청이 다시 전권을 받는다 — 지금 에이전트가 세운 것(막기·가짜·흉내·기록·trace·◈)을 거두는
+    /// 단추다. Zig가 단일 출처(control_pane_grant_store).
     @objc private func menuRevokeBrowserGrants(_ sender: Any?) {
         _ = sender
         _ = maru_macos_control_revoke_all_browser_grants()
@@ -14064,27 +14001,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_control_revoke_browser_grant(ref.pane, ref.target, ref.scope)
     }
 
-    /// pane 동의(2026-11-16 — 「거부나 허용 해제할 수 있는 UI」): 거부 줄을 고르면 그 pane 의 거부를 지운다 — 다음 open 은 다시 묻는다.
-    @objc private func menuClearAgentTabsDenial(_ sender: Any?) {
-        guard let item = sender as? NSMenuItem, let pane = item.representedObject as? UInt64 else { return }
-        _ = maru_macos_control_clear_agent_tabs_denial(pane)
-    }
-
-    /// pane 동의 줄에 보일 pane 제목(결정 순간 — Zig 가 모달과 같은 규칙으로 걸렀다). 없으면 빈 글.
-    private func agentTabsPaneTitle(_ pane: UInt64) -> String {
-        var buf = [UInt8](repeating: 0, count: 128)
-        let n = buf.withUnsafeMutableBufferPointer { maru_macos_control_agent_tabs_pane_title(pane, $0.baseAddress, $0.count) }
-        return String(decoding: buf[0..<Int(n)], as: UTF8.self)
-    }
-
     /// "Browser Grants" 서브메뉴 재생성(menuNeedsUpdate가 열릴 때 호출) — Zig grant store를 조회해 항목을 새로 만든다.
     /// count→grant_at으로 스냅샷을 읽어(revoke의 swap-remove로 인덱스가 바뀌므로 열 때마다 새로 읽음) 각 grant를 사람이
     /// 읽을 레이블(pane→대상 URL·scope)로 나열하고, 비면 disabled "No active grants", 끝에 separator + "Revoke All".
     private func rebuildBrowserGrantsMenu(_ menu: NSMenu) {
         menu.removeAllItems()
         let count = maru_macos_control_browser_grant_count()
-        let denied = maru_macos_control_agent_tabs_denied_count() // pane 동의를 거부한 pane — 고르면 거부를 지운다
-        if count == 0 && denied == 0 {
+        if count == 0 {
             let empty = NSMenuItem(title: "No active grants", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
@@ -14101,24 +14024,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 menu.addItem(item)
                 i += 1
             }
-            var d: UInt32 = 0
-            while d < denied {
-                var pane: UInt64 = 0
-                guard maru_macos_control_agent_tabs_denied_at(d, &pane) == 1 else { d += 1; continue }
-                let title = agentTabsPaneTitle(pane)
-                let shown = title.isEmpty ? "pane #\(pane)" : "\(title) (pane #\(pane))"
-                let item = NSMenuItem(title: "Agent tabs: denied — \(shown) · ask again", action: #selector(menuClearAgentTabsDenial(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = pane
-                menu.addItem(item)
-                d += 1
-            }
         }
         menu.addItem(.separator())
-        // 「Revoke All」 은 모두 처음으로 — grant 와 함께 거부한 pane 의 기억도 지운다(이 메뉴는 한 줄씩 + 끝의 하나가 관례다).
         let all = NSMenuItem(title: "Revoke All", action: #selector(menuRevokeBrowserGrants(_:)), keyEquivalent: "")
         all.target = self
-        all.isEnabled = count > 0 || denied > 0
+        all.isEnabled = count > 0
         menu.addItem(all)
     }
 
@@ -14164,12 +14074,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let n = buf.withUnsafeMutableBufferPointer { maru_macos_control_browser_emulation_summary(pane, target, $0.baseAddress, $0.count) }
             let summary = String(decoding: buf[0..<Int(n)], as: UTF8.self)
             scopeDesc = summary.isEmpty ? "device emulation" : "device emulation (\(summary))"
-        // 7 = browser_agent_tabs(2026-11-16 — 그 pane 이 에이전트 탭을 열어도 된다는 동의, target 은 그 pane 자신). 철회하면 그 pane 은 다음 open 에서 다시
-        // 묻고, 그 pane 이 연 에이전트 탭은 사람의 탭이 된다(◈ 도 사라진다).
-        case 7:
-            let title = agentTabsPaneTitle(pane)
-            let shown = title.isEmpty ? "pane #\(pane)" : "\(title) (pane #\(pane))"
-            return "Agent tabs: allowed — \(shown) · revoke (its agent tabs become yours)"
         default: scopeDesc = "control"
         }
         return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"
@@ -18064,7 +17968,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browser_fixture_url=\(wp?.browserFixtureUrl ?? "pending")
             browser_fixture_script=\(wp?.browserFixtureScript ?? "pending")
             browser_fixture_cookies=\(wp?.browserFixtureCookies ?? "pending")
-            browser_grant_navigate_ok=\(grantSmokeResult())
             browser_ctl_navigate_ok=\(browserCtlResults().navigateOk)
             browser_ctl_get_url=\(browserCtlResults().getUrl)
             browser_ctl_events=\(browserCtlResults().events)

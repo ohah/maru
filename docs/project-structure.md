@@ -154,7 +154,7 @@ src/
   path_shape.zig        경로 모양 판정(절대·구분자). L1 링크 감지와 L2 경로 가드 양쪽이 필요한데 L1은 L2를 import할 수 없어 최상위에 둔다
   redact.zig            민감정보 redaction 단일 출처(코드). project-rules.md "민감정보 redaction 기준"의 코드 미러 — app/observability/config/session이 공유
   hazard.zig            문서 내용의 신뢰 판정 — 보이는 것과 실제가 달라지게 만드는 문자를 가려낸다(native-editor-document-model.md §3.8)
-  invisible_text.zig    보이지 않는 코드 포인트 판정(Unicode Default_Ignorable ∪ 제어 ∪ 줄 구분) — CLI 의 되비춘 낱말(`<U+XXXX>` 로 보이게)과 L2 pane 동의 제목(`sanitizeTitle` — 공백)이 같은 목록을 쓴다
+  invisible_text.zig    보이지 않는 코드 포인트 판정(Unicode Default_Ignorable ∪ 제어 ∪ 줄 구분) — CLI 의 되비춘 낱말(`<U+XXXX>` 로 보이게)이 쓴다(pane 동의 제목은 2026-11-16 동의와 함께 걷혔다)
   icons.zig             **생성 파일**(tools/svg_to_coverage.py). 아이콘 semantic 이름이 단일 출처이고 소비처는 codepoint 리터럴 대신 이 enum을 쓴다. 직접 수정하지 않는다
   i18n.zig              UI 표시 문자열의 언어별 테이블·조회·런타임 보간(i18n.md 계약). 문자열이 platform에 갇히지 않게 하는 자리라 chrome·session·config·platform이 모두 import한다
   shutdown_wire_contract.zig  종료 backend와 앱 조합 계층이 함께 쓰는 포인터 없는 wire 권위 값

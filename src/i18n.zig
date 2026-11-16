@@ -1484,30 +1484,11 @@ const Table = struct {
     status_viewport_narrowed: [:0]const u8,
     ws_checkpoint_write_failed: [:0]const u8,
 
-    // ── 브라우저 권한 확인 (리뷰 후속) ──
-    // **로그인 토큰 접근을 묻는 문장이다.** 영어 UI 아래 한국어 동의문이 뜨면 사용자가 무엇을
-    // 허용하는지 못 읽는다 — 버튼(`btn_allow`/`btn_deny`)은 이미 번역돼 있어 더 어긋나 보였다.
-    grant_scope_storage: [:0]const u8,
-    // W9d①: 네트워크 기록 읽기(`browser_network`)를 묻는 동의문 — 설정 `browser.agent-network-full` 이 켜졌을 때(기본: 헤더 값과 다른 사이트의
-    // 요청까지 보인다 — 쿠키·인증 값은 쿠키 권한도 받은 사이트만, 적대 리뷰 3 회차 D1)와 꺼졌을 때(이 사이트의 요청만 자세히, 헤더 값은 허용 목록만).
-    grant_scope_network: [:0]const u8,
-    grant_scope_network_limited: [:0]const u8,
-    // W9d②: 응답 본문 기록(`browser_network_body`)을 묻는 동의문 — 사이트마다 한 번(사용자 탭), 탭 제목 앞에 ◉ 가 붙는다.
-    grant_scope_network_body: [:0]const u8,
-    // W9d③: 요청 막기·엄격 모드(`browser_network_block`)를 묻는 동의문 — 사이트마다 한 번(사용자 탭). 해를 인정한다(페이지가 깨질 수 있다,
-    // 서비스 워커를 이 탭에서 끌 수 있다 — 사용자 결정 UC1·Q1), 탭 제목 앞에 ⊘.
-    grant_scope_network_block: [:0]const u8,
     // W9d③: 에이전트 규칙이 이 탭의 요청을 막는다는 알림 — 사용자가 마지막으로 몬 탭의 주 프레임 이동이 막혔거나 규칙이 있는 탭을 처음 몰 때.
     web_osr_block_notice: [:0]const u8,
-    // W9d④: 가짜 응답(`browser_network_mock`)을 묻는 동의문 — 사이트마다 한 번(사용자 탭). 해를 인정한다(페이지·스크립트를 바꿔 이 사이트로서
-    // 코드를 돌리고 진짜처럼 보일 수 있다 — 사용자 결정 UD1·UC1), 탭 제목 앞에 ▣.
-    grant_scope_network_mock: [:0]const u8,
     // W9d④: 에이전트의 가짜 응답이 이 탭의 내용을 바꾼다는 알림 — 사용자가 마지막으로 몬 탭의 주 프레임 문서가 가짜였거나 규칙이 있는 탭을 처음
     // 몰 때(가짜 문서는 주소창에 진짜 주소를 보인다).
     web_osr_mock_notice: [:0]const u8,
-    // W9e①: 기기 흉내(`browser_emulation`)를 묻는 동의문 — 사이트마다 한 번(사용자 탭, 사용자 결정 Q1). 이 사이트에 다른 기기처럼 보인다는 것,
-    // 이 탭이 연 창도 시간대·언어가 따라갈 수 있다는 것(실측 E13), 이 사이트에서만이라는 것, 탭 제목 앞에 ◫.
-    grant_scope_emulation: [:0]const u8,
     // W9e①: 사용자가 흉내 중인 에이전트 탭을 처음 몰 때의 알림(탭·세대마다 한 번 — 계획 §9).
     web_osr_emulation_notice: [:0]const u8,
     web_osr_conditions_released: [:0]const u8,
@@ -1626,10 +1607,6 @@ const Table = struct {
     perm_web_app_installation: [:0]const u8,
     perm_disk_quota: [:0]const u8,
     perm_captured_surface_control: [:0]const u8,
-    grant_scope_control: [:0]const u8,
-    grant_prompt: [:0]const u8,
-    /// pane 동의(사용자 결정 2026-11-16) — 에이전트 탭은 사용자의 로그인된 사이트를 쓴다. {0} = pane 제목. 질문이 끝에 온다.
-    grant_prompt_agent_tabs: [:0]const u8,
     // ── 에이전트의 파일 올리기 확인(W9c③ — `app_host_abi` 가 문장을, `session/web_upload_display` 가 파일 줄을 만든다) ──
     upload_prompt: [:0]const u8,
     upload_count_one: [:0]const u8,
@@ -2517,15 +2494,8 @@ const en: Table = .{
     .status_session_not_persisted = "New terminals will not persist",
     .status_viewport_narrowed = "phone {0} cols",
     .ws_checkpoint_write_failed = "Workspace checkpoint save failed",
-    .grant_scope_storage = "read and write this site's cookies and storage, including its subdomains and login tokens",
-    .grant_scope_network = "read this tab's network requests from now on, incl. other sites' (cookie values only where cookies are allowed)",
-    .grant_scope_network_limited = "read this tab's network requests from now on (details for this site only, no cookie or login values)",
-    .grant_scope_network_body = "record this tab's response bodies on this site from now on (kept in memory, ◉ on the tab while recording)",
-    .grant_scope_network_block = "block this site's requests in this tab and turn off its service worker here (pages may break; ⊘ on the tab)",
     .web_osr_block_notice = "Agent rules (⊘) are blocking requests in this tab — manage them in Browser Grants.",
-    .grant_scope_network_mock = "fake this site's responses in this tab, pages and scripts too: it can run code with this site's login and look real (▣ on the tab)",
     .web_osr_mock_notice = "Agent mock responses (▣) are changing this tab — the page you see may not be real. Manage them in Browser Grants.",
-    .grant_scope_emulation = "make this tab look like another device to this site (screen, language, time zone, location; popups too; this site only, ◫)",
     .web_osr_emulation_notice = "The agent made this tab look like another device (◫) — screen size, language, time zone or location may differ from yours. Turn it off in Browser Grants.",
     .web_osr_conditions_released = "You used this tab, so the agent's slowed CPU and network conditions on it were turned off.",
     .web_osr_gpu_unavailable = "The Chromium engine can't draw on this Mac (no GPU path). Use the built-in engine for this page.",
@@ -2621,9 +2591,6 @@ const en: Table = .{
     .perm_web_app_installation = "Install web apps",
     .perm_disk_quota = "Store more data on this device",
     .perm_captured_surface_control = "Scroll and zoom the tab you share",
-    .grant_scope_control = "control this browser (navigate, click, type, read)",
-    .grant_prompt = "An agent wants to {0}. Target: {1}. Allow?",
-    .grant_prompt_agent_tabs = "The agent in this pane ({0}) wants to open browser tabs that use your logged-in sites (◈ marks them in the tab bar). Allow?",
     .upload_prompt = "An agent wants to upload {0} to {1}. The page gets each file's name and content. Allow only if you expect these files — every file is listed below, and Allow works only while the whole list is visible.",
     .upload_count_one = "1 file",
     .upload_count_many = "{0} files",
@@ -3816,15 +3783,8 @@ const ko: Table = .{
     .status_session_not_persisted = "새 터미널이 유지되지 않습니다",
     .status_viewport_narrowed = "폰 {0}열",
     .ws_checkpoint_write_failed = "작업 공간 체크포인트 저장에 실패했습니다",
-    .grant_scope_storage = "이 사이트(하위 도메인 포함)의 쿠키·스토리지(로그인 토큰 포함)를 읽고 쓰려",
-    .grant_scope_network = "이 탭의 네트워크 요청을 지금부터 다른 사이트 것까지 읽으려(쿠키 값은 쿠키 허용 사이트만)",
-    .grant_scope_network_limited = "이 탭의 네트워크 요청을 지금부터 읽으려(이 사이트만 자세히, 쿠키·로그인 값 없이)",
-    .grant_scope_network_body = "이 탭의 이 사이트 응답 본문을 지금부터 기록하려(메모리에만, 기록하는 동안 탭에 ◉)",
-    .grant_scope_network_block = "이 탭에서 이 사이트의 요청을 막거나 서비스 워커를 끄려(페이지가 깨질 수 있음, 탭에 ⊘)",
     .web_osr_block_notice = "에이전트 규칙(⊘)이 이 탭의 요청을 막고 있습니다 — Browser Grants 에서 관리하세요.",
-    .grant_scope_network_mock = "이 탭의 이 사이트 응답을 가짜로 바꾸려(스크립트도 — 로그인된 채 코드 실행, 탭에 ▣)",
     .web_osr_mock_notice = "에이전트의 가짜 응답(▣)이 이 탭의 내용을 바꾸고 있습니다 — 보이는 페이지가 진짜가 아닐 수 있습니다. Browser Grants 에서 관리하세요.",
-    .grant_scope_emulation = "이 사이트에 이 탭을 다른 기기로 보이려(화면·언어·시간대·위치, 연 창도, 이 사이트만, ◫)",
     .web_osr_emulation_notice = "에이전트가 이 탭을 다른 기기처럼 보이게 했습니다(◫) — 화면 크기·언어·시간대·위치가 실제와 다를 수 있습니다. Browser Grants 에서 끕니다.",
     .web_osr_conditions_released = "이 탭을 직접 써서 에이전트가 건 느린 CPU·네트워크 조건을 껐습니다.",
     .web_osr_gpu_unavailable = "이 Mac 에서는 Chromium 엔진으로 그릴 수 없습니다(GPU 경로 없음). 이 페이지는 내장 엔진을 쓰세요.",
@@ -3920,9 +3880,6 @@ const ko: Table = .{
     .perm_web_app_installation = "웹 앱 설치",
     .perm_disk_quota = "이 기기에 데이터 더 저장",
     .perm_captured_surface_control = "공유한 탭 스크롤·확대",
-    .grant_scope_control = "이 브라우저(이동·클릭·입력·읽기)를 제어하려",
-    .grant_prompt = "에이전트가 {0} 합니다. 대상: {1}. 허용하시겠습니까?",
-    .grant_prompt_agent_tabs = "이 pane 의 에이전트({0})가 로그인된 사이트를 쓰는 브라우저 탭을 열려고 합니다(탭 줄에 ◈ 표시). 허용하시겠습니까?",
     .upload_prompt = "에이전트가 {1} 에 {0} 을 올리려 합니다. 페이지는 각 파일의 이름과 내용을 받습니다. 이 파일들이 맞을 때만 허용하세요 — 아래에 모든 파일이 있고, 목록이 다 보일 때만 허용할 수 있습니다.",
     .upload_count_one = "파일 1 개",
     .upload_count_many = "파일 {0} 개",

@@ -370,7 +370,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // v259: W9e① maru_macos_control_browser_emulation_summary (Browser Grants device-emulation line) and grant scope wire 6 (browser_emulation).
 // v260: W9e② maru_macos_control_browser_trace_summary (Browser Grants performance-trace line).
 // v261: grant scope wire 7 (browser_agent_tabs — the pane's consent to open agent tabs, 2026-11-16) and maru_macos_control_agent_tabs_{denied_count,denied_at,pane_title} / clear_agent_tabs_denial (Browser Grants undo rows).
-pub const abi_version: u32 = 261;
+// v262: user decision 2026-11-16 (full agent access — no browser permission prompts) removes grant scope wire 7 and maru_macos_control_agent_tabs_{denied_count,denied_at,pane_title} / clear_agent_tabs_denial.
+pub const abi_version: u32 = 262;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -3041,7 +3042,6 @@ const PendingConfirm = union(enum) {
     quit,
     paste: u64,
     file_conflict_reload: u64,
-    grant: u64,
     /// W9c③: 에이전트의 파일 올리기 확인(`browser.upload` — 부를 때마다). 값은 그 요청의 async_id. 파일 줄은 `upload_notes` 가 든다.
     upload: u64,
     file_panel_close,
@@ -3081,11 +3081,9 @@ const QuitDecision = enum(u32) {
     cancelled = 2, // 사용자가 "취소" — host가 NSApp.reply(false)
 };
 
-/// 1e-confirm-2b: browser grant 확인 모달의 결정 latch(§9.2 Model B). named 타입이라 field·takeGrantDecision 반환이 같은
-/// 타입을 공유한다(익명 struct는 매 리터럴이 별개 타입이라 불가). app_host_abi.drainGrantPrompts가 async_id로 head와 대조.
-/// `by_user` — 사용자가 단추·키로 답했다(참) / 다른 상자가 덮어 닫혔다(거짓, `approved` 도 거짓). pane 동의(2026-11-16)는 사용자의 거부만
-/// 기억한다 — 신뢰 프롬프트(§8.2a)와 같은 규칙: 다른 모달이 덮은 것은 답이 아니다.
-const GrantConfirmDecision = struct { async_id: u64, approved: bool, by_user: bool = false };
+/// W9c③: 업로드 확인 모달의 결정 latch. named 타입이라 field·`takeUploadDecision` 이 같은 타입을 공유한다(익명 struct 는 매 리터럴이 별개
+/// 타입이라 불가). browser grant 확인 모달(§9.2 Model B)은 사용자 결정 2026-11-16(「AI 가 모든 접근」)으로 걷혔다.
+const GrantConfirmDecision = struct { async_id: u64, approved: bool };
 
 /// surface teardown 관찰 훅. AppSession은 컨트롤 서버를 import하지 않고 surface 수명만 알리며, macOS ABI 계층이
 /// pane-bound browser grant/wait 취소에 연결한다. null이면 순수/헤드리스 세션 동작은 기존과 동일하다.
@@ -6373,11 +6371,6 @@ pub const AppSession = struct {
     paste_preview_lines: [paste_preview_max_lines + 1][]const u8 = undefined,
     // Cmd+Q 종료 확인의 결정 latch. tick epilogue가 FrameSummary.quit_decision에 실어 host로 한 번 전달한 뒤 .none으로 리셋한다.
     quit_decision: QuitDecision = .none,
-    // 1e-confirm-2b: browser grant 확인 모달의 보류(§9.2 Model B). null=보류 없음, 값=확인 중인 grant의 async_id.
-    // 다른 확인 모달(close/reset/quit/paste)과 배타(한 번에 한 모달). confirm_accept/cancel이 grant_confirm_decision에
-    // latch하면 app_host_abi.drainGrantPrompts가 takeGrantDecision으로 폴해 grant 기록+재구동 or unauthorized한다.
-    // grant 확인 결정 latch: {async_id, approved}. app_host_abi가 takeGrantDecision으로 한 번 읽고 비운다(one-shot).
-    grant_confirm_decision: ?GrantConfirmDecision = null,
     /// W9c③: 업로드 확인 모달의 결정 latch({async_id, approved}) — app_host_abi 가 `takeUploadDecision` 으로 한 번 읽고 비운다.
     upload_confirm_decision: ?GrantConfirmDecision = null,
     /// W9c③: 업로드 확인 모달의 파일 줄(소유)과 그것을 빌린 안내 줄 — 모달이 열려 있는 동안 confirm 의 `notes` 가 빌린다.
@@ -10887,11 +10880,6 @@ pub const AppSession = struct {
         if (self.pending_confirm == .editor_save_close) @import("app_session/editor/save/close.zig").cancel(self);
         switch (self.pending_confirm) {
             .quit => self.quit_decision = .cancelled,
-            .grant => |async_id| {
-                self.grant_confirm_decision = .{ .async_id = async_id, .approved = false };
-                if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return); // 모달이 닫혀 키가 돌아간다
-                self.osr_grant_return = 0;
-            },
             // W9c③: 다른 상자가 업로드 확인을 밀어내면(사용자가 닫기 등을 불렀다) 거부로 친다 — 묻지 않은 채 올리지 않는다.
             .upload => |async_id| {
                 self.upload_confirm_decision = .{ .async_id = async_id, .approved = false };
@@ -10986,45 +10974,6 @@ pub const AppSession = struct {
     /// 확인 전용이라 호출자가 문장을 지어낼 이유가 없다.
     pub fn showConfirm(self: *AppSession, message: maru.i18n.Key, target: PendingClose) void {
         self.showConfirmButtons(.{ .close = target }, maru.i18n.t(message), .{ .confirm = maru.i18n.t(.btn_close), .cancel = maru.i18n.t(.common_cancel) });
-    }
-
-    /// 1e-confirm-2b: browser grant 확인 모달을 연다(§9.2 Model B, 라벨 "허용"/"거부"). **비파괴**: 이미 다른 오버레이/확인
-    /// 모달이 열려 있으면 안 뜨고 false(app_host_abi.drainGrantPrompts가 다음 tick 재시도) — 사용자의 세팅/닫기확인 등을
-    /// 가로채지 않는다. 이미 이 async_id를 보여주는 중이면 true(재-show 안 함, idempotent). 성공 시 pending_grant=async_id +
-    /// 모달 표시 후 true. confirm_accept/cancel이 grant_confirm_decision에 latch → app_host_abi가 takeGrantDecision으로 폴.
-    pub fn showGrantConfirm(self: *AppSession, message: []const u8, async_id: u64) bool {
-        if (self.pending_confirm == .grant) return self.pending_confirm.grant == async_id;
-        // 다른 모달/오버레이 점유(닫기·종료·리셋·붙여넣기 확인 or 세팅/find/palette 등) → 안 뜸(비파괴). 다음 tick 재시도.
-        if (self.anyOverlayOpen() or self.pending_confirm != .none) return false;
-        self.showConfirmButtons(.{ .grant = async_id }, message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
-        // 모달이 키를 가져간다 — maru 가 옮긴 것(W9c② 적대 리뷰 5 회차: 허락 직후 에이전트 자신의 alert 가 거절됐다).
-        self.osr_grant_return = self.osr_key_target;
-        if (self.osr_key_target != 0) web_ops.markFocusByApp(self, self.osr_key_target, 0);
-        // 에이전트 요청이 tick 에 꺼내져 **비동기로 뜬다**(요청 시점을 에이전트가 고른다) — 사용자가 치던 키가 허용이 되지 않게
-        // (`guardAsync` — 거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더 묻는다, chrome-strategy §5.4).
-        self.chrome_host.confirm.guardAsync(maru.i18n.t(.grant_recheck));
-        return true;
-    }
-
-    /// 1e-confirm-2b: 래치된 grant 확인 결정을 한 번 읽고 비운다(one-shot). app_host_abi.drainGrantPrompts가 매 tick 폴한다.
-    pub fn takeGrantDecision(self: *AppSession) ?GrantConfirmDecision {
-        const d = self.grant_confirm_decision orelse return null;
-        self.grant_confirm_decision = null;
-        return d;
-    }
-
-    /// pane 동의(2026-11-16): 답을 기다리던 동의 요청이 끝났다(시한·pane 사라짐) — 그 모달을 결정 없이 거둔다(다른 모달이면 그대로).
-    /// 이 창에 래치된 그 요청의 답도 버린다. 업로드의 `dismissUploadConfirm` 과 같은 모양이다.
-    pub fn dismissGrantConfirm(self: *AppSession, async_id: u64) void {
-        if (self.grant_confirm_decision) |d| if (d.async_id == async_id) {
-            self.grant_confirm_decision = null;
-        };
-        if (self.pending_confirm != .grant or self.pending_confirm.grant != async_id) return;
-        self.pending_confirm = .none;
-        self.chrome_host.confirm.dismiss();
-        if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return);
-        self.osr_grant_return = 0;
-        self.metal_dirty = true;
     }
 
     /// W9c③: 에이전트의 파일 올리기 확인 모달(라벨 「허용」/「거부」). `lines` 는 파일마다 두 줄(`session.web_upload_display.fileLines`) —
@@ -13658,11 +13607,6 @@ pub const AppSession = struct {
                     .remote_file_tree_delete => file_panel_ops.confirmRemoteFileTreeDelete(self),
                     .lsp_trust => editor_ops.lsp_client.answerTrust(self, true),
                     .lsp_trust_manage => editor_ops.lsp_client.answerManage(self, .primary),
-                    .grant => |async_id| {
-                        self.grant_confirm_decision = .{ .async_id = async_id, .approved = true, .by_user = true };
-                        if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return); // 모달이 닫혀 키가 돌아간다
-                        self.osr_grant_return = 0;
-                    },
                     .upload => |async_id| {
                         // 목록이 다 보이지 않으면 허용하지 않는다 — 키보드 확정도(⌘⏎). 상자를 다시 열어 둔다(창을 넓히거나 거부).
                         const tk = self.buildChromeTokens();
@@ -13738,14 +13682,10 @@ pub const AppSession = struct {
                 if (owner == .save_conflict) editor_conflict_ops.confirmReload(self, owner.save_conflict);
                 self.metal_dirty = true;
             },
-            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/grant)을 버린다.
+            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/업로드)을 버린다.
                 // 신뢰 프롬프트는 **사용자의 취소만** 거부로 기억한다(§8.2a) — 다른 모달이 덮거나 앱이 끝나며 닫히는 것은 답이 아니다.
                 if (self.pending_confirm == .lsp_trust) editor_ops.lsp_client.answerTrust(self, false);
-                const user_denied_grant = self.pending_confirm == .grant; // 사용자의 「거부」 — 다른 상자가 덮은 것과 가른다(pane 동의의 기억)
                 self.cancelPendingConfirm();
-                if (user_denied_grant) if (self.grant_confirm_decision) |*d| {
-                    d.by_user = true;
-                };
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
@@ -100495,54 +100435,6 @@ test "MP: **비활성 pane** 의 프리뷰도 그려진다 — 클릭은 그 pan
     try std.testing.expect(bd.x < @as(f32, @floatFromInt(full.x + full.w / 2)));
 }
 
-test "브라우저 권한 확인은 비동기 보호(chrome-strategy §5.4) — 거부 포커스, 치던 `y`·→·Enter 는 거부, ← 로 고른 허용의 Enter 는 질문을 그대로 둔 채 한 번 더 묻고 그 사이 글자는 처음으로 되돌리며, 그다음 허용은 ⌘⏎ 뿐이다" {
-    const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
-    const question = "An agent wants to read storage. Target: accounts.example.com. Allow?";
-    try std.testing.expect(session.showGrantConfirm(question, 7));
-    const c = &session.chrome_host.confirm;
-    try std.testing.expect(c.focused == .cancel and !c.letter_keys);
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'y' } });
-    try std.testing.expect(c.open and session.takeGrantDecision() == null);
-    _ = try session.handleKeyEvent(.{ .key = .enter });
-    const denied = session.takeGrantDecision().?;
-    try std.testing.expect(!denied.approved and denied.async_id == 7);
-    // 터미널에서 치던 「`git sta` → (제안 수락) ⏎」가 두 줄 이어져도 허락이 아니다 — → 는 거부에서 돌지 않고, 그 사이 글자는
-    // 다시 묻던 것을 처음으로 되돌린다.
-    try std.testing.expect(session.showGrantConfirm(question, 8));
-    _ = try session.handleKeyEvent(.{ .key = .arrow_left }); // 「허용」으로 — Enter 는 한 번 더 묻는다
-    _ = try session.handleKeyEvent(.{ .key = .enter });
-    try std.testing.expect(c.open and c.rechecking and session.takeGrantDecision() == null);
-    try std.testing.expectEqualStrings(question, c.message); // 다시 묻는 동안에도 질문(무엇을 허용하는지)은 그대로다
-    try std.testing.expectEqualStrings(maru.i18n.t(.grant_recheck), c.recheck.?);
-    for ("git pu") |ch| _ = try session.handleKeyEvent(.{ .key = .{ .char = ch } });
-    try std.testing.expect(!c.rechecking and c.focused == .cancel);
-    _ = try session.handleKeyEvent(.{ .key = .arrow_right });
-    _ = try session.handleKeyEvent(.{ .key = .enter });
-    const denied2 = session.takeGrantDecision().?;
-    try std.testing.expect(!denied2.approved and denied2.async_id == 8);
-    // 다시 묻는 중의 Esc 는 거부다.
-    try std.testing.expect(session.showGrantConfirm(question, 9));
-    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
-    _ = try session.handleKeyEvent(.{ .key = .enter });
-    try std.testing.expect(c.rechecking);
-    _ = try session.handleKeyEvent(.{ .key = .escape });
-    const denied3 = session.takeGrantDecision().?;
-    try std.testing.expect(!denied3.approved and denied3.async_id == 9);
-    // 다시 묻는 문장에서도 「← ⏎」는 허락이 아니다(TUI 의 예/아니오를 두 번 고르는 입력) — ⌘⏎ 라야 허용이다.
-    try std.testing.expect(session.showGrantConfirm(question, 10));
-    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
-    _ = try session.handleKeyEvent(.{ .key = .enter });
-    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
-    _ = try session.handleKeyEvent(.{ .key = .enter });
-    try std.testing.expect(c.open and c.rechecking and session.takeGrantDecision() == null);
-    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
-    const approved = session.takeGrantDecision().?;
-    try std.testing.expect(approved.approved and approved.async_id == 10);
-}
-
 test "OVF1 오버레이 프레임이 그리는 출처마다 관문(overlayFrameNeeded)이 선다 — 새 출처를 더하고 관문을 빠뜨리면 여기서 멈춘다 (소스 판정)" {
     // 2026-10-09: 이름 없는 문서 저장 상자(#4250)와 마커 프리뷰 실패 안내가 **그려지는 길은 있는데 관문에 없어** 다른 오버레이가 없으면 안 그려졌다.
     // 관문은 손으로 쓴 목록이라 출처가 늘 때 함께 늘어야 한다. 이 판정자는 `buildChromeOverlayPrep` 의 그리기 호출을 전부 세고, 호출마다
@@ -102238,32 +102130,6 @@ fn w9c2R5Web(session: *AppSession, allocator: std.mem.Allocator) !u64 {
     try web_osr.testHold(allocator, sid);
     web_osr.testRunning(sid);
     return sid;
-}
-
-test "W9c② 적대 리뷰 5 회차 재현 A: 에이전트가 청한 권한 모달이 포커스 탭 위에 떴다 닫혀도 사용자 바뀜이 아니다 — 허락 뒤 다시 보낸 누름의 alert 는 에이전트가 답한다" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try w6jSession(allocator);
-    defer allocator.destroy(session);
-    defer web_osr.testForget(allocator);
-    defer session.deinit();
-    const tab = try w9c2R5Web(session, allocator); // 사용자의 탭 — 키를 쥐었다(사용자가 지켜본다)
-    web_ops.syncOsrKeyTarget(session);
-    try std.testing.expectEqual(tab, session.osr_key_target);
-    web_osr.testAgeStamps(tab, 60_000); // 사용자는 1 분 전 만졌다
-    // 에이전트가 그 탭에 browser.click → 권한 모달(drainGrantPrompts → showGrantConfirm)
-    try std.testing.expect(session.showGrantConfirm("Allow agent to control this tab?", 1));
-    web_ops.syncOsrKeyTarget(session); // tick
-    try std.testing.expectEqual(@as(u64, 0), session.osr_key_target);
-    // 사용자가 허용을 누른다 → 모달이 닫힌다 → tick → 키가 돌아온다
-    session.chrome_host.confirm.dismiss();
-    session.dispatchChromeAction(.confirm_accept); // 실제 허락 경로(grant 결정·표시)
-    web_ops.syncOsrKeyTarget(session);
-    try std.testing.expectEqual(tab, session.osr_key_target);
-    // 다시 보낸 누름(에이전트 시각) → 페이지 onclick 의 alert("Saved")
-    web_osr.noteAgentInput(tab);
-    web_osr.testApplyNow(allocator, .{ .js_dialog = .{ .browser = tab, .request = 1, .kind = .alert, .origin = "https://app.test", .message = "Saved" } });
-    _ = try web_osr.agentReplyDialog(allocator, tab, null, true, "", W9c2R5Access.access);
 }
 
 test "W9c② 적대 리뷰 5 회차 재현 B: 뒤 탭을 에이전트가 닫은 표시가 남아 사용자의 탭 전환을 maru 것으로 보지 않는다 — 그 탭의 focus confirm 은 에이전트가 답하지 못한다" {

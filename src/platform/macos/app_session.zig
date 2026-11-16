@@ -67364,6 +67364,26 @@ test "P0-1: 사용자가 누른 링크는 에이전트 탭을 재사용하지 �
     try std.testing.expectEqualStrings("https://a.co/now-human", (web_osr.testLastUrl(agent_tab) orelse return error.TestUnexpectedResult));
 }
 
+test "P0-1: 보이는 Chromium 탭이 둘이면 활성 pane 의 탭이 먼저다 — pane 순서의 첫 탭이 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const first = try pane_ops.appendWebTermInActivePane(session, .browser); // 왼쪽(pane 순서의 첫째)
+    try pane_ops.splitActivePane(session, .horizontal);
+    const second = try pane_ops.appendWebTermInActivePane(session, .browser); // 오른쪽 — 활성
+    for ([_]u64{ first, second }) |sid| {
+        try web_osr.testHold(allocator, sid);
+        web_osr.testRunning(sid);
+    }
+
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/active"));
+    try std.testing.expectEqualStrings("https://a.co/active", (web_osr.testLastUrl(second) orelse return error.TestUnexpectedResult));
+    try std.testing.expect(web_osr.testLastUrl(first) == null);
+}
+
 test "P0-1: 엔진이 WebKit 이면(설치 없음 폴백 포함) 링크는 예전 그대로 Swift pending action 으로 간다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

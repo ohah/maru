@@ -12328,7 +12328,7 @@ pub fn build(b: *std.Build) void {
     const run_plugin_skill_tests = b.addRunArtifact(plugin_skill_tests);
     run_plugin_skill_tests.setCwd(b.path("."));
     run_plugin_skill_tests.has_side_effects = true;
-    run_plugin_skill_tests.addArg("--maru-expect-tests=15");
+    run_plugin_skill_tests.addArg("--maru-expect-tests=17");
     b.step("test-plugin-skill", "Check the maru-browser agent plugin against the real maru browser parser and help").dependOn(&run_plugin_skill_tests.step);
     test_step.dependOn(&run_plugin_skill_tests.step);
 

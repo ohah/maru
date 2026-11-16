@@ -128,7 +128,7 @@ pub const tools = [_]Tool{
         .{ .key = "text", .kind = .string, .flag = "--text", .description = "answer text for a prompt" },
         .{ .key = "dialog", .kind = .int, .flag = "--dialog", .description = "dialog token from browser_dialog", .min = 1, .max = 9_007_199_254_740_991 },
     }) },
-    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — the user has up to 2 minutes to answer, so allow the call 3 minutes; on a user's tab you do not control yet the tab's own confirmation comes first, so make another call on it first, such as browser_snapshot); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
+    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — the user has up to 2 minutes to answer, so allow the call " ++ ask_wait_text ++ "; on a user's tab you do not control yet the tab's own confirmation comes first, so make another call on it first, such as browser_snapshot); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
     .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests (shared-worker requests carry the same mark), and for attempts Chromium restarted (the retry is a separate, newer req). Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation, unless the user clicked, typed or navigated in that tab before your first read); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded; response bodies are recorded only while browser_network_record is on (each line then shows its body state). WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. dropped counts requests maru did not record because the page made them too fast or held too many unfinished; dropped_sw_inflight_cap counts service-worker requests not recorded because the site's service workers held too many unfinished fetches (sw_inflight_cap — 128 per origin of the worker, 512 in total; page requests are not affected). Service-worker requests of a site no tab shows any more stop counting toward that cap, but they still hold a slot: when the unfinished service-worker requests (counted and released together) fill 1024 slots, maru forgets the oldest released one: such a request stays in the list unfinished (its response and end are not recorded). Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
         .{ .key = "types", .kind = .string, .flag = "--type", .description = "request types separated by commas: document, iframe, stylesheet, script, image, font, xhr (fetch and XHR), media, worker, shared_worker, service_worker, prefetch, favicon, ping, csp_report, object, plugin, preload, other" },
         .{ .key = "method", .kind = .string, .flag = "--method", .description = "HTTP method, like GET or POST" },
@@ -262,11 +262,19 @@ pub fn invocation(args: []const []const u8) Invocation {
     return .bad;
 }
 
+/// 사용자에게 묻는 호출(확인 모달 — 대기 최대 약 150 초 + 그 뒤 동작)에 주라고 안내하는 시한(사용자 결정 D5 「3 분」). **한 값이다** —
+/// instructions·`browser_upload` 설명·`maru mcp --help` 가 이 글을 잇고, 스킬(SKILL.md 와 참조 파일의 「at least N minutes」·Bash `timeout: N`)은
+/// plugin_skill_sync ⑪ 이 이 값과 맞는지 본다(전에는 MCP 시험만 글자 「3 minutes」 를 찾고 스킬 쪽 숫자는 아무도 안 봤다).
+pub const ask_wait_minutes: u32 = 3;
+pub const ask_wait_text = std.fmt.comptimePrint("{d} minutes", .{ask_wait_minutes});
+pub const ask_wait_ms: u64 = @as(u64, ask_wait_minutes) * std.time.ms_per_min;
+
 pub const usage =
     \\usage: maru mcp
     \\Serve the browser commands as MCP tools over stdio (one JSON-RPC message per line).
     \\Add it to an agent, for example: claude mcp add maru -- maru mcp
-    \\Set the agent's tool timeout for this server to at least 3 minutes: a call that asks the user waits for the answer.
+    \\
+++ "Set the agent's tool timeout for this server to at least " ++ ask_wait_text ++ ": a call that asks the user waits for the answer.\n" ++
     \\Run it from a maru pane — requests act for that pane (see `maru browser --help`).
     \\
 ;
@@ -654,7 +662,7 @@ pub const server_guidance =
     "runs in; inside tmux or screen in that pane every request except browser_list is refused. On a tab the user opened, the first call asks the user, " ++
     "and the network, recording, blocking, mocking and emulation tools ask again once per site (each tool's description says which); " ++
     "after that, tabs you opened ask nothing more except browser_upload. A call that asks the user waits for the answer (up to 2 minutes for a dialog, " ++
-    "then the action), so allow it 3 minutes. browser_upload on a user's tab you do not control yet would ask twice (the tab first), " ++
+    "then the action), so allow it " ++ ask_wait_text ++ ". browser_upload on a user's tab you do not control yet would ask twice (the tab first), " ++
     "so make another call on that tab first, such as browser_snapshot. If your client gives up sooner, the call still finishes and the next call " ++
     "waits for it, so check the tab before you repeat anything. Calls run one at a time. After a click, wait for something only the " ++
     "next page has: a load wait right after a click can still see the old page. CPU and network conditions set with browser_emulate " ++
@@ -991,24 +999,26 @@ test "M10: instructions 와 모든 도구 설명(실제 응답)이 클라이언�
     try testing.expect(try overClientCap(at_cap[1..] ++ "\u{1F600}"));
 }
 
-test "M10(D5): 사용자에게 묻는 호출의 시한 안내는 3 분 — instructions·업로드 설명·`maru mcp --help` 가 같은 숫자를 말한다" {
+test "M10(D5): 사용자에게 묻는 호출의 시한 안내는 3 분(`ask_wait_text`) — instructions·업로드 설명·`maru mcp --help` 가 같은 숫자를 말한다" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const served = try servedInstructions(arena_state.allocator());
     // 모델에게는 할 수 있는 일을(기다림을 허락하고, 클라이언트가 먼저 포기해도 그 호출은 끝까지 돈다 — 반복 전에 확인).
-    try testing.expect(std.mem.indexOf(u8, served, "allow it 3 minutes") != null);
+    try testing.expectEqualStrings("3 minutes", ask_wait_text); // 값 자체는 사용자 결정 D5 — 상수를 바꾸면 이 줄과 스킬(⑪)이 함께 빨개진다
+    try testing.expectEqual(@as(u64, 180_000), ask_wait_ms);
+    try testing.expect(std.mem.indexOf(u8, served, "allow it " ++ ask_wait_text) != null);
     try testing.expect(std.mem.indexOf(u8, served, "the call still finishes") != null);
     // 전의 「150 초 시한을 주라」 는 모델이 실행할 수 없는 지시였고 스킬(3 분)과 숫자가 달랐다.
     try testing.expect(std.mem.indexOf(u8, served, "tool timeout of at least 150") == null);
     const up = findTool("browser_upload").?.description;
-    try testing.expect(std.mem.indexOf(u8, up, "allow the call 3 minutes") != null);
+    try testing.expect(std.mem.indexOf(u8, up, "allow the call " ++ ask_wait_text) != null);
     // 제어 권한이 없는 사용자 탭의 업로드는 확인이 둘(탭 → 업로드) — 3 분이 모자라지 않게 먼저 다른 호출로 제어를 받으라고 한다.
     try testing.expect(std.mem.indexOf(u8, up, "make another call on it first") != null);
     try testing.expect(std.mem.indexOf(u8, served, "would ask twice (the tab first)") != null);
     // browser.list 는 ungated — tmux 안에서도 성공하므로 「모두 거절」 이 아니다.
     try testing.expect(std.mem.indexOf(u8, served, "every request except browser_list is refused") != null);
     // 사람에게는 설정할 값을(도구 시한은 클라이언트 설정이다).
-    try testing.expect(std.mem.indexOf(u8, usage, "tool timeout for this server to at least 3 minutes") != null);
+    try testing.expect(std.mem.indexOf(u8, usage, "tool timeout for this server to at least " ++ ask_wait_text ++ ": a call") != null);
 }
 
 // `serverInfo` 는 MCP 클라이언트가 「어느 서버의 어느 판인가」를 보는 자리다(로그·진단). 전에는 고정 `"0"` 이라 설치된 maru 가

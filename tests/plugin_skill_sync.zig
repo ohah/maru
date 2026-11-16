@@ -21,6 +21,8 @@
 //!   ⑩ 「your tab」·「your own tab」 을 아무 데서도 쓰지 않는다 — CLI help 는 사람의 탭을, 스킬은 에이전트가 연 탭을 그렇게 불러 뜻이
 //!      반대였다(M10 D7). 플러그인 글·`maru browser --help`·`maru mcp` 의 응답(instructions·도구와 인자 설명)·`maru mcp --help` 가
 //!      「the user's tabs」 와 「tabs you opened」 로 말한다.
+//!   ⑪ 사용자에게 묻는 호출에 주라는 시한 — 스킬의 「at least N minutes」·「N-minute」·Bash `timeout: N` 이 `maru mcp` 가 쓰는 같은 상수(`mcp.ask_wait_text`·
+//!      `ask_wait_ms`, 사용자 결정 D5)와 같고, 그 대기(「about N s」)가 시한보다 짧다 — 두 표면의 숫자가 따로 바뀌지 못하게.
 //!
 //! **공허하게 통과하지 않는다**(project-rules 「못 찾으면 실패」·pr-checklist 「판정자 규율」): 추출한 예시 수와 help 명령
 //! 수에 하한을 단언하고, 코드 표시 밖 산문에 `maru browser` 가 나오면 실패한다 — 모든 명령이 ①을 지나게 하려고.
@@ -836,6 +838,162 @@ test "⑩ 플러그인 글·CLI help·MCP 안내는 「your tab」 이라 쓰지
     try std.testing.expect(ambiguousTabWord("On Your tabs") != null and ambiguousTabWord("in your tab.") != null);
     try std.testing.expect(ambiguousTabWord("work in your own tab") != null);
     try std.testing.expect(ambiguousTabWord("tabs you opened and the user's tabs") == null);
+}
+
+/// 스킬 글에서 「기다림」 의 숫자를 모은다(⑪) — 주라는 시한(「at least N minutes」·「a N-minute shell timeout」), Bash 도구의 ms(`timeout: N`),
+/// 대기 최대치(「about N s」·「about N seconds」). 공백류(줄바꿈 포함)는 한 칸으로 접어서 본다 — 마크다운 줄이 「at least」 와 숫자 사이에서 끊겨도
+/// 놓치지 않게(적대 리뷰 C·D: 「3-minute」 꼴 두 자리와 줄바꿈 꼴을 처음 판이 못 봤다).
+const WaitMention = struct { kind: enum { allowance_minutes, timeout_ms, about_seconds }, value: u64, line: usize };
+
+fn waitMentions(arena: std.mem.Allocator, text: []const u8) ![]const WaitMention {
+    // 공백류를 한 칸으로 접은 글과, 접은 글의 바이트마다 원래 줄 번호.
+    var norm: std.ArrayList(u8) = .empty;
+    var line_of: std.ArrayList(usize) = .empty;
+    var line: usize = 1;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (std.ascii.isWhitespace(c)) {
+            if (norm.items.len == 0 or norm.items[norm.items.len - 1] != ' ') {
+                try norm.append(arena, ' ');
+                try line_of.append(arena, line);
+            }
+            if (c == '\n') line += 1;
+            continue;
+        }
+        try norm.append(arena, c);
+        try line_of.append(arena, line);
+    }
+    const t = norm.items;
+    var out: std.ArrayList(WaitMention) = .empty;
+    const Pat = struct { head: []const u8, tails: []const []const u8, kind: @FieldType(WaitMention, "kind") };
+    const pats = [_]Pat{
+        .{ .head = "at least ", .tails = &.{" minute"}, .kind = .allowance_minutes },
+        .{ .head = "timeout: ", .tails = &.{""}, .kind = .timeout_ms },
+        .{ .head = "timeout:", .tails = &.{""}, .kind = .timeout_ms }, // 붙여 쓴 꼴(위 꼴과 겹치지 않게 아래에서 숫자로 시작할 때만)
+        .{ .head = "about ", .tails = &.{ " s", " second" }, .kind = .about_seconds },
+    };
+    for (pats) |pat| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, t, from, pat.head)) |at| {
+            from = at + pat.head.len;
+            var end = from;
+            while (end < t.len and std.ascii.isDigit(t[end])) end += 1;
+            if (end == from) continue; // 숫자가 아니면 기다림 숫자가 아니다(「at least one」·「timeout: 」 뒤 공백 꼴은 위 패턴이 맡는다)
+            // 꼬리 하나가 맞아야 한다. 「about 150 s」 의 단위 뒤는 낱말 경계여야 한다(「about 15 sites」 를 초로 읽지 않게) — 「 s」 가 「 seconds」 의
+            // 앞부분이기도 하므로 꼬리마다 경계까지 보고 처음 맞는 것을 쓴다. 「second」 는 복수 s 까지 받는다.
+            const matched = for (pat.tails) |tl| {
+                if (!std.mem.startsWith(u8, t[end..], tl)) continue;
+                if (pat.kind != .about_seconds) break true;
+                var after = end + tl.len;
+                if (std.mem.eql(u8, tl, " second") and after < t.len and t[after] == 's') after += 1;
+                if (after < t.len and std.ascii.isAlphabetic(t[after])) continue;
+                break true;
+            } else false;
+            if (!matched) continue;
+            try out.append(arena, .{ .kind = pat.kind, .value = try std.fmt.parseInt(u64, t[from..end], 10), .line = line_of.items[at] });
+        }
+    }
+    // 「a 3-minute shell timeout」 — 숫자 바로 뒤 「-minute」.
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, t, from, "-minute")) |at| {
+        from = at + 1;
+        var start = at;
+        while (start > 0 and std.ascii.isDigit(t[start - 1])) start -= 1;
+        if (start == at) continue;
+        if (start > 0 and std.ascii.isAlphanumeric(t[start - 1])) continue; // 「v2-minute」 같은 낱말 조각
+        try out.append(arena, .{ .kind = .allowance_minutes, .value = try std.fmt.parseInt(u64, t[start..at], 10), .line = line_of.items[start] });
+    }
+    return out.items;
+}
+
+/// 한 글의 기다림 숫자가 `mcp` 의 상수와 맞는가 — 틀린 것마다 한 줄 보고, 그 수.
+fn waitProblems(path: []const u8, mentions: []const WaitMention) usize {
+    var bad: usize = 0;
+    for (mentions) |m| {
+        const ok = switch (m.kind) {
+            .allowance_minutes => m.value == mcp.ask_wait_minutes,
+            .timeout_ms => m.value == mcp.ask_wait_ms,
+            .about_seconds => m.value * std.time.ms_per_s < mcp.ask_wait_ms,
+        };
+        if (ok) continue;
+        std.debug.print("{s}:{d}: 기다림 숫자 {d}({s}) — maru mcp 의 시한은 {s}({d} ms, mcp.ask_wait_*)다\n", .{ path, m.line, m.value, @tagName(m.kind), mcp.ask_wait_text, mcp.ask_wait_ms });
+        bad += 1;
+    }
+    return bad;
+}
+
+/// 시한을 말해야 하는 글이 그 언급을 잃었는가(공허 통과 막기) — 모자라면 true.
+fn waitCoverageMissing(mentions: []const WaitMention, min_allowance: usize, min_timeout: usize) bool {
+    var allowance: usize = 0;
+    var timeout: usize = 0;
+    for (mentions) |m| switch (m.kind) {
+        .allowance_minutes => allowance += 1,
+        .timeout_ms => timeout += 1,
+        .about_seconds => {},
+    };
+    return allowance < min_allowance or timeout < min_timeout;
+}
+
+test "⑪ 스킬이 말하는 시한(「at least N minutes」·「N-minute」·`timeout: N`)은 maru mcp 와 같은 상수이고, 대기(「about N s」)는 그보다 짧다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // 시한을 말해야 하는 글(묻는 호출을 다루는 곳) — 하나라도 숫자를 잃으면(문장을 다듬다 지우면) 공허하게 통과하지 않게 파일마다 본다. 그 파일이
+    // 없어도(이름을 바꾸면) 조용히 빠지지 않게 찾은 수를 센다.
+    const must = [_]struct { path: []const u8, allowance: usize, timeout: usize }{
+        .{ .path = skill_path, .allowance = 2, .timeout = 1 },
+        .{ .path = skill_dir ++ "/references/dialogs-and-uploads.md", .allowance = 1, .timeout = 0 },
+        .{ .path = skill_dir ++ "/references/tabs-and-permissions.md", .allowance = 2, .timeout = 0 },
+    };
+    var found: [must.len]usize = @splat(0);
+    var bad: usize = 0;
+    var total: usize = 0;
+    for (try pluginMarkdown(arena)) |f| {
+        const mentions = try waitMentions(arena, f.text);
+        total += mentions.len;
+        bad += waitProblems(f.path, mentions);
+        for (must, 0..) |want, k| if (std.mem.eql(u8, want.path, f.path)) {
+            found[k] += 1;
+            if (waitCoverageMissing(mentions, want.allowance, want.timeout)) {
+                std.debug.print("{s}: 시한 언급이 모자란다(시한 {d} 곳·timeout: {d} 곳 이상이어야 한다)\n", .{ f.path, want.allowance, want.timeout });
+                bad += 1;
+            }
+        };
+    }
+    for (must, found) |want, n| if (n != 1) {
+        std.debug.print("{s}: 시한을 말해야 하는 글이 {d} 개 — 정확히 하나여야 한다(파일 이름이 바뀌었나)\n", .{ want.path, n });
+        bad += 1;
+    };
+    std.debug.print("plugin skill: 기다림 숫자 {d} 곳, 시한 {s}\n", .{ total, mcp.ask_wait_text });
+    try std.testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "스캐너: 기다림 숫자 — 틀린 분·ms·긴 대기(크고 작은 쪽·경계)가 걸리고, 줄바꿈·붙여 쓴 꼴도 읽고, 숫자 아닌 낱말은 숫자가 아니다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const good = "waits up to about 150 s. Give it a timeout of at least " ++ mcp.ask_wait_text ++ " (Bash: `timeout: 180000`), a 3-minute\nshell timeout, about 179 seconds.";
+    const g = try waitMentions(arena, good);
+    try std.testing.expectEqual(@as(usize, 5), g.len);
+    try std.testing.expectEqual(@as(usize, 0), waitProblems("t.md", g));
+    // 보고 줄 번호는 원래 글 기준이다 — 「3-minute」 는 1 줄, 줄바꿈 뒤 「about 179 seconds」 는 둘째 줄.
+    for (g) |m| if (m.value == 179) try std.testing.expectEqual(@as(usize, 2), m.line) else try std.testing.expectEqual(@as(usize, 1), m.line);
+    for ([_][]const u8{
+        "a timeout of at least 2 minutes", "a timeout of at least 5 minutes", "at least 2\nminutes", "a 2-minute shell timeout", "a 4-minute timeout",
+        "Bash: `timeout: 120000`",         "Bash: `timeout: 300000`",         "timeout:120000",      "waits about 240 s",        "waits about 180 s",
+        "about 200 seconds",
+    }) |wrong| {
+        const m = try waitMentions(arena, wrong);
+        errdefer std.debug.print("스캐너: 「{s}」 → {d} 개\n", .{ wrong, m.len });
+        try std.testing.expectEqual(@as(usize, 1), m.len);
+        try std.testing.expectEqual(@as(usize, 1), waitProblems("t.md", m));
+    }
+    try std.testing.expectEqual(@as(usize, 0), (try waitMentions(arena, "at least one tab, about 15 sites, at least 8 tabs, v2-minute, timeout: none")).len);
+    // 파일별 하한의 양성 대조 — 언급을 잃은 글은 걸리고, 다 있는 글은 안 걸린다.
+    try std.testing.expect(waitCoverageMissing(try waitMentions(arena, "no numbers here"), 1, 0));
+    try std.testing.expect(waitCoverageMissing(try waitMentions(arena, "at least 3 minutes"), 1, 1));
+    try std.testing.expect(!waitCoverageMissing(g, 2, 1));
 }
 
 test "스캐너: 규칙 구역 — 표지가 없거나·둘이거나·거꾸로거나·코드 블록 안이거나·줄에 다른 글과 섞이거나·비면 오류, 표면 낱말은 걸린다" {

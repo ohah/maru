@@ -24,7 +24,7 @@ maru browser emulate --surface 12 --clear
 | Viewport, user agent, locale, time zone, geolocation, media features, vision | `--clear` (or `--no-…`), the tab closes, or the permission is withdrawn. On a user's tab it is only paused while another site is shown and comes back with that site — clear it while the tab still shows the site (from another site `--clear` is refused). |
 | `--cpu` (1–20× slower) and `--network` (presets or `--latency`) | The process that set them exits — for you, this agent process. Clear them yourself before you finish. |
 
-- On your tabs there is no dialog. On a user's tab the first `emulate` asks once per site, and it applies only
+- On tabs you opened there is no dialog. On a user's tab the first `emulate` asks once per site, and it applies only
   while that site is shown. On a user's tab `--network` takes a preset only, and not `offline`.
 - One pane owns a tab's emulation. Another pane gets `emulated_by_other_pane`.
 - **If the user clicks or types in the tab, Maru drops your `--cpu` and `--network` there** (`released: human_input`).

@@ -139,7 +139,7 @@ maru browser network-record --surface <id> --off
 ## 7. References — read the one you need
 
 - [errors.md](references/errors.md) — every error line and what to do.
-- [tabs-and-permissions.md](references/tabs-and-permissions.md) — your tabs vs the user's, limits, cookies and storage, sub-agents.
+- [tabs-and-permissions.md](references/tabs-and-permissions.md) — agent tabs (the ones you opened) vs the user's tabs, limits, cookies and storage, sub-agents.
 - [emulation-and-trace.md](references/emulation-and-trace.md) — `emulate`, CPU and network conditions, `trace`; owners and lifetimes.
 - [network.md](references/network.md) — `network`, `network-request`, `network-record`, `network-block`, `network-mock`.
 - [dialogs-and-uploads.md](references/dialogs-and-uploads.md) — `dialog`, `handle-dialog`, a `close` that asks, `upload`.

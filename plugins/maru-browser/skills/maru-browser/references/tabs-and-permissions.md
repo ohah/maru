@@ -9,16 +9,16 @@ from a background `&` job while another job holds the terminal. A refusal is `-3
 `maru browser list` works from anywhere (it only lists), so its success does not prove you are in a pane.
 The first `open` does.
 
-## Your tabs (`open`)
+## Agent tabs — the tabs you open (`open`)
 
 - `maru browser open --url https://example.com` opens a hidden tab behind the user's current tab in your pane and
   prints `opened <id> <url>`. No dialog; the user's view and focus stay where they are. It waits for the first
   load (at most 25 s, `--timeout` to change).
 - Your pane owns it: commands work there without a dialog, on any site it goes to — except the cookie commands
-  and `clear-storage` (they ask once per site, on your tabs too) and `upload` (asks every time). Give those the
+  and `clear-storage` (they ask once per site, on tabs you opened too) and `upload` (asks every time). Give those the
   3-minute shell timeout.
 - A pane holds at most 8 agent tabs, about 157 MB each. A ninth `open` fails until you `close` one.
-  Pages you open with real clicks in your tab (`target=_blank`, `window.open`) also become your tabs and count.
+  Pages you open with real clicks in a tab you opened (`target=_blank`, `window.open`) also become agent tabs and count.
 - Agent tabs are not remembered across an app restart, and become the user's tabs when your pane closes.
   After that they are user tabs: controlling them asks again.
 

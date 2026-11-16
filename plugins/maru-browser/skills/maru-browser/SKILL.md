@@ -45,7 +45,8 @@ maru browser snapshot --surface 12 --interactive     # check what changed
 maru browser close --surface 12                      # always, when done
 ```
 
-- `open` makes a hidden tab behind the user's tab, owned by your pane: no dialog, the user's view does not move.
+- `open` makes a hidden tab behind the user's tab, owned by your pane; the user's view does not move. The first `open`
+  in a pane asks the user once (give it a 3-minute shell timeout); after they allow it, later opens do not ask.
   Work there, with the id it printed — the ids in `list` are mostly the user's tabs (section 3).
 - Target by locator (`--role button --name "Sign in"`, `--by-text`, `--by-label`) or ref; CSS `--selector` last.
   Refs come from the latest snapshot and last while that document lives: after a navigation, snapshot again.

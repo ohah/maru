@@ -12,8 +12,12 @@ The first `open` does.
 ## Agent tabs — the tabs you open (`open`)
 
 - `maru browser open --url https://example.com` opens a hidden tab behind the user's current tab in your pane and
-  prints `opened <id> <url>`. No dialog; the user's view and focus stay where they are. It waits for the first
+  prints `opened <id> <url>`. The user's view and focus stay where they are. It waits for the first
   load (at most 25 s, `--timeout` to change).
+- The first `open` in a pane shows the user one dialog: the tabs you open would use their logged-in sites. The call waits
+  for the answer (2 minutes at most). If they allow it, your pane opens tabs without asking again until the pane
+  closes or the app restarts. If they decline, `open` fails with `agent_tabs_declined` and Maru does not ask again
+  for about 10 minutes — tell the user instead of retrying. Agent tabs show ◈ in the tab bar.
 - Your pane owns it: commands work there without a dialog, on any site it goes to — except the cookie commands
   and `clear-storage` (they ask once per site, on tabs you opened too) and `upload` (asks every time). Give those the
   3-minute shell timeout.

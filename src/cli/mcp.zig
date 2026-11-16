@@ -117,7 +117,7 @@ fn withSurface(comptime extra: []const Arg) []const Arg {
 
 pub const tools = [_]Tool{
     .{ .name = "browser_list", .subcommand = "list", .description = "List the browser tabs of this maru instance (id, url, title, engine, controllable methods).", .args = &.{} },
-    .{ .name = "browser_open", .subcommand = "open", .description = "Open a Chromium tab behind the current one in this pane and wait for its first load. Returns the new tab id. Only from a maru pane; up to 8 tabs per pane.", .args = &.{
+    .{ .name = "browser_open", .subcommand = "open", .description = "Open a Chromium tab behind the current one in this pane and wait for its first load. Returns the new tab id. Only from a maru pane; up to 8 tabs per pane. The tab uses the user's logged-in sites, so the first open from a pane asks the user once (allow up to 2 minutes for the answer); if they decline, opens from this pane are refused for about 10 minutes (agent_tabs_declined) — tell the user instead of retrying.", .args = &.{
         .{ .key = "url", .kind = .string, .flag = "--url", .description = "http(s) address to load (omit for a blank tab)" },
         .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)", .min = 1, .max = 25000 },
     } },
@@ -649,16 +649,16 @@ pub const agent_rules: []const u8 = blk: {
 /// 시한은 모델이 할 수 있는 일로 쓴다(도구 시한은 사람이 클라이언트에 설정한다 — 그 안내는 `usage` 에, 사용자 결정 D5 「3 분」).
 pub const server_guidance =
     "Using these tools: find tabs with browser_list, or open a hidden tab of your own behind the user's with browser_open " ++
-    "(no dialog; up to 8 per pane), then act on a tab by its id (surface). Prefer locators (role, by_text, by_label) or refs " ++
+    "(it uses the user's logged-in sites, so the first open in this pane asks the user once; up to 8 per pane), then act on a tab by its id (surface). Prefer locators (role, by_text, by_label) or refs " ++
     "from browser_snapshot over CSS selectors; snapshot again after a navigation. Requests come from the maru pane this server " ++
     "runs in; inside tmux or screen in that pane every request except browser_list is refused. On a tab the user opened, the first call asks the user, " ++
     "and the network, recording, blocking, mocking and emulation tools ask again once per site (each tool's description says which); " ++
-    "tabs you opened ask nothing except browser_upload. A call that asks the user waits for the answer (up to 2 minutes for a dialog, " ++
+    "after that, tabs you opened ask nothing more except browser_upload. A call that asks the user waits for the answer (up to 2 minutes for a dialog, " ++
     "then the action), so allow it 3 minutes. browser_upload on a user's tab you do not control yet would ask twice (the tab first), " ++
     "so make another call on that tab first, such as browser_snapshot. If your client gives up sooner, the call still finishes and the next call " ++
     "waits for it, so check the tab before you repeat anything. Calls run one at a time. After a click, wait for something only the " ++
     "next page has: a load wait right after a click can still see the old page. CPU and network conditions set with browser_emulate " ++
-    "last while this MCP connection runs. A tab's title shows ◉ while its response bodies are recorded, ⊘ with block rules, " ++
+    "last while this MCP connection runs. Tabs you opened show ◈ before their title; a tab's title shows ◉ while its response bodies are recorded, ⊘ with block rules, " ++
     "▣ with mock rules, ◫ while emulated and ◔ while tracing.";
 
 /// `initialize` 의 `instructions` 로 내는 글 — 규칙이 **앞**(클라이언트가 4,096 자에서 자르면 꼬리부터 잃는다), 이 서버의 안내가 뒤.

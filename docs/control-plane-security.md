@@ -284,6 +284,16 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 - **누가 grant 를 쓰나**: grant 는 pane 단위(Model B)라, 그 pane 의 foreground 작업의 **자손 전부**가 쓴다 — 에이전트 본체만이
   아니라 그것이 띄운 도구·MCP 서버·플러그인, pane 셸이 쉬는 동안 그 셸이 띄워 둔 setsid 데몬도. 연결 하나의 출처는 연결에
   고정되고, 같은 fd 를 물려받은 프로세스는 그 조상이 foreground 인 동안 같은 출처로 요청한다.
+- **pane 동의(사용자 결정 2026-11-16)**: 에이전트 탭(`browser.open`·그 탭의 페이지가 연 탭)은 사용자의 Chromium 쿠키 통을 그대로 쓴다 —
+  통을 나누지 않는다(사용자 결정). 대신 pane 이 처음 탭을 열 때 확인 모달로 한 번 묻는다. 허용은 `(pane, pane, browser_agent_tabs)`
+  grant 로 남아(그 scope 는 상속 fd 로 발급하지 않는다) 위 「누가 grant 를 쓰나」 의 자손 전부가 쓰고, pane 이 닫히거나 앱이 끝나면 사라진다
+  (grant 저장소와 같은 메모리 모델). 거부는 `control_agent_tab_consent.DenyMemory` 가 그 pane 에 `deny_quiet_ms`(10 분) 기억해 그동안은 모달
+  없이 `agent_tabs_declined` 로 거절한다 — 거부한 에이전트가 곧 다시 열어 모달을 거듭 띄우지(허용을 조르지) 못하게. 다른 grant 모달에는 없던
+  기억이라 관례가 아니라 값으로 골랐다. 사용자의 단추·키 답만 거부로 치고, 다른 모달이 덮은 것·시한(120 초 — `agent_tabs_unanswered`)은
+  기억하지 않는다(§8.2a 신뢰 프롬프트와 같은 규칙). 동의를 Browser Grants 메뉴에서 거두면(wire 7) 그 pane 의 에이전트 탭도 사람의 탭이
+  되고(탭과 함께 생긴 권한은 뿌리와 함께 간다 — §8.3 F3), 그 pane 의 남은 탭은 에이전트의 장으로 새 에이전트 탭을 만들지 못한다. 동의
+  한 번 뒤의 위험은 이 결정 전과 같다 — 그 pane 의 에이전트(와 자손)는 묻지 않고 로그인된 사이트에서 행동할 수 있다(§8.3 browser_network 문단
+  의 쿠키 통). 모달은 pane 제목(프로그램이 정한다 — 제어 글자를 지우고 40 칸)을 보여 줄 뿐 그 pane 을 화면에서 가리키지는 않는다.
 - **앞으로 write·read-output·lifecycle 을 연결할 때(경고)**: 1g 는 확인되지 않은 셀렉터를 null 로 바꾸고, 지금의 ambient 폴백은
   「앵커 없음 = metadata 전체」다. 그 폴백을 metadata 밖 scope 로 넓히면 1g 가 버린 셀렉터가 오히려 권한 확장이 된다 — 새 scope
   는 앵커가 없으면 거절해야 한다. auth.grant 로 받은 metadata cap 도 앵커가 셀렉터라 1g 뒤로는 셀렉터가 버려지면 무효가 된다(지금은

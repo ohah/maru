@@ -253,18 +253,18 @@ fn parseTraceArgs(rest: []const []const u8, diag: *Diag) ParseError!TraceCmd {
     while (i < rest.len) {
         const a = rest[i];
         if (matchOpt(a, "--surface")) {
-            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&surface, try optValue(diag, rest, &i, "--surface"));
         } else if (matchOpt(a, "--action")) {
-            const want = std.meta.stringToEnum(TraceCmd.Action, try optValue(rest, &i, "--action")) orelse return error.InvalidTraceArgs;
+            const want = std.meta.stringToEnum(TraceCmd.Action, try optValue(diag, rest, &i, "--action")) orelse return error.InvalidTraceArgs;
             if (want == .read or want == .run) return error.InvalidTraceArgs;
             if (action) |c| if (c != want) return error.InvalidTraceArgs;
             action = want;
         } else if (matchOpt(a, "--duration")) {
             if (cmd.duration_ms != null) return error.InvalidTraceArgs;
-            cmd.duration_ms = try parseTraceDuration(try optValue(rest, &i, "--duration"));
+            cmd.duration_ms = try parseTraceDuration(try optValue(diag, rest, &i, "--duration"));
         } else if (matchOpt(a, "--out")) {
             if (cmd.out != null) return error.InvalidTraceArgs;
-            const o = try optValue(rest, &i, "--out");
+            const o = try optValue(diag, rest, &i, "--out");
             if (o.len == 0) return error.InvalidTraceArgs;
             cmd.out = o;
         } else if (eq(a, "--reload")) {
@@ -374,43 +374,43 @@ fn parseEmulateArgs(rest: []const []const u8, diag: *Diag) ParseError!EmulateCmd
     while (i < rest.len) {
         const a = rest[i];
         if (matchOpt(a, "--surface")) {
-            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&surface, try optValue(diag, rest, &i, "--surface"));
         } else if (matchOpt(a, "--viewport")) {
-            try Set.change(EmulateCmd.Viewport, &cmd.viewport, .{ .set = try parseViewportSpec(try optValue(rest, &i, "--viewport")) });
+            try Set.change(EmulateCmd.Viewport, &cmd.viewport, .{ .set = try parseViewportSpec(try optValue(diag, rest, &i, "--viewport")) });
         } else if (matchOpt(a, "--user-agent")) {
             if (ua_text != null) return error.InvalidEmulateArgs;
-            ua_text = try optValue(rest, &i, "--user-agent");
+            ua_text = try optValue(diag, rest, &i, "--user-agent");
         } else if (matchOpt(a, "--platform")) {
             if (platform != null) return error.InvalidEmulateArgs;
-            platform = try optValue(rest, &i, "--platform");
+            platform = try optValue(diag, rest, &i, "--platform");
         } else if (matchOpt(a, "--client-hints")) {
             if (hints != null) return error.InvalidEmulateArgs;
-            hints = try optValue(rest, &i, "--client-hints");
+            hints = try optValue(diag, rest, &i, "--client-hints");
         } else if (matchOpt(a, "--locale")) {
-            try Set.change([]const u8, &cmd.locale, .{ .set = try optValue(rest, &i, "--locale") });
+            try Set.change([]const u8, &cmd.locale, .{ .set = try optValue(diag, rest, &i, "--locale") });
         } else if (matchOpt(a, "--timezone")) {
-            try Set.change([]const u8, &cmd.timezone, .{ .set = try optValue(rest, &i, "--timezone") });
+            try Set.change([]const u8, &cmd.timezone, .{ .set = try optValue(diag, rest, &i, "--timezone") });
         } else if (matchOpt(a, "--geolocation")) {
-            try Set.change(EmulateCmd.Geo, &cmd.geolocation, .{ .set = try parseGeoSpec(try optValue(rest, &i, "--geolocation")) });
+            try Set.change(EmulateCmd.Geo, &cmd.geolocation, .{ .set = try parseGeoSpec(try optValue(diag, rest, &i, "--geolocation")) });
         } else if (matchOpt(a, "--vision")) {
-            try Set.change([]const u8, &cmd.vision, .{ .set = try optValue(rest, &i, "--vision") });
+            try Set.change([]const u8, &cmd.vision, .{ .set = try optValue(diag, rest, &i, "--vision") });
         } else if (matchOpt(a, "--media") or matchOpt(a, "--color-scheme") or matchOpt(a, "--reduced-motion") or matchOpt(a, "--forced-colors") or matchOpt(a, "--contrast")) {
             const name: []const u8 = for ([_][]const u8{ "--media", "--color-scheme", "--reduced-motion", "--forced-colors", "--contrast" }) |n| {
                 if (matchOpt(a, n)) break n;
             } else unreachable;
-            const v = try optValue(rest, &i, name);
+            const v = try optValue(diag, rest, &i, name);
             const slot: *?[]const u8 = if (eq(name, "--media")) &media.type else if (eq(name, "--color-scheme")) &media.color_scheme else if (eq(name, "--reduced-motion")) &media.reduced_motion else if (eq(name, "--forced-colors")) &media.forced_colors else &media.contrast;
             if (slot.* != null) return error.InvalidEmulateArgs;
             slot.* = v;
             media_given = true;
         } else if (matchOpt(a, "--cpu")) {
-            const v = try optValue(rest, &i, "--cpu");
+            const v = try optValue(diag, rest, &i, "--cpu");
             try Set.change(f64, &cmd.cpu, .{ .set = std.fmt.parseFloat(f64, v) catch return error.InvalidEmulateArgs });
         } else if (matchOpt(a, "--network")) {
-            try Set.change(EmulateCmd.Network, &cmd.network, .{ .set = .{ .preset = try optValue(rest, &i, "--network") } });
+            try Set.change(EmulateCmd.Network, &cmd.network, .{ .set = .{ .preset = try optValue(diag, rest, &i, "--network") } });
         } else if (matchOpt(a, "--latency") or matchOpt(a, "--download") or matchOpt(a, "--upload")) {
             const name: []const u8 = if (matchOpt(a, "--latency")) "--latency" else if (matchOpt(a, "--download")) "--download" else "--upload";
-            const n = std.fmt.parseInt(u32, try optValue(rest, &i, name), 10) catch return error.InvalidEmulateArgs;
+            const n = std.fmt.parseInt(u32, try optValue(diag, rest, &i, name), 10) catch return error.InvalidEmulateArgs;
             const slot: *?u32 = if (eq(name, "--latency")) &latency else if (eq(name, "--download")) &download else &upload;
             if (slot.* != null) return error.InvalidEmulateArgs;
             slot.* = n;
@@ -432,7 +432,7 @@ fn parseEmulateArgs(rest: []const []const u8, diag: *Diag) ParseError!EmulateCmd
             action = want;
             i += 1;
         } else if (matchOpt(a, "--action")) {
-            const want = std.meta.stringToEnum(EmulateCmd.Action, try optValue(rest, &i, "--action")) orelse return error.InvalidEmulateArgs;
+            const want = std.meta.stringToEnum(EmulateCmd.Action, try optValue(diag, rest, &i, "--action")) orelse return error.InvalidEmulateArgs;
             if (action) |c| if (c != want) return error.InvalidEmulateArgs;
             action = want;
         } else if (std.mem.startsWith(u8, a, "--") and std.mem.endsWith(u8, if (std.mem.indexOfScalar(u8, a, '=')) |e| a[0..e] else a, "-json")) {
@@ -447,7 +447,7 @@ fn parseEmulateArgs(rest: []const []const u8, diag: *Diag) ParseError!EmulateCmd
                 if (eq(head, flag)) break k;
             } else return diag.unknownOption(a);
             if (cmd.json[gi] != null) return error.InvalidEmulateArgs;
-            const text = try optValue(rest, &i, head);
+            const text = try optValue(diag, rest, &i, head);
             // JSON 꼴인지만 여기서 본다(값의 뜻은 서버가 — 까닭과 함께).
             var vbuf: [32 * 1024]u8 = undefined;
             var fba = std.heap.FixedBufferAllocator.init(&vbuf);
@@ -865,7 +865,7 @@ fn displaySafe(s: []const u8, out: []u8) usize {
 pub const Diag = struct {
     /// 첫 낱말(하위 명령 이름 — 모르는 명령이면 그 낱말). 인자가 없으면 null.
     command: ?[]const u8 = null,
-    /// 모르는 옵션(`UnknownOption`)이나 남는 인자(`UnexpectedArgument`)의 낱말.
+    /// 모르는 옵션(`UnknownOption`)이나 남는 인자(`UnexpectedArgument`)의 낱말, 값 없는 옵션(`MissingOptionValue`)의 이름.
     token: ?[]const u8 = null,
 
     /// 낱말을 적고 오류를 돌려준다 — `return diag.unknownOption(a);` 한 줄로 쓰게(적는 것을 잊은 자리가 생기지 않게).
@@ -876,6 +876,11 @@ pub const Diag = struct {
     fn unexpected(self: *Diag, a: []const u8) ParseError {
         self.token = a;
         return error.UnexpectedArgument;
+    }
+    /// 값을 받는 옵션이 값 없이 끝났다 — `opt` 는 그 옵션의 **상수 이름**(사용자 글이 아니다; `=` 꼴은 빈 값이라 여기 오지 않는다).
+    fn missingValue(self: *Diag, opt: []const u8) ParseError {
+        self.token = opt;
+        return error.MissingOptionValue;
     }
 };
 
@@ -1020,12 +1025,12 @@ fn parseInner(args: []const []const u8, diag: *Diag) ParseError!Command {
         while (i < rest.len) {
             const a = rest[i];
             if (matchOpt(a, "--url")) {
-                url = optValue(rest, &i, "--url") catch |err| switch (err) {
+                url = optValue(diag, rest, &i, "--url") catch |err| switch (err) {
                     error.MissingOptionValue => return error.MissingUrl,
                     else => return err,
                 };
             } else if (matchOpt(a, "--timeout")) {
-                const value = optValue(rest, &i, "--timeout") catch |err| switch (err) {
+                const value = optValue(diag, rest, &i, "--timeout") catch |err| switch (err) {
                     error.MissingOptionValue => return error.MissingTimeoutValue,
                     else => return err,
                 };
@@ -1252,7 +1257,7 @@ fn parseInner(args: []const []const u8, diag: *Diag) ParseError!Command {
                 max_depth = std.fmt.parseInt(u32, a["--max-depth=".len..], 10) catch return error.InvalidMaxDepth;
                 i += 1;
             } else if (eq(a, "--selector")) {
-                if (i + 1 >= args.len) return error.MissingOptionValue;
+                if (i + 1 >= args.len) return diag.missingValue("--selector");
                 selector = args[i + 1];
                 i += 2;
             } else if (std.mem.startsWith(u8, a, "--selector=")) {
@@ -1418,9 +1423,9 @@ fn parseHandleDialogArgs(rest: []const []const u8, diag: *Diag) ParseError!@Fiel
             accept = eq(a, "--accept");
             i += 1;
         } else if (matchOpt(a, "--text")) {
-            text = try optValue(rest, &i, "--text");
+            text = try optValue(diag, rest, &i, "--text");
         } else if (matchOpt(a, "--dialog")) {
-            const value = try optValue(rest, &i, "--dialog");
+            const value = try optValue(diag, rest, &i, "--dialog");
             const t = std.fmt.parseInt(u64, value, 10) catch return error.InvalidDialogToken;
             if (t == 0 or t > max_dialog_token) return error.InvalidDialogToken;
             dialog = t;
@@ -1458,14 +1463,14 @@ fn parseWaitArgs(rest: []const []const u8, diag: *Diag) ParseError!WaitArgs {
     while (i < rest.len) {
         const a = rest[i];
         if (matchOpt(a, "--surface")) {
-            const value = optValue(rest, &i, "--surface") catch |err| switch (err) {
+            const value = optValue(diag, rest, &i, "--surface") catch |err| switch (err) {
                 error.MissingOptionValue => return error.MissingSurfaceValue,
                 else => return err,
             };
             try assignSurface(&r.surface, value);
         } else if (matchOpt(a, "--selector")) {
             if (r.condition != null) return error.ConflictingWaitCondition;
-            const value = try optValue(rest, &i, "--selector");
+            const value = try optValue(diag, rest, &i, "--selector");
             if (value.len == 0) return error.MissingSelector;
             r.condition = .selector;
             r.selector = value;
@@ -1480,23 +1485,23 @@ fn parseWaitArgs(rest: []const []const u8, diag: *Diag) ParseError!WaitArgs {
             r.loc.exact = true;
             i += 1;
         } else if (matchOpt(a, "--role")) {
-            r.loc.role = try optValue(rest, &i, "--role");
+            r.loc.role = try optValue(diag, rest, &i, "--role");
         } else if (matchOpt(a, "--name")) {
-            r.loc.name = try optValue(rest, &i, "--name");
+            r.loc.name = try optValue(diag, rest, &i, "--name");
         } else if (matchOpt(a, "--by-text")) {
-            r.loc.by_text = try optValue(rest, &i, "--by-text");
+            r.loc.by_text = try optValue(diag, rest, &i, "--by-text");
         } else if (matchOpt(a, "--by-label")) {
-            r.loc.by_label = try optValue(rest, &i, "--by-label");
+            r.loc.by_label = try optValue(diag, rest, &i, "--by-label");
         } else if (matchOpt(a, "--level")) {
-            const v = std.fmt.parseInt(u32, try optValue(rest, &i, "--level"), 10) catch return error.InvalidLocatorNumber;
+            const v = std.fmt.parseInt(u32, try optValue(diag, rest, &i, "--level"), 10) catch return error.InvalidLocatorNumber;
             if (v < 1 or v > 100) return error.InvalidLocatorNumber;
             r.loc.level = v;
         } else if (matchOpt(a, "--nth")) {
-            const v = std.fmt.parseInt(u32, try optValue(rest, &i, "--nth"), 10) catch return error.InvalidLocatorNumber;
+            const v = std.fmt.parseInt(u32, try optValue(diag, rest, &i, "--nth"), 10) catch return error.InvalidLocatorNumber;
             if (v > 1_000_000) return error.InvalidLocatorNumber;
             r.loc.nth = v;
         } else if (matchOpt(a, "--timeout")) {
-            const value = optValue(rest, &i, "--timeout") catch |err| switch (err) {
+            const value = optValue(diag, rest, &i, "--timeout") catch |err| switch (err) {
                 error.MissingOptionValue => return error.MissingTimeoutValue,
                 else => return err,
             };
@@ -1523,23 +1528,23 @@ fn parseCookieArgs(rest: []const []const u8, diag: *Diag) ParseError!CookieArgs 
             r.secure = true;
             i += 1;
         } else if (matchOpt(a, "--surface")) {
-            try assignSurface(&r.surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&r.surface, try optValue(diag, rest, &i, "--surface"));
         } else if (matchOpt(a, "--name")) {
-            r.name = try optValue(rest, &i, "--name");
+            r.name = try optValue(diag, rest, &i, "--name");
         } else if (matchOpt(a, "--key")) {
-            r.key = try optValue(rest, &i, "--key");
+            r.key = try optValue(diag, rest, &i, "--key");
         } else if (matchOpt(a, "--value")) {
-            r.value = try optValue(rest, &i, "--value");
+            r.value = try optValue(diag, rest, &i, "--value");
         } else if (matchOpt(a, "--domain")) {
-            r.domain = try optValue(rest, &i, "--domain");
+            r.domain = try optValue(diag, rest, &i, "--domain");
         } else if (matchOpt(a, "--path")) {
-            r.path = try optValue(rest, &i, "--path");
+            r.path = try optValue(diag, rest, &i, "--path");
         } else if (matchOpt(a, "--selector")) {
-            r.selector = try optValue(rest, &i, "--selector");
+            r.selector = try optValue(diag, rest, &i, "--selector");
         } else if (matchOpt(a, "--ref")) {
-            r.ref = try optValue(rest, &i, "--ref");
+            r.ref = try optValue(diag, rest, &i, "--ref");
         } else if (matchOpt(a, "--text")) {
-            r.text = try optValue(rest, &i, "--text");
+            r.text = try optValue(diag, rest, &i, "--text");
         } else if (std.mem.startsWith(u8, a, "-")) {
             return diag.unknownOption(a);
         } else {
@@ -1585,9 +1590,9 @@ fn parseNetworkArgs(rest: []const []const u8, diag: *Diag) ParseError!NetworkCmd
     while (i < rest.len) {
         const a = rest[i];
         if (matchOpt(a, "--surface")) {
-            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&surface, try optValue(diag, rest, &i, "--surface"));
         } else if (matchOpt(a, "--type")) {
-            var it = std.mem.splitScalar(u8, try optValue(rest, &i, "--type"), ',');
+            var it = std.mem.splitScalar(u8, try optValue(diag, rest, &i, "--type"), ',');
             while (it.next()) |t| {
                 if (t.len == 0) continue;
                 const known = for (network_type_names) |n| {
@@ -1598,12 +1603,12 @@ fn parseNetworkArgs(rest: []const []const u8, diag: *Diag) ParseError!NetworkCmd
                 cmd.type_count += 1;
             }
         } else if (matchOpt(a, "--method")) {
-            const m = try optValue(rest, &i, "--method");
+            const m = try optValue(diag, rest, &i, "--method");
             if (m.len == 0 or m.len > 32) return error.InvalidMethod;
             for (m) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.InvalidMethod;
             cmd.method = m;
         } else if (matchOpt(a, "--status")) {
-            const v = try optValue(rest, &i, "--status");
+            const v = try optValue(diag, rest, &i, "--status");
             if (v.len == 3 and v[0] >= '1' and v[0] <= '5' and std.ascii.toLower(v[1]) == 'x' and std.ascii.toLower(v[2]) == 'x') {
                 cmd.status_class = v[0] - '0';
             } else {
@@ -1612,19 +1617,19 @@ fn parseNetworkArgs(rest: []const []const u8, diag: *Diag) ParseError!NetworkCmd
                 cmd.status = n;
             }
         } else if (matchOpt(a, "--url-contains")) {
-            const v = try optValue(rest, &i, "--url-contains");
+            const v = try optValue(diag, rest, &i, "--url-contains");
             if (v.len == 0 or v.len > 2048) return error.InvalidUrlFilter;
             cmd.url_contains = v;
         } else if (matchOpt(a, "--before-req")) {
-            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--before-req"), 10) catch return error.InvalidBeforeReq;
+            const n = std.fmt.parseInt(u64, try optValue(diag, rest, &i, "--before-req"), 10) catch return error.InvalidBeforeReq;
             if (n == 0 or n > max_dialog_token) return error.InvalidBeforeReq;
             cmd.before_req = n;
         } else if (matchOpt(a, "--page")) {
-            const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--page"), 10) catch return error.InvalidPage;
+            const n = std.fmt.parseInt(u32, try optValue(diag, rest, &i, "--page"), 10) catch return error.InvalidPage;
             if (n > max_network_page) return error.InvalidPage;
             cmd.page = n;
         } else if (matchOpt(a, "--page-size")) {
-            const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--page-size"), 10) catch return error.InvalidPage;
+            const n = std.fmt.parseInt(u32, try optValue(diag, rest, &i, "--page-size"), 10) catch return error.InvalidPage;
             if (n == 0 or n > max_network_page_size) return error.InvalidPage;
             cmd.page_size = n;
         } else if (eq(a, "--clear")) {
@@ -1654,25 +1659,25 @@ fn parseNetworkRequestArgs(rest: []const []const u8, diag: *Diag) ParseError!Net
     while (i < rest.len) {
         const a = rest[i];
         if (matchOpt(a, "--surface")) {
-            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&surface, try optValue(diag, rest, &i, "--surface"));
         } else if (matchOpt(a, "--req")) {
-            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--req"), 10) catch return error.InvalidRequestId;
+            const n = std.fmt.parseInt(u64, try optValue(diag, rest, &i, "--req"), 10) catch return error.InvalidRequestId;
             if (n == 0 or n > max_dialog_token) return error.InvalidRequestId;
             req = n;
         } else if (eq(a, "--body")) {
             cmd.body = true;
             i += 1;
         } else if (matchOpt(a, "--offset")) {
-            const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--offset"), 10) catch return error.InvalidBodyOffset;
+            const n = std.fmt.parseInt(u32, try optValue(diag, rest, &i, "--offset"), 10) catch return error.InvalidBodyOffset;
             if (n > max_network_body_bytes) return error.InvalidBodyOffset;
             cmd.offset = n;
         } else if (matchOpt(a, "--max-bytes")) {
-            const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--max-bytes"), 10) catch return error.InvalidBodyBytes;
+            const n = std.fmt.parseInt(u32, try optValue(diag, rest, &i, "--max-bytes"), 10) catch return error.InvalidBodyBytes;
             if (n == 0 or n > max_network_body_read) return error.InvalidBodyBytes;
             cmd.max_bytes = n;
         } else if (matchOpt(a, "--out")) {
             // 재검증 3 차 뒤 N-i3: 맨 끝의 값 없는 `--out` 도 exec·screenshot 처럼 「--out needs a value」(전에는 「the option needs a value」).
-            const v = optValue(rest, &i, "--out") catch return error.MissingOutValue;
+            const v = optValue(diag, rest, &i, "--out") catch return error.MissingOutValue;
             if (v.len == 0) return error.MissingOutValue;
             cmd.out = v;
         } else if (std.mem.startsWith(u8, a, "-")) {
@@ -1697,7 +1702,7 @@ fn parseNetworkRecordArgs(rest: []const []const u8, diag: *Diag) ParseError!@Fie
     while (i < rest.len) {
         const a = rest[i];
         if (matchOpt(a, "--surface")) {
-            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&surface, try optValue(diag, rest, &i, "--surface"));
         } else if (eq(a, "--on") or eq(a, "--off")) {
             if (on != null) return error.MissingRecordSwitch;
             on = eq(a, "--on");
@@ -1725,21 +1730,21 @@ fn parseNetworkBlockArgs(rest: []const []const u8, diag: *Diag) ParseError!Netwo
     while (i < rest.len) {
         const a = rest[i];
         if (matchOpt(a, "--surface")) {
-            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&surface, try optValue(diag, rest, &i, "--surface"));
         } else if (matchOpt(a, "--add") or matchOpt(a, "--remove") or matchOpt(a, "--pattern")) {
             const name: []const u8 = if (matchOpt(a, "--add")) "--add" else if (matchOpt(a, "--remove")) "--remove" else "--pattern";
-            const v = try optValue(rest, &i, name);
+            const v = try optValue(diag, rest, &i, name);
             if (eq(name, "--add")) try setAction(&action, .add) else if (eq(name, "--remove")) try setAction(&action, .remove);
             if (v.len == 0 or cmd.pattern_count == max_block_patterns) return error.InvalidBlockArgs;
             cmd.patterns[cmd.pattern_count] = v;
             cmd.pattern_count += 1;
         } else if (matchOpt(a, "--rule")) {
-            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--rule"), 10) catch return error.InvalidBlockArgs;
+            const n = std.fmt.parseInt(u64, try optValue(diag, rest, &i, "--rule"), 10) catch return error.InvalidBlockArgs;
             if (n == 0 or n > std.math.maxInt(u32) or cmd.rule_count == max_block_patterns) return error.InvalidBlockArgs;
             cmd.rules[cmd.rule_count] = n;
             cmd.rule_count += 1;
         } else if (matchOpt(a, "--type")) {
-            var it = std.mem.splitScalar(u8, try optValue(rest, &i, "--type"), ',');
+            var it = std.mem.splitScalar(u8, try optValue(diag, rest, &i, "--type"), ',');
             while (it.next()) |t| {
                 if (t.len == 0) continue;
                 const known = for (network_type_names) |n| {
@@ -1750,7 +1755,7 @@ fn parseNetworkBlockArgs(rest: []const []const u8, diag: *Diag) ParseError!Netwo
                 cmd.type_count += 1;
             }
         } else if (matchOpt(a, "--strict")) {
-            const v = try optValue(rest, &i, "--strict");
+            const v = try optValue(diag, rest, &i, "--strict");
             try setAction(&action, .strict);
             const on = if (eq(v, "on")) true else if (eq(v, "off")) false else return error.InvalidBlockArgs;
             if (cmd.on) |o| if (o != on) return error.InvalidBlockArgs;
@@ -1767,7 +1772,7 @@ fn parseNetworkBlockArgs(rest: []const []const u8, diag: *Diag) ParseError!Netwo
             try setAction(&action, .list);
             i += 1;
         } else if (matchOpt(a, "--action")) {
-            const v = try optValue(rest, &i, "--action");
+            const v = try optValue(diag, rest, &i, "--action");
             try setAction(&action, std.meta.stringToEnum(NetworkBlockCmd.Action, v) orelse return error.InvalidBlockAction);
         } else if (std.mem.startsWith(u8, a, "-")) {
             return diag.unknownOption(a);
@@ -1805,20 +1810,20 @@ fn parseNetworkMockArgs(rest: []const []const u8, diag: *Diag) ParseError!Networ
     while (i < rest.len) {
         const a = rest[i];
         if (matchOpt(a, "--surface")) {
-            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&surface, try optValue(diag, rest, &i, "--surface"));
         } else if (matchOpt(a, "--add") or matchOpt(a, "--remove") or matchOpt(a, "--pattern")) {
             const name: []const u8 = if (matchOpt(a, "--add")) "--add" else if (matchOpt(a, "--remove")) "--remove" else "--pattern";
-            const v = try optValue(rest, &i, name);
+            const v = try optValue(diag, rest, &i, name);
             if (eq(name, "--add")) try setAction(&action, .add) else if (eq(name, "--remove")) try setAction(&action, .remove);
             if (v.len == 0 or cmd.pattern != null) return error.InvalidMockArgs;
             cmd.pattern = v;
         } else if (matchOpt(a, "--rule")) {
-            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--rule"), 10) catch return error.InvalidMockArgs;
+            const n = std.fmt.parseInt(u64, try optValue(diag, rest, &i, "--rule"), 10) catch return error.InvalidMockArgs;
             if (n == 0 or n > std.math.maxInt(u32) or cmd.rule_count == max_block_patterns) return error.InvalidMockArgs;
             cmd.rules[cmd.rule_count] = n;
             cmd.rule_count += 1;
         } else if (matchOpt(a, "--type")) {
-            var it = std.mem.splitScalar(u8, try optValue(rest, &i, "--type"), ',');
+            var it = std.mem.splitScalar(u8, try optValue(diag, rest, &i, "--type"), ',');
             while (it.next()) |t| {
                 if (t.len == 0) continue;
                 const known = for (network_type_names) |n| {
@@ -1829,7 +1834,7 @@ fn parseNetworkMockArgs(rest: []const []const u8, diag: *Diag) ParseError!Networ
                 cmd.type_count += 1;
             }
         } else if (matchOpt(a, "--method")) {
-            var it = std.mem.splitScalar(u8, try optValue(rest, &i, "--method"), ',');
+            var it = std.mem.splitScalar(u8, try optValue(diag, rest, &i, "--method"), ',');
             while (it.next()) |m| {
                 if (m.len == 0) continue;
                 if (cmd.method_count == max_mock_methods) return error.InvalidMockArgs;
@@ -1837,26 +1842,26 @@ fn parseNetworkMockArgs(rest: []const []const u8, diag: *Diag) ParseError!Networ
                 cmd.method_count += 1;
             }
         } else if (matchOpt(a, "--status")) {
-            const v = std.fmt.parseInt(u16, try optValue(rest, &i, "--status"), 10) catch return error.InvalidMockArgs;
+            const v = std.fmt.parseInt(u16, try optValue(diag, rest, &i, "--status"), 10) catch return error.InvalidMockArgs;
             cmd.status = v;
             response_opts = true;
         } else if (matchOpt(a, "--content-type")) {
-            cmd.content_type = try optValue(rest, &i, "--content-type");
+            cmd.content_type = try optValue(diag, rest, &i, "--content-type");
             response_opts = true;
         } else if (matchOpt(a, "--header")) {
-            const v = try optValue(rest, &i, "--header");
+            const v = try optValue(diag, rest, &i, "--header");
             if (std.mem.indexOfScalar(u8, v, ':') == null or cmd.header_count == max_mock_headers) return error.InvalidMockArgs;
             cmd.headers[cmd.header_count] = v;
             cmd.header_count += 1;
             response_opts = true;
         } else if (matchOpt(a, "--body") or matchOpt(a, "--body-file") or matchOpt(a, "--body-base64")) {
             const name: []const u8 = if (matchOpt(a, "--body-file")) "--body-file" else if (matchOpt(a, "--body-base64")) "--body-base64" else "--body";
-            const v = try optValue(rest, &i, name);
+            const v = try optValue(diag, rest, &i, name);
             if (cmd.body != null or cmd.body_file != null or cmd.body_base64 != null) return error.InvalidMockArgs;
             if (eq(name, "--body")) cmd.body = v else if (eq(name, "--body-file")) cmd.body_file = v else cmd.body_base64 = v;
             response_opts = true;
         } else if (matchOpt(a, "--strict")) {
-            const v = try optValue(rest, &i, "--strict");
+            const v = try optValue(diag, rest, &i, "--strict");
             try setAction(&action, .strict);
             const on = if (eq(v, "on")) true else if (eq(v, "off")) false else return error.InvalidMockArgs;
             if (cmd.on) |o| if (o != on) return error.InvalidMockArgs;
@@ -1873,7 +1878,7 @@ fn parseNetworkMockArgs(rest: []const []const u8, diag: *Diag) ParseError!Networ
             try setAction(&action, .list);
             i += 1;
         } else if (matchOpt(a, "--action")) {
-            const v = try optValue(rest, &i, "--action");
+            const v = try optValue(diag, rest, &i, "--action");
             try setAction(&action, std.meta.stringToEnum(NetworkBlockCmd.Action, v) orelse return error.InvalidMockAction);
         } else if (std.mem.startsWith(u8, a, "-")) {
             return diag.unknownOption(a);
@@ -1961,30 +1966,30 @@ fn parseActArgs(rest: []const []const u8, extras: ActExtras, diag: *Diag) ParseE
             r.exact = true;
             i += 1;
         } else if (matchOpt(a, "--surface")) {
-            try assignSurface(&r.surface, try optValue(rest, &i, "--surface"));
+            try assignSurface(&r.surface, try optValue(diag, rest, &i, "--surface"));
         } else if (matchOpt(a, "--selector")) {
-            r.selector = try optValue(rest, &i, "--selector");
+            r.selector = try optValue(diag, rest, &i, "--selector");
         } else if (matchOpt(a, "--ref")) {
-            r.ref = try optValue(rest, &i, "--ref");
+            r.ref = try optValue(diag, rest, &i, "--ref");
         } else if (matchOpt(a, "--by-text")) {
-            r.by_text = try optValue(rest, &i, "--by-text");
+            r.by_text = try optValue(diag, rest, &i, "--by-text");
         } else if (matchOpt(a, "--by-label")) {
-            r.by_label = try optValue(rest, &i, "--by-label");
+            r.by_label = try optValue(diag, rest, &i, "--by-label");
         } else if (matchOpt(a, "--role")) {
-            r.role = try optValue(rest, &i, "--role");
+            r.role = try optValue(diag, rest, &i, "--role");
         } else if (matchOpt(a, "--name")) {
-            r.name = try optValue(rest, &i, "--name");
+            r.name = try optValue(diag, rest, &i, "--name");
         } else if (matchOpt(a, "--level")) {
-            const v = std.fmt.parseInt(u32, try optValue(rest, &i, "--level"), 10) catch return error.InvalidLocatorNumber;
+            const v = std.fmt.parseInt(u32, try optValue(diag, rest, &i, "--level"), 10) catch return error.InvalidLocatorNumber;
             if (v < 1 or v > 100) return error.InvalidLocatorNumber;
             r.level = v;
         } else if (matchOpt(a, "--nth")) {
-            r.nth = std.fmt.parseInt(u32, try optValue(rest, &i, "--nth"), 10) catch return error.InvalidLocatorNumber;
+            r.nth = std.fmt.parseInt(u32, try optValue(diag, rest, &i, "--nth"), 10) catch return error.InvalidLocatorNumber;
             if (r.nth.? > 1_000_000) return error.InvalidLocatorNumber; // 서버(L2)와 같은 범위
         } else if (extras.text and matchOpt(a, "--text")) {
-            r.text = try optValue(rest, &i, "--text");
+            r.text = try optValue(diag, rest, &i, "--text");
         } else if (extras.key and matchOpt(a, "--key")) {
-            r.key = try optValue(rest, &i, "--key");
+            r.key = try optValue(diag, rest, &i, "--key");
         } else if (std.mem.startsWith(u8, a, "-")) {
             return diag.unknownOption(a);
         } else {
@@ -2015,11 +2020,12 @@ fn matchOpt(a: []const u8, opt: []const u8) bool {
     return eq(a, opt) or (std.mem.startsWith(u8, a, opt) and a.len > opt.len and a[opt.len] == '=');
 }
 
-/// `--opt val`(공백) 또는 `--opt=val`의 값. `i`를 소비만큼 전진. 값 없으면 MissingOptionValue.
-fn optValue(rest: []const []const u8, i: *usize, opt: []const u8) ParseError![]const u8 {
+/// `--opt val`(공백) 또는 `--opt=val`의 값. `i`를 소비만큼 전진. 값 없으면 MissingOptionValue — `diag` 에 그 옵션 이름을 남긴다(오류 글이
+/// 「option '--x' needs a value」 로 말하게; 값을 읽는 자리가 모두 이 함수를 지나므로 여기 한 곳에서 적는다).
+fn optValue(diag: *Diag, rest: []const []const u8, i: *usize, opt: []const u8) ParseError![]const u8 {
     const a = rest[i.*];
     if (eq(a, opt)) {
-        if (i.* + 1 >= rest.len) return error.MissingOptionValue;
+        if (i.* + 1 >= rest.len) return diag.missingValue(opt);
         i.* += 2;
         return rest[i.* - 1];
     }
@@ -4232,6 +4238,46 @@ test "M8: 모르는 옵션·남는 인자는 자리마다 그 낱말을 Diag 에
     var diag: Diag = .{};
     try testing.expectError(error.UnexpectedArgument, parseDiag(&many, &diag));
     try testing.expectEqualStrings("--exact", diag.token.?);
+}
+
+// 이 시험이 증명하는 것: 값을 받는 옵션이 맨 끝에 값 없이 오면(`MissingOptionValue`) 파서가 **그 옵션 이름**을 적는다 — 전에는 「the option needs
+// a value」 만 말해 `click --surface 1 --selector` 처럼 옵션이 여럿인 줄에서 어느 것인지 몰랐다(#4729 적대 1 회차 LOW). 하위 파서마다 한 꼴씩
+// (값을 읽는 자리는 모두 `optValue` 하나를 지난다 — 그 함수가 적는다), snapshot 의 손으로 읽는 `--selector` 도. 이미 이름을 말하는 따로 매긴
+// 오류(`--timeout needs a value` 등)는 그대로다. 적는 낱말은 사용자 글이 아니라 옵션 **상수**다(`=` 꼴·값은 싣지 않는다).
+test "MissingOptionValue: 값 없는 옵션은 그 옵션 이름을 낱말로 남긴다 — 하위 파서마다" {
+    const Case = struct { args: []const []const u8, token: []const u8 };
+    const cases = [_]Case{
+        .{ .args = &.{ "click", "--surface" }, .token = "--surface" }, // act
+        .{ .args = &.{ "click", "--surface", "1", "--selector" }, .token = "--selector" },
+        .{ .args = &.{ "type", "--surface", "1", "--ref", "n2", "--text" }, .token = "--text" },
+        .{ .args = &.{ "upload", "--surface", "1", "--role" }, .token = "--role" },
+        .{ .args = &.{ "snapshot", "--surface", "1", "--selector" }, .token = "--selector" }, // parseInner 안 손 읽기
+        .{ .args = &.{ "set-cookie", "--surface", "1", "--name" }, .token = "--name" }, // cookie
+        .{ .args = &.{ "get-local-storage", "--surface", "1", "--key" }, .token = "--key" },
+        .{ .args = &.{ "handle-dialog", "--surface", "1", "--accept", "--text" }, .token = "--text" },
+        .{ .args = &.{ "wait", "--surface", "1", "--selector" }, .token = "--selector" },
+        .{ .args = &.{ "network", "--surface", "1", "--type" }, .token = "--type" },
+        .{ .args = &.{ "network-request", "--surface", "1", "--req" }, .token = "--req" },
+        .{ .args = &.{ "network-block", "--surface", "9", "--add" }, .token = "--add" },
+        .{ .args = &.{ "network-mock", "--surface", "9", "--add", "https://a.test/*", "--header" }, .token = "--header" },
+        .{ .args = &.{ "emulate", "--surface", "1", "--viewport" }, .token = "--viewport" },
+        .{ .args = &.{ "trace", "start", "--surface", "1", "--duration" }, .token = "--duration" },
+    };
+    for (cases) |c| {
+        var diag: Diag = .{};
+        const got = if (parseDiag(c.args, &diag)) |_| {
+            std.debug.print("MissingOptionValue: {s} 가 통과했다\n", .{c.args[0]});
+            return error.TestExpectedError;
+        } else |e| e;
+        errdefer std.debug.print("MissingOptionValue: {s} … → {s}, token={?s}\n", .{ c.args[0], @errorName(got), diag.token });
+        try testing.expectEqual(error.MissingOptionValue, got);
+        try testing.expectEqualStrings(c.token, diag.token orelse "(none)");
+    }
+    // 따로 매긴 오류는 그대로(그 글이 이미 옵션을 말한다).
+    try testing.expectError(error.MissingTimeoutValue, parse(&.{ "wait", "--surface", "1", "--load", "--timeout" }));
+    try testing.expectError(error.MissingUrl, parse(&.{ "open", "--url" }));
+    // `--opt=` 는 빈 값이지 값 없음이 아니다(지금 규칙 그대로).
+    try testing.expect(parse(&.{ "handle-dialog", "--surface", "1", "--accept", "--text=" }) catch null != null);
 }
 
 test "parse: --help → .help(파싱보다 우선)" {

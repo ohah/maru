@@ -144,7 +144,7 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
 }
 
 /// 파싱 실패의 이유(줄바꿈 없이) — 모르는 옵션·남는 인자·모르는 명령이면 그 낱말까지(M8: 전에는 「unknown option」 만 말해 어느 것이
-/// 틀렸는지 몰랐다). 첫 낱말(`unknown option`·`unknown subcommand`·`too many arguments`)은 그대로 둔다 — 이미 설치된 스킬이 그 글로 줄을 찾는다.
+/// 틀렸는지 몰랐다), 값 없는 옵션이면 그 옵션 이름까지(`option '--x' needs a value` — 전에는 「the option needs a value」). 첫 낱말(`unknown option`·`unknown subcommand`·`too many arguments`)은 그대로 둔다 — 이미 설치된 스킬이 그 글로 줄을 찾는다.
 /// 한 번짜리 CLI(`writeUsage`)·repl·`maru mcp` 가 모두 이것을 쓴다.
 pub fn writeParseReason(w: *std.Io.Writer, err: browser.ParseError, diag: browser.Diag) std.Io.Writer.Error!void {
     switch (err) {
@@ -160,6 +160,11 @@ pub fn writeParseReason(w: *std.Io.Writer, err: browser.ParseError, diag: browse
         error.UnknownSubcommand => if (diag.command) |c| {
             try w.writeAll("unknown subcommand ");
             return browser.writeArgToken(w, c);
+        },
+        error.MissingOptionValue => if (diag.token) |t| {
+            try w.writeAll("option ");
+            try browser.writeArgToken(w, t);
+            return w.writeAll(" needs a value");
         },
         else => {},
     }
@@ -2104,6 +2109,9 @@ test "M8: 모르는 옵션·남는 인자·모르는 명령은 그 낱말을 말
     // 이름이 없는 이유는 지금 글 그대로(머리만 명령 이름).
     try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{"get-url"}, &buf), "maru browser get-url: --surface <id> is required\n"));
     try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{}, &buf), "maru browser: a subcommand is required\n"));
+    // 값 없는 옵션도 그 이름을(전에는 「the option needs a value」 — 옵션이 여럿인 줄에서 어느 것인지 몰랐다).
+    try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{ "click", "--surface", "1", "--selector" }, &buf), "maru browser click: option '--selector' needs a value\n  click "));
+    try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{ "click", "--surface" }, &buf), "maru browser click: option '--surface' needs a value\n"));
 }
 
 test "M8: 되비추는 낱말 — 옵션의 `=` 뒤 값은 싣지 않고, 보이지 않는 글자는 빼고, 64 바이트에서 자른다" {
@@ -2134,6 +2142,9 @@ test "M8: repl 의 파싱 오류도 낱말을 말한다" {
     try std.testing.expect(std.mem.startsWith(u8, err.written(), "error: unknown option '--valeu'\n  click "));
     try std.testing.expect(std.mem.endsWith(u8, err.written(), browser.help_footer));
     try std.testing.expect(std.mem.indexOf(u8, err.written(), "  navigate ") == null);
+    err.clearRetainingCapacity();
+    try std.testing.expect(!try replCommand(std.testing.io, std.testing.allocator, &.{ "set-cookie", "--name" }, &current, &out.writer, &err.writer));
+    try std.testing.expect(std.mem.startsWith(u8, err.written(), "error: option '--name' needs a value\n  set-cookie "));
 }
 
 test "M4·D2: 파싱 오류 뒤에는 그 명령의 help 만, 모르는 명령은 명령 목록 한 줄, 맨 `maru browser` 만 전역 help" {

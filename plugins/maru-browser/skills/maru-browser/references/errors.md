@@ -11,6 +11,7 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 |---|---|---|
 | `command not found` for `maru` | maru is not on PATH | Ask the user to run `maru install-cli` in a Maru pane. Stop. |
 | `unknown subcommand 'x'` then a `commands (…):` line, or `unknown option '--x'` or `too many arguments: 'x' was not expected` then that command's help lines | A typo, or a command or flag your maru does not have. The message names the word. | Read the lines printed under it (or that command's `--help`, like `maru browser click --help`). If what you wanted is not there, do not use it; tell the user their maru is older. |
+| `option '--x' needs a value` (older maru: `the option needs a value`) | The flag at the end of the line has no value after it | Put the value right after that flag — quote it if it has spaces. |
 | `screenshot: needs --out <file> …` | A screenshot without `--out` (maru never prints PNG bytes) | Add `--out "$TMPDIR/<new name>.png"`. |
 | `no running maru instance found.` | Maru is not running, its socket is stale, or a sandbox blocks the socket in `~/.cache/maru/control` | Stop and tell the user. Mention the sandbox if Maru is clearly running. |
 | `… (multiple maru instances found; selecting one is not supported yet).` | Two Maru apps (for example a dev build and the installed one), or a dead one's socket | Ask the user to quit one. |

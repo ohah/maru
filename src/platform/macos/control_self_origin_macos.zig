@@ -116,6 +116,75 @@ pub fn provider() so.Provider {
     return .{ .ctx = &provider_ctx, .lookup = lookupThunk, .session_of = sessionThunk };
 }
 
+// ── pane 안 tmux 잇기의 공급자(`so.tmuxClientSessions`) ───────────────────────────────────────────────────────────────────────
+
+extern "c" fn proc_listallpids(buffer: ?*anyopaque, buffersize: c_int) c_int;
+extern "c" fn proc_pidfdinfo(pid: c_int, fd: c_int, flavor: c_int, buffer: ?*anyopaque, buffersize: c_int) c_int;
+
+/// `struct proc_fdinfo`(SDK `sys/proc_info.h`) — fd 번호와 종류.
+const ProcFdInfo = extern struct { proc_fd: i32, proc_fdtype: u32 };
+const proc_pidlistfds: c_int = 1;
+const proc_pidfdsocketinfo: c_int = 3;
+const prox_fdtype_socket: u32 = 2;
+/// `struct socket_fdinfo` 의 크기와 쓰는 칸의 자리(SDK 의 `offsetof` 실측 — `open_access/spike/off.c`). 구조체 전부를 옮겨 적지 않고 바이트로
+/// 읽는다(안쪽 공용체·`vinfo_stat` 가 길다). 자리가 어긋나면 pcb 가 맞지 않아 잇기가 늘 실패로 닫힌다(열리지는 않는다) — 아래 socketpair 시험이 잡는다.
+const socket_fdinfo_size: usize = 792;
+const soi_pcb_at: usize = 168;
+const soi_family_at: usize = 184;
+const unsi_conn_pcb_at: usize = 272;
+const af_unix: i32 = 1;
+
+/// 살아 있는 pid 들(`buf` 를 채운다). 실패하면 빈 것.
+pub fn listPids(buf: []i32) []const i32 {
+    const n = proc_listallpids(buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int) / @sizeOf(i32)) * @sizeOf(i32)));
+    if (n <= 0) return buf[0..0];
+    return buf[0..@min(@as(usize, @intCast(n)), buf.len)];
+}
+
+/// 그 프로세스의 unix 소켓들(pcb 와 상대 pcb). 못 읽으면(끝났다·남의 것) 빈 것.
+pub fn unixSockets(pid: i32, buf: []so.UnixSock) []const so.UnixSock {
+    if (pid <= 0 or buf.len == 0) return buf[0..0];
+    var fds: [256]ProcFdInfo = undefined;
+    const bytes = proc_pidinfo(pid, proc_pidlistfds, 0, &fds, @sizeOf(@TypeOf(fds)));
+    if (bytes <= 0) return buf[0..0];
+    const count = @min(@as(usize, @intCast(bytes)) / @sizeOf(ProcFdInfo), fds.len);
+    var n: usize = 0;
+    var info: [socket_fdinfo_size]u8 align(8) = undefined;
+    for (fds[0..count]) |fd| {
+        if (fd.proc_fdtype != prox_fdtype_socket) continue;
+        if (proc_pidfdinfo(pid, fd.proc_fd, proc_pidfdsocketinfo, &info, socket_fdinfo_size) != socket_fdinfo_size) continue;
+        if (std.mem.readInt(i32, info[soi_family_at..][0..4], .little) != af_unix) continue;
+        buf[n] = .{ .pcb = std.mem.readInt(u64, info[soi_pcb_at..][0..8], .little), .conn_pcb = std.mem.readInt(u64, info[unsi_conn_pcb_at..][0..8], .little) };
+        n += 1;
+        if (n == buf.len) break;
+    }
+    return buf[0..n];
+}
+
+/// 실행 파일 이름이 `tmux` 인가.
+pub fn isTmux(pid: i32) bool {
+    var buf: [64]u8 = undefined;
+    const name = procName(pid, &buf) orelse return false;
+    return std.mem.eql(u8, name, "tmux");
+}
+
+fn pidsThunk(_: *anyopaque, buf: []i32) []const i32 {
+    return listPids(buf);
+}
+
+fn unixSocketsThunk(_: *anyopaque, pid: i32, buf: []so.UnixSock) []const so.UnixSock {
+    return unixSockets(pid, buf);
+}
+
+fn isTmuxThunk(_: *anyopaque, pid: i32) bool {
+    return isTmux(pid);
+}
+
+/// 실제 OS 를 읽는 tmux 잇기 공급자(상태 없음).
+pub fn tmuxProvider() so.TmuxProvider {
+    return .{ .base = provider(), .ctx = &provider_ctx, .pids = pidsThunk, .unix_sockets = unixSocketsThunk, .is_tmux = isTmuxThunk };
+}
+
 /// 지금 벽시계(µs) — `ProcInfo.start_us` 와 같은 시계.
 pub fn nowUs() u64 {
     var tv: c.timeval = undefined;
@@ -150,4 +219,23 @@ test "socketpair 의 peer pid 는 그 소켓에 쓴 자기 자신이다" {
     defer _ = c.close(fds[1]);
     _ = c.write(fds[1], "x", 1);
     try std.testing.expectEqual(c.getpid(), peerPid(fds[0]).?);
+}
+
+test "tmux 잇기의 소켓 고리 — socketpair 의 두 끝은 서로의 pcb 를 상대로 갖는다(칸 자리가 SDK 와 맞는지), 자기 pid 는 목록에 있다" {
+    var fds: [2]c.fd_t = undefined;
+    if (c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &fds) != 0) return error.SkipZigTest;
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    var buf: [64]so.UnixSock = undefined;
+    const socks = unixSockets(c.getpid(), &buf);
+    // 두 끝 a·b 가 a.conn == b.pcb 이고 b.conn == a.pcb 인 쌍이 있다.
+    var paired = false;
+    for (socks) |a| for (socks) |b| {
+        if (a.pcb != 0 and a.pcb != b.pcb and a.conn_pcb == b.pcb and b.conn_pcb == a.pcb) paired = true;
+    };
+    try std.testing.expect(paired);
+    var pids: [16384]i32 = undefined;
+    try std.testing.expect(std.mem.indexOfScalar(i32, listPids(&pids), c.getpid()) != null);
+    try std.testing.expect(!isTmux(c.getpid())); // 시험 바이너리 이름은 tmux 가 아니다
+    try std.testing.expectEqual(@as(usize, 0), unixSockets(-1, &buf).len);
 }

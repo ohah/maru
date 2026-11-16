@@ -235,7 +235,104 @@ pub fn stillForeground(provider: Provider, origin: Origin) bool {
     return sid == origin.sid;
 }
 
-// ── 시험(가짜 공급자) ───────────────────────────────────────────────────────────────────────────────────────
+// ── pane 안 tmux 잇기(사용자 결정 2026-11-16 「AI 가 모든 접근」) ─────────────────────────────────────────────────────────────────
+//
+// tmux 안의 명령은 조상을 거슬러 오르면 tmux **서버**(launchd 아래 데몬)에서 끊겨 Maru pane 에 닿지 않는다 — 1g 는 그 tmux pane 의 세션을
+// 출처로 찾지만 그 세션은 어느 pane 의 뿌리와도 맞지 않아 거절됐다(실측 — open_access MEASURE). 그런데 그 서버에 붙은 **클라이언트**는 Maru pane 의
+// foreground 작업이고, 둘은 unix 소켓 한 쌍으로 이어져 있다: 클라이언트 소켓의 pcb 가 서버가 받은 소켓의 상대 pcb 다(macOS
+// `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)` 의 `soi_pcb`·`unsi_conn_pcb` — 같은 uid 면 읽힌다, tmux 3.6b 실측). 그 고리로 세션 → 서버 → 클라이언트 →
+// 클라이언트의 세션(= Maru pane)을 잇는다. 이름(`tmux`)은 훑을 프로세스를 좁히는 거름이지 증명이 아니다 — 증명은 소켓 고리다.
+//
+// **받아들인 한계**: 같은 서버의 다른 tmux 세션(예: ssh 로 붙은 클라이언트의 세션)과 Maru 클라이언트의 세션을 OS 만으로는 가를 수 없다 — 서버에
+// Maru pane 의 foreground 클라이언트가 하나라도 있으면 그 서버의 모든 tmux pane 이 그 Maru pane 으로 통과한다(전권 결정 아래에서 받아들임). 두 겹
+// tmux·screen 은 잇지 않는다.
+
+/// 한 unix 소켓의 두 손잡이 — 자기 pcb 와 연결된 상대의 pcb(연결이 없으면 0). 커널이 숨긴 값이지만 같은 소켓이면 같은 값이다.
+pub const UnixSock = struct { pcb: u64, conn_pcb: u64 };
+
+/// tmux 잇기에 필요한 것 — 1g 의 `Provider` 에 프로세스 목록·unix 소켓·이름 거름을 더한다.
+pub const TmuxProvider = struct {
+    base: Provider,
+    ctx: *anyopaque,
+    /// 지금 살아 있는 pid 들(`buf` 를 채워 그 앞부분을 돌려준다 — 넘치면 잘린다).
+    pids: *const fn (ctx: *anyopaque, buf: []i32) []const i32,
+    /// 그 프로세스의 unix 소켓들(`buf` 를 채운다 — 못 읽으면 빈 것).
+    unix_sockets: *const fn (ctx: *anyopaque, pid: i32, buf: []UnixSock) []const UnixSock,
+    /// 실행 파일 이름이 `tmux` 인가.
+    is_tmux: *const fn (ctx: *anyopaque, pid: i32) bool,
+};
+
+/// 한 서버에서 이을 클라이언트 세션 수의 상한(그 이상은 버린다 — pane 이 그만큼 한 서버에 붙는 일은 드물다).
+pub const max_tmux_clients: usize = 8;
+/// 서버 한 프로세스에서 볼 unix 소켓 수의 상한(클라이언트 연결 + 듣는 소켓).
+const max_server_socks: usize = 128;
+/// 클라이언트 한 프로세스에서 볼 unix 소켓 수의 상한.
+const max_client_socks: usize = 16;
+
+/// tmux 안 명령의 세션(`origin_sid` — 1g 출처의 세션, 그 리더는 tmux pane 의 셸)에서, 그 tmux 서버에 소켓으로 붙어 있고 **자기 터미널의
+/// foreground** 인 클라이언트들의 세션 번호를 클라이언트 pid 가 작은 차례로(같은 세션은 한 번) `out` 에 담아 돌려준다. 호출자(L4)가 그 세션을 Maru
+/// pane 의 뿌리와 맞춘다. 서버를 못 알아보면 빈 것.
+/// - 리더: pid == `origin_sid`, 같은 uid.
+/// - 서버: 리더의 부모 — 같은 uid·제어 터미널 없음(데몬)·이름 `tmux`·리더보다 늦게 시작하지 않음(pid 를 물려받은 다른 프로세스가 아님).
+/// - 클라이언트: 서버가 아닌 같은 uid·제어 터미널 있음·그 터미널의 foreground(pgid == tpgid — ^Z 로 멈춘 클라이언트는 아니다)·이름 `tmux`, 그리고
+///   제 unix 소켓의 pcb 가 서버가 받은 소켓의 상대 pcb 다.
+pub fn tmuxClientSessions(tp: TmuxProvider, origin_sid: i32, server_uid: u32, pid_buf: []i32, out: *[max_tmux_clients]i32) []const i32 {
+    const p = tp.base;
+    if (origin_sid <= 1) return out[0..0];
+    const leader = p.lookup(p.ctx, origin_sid) orelse return out[0..0];
+    if (leader.pid != origin_sid or leader.uid != server_uid or leader.ppid <= 1) return out[0..0];
+    const server_pid = leader.ppid;
+    const server = p.lookup(p.ctx, server_pid) orelse return out[0..0];
+    if (server.pid != server_pid or server.uid != server_uid or server.has_ctty or server.start_us > leader.start_us) return out[0..0];
+    if (!tp.is_tmux(tp.ctx, server_pid)) return out[0..0];
+    // 서버가 받은 연결의 상대 pcb — 그것을 제 소켓으로 쥔 프로세스가 그 서버의 클라이언트다.
+    var sbuf: [max_server_socks]UnixSock = undefined;
+    var peers: [max_server_socks]u64 = undefined;
+    var np: usize = 0;
+    for (tp.unix_sockets(tp.ctx, server_pid, &sbuf)) |s| if (s.conn_pcb != 0) {
+        peers[np] = s.conn_pcb;
+        np += 1;
+    };
+    if (np == 0) return out[0..0];
+    // 클라이언트를 pid 차례로 모은다(결정적 — 여럿이면 L4 가 첫 pane 을 고른다).
+    var found_pid: [max_tmux_clients]i32 = undefined;
+    var found_sid: [max_tmux_clients]i32 = undefined;
+    var nf: usize = 0;
+    for (tp.pids(tp.ctx, pid_buf)) |pid| {
+        if (pid <= 1 or pid == server_pid) continue;
+        const info = p.lookup(p.ctx, pid) orelse continue;
+        if (info.pid != pid or info.uid != server_uid or !info.has_ctty or info.pgid <= 0 or info.pgid != info.tpgid) continue;
+        if (!tp.is_tmux(tp.ctx, pid)) continue;
+        var cbuf: [max_client_socks]UnixSock = undefined;
+        const linked = for (tp.unix_sockets(tp.ctx, pid, &cbuf)) |s| {
+            if (s.pcb != 0 and std.mem.indexOfScalar(u64, peers[0..np], s.pcb) != null) break true;
+        } else false;
+        if (!linked) continue;
+        const sid = p.session_of(p.ctx, pid) orelse continue;
+        if (sid <= 1) continue;
+        // pid 차례로 끼운다(작은 것이 앞). 넘치면 가장 큰 pid 를 버린다.
+        var at: usize = nf;
+        while (at > 0 and found_pid[at - 1] > pid) : (at -= 1) {}
+        if (at >= max_tmux_clients) continue;
+        var j: usize = @min(nf, max_tmux_clients - 1);
+        while (j > at) : (j -= 1) {
+            found_pid[j] = found_pid[j - 1];
+            found_sid[j] = found_sid[j - 1];
+        }
+        found_pid[at] = pid;
+        found_sid[at] = sid;
+        nf = @min(nf + 1, max_tmux_clients);
+    }
+    var n: usize = 0;
+    for (found_sid[0..nf]) |sid| {
+        if (std.mem.indexOfScalar(i32, out[0..n], sid) != null) continue;
+        out[n] = sid;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+// ── 시험(가짜 공급자)───────────────────────────────────────────────────────────────────────────────────────
 
 const Fake = struct {
     procs: []const ProcInfo,
@@ -641,4 +738,138 @@ test "W9e② 확인 결정 9: 사람이 친 CLI 의 주인은 그 명령을 띄�
     try std.testing.expect(!ownerAlive(gone.provider(), own));
     var reused: Fake = .{ .procs = &.{.{ .pid = 101, .ppid = 1, .pgid = 101, .uid = uid, .has_ctty = true, .tpgid = 101, .start_us = 77 }}, .sessions = &.{} };
     try std.testing.expect(!ownerAlive(reused.provider(), own));
+}
+
+// ── tmux 잇기 시험(사용자 결정 2026-11-16 「AI 가 모든 접근」 — pane 안 tmux 의 명령도 그 pane 으로) ─────────────────────────────
+
+/// 가짜 공급자의 소켓 한 줄(그 pid 가 쥔 소켓).
+const SockRow = struct { pid: i32, s: UnixSock };
+
+/// 가짜 tmux 공급자 — 프로세스 표(`Fake`)에 pid 목록·unix 소켓·이름을 더한다.
+const FakeTmux = struct {
+    base: Fake,
+    socks: []const SockRow,
+    tmux_names: []const i32,
+
+    fn pids(ctx: *anyopaque, buf: []i32) []const i32 {
+        const self: *FakeTmux = @ptrCast(@alignCast(ctx));
+        var n: usize = 0;
+        for (self.base.procs) |p| {
+            if (n == buf.len) break;
+            buf[n] = p.pid;
+            n += 1;
+        }
+        return buf[0..n];
+    }
+
+    fn unixSockets(ctx: *anyopaque, pid: i32, buf: []UnixSock) []const UnixSock {
+        const self: *FakeTmux = @ptrCast(@alignCast(ctx));
+        var n: usize = 0;
+        for (self.socks) |e| if (e.pid == pid and n < buf.len) {
+            buf[n] = e.s;
+            n += 1;
+        };
+        return buf[0..n];
+    }
+
+    fn isTmux(ctx: *anyopaque, pid: i32) bool {
+        const self: *FakeTmux = @ptrCast(@alignCast(ctx));
+        return std.mem.indexOfScalar(i32, self.tmux_names, pid) != null;
+    }
+
+    fn provider(self: *FakeTmux) TmuxProvider {
+        return .{ .base = self.base.provider(), .ctx = self, .pids = pids, .unix_sockets = unixSockets, .is_tmux = isTmux };
+    }
+};
+
+// Maru pane(세션 100): login 100 → 셸 101 → tmux 클라이언트 110(foreground, pgid 110). tmux 서버 120(데몬 — ppid 1, 터미널 없음).
+// tmux pane(세션 130): 서버 120 → 셸 130(리더) → 에이전트 131(foreground). 클라이언트 소켓 pcb 0xC1 ↔ 서버가 받은 소켓 pcb 0x51.
+const tmux_client: ProcInfo = .{ .pid = 110, .ppid = 101, .pgid = 110, .uid = uid, .has_ctty = true, .tpgid = 110, .start_us = 40 };
+const tmux_server: ProcInfo = .{ .pid = 120, .ppid = 1, .pgid = 120, .uid = uid, .has_ctty = false, .tpgid = 0, .start_us = 41 };
+const tmux_shell: ProcInfo = .{ .pid = 130, .ppid = 120, .pgid = 130, .uid = uid, .has_ctty = true, .tpgid = 131, .start_us = 42 };
+const tmux_agent: ProcInfo = .{ .pid = 131, .ppid = 130, .pgid = 131, .uid = uid, .has_ctty = true, .tpgid = 131, .start_us = 43 };
+const tmux_sessions = [_][2]i32{ .{ 101, 100 }, .{ 110, 100 }, .{ 120, 120 }, .{ 130, 130 }, .{ 131, 130 } };
+const tmux_socks = [_]SockRow{
+    .{ .pid = 120, .s = .{ .pcb = 0x50, .conn_pcb = 0 } }, // 서버가 듣는 소켓
+    .{ .pid = 120, .s = .{ .pcb = 0x51, .conn_pcb = 0xC1 } }, // 서버가 받은 클라이언트 연결
+    .{ .pid = 110, .s = .{ .pcb = 0xC1, .conn_pcb = 0x51 } }, // 클라이언트 쪽
+};
+
+fn tmuxFake(procs: []const ProcInfo, socks: []const SockRow, names: []const i32) FakeTmux {
+    return .{ .base = .{ .procs = procs, .sessions = &tmux_sessions }, .socks = socks, .tmux_names = names };
+}
+
+test "tmux 잇기: tmux 안 명령의 세션 → 그 서버에 붙은 pane 안 foreground 클라이언트의 세션(= Maru pane) — 1g 는 그 tmux pane 의 출처를 이미 찾았다" {
+    var f = tmuxFake(&.{ login, shell(110), tmux_client, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    // 1g 는 tmux pane 의 foreground 조상(131, 세션 130)을 출처로 준다 — 그 세션이 어느 Maru pane 에도 맞지 않을 때 잇는다.
+    const o = findOrigin(f.base.provider(), 131, uid, accepted).origin;
+    try std.testing.expectEqual(@as(i32, 130), o.sid);
+    var out: [max_tmux_clients]i32 = undefined;
+    var pid_buf: [16]i32 = undefined;
+    try std.testing.expectEqualSlices(i32, &.{100}, tmuxClientSessions(f.provider(), o.sid, uid, &pid_buf, &out));
+}
+
+test "tmux 잇기: 서버에 붙지 않은 클라이언트·백그라운드로 멈춘 클라이언트·이름이 tmux 가 아닌 부모·터미널을 가진 부모는 잇지 않는다" {
+    var pid_buf: [16]i32 = undefined;
+    var out: [max_tmux_clients]i32 = undefined;
+    // 클라이언트 소켓이 다른 서버의 것(상대 pcb 가 서버가 받은 소켓이 아님).
+    const other = [_]SockRow{ tmux_socks[0], .{ .pid = 120, .s = .{ .pcb = 0x51, .conn_pcb = 0xC2 } }, tmux_socks[2] };
+    var f1 = tmuxFake(&.{ login, shell(110), tmux_client, tmux_server, tmux_shell, tmux_agent }, &other, &.{ 110, 120 });
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f1.provider(), 130, uid, &pid_buf, &out).len);
+    // ^Z 로 멈춘 클라이언트 — pane 의 foreground 가 셸(101)이다(1g 의 「다른 작업이 foreground 인 동안의 백그라운드 거절」 과 같은 규칙).
+    var bg = tmux_client;
+    bg.tpgid = 101;
+    var f2 = tmuxFake(&.{ login, shell(101), bg, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f2.provider(), 130, uid, &pid_buf, &out).len);
+    // 리더의 부모가 tmux 가 아니다(이름) — 아무 데몬이나 서버로 치지 않는다.
+    var f3 = tmuxFake(&.{ login, shell(110), tmux_client, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{110});
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f3.provider(), 130, uid, &pid_buf, &out).len);
+    // 리더의 부모가 터미널을 가졌다(데몬이 아니다).
+    var with_tty = tmux_server;
+    with_tty.has_ctty = true;
+    with_tty.tpgid = 120;
+    var f4 = tmuxFake(&.{ login, shell(110), tmux_client, with_tty, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f4.provider(), 130, uid, &pid_buf, &out).len);
+    // 클라이언트가 이름이 tmux 가 아니다(같은 pcb 를 쥔 다른 프로그램은 보지 않는다 — 소켓을 훑는 프로세스를 tmux 로 좁힌다).
+    var f5 = tmuxFake(&.{ login, shell(110), tmux_client, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{120});
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f5.provider(), 130, uid, &pid_buf, &out).len);
+    // 대조: 다 갖추면 잇는다.
+    var ok = tmuxFake(&.{ login, shell(110), tmux_client, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    try std.testing.expectEqualSlices(i32, &.{100}, tmuxClientSessions(ok.provider(), 130, uid, &pid_buf, &out));
+}
+
+test "tmux 잇기: pid 를 물려받은 서버(리더보다 늦게 시작)·다른 uid 의 서버·다른 uid 의 클라이언트·리더가 아닌 세션 번호는 잇지 않는다" {
+    var pid_buf: [16]i32 = undefined;
+    var out: [max_tmux_clients]i32 = undefined;
+    var late = tmux_server;
+    late.start_us = 99;
+    var f1 = tmuxFake(&.{ login, shell(110), tmux_client, late, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f1.provider(), 130, uid, &pid_buf, &out).len);
+    var root_server = tmux_server;
+    root_server.uid = 0;
+    var f2 = tmuxFake(&.{ login, shell(110), tmux_client, root_server, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f2.provider(), 130, uid, &pid_buf, &out).len);
+    var other_client = tmux_client;
+    other_client.uid = 502;
+    var f3 = tmuxFake(&.{ login, shell(110), other_client, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f3.provider(), 130, uid, &pid_buf, &out).len);
+    var f4 = tmuxFake(&.{ login, shell(110), tmux_client, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f4.provider(), 131, uid, &pid_buf, &out).len); // 131 은 리더가 아니다
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f4.provider(), 1, uid, &pid_buf, &out).len);
+}
+
+test "tmux 잇기: 한 서버에 Maru pane 둘의 클라이언트가 붙으면 둘 다 — pid 가 작은 클라이언트부터, 같은 세션은 한 번" {
+    var pid_buf: [16]i32 = undefined;
+    var out: [max_tmux_clients]i32 = undefined;
+    const login2: ProcInfo = .{ .pid = 200, .ppid = 50, .pgid = 200, .uid = 0, .has_ctty = true, .tpgid = 105, .start_us = 10 };
+    const client2: ProcInfo = .{ .pid = 105, .ppid = 1, .pgid = 105, .uid = uid, .has_ctty = true, .tpgid = 105, .start_us = 39 };
+    const client3: ProcInfo = .{ .pid = 111, .ppid = 101, .pgid = 111, .uid = uid, .has_ctty = true, .tpgid = 111, .start_us = 40 };
+    const socks = [_]SockRow{
+        tmux_socks[0],                                            tmux_socks[1],                                            tmux_socks[2],
+        .{ .pid = 120, .s = .{ .pcb = 0x52, .conn_pcb = 0xC5 } }, .{ .pid = 105, .s = .{ .pcb = 0xC5, .conn_pcb = 0x52 } }, .{ .pid = 120, .s = .{ .pcb = 0x53, .conn_pcb = 0xC6 } },
+        .{ .pid = 111, .s = .{ .pcb = 0xC6, .conn_pcb = 0x53 } },
+    };
+    const sessions = tmux_sessions ++ [_][2]i32{ .{ 105, 200 }, .{ 111, 100 } };
+    var f: FakeTmux = .{ .base = .{ .procs = &.{ login, login2, shell(110), tmux_client, client2, client3, tmux_server, tmux_shell, tmux_agent }, .sessions = &sessions }, .socks = &socks, .tmux_names = &.{ 105, 110, 111, 120 } };
+    try std.testing.expectEqualSlices(i32, &.{ 200, 100 }, tmuxClientSessions(f.provider(), 130, uid, &pid_buf, &out));
 }

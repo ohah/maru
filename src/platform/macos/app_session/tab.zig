@@ -1832,12 +1832,20 @@ pub const trace_mark_utf8 = "\u{25D4}";
 /// trace 표식의 파랑(빨강 ◉·호박 ⊘·보라 ▣·청록 ◫ 와 다른 고정 색 — 테마와 무관하게).
 pub const trace_mark_color: maru.color.Rgb = .{ .r = 0x3D, .g = 0x8B, .b = 0xE8 };
 
+/// 사용자 결정 2026-11-16: 에이전트가 연 탭(`browser.open` — 그 탭의 페이지가 연 탭 포함)의 표식 ◈(U+25C8 — 번들 JetBrains Mono·Jetendard 에
+/// 있다). 그 탭은 사용자의 로그인된 사이트를 쓰므로 사용자가 탭 줄에서 자기 탭과 가르게 한다. 기능 표식(◉⊘▣◫◔)과 함께면 **맨 앞**(`◈◉⊘▣◫◔`) —
+/// 「누구의 탭인가」 가 「그 탭에서 무엇이 도는가」 보다 먼저다. 셀로 그려 **그 칸만** 마젠타로 칠한다(`recolorAgentTabMarkCells`).
+pub const agent_tab_mark: u21 = 0x25C8;
+pub const agent_tab_mark_utf8 = "\u{25C8}";
+/// 에이전트 탭 표식의 마젠타(빨강 ◉·호박 ⊘·보라 ▣·청록 ◫·파랑 ◔·에이전트 브랜드색과 다른 고정 색 — 테마와 무관하게).
+pub const agent_tab_mark_color: maru.color.Rgb = .{ .r = 0xC8, .g = 0x50, .b = 0x9B };
+
 /// 이 탭 제목이 셀로 그리는 마커(running `●`, 또는 기록 `◉`·막기 `⊘`·가짜 `▣`·흉내 `◫`·trace `◔` 의 그 차례의 1–5 글자 — `◉⊘▣◫◔`·`◉▣`·`⊘◫` …)로
 /// 시작하면 그 마커(UTF-8).
 pub fn tabTitleMarker(title: []const u8) ?[]const u8 {
     if (tabTitleRunningMarker(title)) return agentFlagUtf8();
     var n: usize = 0;
-    for ([_][]const u8{ recording_mark_utf8, blocking_mark_utf8, mock_mark_utf8, emulation_mark_utf8, trace_mark_utf8 }) |m| {
+    for ([_][]const u8{ agent_tab_mark_utf8, recording_mark_utf8, blocking_mark_utf8, mock_mark_utf8, emulation_mark_utf8, trace_mark_utf8 }) |m| {
         if (std.mem.startsWith(u8, title[n..], m)) n += m.len;
     }
     return if (n == 0) null else title[0..n];
@@ -1856,7 +1864,7 @@ pub const title_mark_escape = "\u{2060}";
 
 /// 고른 제목을 탭 제목으로 쓸 때 기록 표식으로 읽히지 않게 할 것인가(`title_mark_escape` 를 앞에 붙인다).
 pub fn titleNeedsMarkEscape(title: []const u8) bool {
-    return std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8) or std.mem.startsWith(u8, title, mock_mark_utf8) or std.mem.startsWith(u8, title, emulation_mark_utf8) or std.mem.startsWith(u8, title, trace_mark_utf8); // W9d③: ⊘ 도, W9d④: ▣ 도, W9e①: ◫ 도, W9e②: ◔ 도
+    return std.mem.startsWith(u8, title, agent_tab_mark_utf8) or std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8) or std.mem.startsWith(u8, title, mock_mark_utf8) or std.mem.startsWith(u8, title, emulation_mark_utf8) or std.mem.startsWith(u8, title, trace_mark_utf8); // W9d③: ⊘ 도, W9d④: ▣ 도, W9e①: ◫ 도, W9e②: ◔ 도
 }
 
 /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
@@ -1870,6 +1878,13 @@ pub fn tabTitleBody(title: []const u8) []const u8 {
 pub fn recolorRecordingMarkCells(cells: anytype) void {
     for (cells) |*c| if (c.codepoint == recording_mark) {
         c.style.foreground = .{ .rgb = recording_mark_color };
+    };
+}
+
+/// 2026-11-16: 셀에 그린 에이전트 탭 표식(◈)만 마젠타로(제목 안의 ◈ 는 칠하지 않는다 — 제목 글은 measured 라 셀에 없다).
+pub fn recolorAgentTabMarkCells(cells: anytype) void {
+    for (cells) |*c| if (c.codepoint == agent_tab_mark) {
+        c.style.foreground = .{ .rgb = agent_tab_mark_color };
     };
 }
 

@@ -6084,6 +6084,9 @@ pub const AppSession = struct {
     /// W9b③ 적대 리뷰 4 회차: 그 pane(셸 surface)이 아직 에이전트 탭을 가진 살아 있는 pane 인가 — app_host_abi 의 에이전트 탭 표로 본다(pane 이
     /// 닫히거나 사용자가 grant 를 철회하면 비운다). 창을 가리지 않는다(다른 창으로 옮긴 탭의 셸은 이 창에 없다). 없으면(시험) 이 창 안에서 찾는다.
     agent_pane_known_callback: ?AgentTabRoomCallback = null,
+    /// 그 web 탭이 지금 에이전트 탭인가(사용자 결정 2026-11-16 — 탭 줄의 ◈) — app_host_abi 의 에이전트 탭 표로 본다(철회·pane 닫힘이면 빠진다;
+    /// `Term.agent_opener` 는 그 뒤에도 남는 값이라 쓰지 않는다). 없으면(시험) 표지를 붙이지 않는다.
+    agent_tab_known_callback: ?AgentTabRoomCallback = null,
     // MARU_TRACE=<파일경로>면 세션의 base kind 이벤트(output/resize/process-exit)를 **파일로 증분 append**한다
     // (레코더는 이벤트마다 flush → 크래시 직전까지 디스크에 남음, observability replayTrace로 화면 재생). 미설정이면
     // null(오버헤드 0). 레코더는 self가 소유한 file writer(`trace_writer`, heap 버퍼 `trace_buf`)에 쓴다 — self가 안정
@@ -22553,6 +22556,7 @@ pub const AppSession = struct {
                     tab_ops.recolorMockMarkCells(dl.cells); // W9d④ 가짜 ▣ → 보라(그 칸만)
                     tab_ops.recolorEmulationMarkCells(dl.cells); // W9e① 흉내 ◫ → 청록(그 칸만)
                     tab_ops.recolorTraceMarkCells(dl.cells); // W9e② trace ◔ → 파랑(그 칸만)
+                    tab_ops.recolorAgentTabMarkCells(dl.cells); // 2026-11-16 에이전트 탭 ◈ → 마젠타(그 칸만)
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                     pane_ops.appendPaneTabTitles(self, &tab_title_batch, lr.leaf, pb, titles.items, editing_tab, pb.full);
 
@@ -23885,7 +23889,6 @@ pub const AppSession = struct {
     /// 탭 바가 그리는 라벨 — **사용자가 보는 제목의 단일 자리**다(diff 기준·running 표식·dirty 표식이
     /// 전부 여기서 붙는다). 판정자가 화면에 실제로 나오는지 재려면 이 함수를 지나야 한다.
     pub fn diffAwareLabel(self: *AppSession, allocator: std.mem.Allocator, term: *Term) ![]u8 {
-        _ = self;
         // W9d② 적대 리뷰 1 회차: 고른 제목(OSC·rename)이 기록 표식 ◉ 로 시작하면 보이지 않는 글자를 앞에 둬 표식으로 읽히지 않게 — 아래 어느
         // 갈래도 이 `base` 를 쓴다(maru 가 붙이는 진짜 표식만 표식이다).
         const raw_base = termLabel(term);
@@ -23945,6 +23948,9 @@ pub const AppSession = struct {
         // W9d④: 가짜 응답 규칙·엄격이 있는 탭 — ▣(보라 — `recolorMockMarkCells`), 함께면 `◉⊘▣` 의 차례로(`◉▣`·`⊘▣`).
         // W9e①: 기기 흉내가 설정된 탭 — ◫(청록 — `recolorEmulationMarkCells`), 함께면 `◉⊘▣◫` 의 차례로.
         if (term.kind == .web) {
+            // 사용자 결정 2026-11-16: 에이전트가 연 탭 — ◈(마젠타 — `recolorAgentTabMarkCells`), 표지 차례의 맨 앞(`◈◉⊘▣◫◔`). 그 탭은 사용자의
+            // 로그인된 사이트를 쓴다 — 사용자가 탭 줄에서 자기 탭과 가르게.
+            const agt = if (self.agent_tab_known_callback) |known| known(term.surface.id) else false;
             const rec = web_osr.networkRecording(term.surface.id);
             const blk = web_osr.networkBlocking(term.surface.id) != null;
             const mck = web_osr.networkMocking(term.surface.id) != null;
@@ -23952,7 +23958,8 @@ pub const AppSession = struct {
             const emu = web_osr.emulation(term.surface.id, &eb) != null;
             // W9e②: 에이전트가 그 탭의 trace 를 뜨는 동안 — ◔(파랑 — `recolorTraceMarkCells`), `◉⊘▣◫◔` 의 차례.
             const trc = web_osr.tracing(term.surface.id);
-            if (rec or blk or mck or emu or trc) return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}{s} {s}", .{
+            if (agt or rec or blk or mck or emu or trc) return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}{s}{s} {s}", .{
+                if (agt) tab_ops.agent_tab_mark_utf8 else "",
                 if (rec) tab_ops.recording_mark_utf8 else "",
                 if (blk) tab_ops.blocking_mark_utf8 else "",
                 if (mck) tab_ops.mock_mark_utf8 else "",
@@ -105284,6 +105291,27 @@ test "W9d④: 가짜 표식 ▣ 는 탭 제목에서 마커로 갈리고(◉⊘�
     try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.mock_mark_color }, cells[2].style.foreground);
     try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.blocking_mark_color }, cells[1].style.foreground);
     try std.testing.expectEqual(terminal.Color.default, cells[3].style.foreground);
+}
+
+// 이 테스트가 증명하는 것(사용자 결정 2026-11-16): 에이전트 탭 표지 ◈ 는 표지 차례의 맨 앞이다 — 혼자(`◈`)든 기능 표지와 함께(`◈◉⊘▣◫◔`)든
+// 마커로 갈리고 본문 자리는 마커 칸 수만큼 밀린다, 차례 밖(`◉◈`)은 앞 글자만 마커다, 고른 제목·페이지 제목의 머리 ◈ 는 표식이 아니다(보이지
+// 않는 글자를 앞에 둔다 — 사람의 탭이 에이전트 탭으로 보이지 않게). 셀에서는 그 칸만 마젠타다.
+test "에이전트 탭 표지 ◈ 는 표지 차례의 맨 앞이고 셀에서 그 칸만 칠한다 — 고른 제목의 ◈ 는 표식이 아니다" {
+    try std.testing.expectEqualStrings("\u{25C8}", tab_ops.tabTitleMarker("\u{25C8} Example").?);
+    try std.testing.expectEqualStrings("Example", tab_ops.tabTitleBody("\u{25C8} Example"));
+    try std.testing.expectEqualStrings("\u{25C8}\u{25C9}\u{2298}\u{25A3}\u{25EB}\u{25D4}", tab_ops.tabTitleMarker("\u{25C8}\u{25C9}\u{2298}\u{25A3}\u{25EB}\u{25D4} Example").?);
+    try std.testing.expectEqual(@as(u32, 6), tab_ops.tabTitleMarkerCols("\u{25C8}\u{25C9}\u{2298}\u{25A3}\u{25EB}\u{25D4}"));
+    try std.testing.expectEqualStrings("\u{25C9}", tab_ops.tabTitleMarker("\u{25C9}\u{25C8} Example").?); // 차례 밖 — 앞 글자만
+    try std.testing.expect(tab_ops.titleNeedsMarkEscape("\u{25C8} My bank"));
+    try std.testing.expect(tab_ops.tabTitleMarker(tab_ops.title_mark_escape ++ "\u{25C8} My bank") == null);
+    try std.testing.expect(tab_ops.agent_tab_mark != agent_running_flag and tab_ops.agent_tab_mark != tab_ops.recording_mark);
+    const C = struct { codepoint: u21, style: struct { foreground: terminal.Color = .default } = .{} };
+    var cells = [_]C{ .{ .codepoint = tab_ops.agent_tab_mark }, .{ .codepoint = tab_ops.recording_mark }, .{ .codepoint = 'x' } };
+    tab_ops.recolorAgentTabMarkCells(&cells);
+    tab_ops.recolorRecordingMarkCells(&cells);
+    try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.agent_tab_mark_color }, cells[0].style.foreground);
+    try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.recording_mark_color }, cells[1].style.foreground);
+    try std.testing.expectEqual(terminal.Color.default, cells[2].style.foreground);
 }
 
 // 이 테스트가 증명하는 것(W9e①): 흉내 표식 ◫ 도 셀로 가르고 그 칸만 청록이다 — 기록 ◉·막기 ⊘·가짜 ▣ 와 함께면 `◉⊘▣◫`(넷)·`◉◫`·`▣◫` 의 차례로

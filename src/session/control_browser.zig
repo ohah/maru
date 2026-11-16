@@ -47,7 +47,6 @@ const capmod = @import("control_capability.zig");
 const cs = @import("control_surface.zig");
 const cev = @import("control_events.zig"); // 5f-0b-3b: browser.subscribe params의 events 필터(EventKind/EventFilter)
 const cpg = @import("control_pane_grant.zig");
-const agent_tab_consent = @import("control_agent_tab_consent.zig"); // 2026-11-16: 거부 글의 「about N minutes」
 const new_tab = @import("web_sidecar/new_tab.zig");
 const ws_wire = @import("web_sidecar/wire.zig");
 const ws_net_policy = @import("web_sidecar/net_policy.zig"); // W9d①: browser.network 의 종류 이름
@@ -3766,8 +3765,8 @@ fn ungrantedResult(gpa: std.mem.Allocator, id: cp.Id, pane_selector: ?u64, targe
     return .{ .err = try errorResponse(gpa, id, .unauthorized) };
 }
 
-/// pane 동의(사용자 결정 2026-11-16)의 답을 요청의 id 로 직렬화한다 — `data.reason` 과 선택 `retry_after_ms`.
-fn serializeAgentTabsAnswer(gpa: std.mem.Allocator, request_bytes: []const u8, code: cp.ErrorCode, reason: []const u8, message: []const u8, retry_after_ms: ?u64) std.mem.Allocator.Error![]u8 {
+/// pane 동의(사용자 결정 2026-11-16)의 답을 요청의 id 로 직렬화한다 — `data.reason`.
+fn serializeAgentTabsAnswer(gpa: std.mem.Allocator, request_bytes: []const u8, code: cp.ErrorCode, reason: []const u8, message: []const u8) std.mem.Allocator.Error![]u8 {
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return errorResponse(gpa, .null, .internal_error),
@@ -3780,21 +3779,19 @@ fn serializeAgentTabsAnswer(gpa: std.mem.Allocator, request_bytes: []const u8, c
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = reason });
-    if (retry_after_ms) |ms| try data.put(gpa, "retry_after_ms", .{ .integer = @intCast(@min(ms, std.math.maxInt(i53))) });
     return cp.serializeError(gpa, req.id, code, message, .{ .object = data });
 }
 
-/// pane 동의를 사용자가 거부했다(또는 거부를 기억하는 중이다) — `-32002`, `reason:"agent_tabs_declined"`, 다시 물을 때까지 `retry_after_ms`.
-/// 글은 에이전트가 사용자에게 말할 것을 준다(다시 시도해도 모달이 뜨지 않는다 — 조르지 않게).
-pub fn serializeAgentTabsDeclined(gpa: std.mem.Allocator, request_bytes: []const u8, retry_after_ms: u64) std.mem.Allocator.Error![]u8 {
-    var buf: [320]u8 = undefined;
-    const message = std.fmt.bufPrint(&buf, "the user declined browser tabs for this pane (they would use the user's logged-in sites) — nothing was opened, and maru will not ask again for about {d} minutes; tell the user instead of retrying", .{agent_tab_consent.minutesCeil(retry_after_ms)}) catch "the user declined browser tabs for this pane — nothing was opened";
-    return serializeAgentTabsAnswer(gpa, request_bytes, .unauthorized, "agent_tabs_declined", message, retry_after_ms);
+/// pane 동의를 사용자가 거부했다(또는 그 pane 의 거부를 기억하는 중이다 — 그 pane 이 사는 동안, 사용자가 메뉴에서 지울 때까지) — `-32002`,
+/// `reason:"agent_tabs_declined"`. 글은 에이전트가 사용자에게 말할 것을 준다(다시 시도해도 모달이 뜨지 않는다 — 조르지 않게), 그리고 사용자가
+/// 되돌리는 자리(Browser Grants 메뉴)를 말한다.
+pub fn serializeAgentTabsDeclined(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error![]u8 {
+    return serializeAgentTabsAnswer(gpa, request_bytes, .unauthorized, "agent_tabs_declined", "the user declined browser tabs for this pane (they would use the user's logged-in sites) — nothing was opened, and maru will not ask again while this pane is open unless the user undoes it in the Browser Grants menu; tell the user instead of retrying");
 }
 
 /// pane 동의 모달에 답이 없었다(시한) — `-32004`, `reason:"agent_tabs_unanswered"`. 기억은 남기지 않는다(사용자가 정하지 않았다).
 pub fn serializeAgentTabsUnanswered(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error![]u8 {
-    return serializeAgentTabsAnswer(gpa, request_bytes, .timeout, "agent_tabs_unanswered", "the user did not answer whether this pane may open browser tabs (2 minutes) — nothing was opened", null);
+    return serializeAgentTabsAnswer(gpa, request_bytes, .timeout, "agent_tabs_unanswered", "the user did not answer whether this pane may open browser tabs (2 minutes) — nothing was opened");
 }
 
 /// W9d②: 본문 기록 전에 네트워크 권한이 없다 — `-32002` 에 `data.reason:"needs_network_permission"`(확인 모달 없이).
@@ -5946,10 +5943,10 @@ test "pane 동의: 틀린 open 요청은 동의가 없어도 needs_grant 가 아
     };
 }
 
-test "pane 동의의 답: 거부는 -32002 agent_tabs_declined + retry_after_ms, 무응답은 -32004 agent_tabs_unanswered" {
+test "pane 동의의 답: 거부는 -32002 agent_tabs_declined(pane 수명 — 시간 없음, 되돌리는 자리를 말한다), 무응답은 -32004 agent_tabs_unanswered" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.open\",\"params\":{}}";
     {
-        const w = try serializeAgentTabsDeclined(testing.allocator, req, 9 * std.time.ms_per_min + 1);
+        const w = try serializeAgentTabsDeclined(testing.allocator, req);
         defer testing.allocator.free(w);
         var p = try std.json.parseFromSlice(std.json.Value, testing.allocator, w, .{});
         defer p.deinit();
@@ -5958,10 +5955,11 @@ test "pane 동의의 답: 거부는 -32002 agent_tabs_declined + retry_after_ms,
         try testing.expectEqual(@as(i64, 9), p.value.object.get("id").?.integer);
         const d = e.get("data").?.object;
         try testing.expectEqualStrings("agent_tabs_declined", d.get("reason").?.string);
-        try testing.expectEqual(@as(i64, 9 * std.time.ms_per_min + 1), d.get("retry_after_ms").?.integer);
+        try testing.expect(d.get("retry_after_ms") == null); // 시간이 지나 풀리지 않는다 — 그 pane 이 사는 동안(사용자 결정)
         const msg = e.get("message").?.string;
         try testing.expect(std.mem.indexOf(u8, msg, "declined") != null);
-        try testing.expect(std.mem.indexOf(u8, msg, "10 minutes") != null); // 올림
+        try testing.expect(std.mem.indexOf(u8, msg, "while this pane is open") != null);
+        try testing.expect(std.mem.indexOf(u8, msg, "Browser Grants") != null); // 사용자가 되돌리는 자리
         try testing.expect(std.mem.indexOf(u8, msg, "logged-in") != null); // 무엇을 거절했는지
     }
     {

@@ -369,7 +369,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // v258: W9d④ maru_macos_control_browser_mock_summary (Browser Grants response-mocking line) and grant scope wire 5 (browser_network_mock).
 // v259: W9e① maru_macos_control_browser_emulation_summary (Browser Grants device-emulation line) and grant scope wire 6 (browser_emulation).
 // v260: W9e② maru_macos_control_browser_trace_summary (Browser Grants performance-trace line).
-// v261: grant scope wire 7 (browser_agent_tabs — the pane's consent to open agent tabs, 2026-11-16) in the Browser Grants menu.
+// v261: grant scope wire 7 (browser_agent_tabs — the pane's consent to open agent tabs, 2026-11-16) and maru_macos_control_agent_tabs_{denied_count,denied_at,pane_title} / clear_agent_tabs_denial (Browser Grants undo rows).
 pub const abi_version: u32 = 261;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과

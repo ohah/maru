@@ -209,6 +209,10 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
 
 - `.web` Term 이 OSR 백엔드면 그 pane 의 본문 rect 에 front 장을 텍스처 quad 로 그린다(kitty 경로·PTY 없음). 화면에
   **보이는** web Term 만 그리고, hit-test rect 는 그 프레임에 그린 것만 유효하다(§13.1 「분업」).
+  그 rect(`osr_layouts`)는 Swift 가 전이 drain 을 부를 때만 다시 계산되는데, Swift 는 창에 웹 Term 이 없고(`web_surfaces_present`
+  0) WKWebView 패널도 없으면 drain 을 건너뛴다 — Chromium 탭은 WKWebView 가 없어 창의 **마지막** 웹 탭이 보이는 채 닫히거나 다른 창으로
+  옮겨지면 rect 가 남아 같은 자리의 터미널 클릭·휠을 삼켰다(W4b 부터, 2026-11-16 제보). 그래서 tick 이 그 신호를 실을 때 웹 Term 이 0 이면
+  rect 도 비운다(`webSurfacesPresentPruningOsr`) — drain 을 건너뛰는 조건과 같은 술어다.
 - 새 프레임은 mailbox dirty 로 알고 **그 창에** 다시 그리기를 요청한다. 이것이 없으면 pane 은 초당 2~8 회만 바뀐다
   (§13.1 「남은 미해결」 10 — seed 확인으로 초당 ~53 회를 실측했다). 창마다 렌더러가 따로 rect 를 든다.
 - 팝업(`PET_POPUP`) 합성 위치는 D4 — maru 렌더러의 별도 quad. 팝업 픽셀은 따로 된 팝업 링(`MWBP`)으로 오고, 열림·사각형·닫힘은

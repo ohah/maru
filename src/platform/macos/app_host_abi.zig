@@ -14413,6 +14413,60 @@ test "에이전트 탭 표지 ◈: 사이드바 세션 목록은 그 칸만 마�
     try std.testing.expectEqual(@as(usize, 0), revoked.magenta);
 }
 
+// 이 시험이 증명하는 것(#4731 변이 M21 생존): 탭 줄 **그리기 경로**(`tick` 이 투영한 셀 스트림)가 ◈ 를 실제로 마젠타로 칠한다. 칠하는 함수 단위
+// 시험(`recolorAgentTabMarkCells`)과 라벨 시험만으로는 `tick` 의 그 호출을 지워도 초록이었다. 셀을 만드는 더 낮은 자리가 없어(탭 줄 셀은 `tick`
+// 안에서 만들고 칠한다) 프레임을 투영해 본다. 「◈ Bank」 제목의 ◈ 는 탭 줄에서 보이지 않는 글자를 앞에 둬 표지가 아니다(measured 제목 글 —
+// 셀이 아니다), 사이드바 셀은 이 스트림에 없다 — 그래서 ◈ 셀은 에이전트 탭의 표지 하나뿐이어야 한다.
+test "에이전트 탭 표지 ◈: 탭 줄 그리기 경로가 그 칸을 마젠타로 칠한다(tick 셀 스트림)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    session.agent_tab_known_callback = onAgentTabKnown;
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell_term = pane.terms.items[0];
+    const shell = shell_term.surfaceId();
+    shell_term.surface.title = "\u{25C8} Bank"; // 프로그램이 정한 pane 제목(OSC 0/2) — 표지와 같은 글자로 시작한다
+    const tab = try session_mod.web_ops.openAgentTab(session, shell, null);
+    try std.testing.expect(adoptAgentTab(shell, tab));
+
+    const mark = @import("app_session/tab.zig");
+    const magenta: u32 = (@as(u32, mark.agent_tab_mark_color.r) << 16) | (@as(u32, mark.agent_tab_mark_color.g) << 8) | mark.agent_tab_mark_color.b;
+    const countTabStrip = struct {
+        fn f(s: *AppSession, want_fg: u32) !struct { all: usize, painted: usize, closes: usize } {
+            s.metal_dirty = true;
+            for (0..4) |_| {
+                _ = try s.tick();
+                if (!s.metal_dirty) break;
+            }
+            var all: usize = 0;
+            var painted: usize = 0;
+            var closes: usize = 0;
+            for (s.metal_buffer.cells) |cell| {
+                if (cell.codepoint == maru.cell_text.sidebar_close_glyph) closes += 1; // 탭마다 ✕ — 탭 줄이 실제로 그려졌다는 양성 대조
+                if (cell.codepoint != @import("app_session/tab.zig").agent_tab_mark) continue;
+                all += 1;
+                if (cell.foreground == want_fg) painted += 1;
+            }
+            return .{ .all = all, .painted = painted, .closes = closes };
+        }
+    }.f;
+    const strip = try countTabStrip(session, magenta);
+    try std.testing.expectEqual(@as(usize, 1), strip.all);
+    try std.testing.expectEqual(@as(usize, 1), strip.painted);
+    try std.testing.expect(strip.closes >= 2); // 탭 둘(셸·에이전트 탭)의 ✕
+    // 철회하면 사람의 탭 — ◈ 셀이 없다. 탭 줄은 그대로 그려진다(부정 판정자의 양성 대조 — 탭 줄이 사라져도 「◈ 없음」 은 참이다).
+    _ = maru_macos_control_revoke_browser_grant(shell, tab, 0);
+    const after = try countTabStrip(session, magenta);
+    try std.testing.expectEqual(@as(usize, 0), after.all);
+    try std.testing.expect(after.closes >= 2);
+}
+
 // 사용자 결정 2026-11-16: Browser Grants 메뉴의 pane 동의 줄(wire 7)을 거두면 그 pane 은 다시 묻고, 그 pane 이 연 에이전트 탭은 사람의 탭이 된다
 // (탭과 함께 생긴 권한은 그 뿌리와 함께 간다 — F3 와 같은 규칙). 다른 pane 의 동의·에이전트 탭은 그대로다.
 test "pane 동의 철회: 메뉴의 wire 7 로 거두면 그 pane 의 에이전트 탭이 사람의 탭이 되고 다른 pane 은 그대로다" {

@@ -369,7 +369,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // v258: W9d④ maru_macos_control_browser_mock_summary (Browser Grants response-mocking line) and grant scope wire 5 (browser_network_mock).
 // v259: W9e① maru_macos_control_browser_emulation_summary (Browser Grants device-emulation line) and grant scope wire 6 (browser_emulation).
 // v260: W9e② maru_macos_control_browser_trace_summary (Browser Grants performance-trace line).
-pub const abi_version: u32 = 260;
+// v261: grant scope wire 7 (browser_agent_tabs — the pane's consent to open agent tabs, 2026-11-16) in the Browser Grants menu.
+pub const abi_version: u32 = 261;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,

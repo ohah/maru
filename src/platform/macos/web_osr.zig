@@ -1770,6 +1770,16 @@ pub fn testRunning(surface_id: u64) void {
     if (surfaces.getPtr(surface_id)) |s| s.created = true;
 }
 
+/// 시험 전용(P0-1): 엔진이 멈춘 것으로 친다(`fail` 과 같은 래치 — 시작 실패·거듭 크래시·프로필 사용 중·버전 불일치). null 이면
+/// 되돌린다(`testForget` 은 래치를 놓지 않는다 — 다음 시험의 `ensure` 가 멈춘 채 남지 않게 부른 시험이 defer 로 되돌린다).
+pub fn testLatch(notice: ?Notice) void {
+    if (!builtin.is_test) @compileError("test only");
+    if (notice) |n| fail(n) else {
+        state = .off;
+        latched = null;
+    }
+}
+
 /// 시험 전용(W10c): 다시 뜬 sidecar 가 그 탭을 처음 불러올 주소.
 pub fn testLastUrl(surface_id: u64) ?[]const u8 {
     if (!builtin.is_test) @compileError("test only");

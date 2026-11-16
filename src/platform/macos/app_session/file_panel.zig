@@ -3337,6 +3337,13 @@ pub fn queueExternalLink(
     if (self.external_link_kind != null) return error.LinkBusy;
 
     const use_system = force_system or self.loaded_config.config.file_panel.external_link_target == .system;
+    // P0-1: 엔진이 Chromium 이면 새 Chromium 탭에 첫 주소로 싣는다(Swift 실행은 WKWebView 로만 navigate 해 빈 탭이 남았다). 엔진이 멈췄으면
+    // 탭을 만들지 않고 시스템 action 으로.
+    if (!use_system) switch (web_ops.openLinkInNewOsrTab(self, href)) {
+        .opened => return,
+        .system => return self.queueExternalLinkAction(href, 0),
+        .webkit => {},
+    };
     const surface_id = if (use_system) 0 else pane_ops.appendWebTermInActivePane(self, .browser) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.OpenFailed,

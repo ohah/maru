@@ -17,6 +17,12 @@ pub const server_name = "maru";
 /// 예전엔 고정 `"0"` 이라 클라이언트 로그에서 판을 가를 수 없었다.
 pub const server_version: []const u8 = @import("maru_version").version;
 
+/// M10: 클라이언트가 `instructions` 와 도구 설명 하나를 자르는 길이(UTF-16 단위). Claude Code 는 둘 다 4,096 자에서 자르고 뒤에
+/// 「… [truncated]」 를 붙인다(code.claude.com/docs/en/mcp.md 「Tool search for MCP server authors」 — tool search 로 나중에 실리는
+/// 도구는 16,384 자지만, tool search 가 꺼진 사용자에게는 처음부터 실려 4,096 자다). 시험의 상한이고, instructions 는 다른 클라이언트
+/// 몫으로 3,600 자 안팎을 목표로 둔다(사용자 결정 D4 2026-11-16).
+pub const client_text_cap = 4096;
+
 /// 도구 인자 하나가 CLI 에서 어떤 모양인가.
 pub const ArgKind = enum {
     /// `--flag <문자열>`
@@ -121,8 +127,8 @@ pub const tools = [_]Tool{
         .{ .key = "text", .kind = .string, .flag = "--text", .description = "answer text for a prompt" },
         .{ .key = "dialog", .kind = .int, .flag = "--dialog", .description = "dialog token from browser_dialog", .min = 1, .max = 9_007_199_254_740_991 },
     }) },
-    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — allow up to 2 minutes for the answer); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
-    .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests (shared-worker requests carry the same mark), and for attempts Chromium restarted (the retry is a separate, newer req). Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded; response bodies are recorded only while browser_network_record is on (each line then shows its body state). WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. dropped counts requests maru did not record because the page made them too fast or held too many unfinished; dropped_sw_inflight_cap counts service-worker requests not recorded because the site's service workers held too many unfinished fetches (sw_inflight_cap — 128 per origin of the worker, 512 in total; page requests are not affected). Service-worker requests of a site no tab shows any more stop counting toward that cap, but they still hold a slot: when the unfinished service-worker requests (counted and released together) fill 1024 slots, maru forgets the oldest released one: such a request stays in the list unfinished (its response and end are not recorded). Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
+    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — the user has up to 2 minutes to answer, so allow the call 3 minutes); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
+    .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests (shared-worker requests carry the same mark), and for attempts Chromium restarted (the retry is a separate, newer req). Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation, unless the user clicked, typed or navigated in that tab before your first read); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded; response bodies are recorded only while browser_network_record is on (each line then shows its body state). WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. dropped counts requests maru did not record because the page made them too fast or held too many unfinished; dropped_sw_inflight_cap counts service-worker requests not recorded because the site's service workers held too many unfinished fetches (sw_inflight_cap — 128 per origin of the worker, 512 in total; page requests are not affected). Service-worker requests of a site no tab shows any more stop counting toward that cap, but they still hold a slot: when the unfinished service-worker requests (counted and released together) fill 1024 slots, maru forgets the oldest released one: such a request stays in the list unfinished (its response and end are not recorded). Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
         .{ .key = "types", .kind = .string, .flag = "--type", .description = "request types separated by commas: document, iframe, stylesheet, script, image, font, xhr (fetch and XHR), media, worker, shared_worker, service_worker, prefetch, favicon, ping, csp_report, object, plugin, preload, other" },
         .{ .key = "method", .kind = .string, .flag = "--method", .description = "HTTP method, like GET or POST" },
         .{ .key = "status", .kind = .string, .flag = "--status", .description = "status code (100-599) or a class like 4xx" },
@@ -132,7 +138,7 @@ pub const tools = [_]Tool{
         .{ .key = "page_size", .kind = .int, .flag = "--page-size", .description = "requests per page (1-200, default 50)", .min = 1, .max = 200 },
         .{ .key = "clear", .kind = .flag, .flag = "--clear", .description = "after this read, show you only newer requests" },
     }) },
-    .{ .name = "browser_network_request", .subcommand = "network-request", .description = "Show one network request of a Chromium tab in detail: request and response headers, redirects, timing and size. Cookie, Set-Cookie and Authorization values (and passwords in addresses) are shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies on that site), even in tabs you opened; otherwise only their names. With browser.agent-network-full off they are never shown. With body:true it also prints one piece of the recorded response body (text only, at most 64 KiB per call, on one line that starts with 'body text: ' — every other line, such as 'more: --offset', is maru's own; line breaks in the body show as ' ⏎ ' and tabs as spaces, so that line is not exact (a ' ⏎ ' in the body looks the same); body_offset continues from the 'more: --offset' line; or out writes the whole body exactly as it is, also a binary one, to a new 0600 file (never over an existing one; under the temp folder only) — not together with body_offset). Bodies exist only for requests made while browser_network_record was on, at most 1 MiB each — both as received and as the text Chromium decoded, so a body in a legacy encoding such as windows-1252 or EUC-KR, which grows when decoded, can be over_cap below 1 MiB received (8 MiB per tab, 32 MiB for all tabs, in memory only); a body sent with another site's cookies or login needs that site's cookie permission too (navigate the tab to that site and run maru browser get-cookies). The body state says why there is none (needs_body_permission, over_cap, not_text, unavailable when the tab moved to another page before the request finished, unmatched for cross-process iframes and workers (and, rarely, a request released because a pairing next to it was given up) — ambiguous when it could not be told apart from another request of the same URL, such as a worker's at about the same time, or, for a service worker's fetch, when maru could not prove the page received exactly that fetch's response (the worker answered from Cache Storage or the HTTP cache, from a response it kept from before recording began, two service workers fetched the same URL at the same time, or a fetch maru could not see came first), restarted when Chromium restarted the request and the retry is a newer req, …).", .args = withSurface(&.{
+    .{ .name = "browser_network_request", .subcommand = "network-request", .description = "Show one network request of a Chromium tab in detail: request and response headers, redirects, timing and size. Needs the tab's network permission (browser_network_requests asks for it). Cookie, Set-Cookie and Authorization values (and passwords in addresses) are shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies on that site), even in tabs you opened; otherwise only their names. With browser.agent-network-full off they are never shown. With body:true it also prints one piece of the recorded response body (text only, at most 64 KiB per call, on one line that starts with 'body text: ' — every other line, such as 'more: --offset', is maru's own; line breaks in the body show as ' ⏎ ' and tabs as spaces, so that line is not exact (a ' ⏎ ' in the body looks the same); body_offset continues from the 'more: --offset' line; or out writes the whole body exactly as it is, also a binary one, to a new 0600 file (never over an existing one; under the temp folder only) — not together with body_offset). Bodies exist only for requests made while browser_network_record was on, at most 1 MiB each — both as received and as the text Chromium decoded, so a body in a legacy encoding such as windows-1252 or EUC-KR, which grows when decoded, can be over_cap below 1 MiB received (8 MiB per tab, 32 MiB for all tabs, in memory only); a body sent with another site's cookies or login needs that site's cookie permission too (navigate the tab to that site and run maru browser get-cookies). The body state says why there is none (needs_body_permission, over_cap, not_text, unavailable when the tab moved to another page before the request finished, unmatched for cross-process iframes and workers (and, rarely, a request released because a pairing next to it was given up) — ambiguous when it could not be told apart from another request of the same URL, such as a worker's at about the same time, or, for a service worker's fetch, when maru could not prove the page received exactly that fetch's response (the worker answered from Cache Storage or the HTTP cache, from a response it kept from before recording began, two service workers fetched the same URL at the same time, or a fetch maru could not see came first), restarted when Chromium restarted the request and the retry is a newer req, …).", .args = withSurface(&.{
         .{ .key = "req", .kind = .int, .flag = "--req", .description = "req number from browser_network_requests", .required = true, .min = 1, .max = 9_007_199_254_740_991 },
         .{ .key = "body", .kind = .flag, .flag = "--body", .description = "also print the recorded response body (one piece of up to body_max_bytes)" },
         .{ .key = "body_offset", .kind = .int, .flag = "--offset", .description = "byte offset into the body (0-1048576) — from the 'more: --offset' line of the previous piece (implies body)", .max = 1024 * 1024 },
@@ -196,7 +202,13 @@ pub const tools = [_]Tool{
         .{ .key = "max_depth", .kind = .int, .flag = "--max-depth", .description = "tree depth limit", .max = std.math.maxInt(u32) },
         .{ .key = "selector", .kind = .string, .flag = "--selector", .description = "only under this element" },
     }) },
-    .{ .name = "browser_console", .subcommand = "console", .description = "Print page console logs.", .args = withSurface(&.{.{ .key = "clear", .kind = .flag, .flag = "--clear", .description = "empty the log after reading" }}) },
+    .{ .name = "browser_console", .subcommand = "console", .description = "Print page console logs. On Chromium tabs (engine=chromium in browser_list) it also holds lines from iframes and workers, " ++
+        "and the first read after you are allowed a tab shows only the current page's lines (earlier lines are deleted, " ++
+        "including pages the tab went through after the permission but before that read), except tabs you opened with browser_open " ++
+        "(and tabs their pages opened), whose first read shows everything since the tab was created " ++
+        "unless the user clicked, typed or navigated in that tab before it. " ++
+        "A read from another pane (another agent, or the user running maru browser console there) takes the console over: " ++
+        "your next read again shows only the current page's lines, and lines logged in between are gone for you.", .args = withSurface(&.{.{ .key = "clear", .kind = .flag, .flag = "--clear", .description = "empty the log after reading" }}) },
     .{ .name = "browser_back", .subcommand = "back", .description = "Go back in the tab's history (Chromium tabs). Answers not ok when there is nothing to go back to.", .args = withSurface(&.{}) },
     .{ .name = "browser_forward", .subcommand = "forward", .description = "Go forward in the tab's history (Chromium tabs). Answers not ok when there is nothing to go forward to.", .args = withSurface(&.{}) },
     .{ .name = "browser_reload", .subcommand = "reload", .description = "Reload the page (Chromium tabs).", .args = withSurface(&.{}) },
@@ -253,6 +265,7 @@ pub const usage =
     \\usage: maru mcp
     \\Serve the browser commands as MCP tools over stdio (one JSON-RPC message per line).
     \\Add it to an agent, for example: claude mcp add maru -- maru mcp
+    \\Set the agent's tool timeout for this server to at least 3 minutes: a call that asks the user waits for the answer.
     \\Run it from a maru pane — requests act for that pane (see `maru browser --help`).
     \\
 ;
@@ -579,43 +592,31 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
         s.write(server_version) catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.objectField("instructions") catch |e| break :blk e;
-        s.write("Control the browser tabs of the maru terminal this agent runs in. Find tabs with browser_list or open one with browser_open, " ++
-            "then act on them by id (surface). Prefer locators (role/by_text/by_label) or refs from browser_snapshot over CSS selectors. " ++
-            "Requests come from the maru pane this process runs in; controlling a tab you did not open asks the user once. " ++
-            "While the user answers that confirmation a call can take up to about 150 seconds (2 minutes for the answer, then the action), " ++
-            "so give this server a tool timeout of at least 150 seconds. Calls run one at a time. " ++
-            "On Chromium tabs (engine=chromium in browser_list) browser_console also holds lines from iframes and workers, " ++
-            "and the first read after you are allowed a tab shows only the current page's lines (earlier lines are deleted, " ++
-            "including pages the tab went through after the permission but before that read), except tabs you opened with browser_open " ++
-            "(and tabs their pages opened), whose first read shows everything since the tab was created " ++
-            "unless the user clicked, typed or navigated in that tab before it. " ++
-            "A read from another pane (another agent, or the user running maru browser console there) takes the console over: " ++
-            "your next read again shows only the current page's lines, and lines logged in between are gone for you. " ++
-            "browser_upload asks the user every time, listing each file with a peek of its content; pass absolute paths of files " ++
-            "(not folders) you mean to send, and expect it to wait for the user's answer. " ++
-            "browser_network_requests and browser_network_request (Chromium tabs) need their own permission for the site the tab shows " ++
-            "(asked once per site; tabs you opened need none); you see requests made after that permission (tabs you opened: since they were created, " ++
-            "unless the user clicked, typed or navigated in that tab before your first read). Cookie, Set-Cookie and Authorization values are " ++
-            "shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies " ++
-            "on that site), and never when the " ++
-            "user turned browser.agent-network-full off; request bodies are not recorded. " ++
-            "browser_network_record turns recording of a tab's response bodies on (the tab title shows a red ◉; asked once per site on the user's tabs, " ++
-            "not on tabs you opened); read a body with browser_network_request body:true, 64 KiB per call (or out for the whole body). " ++
-            "A body sent with another site's cookies or login also needs that site's cookie permission. " ++
-            "browser_network_block blocks a tab's requests by pattern on the site where you add the rule (the tab title shows ⊘; asked once per site " ++
-            "on the user's tabs, not on tabs you opened; strict mode bypasses the site's service worker in that tab). " ++
-            "browser_network_mock answers a tab's requests with responses you give, on the site where you add the rule (the tab title shows ▣; needs " ++
-            "the tab's control and network permissions; service and shared workers never see mocks, nor a shared worker's script — use strict for pages a service worker controls). " ++
-            "browser_emulate makes a tab look like another device (screen, user agent, language, time zone, location, media) to its pages and servers " ++
-            "(the tab title shows ◫; asked once per site on the user's tabs and applied only while that site is shown; cross-site iframes and service " ++
-            "workers keep the real values; cpu and network conditions last while you — this MCP connection — run). " ++
-            "browser_trace_start and browser_trace_stop record and summarize a performance trace of a tab you opened (the tab title shows ◔; " ++
-            "one trace at a time in the browser; discarded when the user uses the tab or another tab's frame shares its renderer process).") catch |e| break :blk e;
+        s.write(instructions) catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
+
+/// M10: 이 서버만의 안내 — 도구 이름·인자·숫자·수명처럼 **표면마다 다른 사실**. 도구 하나의 세부(권한의 층·보이는 범위·console 첫 읽기)는
+/// 그 도구의 설명이 갖는다 — 설명은 그 도구를 불러올 때 실리고(tool search), instructions 는 4,096 자에서 잘리기 때문이다(`client_text_cap`).
+/// 시한은 모델이 할 수 있는 일로 쓴다(도구 시한은 사람이 클라이언트에 설정한다 — 그 안내는 `usage` 에, 사용자 결정 D5 「3 분」).
+pub const server_guidance =
+    "Using these tools: find tabs with browser_list, or open a hidden tab of your own behind the user's with browser_open " ++
+    "(no dialog; up to 8 per pane), then act on a tab by its id (surface). Prefer locators (role, by_text, by_label) or refs " ++
+    "from browser_snapshot over CSS selectors; snapshot again after a navigation. Requests come from the maru pane this server " ++
+    "runs in; inside tmux or screen in that pane every request is refused. On a tab the user opened, the first call asks the user, " ++
+    "and the network, recording, blocking, mocking and emulation tools ask again once per site (each tool's description says which); " ++
+    "tabs you opened ask nothing except browser_upload. A call that asks the user waits for the answer (about 150 seconds at most, " ++
+    "with the action that follows), so allow it 3 minutes; if your client gives up sooner, the call still finishes and the next call " ++
+    "waits for it, so check the tab before you repeat anything. Calls run one at a time. After a click, wait for something only the " ++
+    "next page has: a load wait right after a click can still see the old page. CPU and network conditions set with browser_emulate " ++
+    "last while this MCP connection runs. A tab's title shows ◉ while its response bodies are recorded, ⊘ with block rules, " ++
+    "▣ with mock rules, ◫ while emulated and ◔ while tracing.";
+
+/// `initialize` 의 `instructions` 로 내는 글.
+pub const instructions = server_guidance;
 
 fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
     try s.beginObject();
@@ -854,21 +855,66 @@ test "W9f: 도구 표의 모든 도구는 CLI 하위 명령이고, 필수 인자
     }
 }
 
-test "W9c①: initialize 의 안내는 Chromium 탭의 console 을 「아직 안 됨」 이라 하지 않고, 무엇이 담기는지 알린다" {
+test "W9c①·M10: browser_console 의 설명은 Chromium 탭의 console 을 「아직 안 됨」 이라 하지 않고, 무엇이 담기고 첫 읽기가 무엇을 지우는지 알린다" {
+    // M10: 이 규칙은 전에 `initialize` 의 `instructions` 에 있었다. instructions 는 Claude Code 가 4,096 자에서 자르고(앞에 스킬과 같은
+    // 규칙 덩어리가 온다) 도구 설명은 그 도구를 불러올 때 실리므로, 그 도구의 세부인 이 글은 설명으로 옮겼다 — 문장은 그대로다.
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const r = (try handleLine(testing.allocator, arena_state.allocator(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")).reply;
-    defer testing.allocator.free(r);
-    try testing.expect(std.mem.indexOf(u8, r, "not available yet") == null);
-    try testing.expect(std.mem.indexOf(u8, r, "browser_console") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "iframes and workers") != null);
+    const d = findTool("browser_console").?.description;
+    try testing.expect(std.mem.indexOf(u8, d, "not available yet") == null);
+    try testing.expect(std.mem.indexOf(u8, d, "iframes and workers") != null);
     // 다른 pane 의 읽기가 묶음을 가져간다는 것도(W9c① 적대 리뷰 2 회차 F3).
-    try testing.expect(std.mem.indexOf(u8, r, "A read from another pane") != null);
+    try testing.expect(std.mem.indexOf(u8, d, "A read from another pane") != null);
     // 에이전트가 연 탭은 처음부터 다 본다는 것과 첫 읽기가 앞 줄을 지운다는 것도(3 회차 F1).
-    try testing.expect(std.mem.indexOf(u8, r, "everything since the tab was created") != null);
+    try testing.expect(std.mem.indexOf(u8, d, "everything since the tab was created") != null);
     // 첫 읽기 전에 사용자가 그 탭을 몰면 그 예외가 풀린다는 것도(4 회차 D).
-    try testing.expect(std.mem.indexOf(u8, r, "unless the user clicked, typed or navigated in that tab before it") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "earlier lines are deleted") != null);
+    try testing.expect(std.mem.indexOf(u8, d, "unless the user clicked, typed or navigated in that tab before it") != null);
+    try testing.expect(std.mem.indexOf(u8, d, "earlier lines are deleted") != null);
+    // 옮긴 뒤 instructions 에 반쪽이 남지 않는다(두 벌이 되지 않게).
+    const served = try servedInstructions(arena_state.allocator());
+    try testing.expect(std.mem.indexOf(u8, served, "earlier lines are deleted") == null);
+}
+
+/// M10: `initialize` 가 **실제로 내는** `instructions`(JSON 을 푼 값). 판정자는 상수가 아니라 이 응답을 잰다 — 배선이 다른 글을
+/// 싣게 바뀌어도 잡히게(pr-checklist 「판정자 규율」). 돌려준 글은 `arena` 소유.
+fn servedInstructions(arena: std.mem.Allocator) ![]const u8 {
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")).reply;
+    defer testing.allocator.free(r);
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, r, .{ .allocate = .alloc_always });
+    return v.object.get("result").?.object.get("instructions").?.string;
+}
+
+/// 글 길이를 클라이언트가 세는 단위로 — Claude Code 는 JavaScript 문자열 길이(UTF-16 단위)로 자른다(BMP 밖 글자는 2).
+fn clientLength(text: []const u8) !usize {
+    return std.unicode.calcUtf16LeLen(text);
+}
+
+test "M10: instructions 와 모든 도구 설명이 클라이언트 상한(client_text_cap) 안이다 — 넘으면 꼬리가 잘린다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const served = try servedInstructions(arena_state.allocator());
+    try testing.expect(try clientLength(served) <= client_text_cap);
+    for (&tools) |*t| {
+        if (try clientLength(t.description) > client_text_cap) {
+            std.debug.print("M10: {s} 설명이 {d} 자 — 상한 {d}\n", .{ t.name, try clientLength(t.description), client_text_cap });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "M10(D5): 사용자에게 묻는 호출의 시한 안내는 3 분 — instructions·업로드 설명·`maru mcp --help` 가 같은 숫자를 말한다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const served = try servedInstructions(arena_state.allocator());
+    // 모델에게는 할 수 있는 일을(기다림을 허락하고, 클라이언트가 먼저 포기해도 그 호출은 끝까지 돈다 — 반복 전에 확인).
+    try testing.expect(std.mem.indexOf(u8, served, "allow it 3 minutes") != null);
+    try testing.expect(std.mem.indexOf(u8, served, "the call still finishes") != null);
+    // 전의 「150 초 시한을 주라」 는 모델이 실행할 수 없는 지시였고 스킬(3 분)과 숫자가 달랐다.
+    try testing.expect(std.mem.indexOf(u8, served, "tool timeout of at least 150") == null);
+    const up = findTool("browser_upload").?.description;
+    try testing.expect(std.mem.indexOf(u8, up, "allow the call 3 minutes") != null);
+    // 사람에게는 설정할 값을(도구 시한은 클라이언트 설정이다).
+    try testing.expect(std.mem.indexOf(u8, usage, "tool timeout for this server to at least 3 minutes") != null);
 }
 
 // `serverInfo` 는 MCP 클라이언트가 「어느 서버의 어느 판인가」를 보는 자리다(로그·진단). 전에는 고정 `"0"` 이라 설치된 maru 가
@@ -1373,13 +1419,13 @@ test "W9d①: browser_network_requests·browser_network_request — 인자가 CL
     const d = (try browser.parse(try argv(arena, one, try jsonOf(arena, "{\"surface\":4,\"req\":12}")))).request.network_request;
     try testing.expect(d.surface_id == 4 and d.req == 12);
     try testing.expectError(error.MissingArgument, argv(arena, one, try jsonOf(arena, "{\"surface\":4}")));
-    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")).reply;
-    defer testing.allocator.free(r);
-    try testing.expect(std.mem.indexOf(u8, r, "browser_network_requests") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "browser.agent-network-full") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "request bodies are not recorded") != null);
+    // M10: 권한·보이는 범위의 글은 전에 instructions 에도 있었다(두 벌). 이제 그 도구의 설명만 말한다 — 설명에 빠짐이 없는지 여기서.
+    try testing.expect(std.mem.indexOf(u8, list.description, "Needs a separate permission per site") != null);
+    try testing.expect(std.mem.indexOf(u8, list.description, "unless the user clicked, typed or navigated in that tab before your first read") != null);
+    try testing.expect(std.mem.indexOf(u8, list.description, "Request bodies are not recorded") != null);
+    try testing.expect(std.mem.indexOf(u8, one.description, "Needs the tab's network permission") != null);
+    try testing.expect(std.mem.indexOf(u8, one.description, "browser.agent-network-full") != null);
     // W9d① 적대 리뷰 3 회차 D1·M1: 자격 증명 값은 쿠키 권한이 있을 때만, 숨긴 이동은 덮이지 않는 사이트에서 시작했거나 지나간 것.
-    try testing.expect(std.mem.indexOf(u8, r, "cookie permission") != null);
     try testing.expect(std.mem.indexOf(u8, list.description, "started on or passed through such a site") != null);
     try testing.expect(std.mem.indexOf(u8, one.description, "cookie permission") != null);
 }
@@ -1411,9 +1457,8 @@ test "W9d②: browser_network_record·browser_network_request 의 본문 인자 
     try testing.expect(std.mem.indexOf(u8, one.description, "64 KiB") != null);
     try testing.expect(std.mem.indexOf(u8, one.description, "1 MiB") != null);
     try testing.expect(std.mem.indexOf(u8, rec.description, "◉") != null);
-    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")).reply;
-    defer testing.allocator.free(r);
-    try testing.expect(std.mem.indexOf(u8, r, "browser_network_record") != null);
+    // instructions 의 제목 기호 색인도 기록을 말한다(어느 탭이 기록 중인지 사용자와 같은 기호로).
+    try testing.expect(std.mem.indexOf(u8, try servedInstructions(arena), "◉ while its response bodies are recorded") != null);
 }
 
 // W9d② v20 A R10(적대 검증 — MCP 인자): 본문 칸의 나쁜 값(음수·소수·지수·글·모르는 키)은 CLI 를 부르기 전에 거절하고, 범위 밖·out+body_offset 은

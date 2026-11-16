@@ -416,6 +416,9 @@ def verify(cli, root):
     assert p.stderr.startswith("maru browser click: unknown option '--valeu'\n  click ") and len(p.stderr) < 2048, records[-1]
     p = run(['browser', 'snapshot', '--surface', '1', '--interactive', 'yes'], 1)
     assert "too many arguments: 'yes' was not expected" in p.stderr, records[-1]
+    # An option left without its value names that option (before: "the option needs a value" on a line with several).
+    p = run(['browser', 'click', '--surface', '1', '--selector'], 1)
+    assert p.stderr.startswith("maru browser click: option '--selector' needs a value\n  click "), records[-1]
     # M5: a screenshot without --out is refused before the socket (PNG bytes never reach stdout — an agent's shell
     # output is a pipe, so a terminal-only check would not protect it).
     p = run(['browser', 'screenshot', '--surface', '1'], 1)

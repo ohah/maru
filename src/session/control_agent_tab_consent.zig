@@ -13,9 +13,11 @@
 //!
 //! **제목**: pane 제목은 그 pane 의 프로그램(묻는 에이전트 자신일 수 있다)이 OSC 로 정한다 — 모달과 메뉴가 같은 규칙(`sanitizeTitle`)으로 거른다.
 //!
-//! **L2 순수**: std 만 import 한다. OS·소켓·GUI 0. 인스턴스는 L4(app_host_abi)가 소유한다(메인 스레드 전용).
+//! **L2 순수**: std 와 중립 leaf(`invisible_text.zig` — std 만)만 import 한다. OS·소켓·GUI 0. 인스턴스는 L4(app_host_abi)가 소유한다(메인 스레드 전용).
 
 const std = @import("std");
+/// 보이지 않는 글자 판정 — CLI 가 되비추는 낱말과 같은 규칙(중립 leaf, std 만).
+const invisible_text = @import("../invisible_text.zig");
 
 /// 기억하는 pane 수. pane 은 대개 몇 개라 넉넉하다 — 넘치면 **허용 항목의 제목**부터 밀어낸다(권한은 grant 저장소에 있다 — 잃는 것은 메뉴의
 /// 제목뿐이다). 거부만으로 가득 차면 가장 먼저 기억한 거부를 밀어낸다(그 pane 은 다시 묻는다 — 거부를 잃는 쪽이 허용을 잃는 쪽보다 안전하다).
@@ -142,17 +144,16 @@ pub const PaneMemory = struct {
 };
 
 /// pane 제목을 모달·메뉴에 실을 수 있게 거른다 — 문장을 흔들 수 있는 글자를 공백으로: C0·C1 제어 글자(줄바꿈 — 줄을 바꾼다)와 **양방향·폭 0 서식
-/// 글자**(U+061C·U+200B–U+200F·U+202A–U+202E·U+2060–U+2064·U+2066–U+2069·U+FEFF — RLO 하나면 뒤따르는 「… Allow?」 까지 거꾸로 그려져 사용자가 읽는
-/// 질문이 바뀐다; 적대 리뷰 R15). UTF-8 이 아니면 「?」. `out` 이 차면 글자 경계에서 멈춘다. 앞뒤 공백은 뗀다.
+/// 글자**(RLO 하나면 뒤따르는 「… Allow?」 까지 거꾸로 그려져 사용자가 읽는 질문이 바뀐다; 적대 리뷰 R15). 판정은 중립 leaf
+/// `invisible_text.isInvisible`(Unicode Default_Ignorable ∪ 제어 ∪ 줄 구분 — CLI 의 되비춘 낱말과 같은 목록; 예전에는 이 함수 안에 목록이 따로
+/// 있었다). UTF-8 이 아니면 「?」. `out` 이 차면 글자 경계에서 멈춘다. 앞뒤 공백은 뗀다.
 pub fn sanitizeTitle(out: []u8, title: []const u8) []const u8 {
     const view = std.unicode.Utf8View.init(title) catch return copyLiteral(out, "?");
     var it = view.iterator();
     var n: usize = 0;
     while (it.nextCodepointSlice()) |bytes| {
         const cp = std.unicode.utf8Decode(bytes) catch return copyLiteral(out, "?");
-        const unsafe = cp < 0x20 or (cp >= 0x7F and cp <= 0x9F) or cp == 0x061C or (cp >= 0x200B and cp <= 0x200F) or
-            (cp >= 0x202A and cp <= 0x202E) or (cp >= 0x2060 and cp <= 0x2064) or (cp >= 0x2066 and cp <= 0x2069) or cp == 0xFEFF;
-        const piece: []const u8 = if (unsafe) " " else bytes;
+        const piece: []const u8 = if (invisible_text.isInvisible(cp)) " " else bytes;
         if (n + piece.len > out.len) break;
         @memcpy(out[n..][0..piece.len], piece);
         n += piece.len;
@@ -238,6 +239,12 @@ test "제목은 제어·양방향·폭 0 글자를 공백으로, 깨진 UTF-8 �
     var buf: [max_title_bytes]u8 = undefined;
     const t = sanitizeTitle(&buf, "\nsafe\u{202E}?wollA \u{2066}x\u{2069}\u{200D}\u{FEFF}\u{061C}y\u{0085}z\x1b ");
     for ([_][]const u8{ "\n", "\u{202E}", "\u{2066}", "\u{2069}", "\u{200D}", "\u{FEFF}", "\u{061C}", "\u{0085}", "\x1b" }) |bad| try testing.expect(std.mem.indexOf(u8, t, bad) == null);
+    // 판정은 CLI 의 되비춤과 같은 중립 leaf(`invisible_text.isInvisible`)다 — 소프트 하이픈·한글 채움·변이 선택자·태그·줄 구분도 질문 줄을
+    // 흔들 수 있는 보이지 않는 글자다.
+    var more_buf: [max_title_bytes]u8 = undefined; // 위 `t` 가 `buf` 를 가리킨다 — 따로 쓴다
+    const more = sanitizeTitle(&more_buf, "a\u{00AD}b\u{3164}c\u{FE0F}d\u{E0041}e\u{2028}f\u{2064}g");
+    try testing.expectEqualStrings("a b c d e f g", more);
+    try testing.expectEqualStrings("가 \u{00A0}나", sanitizeTitle(&more_buf, "가 \u{00A0}나")); // 대조: 보이는 빈칸·글자는 그대로
     try testing.expect(std.mem.startsWith(u8, t, "safe") and std.mem.indexOf(u8, t, "y") != null);
     try testing.expectEqualStrings("?", sanitizeTitle(&buf, "a\xffb"));
     var small: [5]u8 = undefined;

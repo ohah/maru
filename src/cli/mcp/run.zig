@@ -176,7 +176,7 @@ test "M8·D5: CLI 파서가 거절한 낱말과 스키마에 없는 키를 도�
         defer err.deinit();
         try serveQuietly(std.testing.io, std.testing.allocator, fds[0], &out.writer, &err.writer);
         var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, out.written(), "\n"), '\n');
-        const want = [_][]const u8{ "error: unknown argument 'selectr' for this tool (see its input schema)", "error: unknown argument '[2Jx' for this tool (see its input schema)" };
+        const want = [_][]const u8{ "error: unknown argument 'selectr' for this tool (see its input schema)", "error: unknown argument '<U+001B>[2Jx' for this tool (see its input schema)" };
         for (want) |w| {
             const p = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, lines.next().?, .{});
             defer p.deinit();

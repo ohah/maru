@@ -283,7 +283,7 @@ fn findArg(tool: *const Tool, key: []const u8) ?*const Arg {
 }
 
 /// 「모르는 키」 거절 글 — 그 키의 이름까지(D5: 전에는 어느 키인지 말하지 않아 에이전트가 스키마를 다시 읽고 추측했다). 키는 에이전트가
-/// 보낸 JSON 이라 `browser.writeArgToken`(보이지 않는 글자 빼기·64 바이트)으로 거른다. 돌려준 글은 `arena` 소유.
+/// 보낸 JSON 이라 `browser.writeArgToken`(보이지 않는 글자는 `<U+XXXX>` 로 보이게·입력 64 바이트)으로 거른다. 돌려준 글은 `arena` 소유.
 fn unknownArgumentText(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Value) std.mem.Allocator.Error![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(arena);
     const w = &aw.writer;

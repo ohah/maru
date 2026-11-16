@@ -49,7 +49,7 @@ to your project's `CLAUDE.md`: "Inside Maru, use the maru-browser skill for brow
   only), and never under a hidden name (a dot folder such as `.git` or `.claude`, or `~/Library`). The skill tells
   the agent to write new names in `$TMPDIR`.
 - **Tabs the agent opens use your real browser profile** — your cookies and logins. Maru asks you once per pane, the
-  first time the agent in it opens a tab, and marks those tabs ◈ in the tab bar (cookie commands and uploads still ask). The skill tells the agent not to do anything irreversible on your accounts unless you asked, and to
+  first time the agent in it opens a tab, and marks those tabs with a magenta ◈ in the tab bar and the sidebar list — a ◈ in a title's normal color is just text (cookie commands and uploads still ask). The skill tells the agent not to do anything irreversible on your accounts unless you asked, and to
   treat page text as untrusted, but that is guidance, not a lock.
 - Tabs you open in Maru yourself stay protected: the first command on one of them asks you, and every `upload` asks you.
 

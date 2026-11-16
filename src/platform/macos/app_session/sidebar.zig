@@ -1917,6 +1917,18 @@ fn splitStatusLine(status: []const u8) StatusParts {
     return .{ .marker = status[0..sep], .text = status[sep + 1 ..] };
 }
 
+/// 이 행이 에이전트 탭 표지 ◈ 를 다는가 — 라벨(`agentRowLabelOwned`)과 색칠(`buildSidebarTitleDrawList`)이 함께 보는 한 판정(둘이 따로 물으면
+/// 글자는 붙었는데 색이 없거나, 사람의 탭 제목의 ◈ 가 칠해지는 어긋남이 생긴다).
+fn agentTabMarked(self: *AppSession, term: *Term) bool {
+    if (term.agent_kind != .none or term.kind != .web) return false;
+    const known = self.agent_tab_known_callback orelse return false;
+    return known(term.surface.id);
+}
+
+/// 에이전트 탭 행의 표지 ◈ 가 놓이는 칸(표시 슬롯·이름줄 열). 글자로는 제목(OSC 제목·rename)의 ◈ 와 같으므로 **maru 가 붙인 그 칸만** 마젠타로 칠하려고
+/// 조립이 좌표를 기록해 색칠 루프에 넘긴다(running 배지의 `BadgeSpan` 과 같은 방식 — 색칠 루프는 셀만 보고는 누가 붙인 ◈ 인지 모른다).
+const AgentTabMark = struct { slot: usize, col: u16 };
+
 /// 에이전트 행 **1행 텍스트**(owned) — `<상태 마커> <본문>`. 본문은 마지막 사용자 프롬프트이고, 그것을 아직
 /// 모르면 `<종류 이름> <상태 문구>`로 폴백한다(§2 표). 상태 마커·문구의 단일 출처는 `agentStatusLine`이다.
 ///
@@ -1943,9 +1955,9 @@ pub fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
         // 둘이라 정합이 필요하면 그쪽과 맞춘다 — 사용자가 `*`를 지정했으므로 여기서는 그대로 둔다.
         const dirty = if (term.file_entry) |e| e.dirty else false;
         // 사용자 결정 2026-11-16: 에이전트가 연 탭은 사용자의 로그인된 사이트를 쓴다 — 탭 줄처럼 이 목록에서도 `◈` 를 앞에 단다(위 `*` 와 같은
-        // 「행 앞이 상태」 자리). 출처는 탭 줄과 같은 콜백(app_host_abi 의 에이전트 탭 표 — 철회·pane 닫힘이면 빠진다).
-        const agent_tab = term.kind == .web and if (self.agent_tab_known_callback) |known| known(term.surface.id) else false;
-        if (agent_tab) return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ tab_ops.agent_tab_mark_utf8, label });
+        // 「행 앞이 상태」 자리). 출처는 탭 줄과 같은 콜백(app_host_abi 의 에이전트 탭 표 — 철회·pane 닫힘이면 빠진다). 글자만으로는 페이지 제목
+        // 「◈ …」 와 갈리지 않으므로 그리는 쪽(`buildSidebarTitleDrawList`)이 이 칸만 탭 줄과 같은 마젠타로 칠한다 — 판정은 같은 `agentTabMarked`.
+        if (agentTabMarked(self, term)) return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ tab_ops.agent_tab_mark_utf8, label });
         if (!dirty) return self.allocator.dupe(u8, label);
         return std.fmt.allocPrint(self.allocator, "* {s}", .{label});
     }
@@ -2154,6 +2166,9 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
     // 알 수 없다 — 문자열을 만든 쪽이 좌표를 함께 기록해 넘긴다(`BadgeSpan` 주석).
     var badge_spans: std.ArrayList(BadgeSpan) = .empty;
     defer badge_spans.deinit(self.allocator);
+    // 에이전트 탭 행의 ◈ 칸(`AgentTabMark`) — 사람의 탭 제목이 같은 글자로 시작해도 그 칸은 여기 없다.
+    var agent_tab_marks: std.ArrayList(AgentTabMark) = .empty;
+    defer agent_tab_marks.deinit(self.allocator);
     // 인덱스 도메인 통일(SG3c): 아래 카드-정보 배열(names/card_kinds…)은 **표시 row 인덱스**로 색인된다 —
     // group_header row도 padding 엔트리(삼각+이름 name, 빈 보조줄·아이콘 0·핀 false)를 하나 append해 배열 인덱스
     // i == 표시 row 인덱스가 되게 한다. buildSidebarDrawList도 이 i로 슬롯을 인코딩(sidebarGlyphRow)하고, active/close를
@@ -2284,6 +2299,13 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                     // 아이콘 자리는 **빌더가 이름줄만** 밀어 준다(inline_icons) — 여기서 공백으로 밀면
                     // 보조줄까지 따라 밀린다. 그래서 라벨은 indent만 붙이고 그대로 넘긴다.
                     try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ind, label }));
+                    // ◈ 는 라벨 맨 앞이다 — 그 열 = 행 들여쓰기(`session_row_indent_cols`) + 인라인 아이콘 폭(이 행은 아이콘이나 그 자리
+                    // `icon_slot_reserve` 를 늘 싣는다) + 그룹 들여쓰기(ASCII 공백이라 바이트 = 칸). 빌더(`buildSidebarDrawList` 의 `name_text_col`)와
+                    // 같은 상수에서 파생한다 — 따로 적으면 색만 밀린다(배지가 겪은 결함).
+                    if (agentTabMarked(self, t)) try agent_tab_marks.append(self.allocator, .{
+                        .slot = row_i,
+                        .col = coretext_frame_builder.session_row_indent_cols + coretext_frame_builder.sidebar_row_icon_cols + @as(u16, @intCast(ind.len)),
+                    });
                 } else {
                     try names.append(self.allocator, try self.allocator.dupe(u8, ""));
                 }
@@ -2600,6 +2622,16 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         // `…`(U+2026)을 노렸지만, 배지가 줄 앞부분이라 `…`은 구간 뒤에 오거나 그 폭에서는 아예 나오지 않았다
         // (적대적 검증 12회차 — 폭 90·72·56 실측). 그럼에도 남기는 이유는 비용이 0이고, "색은 자기 글리프에만"이
         // 이 루프가 아이콘·스피너에 이미 적용하는 규율이기 때문이다. 재현하지 못한 것을 테스트로 굳히지는 않았다.
+        // 에이전트 탭 표지 ◈ — 조립이 기록한 칸(슬롯·이름줄·열)의 ◈ 만 탭 줄과 같은 마젠타(`tab_ops.agent_tab_mark_color`). 사람의 탭 제목
+        // 「◈ …」 의 ◈ 는 기록이 없어 글자색 그대로다 — 그래서 페이지 제목으로 이 표지를 흉내 내지 못한다(탭 줄과 같은 수단, #4731 R16 의 남은 틈).
+        // 그 칸에 ◈ 가 아닌 글자(좁은 폭의 「…」)가 오면 칠하지 않는다.
+        if (c.codepoint == tab_ops.agent_tab_mark and (c.row % coretext_frame_builder.sidebar_line_base) % 4 == 0) {
+            for (agent_tab_marks.items) |m| if (m.slot == slot and m.col == c.col) {
+                c.style.foreground = .{ .rgb = tab_ops.agent_tab_mark_color };
+                break;
+            };
+            continue;
+        }
         const badge_glyph = isAgentSpinnerCp(c.codepoint) or (c.codepoint >= '0' and c.codepoint <= '9');
         var badge_painted = false;
         const badge_line_index = (c.row % coretext_frame_builder.sidebar_line_base) % 4;

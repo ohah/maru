@@ -2740,17 +2740,75 @@ pub fn isBrowserTerm(term: *const Term) bool {
     return term.kind == .web and term.file_entry == null and term.web_panel_kind == .browser;
 }
 
-/// 지금 **화면에 보이는** browser 패널의 surface_id(없으면 0). 각 pane의 **활성 Term만** 본다 — 숨은 Term 탭의
+/// 지금 **화면에 보이는** 사용자의 browser 패널(없으면 null). 각 pane의 **활성 Term만** 본다 — 숨은 Term 탭의
 /// 브라우저에 링크를 띄우면 화면이 그대로라 "아무 일도 안 일어난 것"처럼 보인다. 활성 pane의 browser를 먼저
 /// 고른다(브라우저를 보다가 옆 터미널 링크를 누르는 흐름이 가장 흔하다). 여럿이면 이 순서의 첫 번째.
-pub fn visibleBrowserSurfaceId(self: *AppSession) u64 {
-    const active = activeWebSurfaceId(self);
-    if (active != 0) return active;
+/// **에이전트 탭은 고르지 않는다**(P0-1 — #4731 pane 동의): 사용자가 누른 링크는 사용자의 탭이다. 에이전트 탭에 실으면 사용자가
+/// 고른 페이지를 그 pane 의 에이전트가 동의 없이 읽는다(에이전트는 제 탭을 묻지 않고 제어한다). 판정은 에이전트 탭 표
+/// (`agent_tab_known_callback` — 탭 줄 ◈ 와 같은 출처, 철회되면 사람의 탭)다. WebKit 에는 에이전트 탭이 없어 무동작이다.
+fn visibleUserBrowserTerm(self: *AppSession) ?*Term {
+    const active = pane_ops.activePane(self).activeTerm();
+    if (isUserBrowserTerm(self, active)) return active;
     for (tab_ops.activeTab(self).panes.items) |pane| {
         const term = pane.activeTerm();
-        if (isBrowserTerm(term)) return term.surfaceId();
+        if (isUserBrowserTerm(self, term)) return term;
     }
-    return 0;
+    return null;
+}
+
+fn isUserBrowserTerm(self: *AppSession, term: *Term) bool {
+    if (!isBrowserTerm(term)) return false;
+    const known = self.agent_tab_known_callback orelse return true;
+    return !known(term.surfaceId());
+}
+
+/// 링크(P0-1)를 Chromium 길로 보낸 결과 — `webkit` 이면 호출자가 예전 WebKit 길(pending action)로, `system` 이면 시스템 브라우저로.
+pub const OsrLinkRoute = enum { webkit, opened, system };
+
+/// Chromium 엔진이 지금 링크를 받을 수 있는가. 멈춘 엔진(래치 — 시작 실패·거듭 크래시·프로필 사용 중·버전 불일치)은 다시 뜨지 않으므로
+/// 링크를 그 탭에 실으면 사용자가 누른 링크를 삼킨다. WebKit 길의 「대상이 사라졌거나 load 가 거부되면 시스템」 과 같은 규칙.
+fn osrTakesLinks() bool {
+    return web_osr.currentState() != .failed;
+}
+
+/// 사용자가 누른 링크를 보이는 browser Term 에 띄운다 — 그 Term 이 Chromium 탭이면 **누른 자리에서** sidecar 로 보낸다(P0-1). 링크의 공유
+/// 실행 경로(`queueExternalLinkAction` → Swift drain)는 WKWebView(`webPanels`)로 navigate 하는데 Chromium 탭에는 WKWebView 가 없어 링크가
+/// 시스템으로 빠졌다. 주소창과 같은 `userNavigate`(사용자의 이동 — 다운로드 몸짓·네트워크 묶음 풀기)이고, 아직 배치 전이라 sidecar 가 그 탭을
+/// 모르면 복원·새 탭과 같은 첫 주소(`pending_url`)로 싣는다. 그 탭에 남은 복원 주소·주소창 이동 대기는 버린다 — 다음 tick 에 뒤따라 가 링크를
+/// 덮지 않게(끌어 놓기 `dropUrlAt` 과 같은 규율). 포커스는 옮기지 않는다(WebKit 길과 같다).
+fn routeLinkToOsrTab(self: *AppSession, term: *Term, url: []const u8) OsrLinkRoute {
+    if (!isOsrTerm(term)) return .webkit;
+    if (!osrTakesLinks()) return .system;
+    const sid = term.surfaceId();
+    if (web_osr.owns(sid)) {
+        if (term.pending_url) |u| {
+            self.allocator.free(u);
+            term.pending_url = null;
+        }
+        web_osr.userNavigate(self.allocator, sid, url);
+    } else {
+        const owned = self.allocator.dupe(u8, url) catch return .system;
+        if (term.pending_url) |u| self.allocator.free(u);
+        term.pending_url = owned;
+    }
+    if (self.addr_navigate_pending == sid) self.addr_navigate_pending = null;
+    self.metal_dirty = true;
+    return .opened;
+}
+
+/// 사용자가 누른 링크를 **새** browser Term 에 띄울 때(터미널 `in-app`·파일 패널 `in-app`) 엔진이 Chromium 이면 새 Chromium 탭에 첫 주소
+/// (`pending_url`)로 싣는다(P0-1 — 예전에는 빈 Chromium 탭이 남고 링크는 시스템으로 갔다). 탭 만들기·포커스는 WebKit 길과 같은
+/// `appendWebTermInActivePane`, 사람의 탭이다(`agent_opener` 0). 엔진이 멈췄으면 **탭을 만들지 않고** 시스템으로 — 빈 탭을 남기지 않는다.
+pub fn openLinkInNewOsrTab(self: *AppSession, url: []const u8) OsrLinkRoute {
+    if (!web_osr.enabled()) return .webkit;
+    if (!osrTakesLinks()) return .system;
+    const owned = self.allocator.dupe(u8, url) catch return .system;
+    _ = pane_ops.appendWebTermInActivePane(self, .browser) catch {
+        self.allocator.free(owned);
+        return .system;
+    };
+    pane_ops.activePane(self).activeTerm().pending_url = owned;
+    return .opened;
 }
 
 /// 터미널 화면에서 (수식키)+클릭한 **웹 링크(http/https)** 를 `input.link-open-target` 정책대로 연다.
@@ -2776,11 +2834,20 @@ pub fn openTerminalWebLink(self: *AppSession, url: []const u8) bool {
     if (!file_panel_bridge.isExplicitHttpLink(url)) return false;
     // **호출 계약**: `urlAt`이 비어 있지 않은 URL을 돌려준 뒤에만 불린다(Swift handleUrlClick). 그 경로가 이미
     // surface_initialized와 활성 탭 존재를 통과했으므로 여기서 다시 방어하지 않는다(프로젝트 규칙 "헛방어 금지").
-    const visible = visibleBrowserSurfaceId(self);
+    // P0-1: 대상이 Chromium 탭이면 Swift 실행(WKWebView)을 세우지 않고 여기서 sidecar 로 보낸다 — 엔진이 WebKit 이면 아래 예전 길 그대로.
+    const visible: u64 = if (visibleUserBrowserTerm(self)) |term| switch (routeLinkToOsrTab(self, term, url)) {
+        .opened => return true,
+        .system => return false,
+        .webkit => term.surfaceId(),
+    } else 0;
     const surface_id = if (visible != 0) visible else switch (target) {
         .auto => return false, // 보이는 패널이 없으면 시스템 — auto는 탭을 새로 만들지 않는다
         // in-app: 없으면 새로 연다. 실패(OOM 등)는 링크를 삼키는 대신 시스템 브라우저로 폴백한다.
-        .in_app => pane_ops.appendWebTermInActivePane(self, .browser) catch return false,
+        .in_app => switch (openLinkInNewOsrTab(self, url)) {
+            .opened => return true,
+            .system => return false,
+            .webkit => pane_ops.appendWebTermInActivePane(self, .browser) catch return false,
+        },
         .system => unreachable, // 위에서 이미 걸렀다
     };
     // 직전 요청이 아직 drain되지 않았으면(같은 tick 안 연타) 이번 클릭은 시스템으로 보낸다 — URL을 덮어써

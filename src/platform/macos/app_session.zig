@@ -58055,6 +58055,10 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
 
 test "FP5 file panel routing: picker one-shot, md/html open, duplicate activation, and invalid targets" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 이 시험은 WebKit 길(Swift pending action)을 본다 — 개발자 셸의 `MARU_WEB_OSR_DIR` 이 엔진을 Chromium 으로 켜면 링크가 sidecar 로
+    // 가므로(P0-1) 엔진을 명시한다.
+    const prev_engine = web_osr.setDecidedForTest(false);
+    defer _ = web_osr.setDecidedForTest(prev_engine);
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -67036,6 +67040,10 @@ test "커서가 멈춘 채 split하면 stale 링크 밑줄이 내려간다" {
 // 실 init/split/web Term이라 macOS 게이트.
 test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 인앱, 아니면 시스템" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 이 시험은 WebKit 길(Swift pending action)을 본다 — 개발자 셸의 `MARU_WEB_OSR_DIR` 이 엔진을 Chromium 으로 켜면 링크가 sidecar 로
+    // 가므로(P0-1) 엔진을 명시한다.
+    const prev_engine = web_osr.setDecidedForTest(false);
+    defer _ = web_osr.setDecidedForTest(prev_engine);
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -67099,6 +67107,10 @@ test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 
 // 아니라 pending action이어야 한다 — Swift가 batch 적용 뒤 drain해 "생성 → navigate" 순서가 보장된다.
 test "openTerminalWebLink(in-app): 보이는 브라우저가 없으면 새 browser Term을 열어 거기로 보낸다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 이 시험은 WebKit 길(Swift pending action)을 본다 — 개발자 셸의 `MARU_WEB_OSR_DIR` 이 엔진을 Chromium 으로 켜면 링크가 sidecar 로
+    // 가므로(P0-1) 엔진을 명시한다.
+    const prev_engine = web_osr.setDecidedForTest(false);
+    defer _ = web_osr.setDecidedForTest(prev_engine);
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -67141,6 +67153,10 @@ test "openTerminalWebLink(in-app): 보이는 브라우저가 없으면 새 brows
 // 앞 링크를 잃지 않는다. in-app에서 이 규칙이 없으면 "탭은 늘었는데 목적지가 바뀐" 상태가 된다.
 test "openTerminalWebLink: drain 전 두 번째 요청은 pending을 덮어쓰지 않고 시스템으로" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 이 시험은 WebKit 길(Swift pending action)을 본다 — 개발자 셸의 `MARU_WEB_OSR_DIR` 이 엔진을 Chromium 으로 켜면 링크가 sidecar 로
+    // 가므로(P0-1) 엔진을 명시한다.
+    const prev_engine = web_osr.setDecidedForTest(false);
+    defer _ = web_osr.setDecidedForTest(prev_engine);
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -67161,6 +67177,221 @@ test "openTerminalWebLink: drain 전 두 번째 요청은 pending을 덮어쓰�
     try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://second.co")); // busy → 호출자가 시스템으로 연다
     const action = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("https://first.co", action.url); // 첫 링크가 보존된다
+}
+
+// ── P0-1: 링크를 Chromium 탭으로 ─────────────────────────────────────────────────────────────────────────────
+//
+// 이 시험들이 증명하는 것: 엔진이 Chromium 일 때 터미널 링크(자동 감지·OSC 8)와 파일 패널 외부 링크가 **Chromium 탭**으로 간다는 것.
+// 왜 중요한가 — 두 링크는 Swift 의 WKWebView(`webPanels`)로 navigate 하는 pending action 하나로 실행되는데 Chromium 탭에는 WKWebView 가
+// 없다. 그래서 링크가 시스템 브라우저로 조용히 빠졌고, 새 탭을 만든 경우(in-app)는 **빈 Chromium 탭**이 남았다(실앱 재현).
+// 판정은 누르는 자리(Zig)에서: Chromium 탭이면 sidecar 로 곧바로(배치 전이면 `pending_url`), 엔진이 멈췄으면 새 탭 없이 시스템.
+
+/// P0-1 시험의 에이전트 탭 표 흉내(`agent_tab_known_callback`) — 이 번호만 에이전트 탭이다.
+var p01_agent_tab: u64 = 0;
+fn p01AgentTabKnown(surface_id: u64) bool {
+    return surface_id != 0 and surface_id == p01_agent_tab;
+}
+
+test "P0-1: 보이는 Chromium 탭이면 터미널 링크를 그 탭으로 곧바로 — Swift action 없이, 사용자의 이동으로, 남은 복원 주소·주소창 이동 대기는 버린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator); // 창 정리(deinit)가 기록을 놓은 뒤에
+    defer session.deinit();
+    try pane_ops.splitActivePane(session, .horizontal); // 좌(터미널)·우(활성)
+    const browser_id = try pane_ops.appendWebTermInActivePane(session, .browser);
+    try web_osr.testHold(allocator, browser_id); // 엔진 Chromium, 이 탭은 배치됐다(sidecar 가 든다)
+    web_osr.testRunning(browser_id);
+    const term = pane_ops.activePane(session).activeTerm();
+    term.pending_url = try allocator.dupe(u8, "https://e.test/restored"); // 아직 못 보낸 복원 주소
+    session.addr_navigate_pending = browser_id; // 같은 탭의 주소창 이동 대기
+    try std.testing.expect(pane_ops.focusPaneByPtr(session, tab_ops.activeTab(session).panes.items[0])); // 터미널 pane 에서 누른다
+    web_osr.testAgeStamps(browser_id, 60_000); // 사용자 시각을 1 분 전으로 — 이동이 「지금」 으로 고치는지 본다
+    const before_ms = web_osr.testUserActionMs(browser_id);
+    var url_buf: [512]u8 = undefined;
+
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/x"));
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null); // Swift 실행 없음 — 그 탭에는 WKWebView 가 없다
+    try std.testing.expectEqualStrings("https://a.co/x", (web_osr.testLastUrl(browser_id) orelse return error.TestUnexpectedResult));
+    try std.testing.expect(web_osr.testUserActionMs(browser_id) > before_ms); // 주소창과 같은 사용자의 이동
+    try std.testing.expect(term.pending_url == null); // 복원 주소가 다음 tick 에 뒤따라 가 링크를 덮지 않는다
+    try std.testing.expect(session.addr_navigate_pending == null); // 주소창 이동 대기도
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .terminal); // 포커스는 그대로(WebKit 과 같다)
+}
+
+test "P0-1: 보이는 Chromium 탭이 아직 배치 전이면 링크를 그 탭의 첫 주소(pending_url)로 싣는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    _ = web_osr.setDecidedForTest(true); // 엔진 Chromium, sidecar 기록은 아직 없다(`testForget` 이 되돌린다)
+    const browser_id = try pane_ops.appendWebTermInActivePane(session, .browser);
+    try std.testing.expect(!web_osr.owns(browser_id));
+    var url_buf: [512]u8 = undefined;
+
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/y"));
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
+    try std.testing.expectEqualStrings("https://a.co/y", (pane_ops.activePane(session).activeTerm().pending_url orelse return error.TestUnexpectedResult));
+    // 둘째 링크는 아직 못 보낸 첫 주소를 덮는다(같은 탭을 연달아 누른 것 — 마지막이 이긴다; 놓친 할당은 시험 할당자가 잡는다).
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/z"));
+    try std.testing.expectEqualStrings("https://a.co/z", (pane_ops.activePane(session).activeTerm().pending_url orelse return error.TestUnexpectedResult));
+}
+
+test "P0-1: in-app 이고 보이는 브라우저가 없으면 새 Chromium 탭(사람의 탭)에 주소를 실어 연다 — 빈 탭도 Swift action 도 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    _ = web_osr.setDecidedForTest(true);
+    session.loaded_config.config.input.link_open_target = .in_app;
+    var url_buf: [512]u8 = undefined;
+    const pane = pane_ops.activePane(session);
+    const terms_before = pane.terms.items.len;
+
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/new"));
+    try std.testing.expectEqual(terms_before + 1, pane.terms.items.len);
+    const created = pane.activeTerm(); // 새 탭으로 옮긴다(WebKit 과 같다)
+    try std.testing.expect(web_ops.isOsrTerm(created));
+    try std.testing.expectEqualStrings("https://a.co/new", (created.pending_url orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(@as(u64, 0), created.agent_opener); // 사용자가 연 링크는 사람의 탭
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
+}
+
+test "P0-1: Chromium 엔진이 멈췄으면(래치) 링크는 시스템으로 — 그 탭에 보내지 않고, in-app 이어도 새 탭을 만들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    defer web_osr.testLatch(null);
+    try pane_ops.splitActivePane(session, .horizontal);
+    const browser_id = try pane_ops.appendWebTermInActivePane(session, .browser);
+    try web_osr.testHold(allocator, browser_id);
+    web_osr.testRunning(browser_id);
+    web_osr.testLatch(.start_failed);
+    var url_buf: [512]u8 = undefined;
+
+    // ① 보이는 Chromium 탭 — 멈춘 엔진에는 보내지 않는다(호출자가 시스템으로 연다).
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://a.co/stopped"));
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
+    try std.testing.expect(web_osr.testLastUrl(browser_id) == null);
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().pending_url == null);
+    // ② in-app, 보이는 브라우저 없음(그 pane 의 터미널 탭으로) — 새 탭을 만들지 않는다.
+    term_ops.focusTerm(session, 0);
+    session.loaded_config.config.input.link_open_target = .in_app;
+    const terms_before = pane_ops.activePane(session).terms.items.len;
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://a.co/stopped2"));
+    try std.testing.expectEqual(terms_before, pane_ops.activePane(session).terms.items.len);
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
+    // ③ 파일 패널 in-app — 새 탭 없이 시스템 action(빈 탭 금지).
+    try file_panel_ops.queueExternalLink(session, "https://f.co/stopped", false);
+    try std.testing.expectEqual(terms_before, pane_ops.activePane(session).terms.items.len);
+    const action = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ExternalLinkActionKind.system, action.kind);
+    try std.testing.expectEqualStrings("https://f.co/stopped", action.url);
+}
+
+test "P0-1: 파일 패널 링크(in-app)는 새 Chromium 탭에 주소를 싣는다 — ⌘⇧·system 은 그대로 시스템, 바쁨 규칙도 그대로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    _ = web_osr.setDecidedForTest(true);
+    var url_buf: [512]u8 = undefined;
+    const pane = pane_ops.activePane(session);
+    const terms_before = pane.terms.items.len;
+
+    try file_panel_ops.queueExternalLink(session, "https://f.co/doc", false);
+    try std.testing.expectEqual(terms_before + 1, pane.terms.items.len);
+    try std.testing.expect(web_ops.isOsrTerm(pane.activeTerm()));
+    try std.testing.expectEqualStrings("https://f.co/doc", (pane.activeTerm().pending_url orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(@as(u64, 0), pane.activeTerm().agent_opener);
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
+
+    // ⌘⇧(강제 시스템) — 탭 없이 시스템 action. 그 action 이 남은 동안 다음 링크는 바쁨(예전 규칙 그대로).
+    try file_panel_ops.queueExternalLink(session, "https://f.co/forced", true);
+    try std.testing.expectError(error.LinkBusy, file_panel_ops.queueExternalLink(session, "https://f.co/busy", false));
+    try std.testing.expectEqual(terms_before + 1, pane.terms.items.len);
+    const forced = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ExternalLinkActionKind.system, forced.kind);
+    // 설정 system — 시스템.
+    session.loaded_config.config.file_panel.external_link_target = .system;
+    try file_panel_ops.queueExternalLink(session, "https://f.co/sys", false);
+    try std.testing.expectEqual(ExternalLinkActionKind.system, (session.takeExternalLinkAction(&url_buf).?).kind);
+    try std.testing.expectEqual(terms_before + 1, pane.terms.items.len);
+}
+
+test "P0-1: 사용자가 누른 링크는 에이전트 탭을 재사용하지 않는다 — auto 는 시스템, in-app 은 새 사람의 탭, 철회돼 사람의 탭이 되면 재사용" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    defer p01_agent_tab = 0;
+    try pane_ops.splitActivePane(session, .horizontal);
+    const agent_tab = try pane_ops.appendWebTermInActivePane(session, .browser); // 보이는 탭 — 에이전트 표에 있다
+    try web_osr.testHold(allocator, agent_tab);
+    web_osr.testRunning(agent_tab);
+    session.agent_tab_known_callback = p01AgentTabKnown;
+    p01_agent_tab = agent_tab;
+    const left = tab_ops.activeTab(session).panes.items[0];
+    try std.testing.expect(pane_ops.focusPaneByPtr(session, left));
+    var url_buf: [512]u8 = undefined;
+
+    // ① auto: 보이는 사용자 브라우저가 없다 — 시스템(에이전트 탭은 그대로).
+    try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://a.co/mine"));
+    try std.testing.expect(web_osr.testLastUrl(agent_tab) == null);
+    try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
+    // ② in-app: 새 사람의 탭(누른 pane — 왼쪽)에 싣는다.
+    session.loaded_config.config.input.link_open_target = .in_app;
+    const left_before = left.terms.items.len;
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/mine2"));
+    try std.testing.expectEqual(left_before + 1, left.terms.items.len);
+    try std.testing.expectEqualStrings("https://a.co/mine2", (left.activeTerm().pending_url orelse return error.TestUnexpectedResult));
+    try std.testing.expect(web_osr.testLastUrl(agent_tab) == null);
+    // ③ 철회로 사람의 탭이 되면(표에서 빠짐) 보이는 브라우저로 다시 친다 — 왼쪽은 터미널 탭으로 돌려 보이는 브라우저는 오른쪽 하나.
+    p01_agent_tab = 0;
+    term_ops.focusTerm(session, 0);
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/now-human"));
+    try std.testing.expectEqualStrings("https://a.co/now-human", (web_osr.testLastUrl(agent_tab) orelse return error.TestUnexpectedResult));
+}
+
+test "P0-1: 엔진이 WebKit 이면(설치 없음 폴백 포함) 링크는 예전 그대로 Swift pending action 으로 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    // 개발자 셸의 `MARU_WEB_OSR_DIR` 이 `enabled()` 를 켜지 않게 엔진을 **명시**한다(결정 = WebKit).
+    _ = web_osr.setDecidedForTest(false);
+    session.agent_tab_known_callback = p01AgentTabKnown; // WebKit 에는 에이전트 탭이 없다 — 표가 비어 있으면 무동작
+    try pane_ops.splitActivePane(session, .horizontal);
+    const browser_id = try pane_ops.appendWebTermInActivePane(session, .browser);
+    const right = pane_ops.activePane(session);
+    try std.testing.expect(pane_ops.focusPaneByPtr(session, tab_ops.activeTab(session).panes.items[0]));
+    var url_buf: [512]u8 = undefined;
+
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://w.co/a"));
+    const reuse = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ExternalLinkActionKind.in_app, reuse.kind);
+    try std.testing.expectEqual(browser_id, reuse.surface_id);
+    try std.testing.expect(right.activeTerm().pending_url == null);
+
+    try file_panel_ops.queueExternalLink(session, "https://w.co/doc", false);
+    const doc = session.takeExternalLinkAction(&url_buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ExternalLinkActionKind.in_app, doc.kind);
+    try std.testing.expectEqual(pane_ops.activePane(session).activeTerm().surfaceId(), doc.surface_id);
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().pending_url == null);
 }
 
 // 휠은 '커서 아래' surface가 소유한다(Ghostty/Warp) — 포커스(활성) pane이 마우스 트래킹 앱(vim/tmux 등)이어도,

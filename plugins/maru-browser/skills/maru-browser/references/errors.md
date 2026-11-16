@@ -27,7 +27,7 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 | `-32002` saying the tab needs its network permission first | `network-record`, `network-block` or `network-mock` before `network` was allowed on that tab (an older maru also prints the foreground hint under it — ignore that there) | Run `network` on that tab first. |
 | `-32002` saying a permission is gone, or that something works only on tabs the agent opened | The user took the permission back, or the command needs a tab you opened | Do not retry in a loop. Ask the user, or `open` a tab of your own. |
 | `error: the user declined the upload — nothing was uploaded (-32002)` | The user said no | Do not retry. Ask what they want. |
-| `error: the user declined browser tabs for this pane … (-32002)` from `open` | The user said no to tabs that use their logged-in sites; Maru does not ask again for about 10 minutes | Do not retry. Tell the user what you needed the browser for. |
+| `error: the user declined browser tabs for this pane … (-32002)` from `open` | The user said no to tabs that use their logged-in sites; Maru does not ask again while your pane is open (the user can undo it in the Browser Grants menu) | Do not retry. Tell the user what you needed the browser for. |
 | `error: maru closed the connection without answering …` | No answer to a dialog in time (about 2 minutes), too many connections, or Maru quit | Ask the user whether a dialog showed up. Retry at most once. |
 
 ## While running

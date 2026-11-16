@@ -17,7 +17,8 @@ The first `open` does.
 - The first `open` in a pane shows the user one dialog: the tabs you open would use their logged-in sites. The call waits
   for the answer (2 minutes at most). If they allow it, your pane opens tabs without asking again until the pane
   closes or the app restarts. If they decline, `open` fails with `agent_tabs_declined` and Maru does not ask again
-  for about 10 minutes — tell the user instead of retrying. Agent tabs show ◈ in the tab bar.
+  while your pane is open — tell the user instead of retrying. The user can undo either answer in Maru's
+  Browser Grants menu. Agent tabs show ◈ in the tab bar.
 - Your pane owns it: commands work there without a dialog, on any site it goes to — except the cookie commands
   and `clear-storage` (they ask once per site, on tabs you opened too) and `upload` (asks every time). Give those the
   3-minute shell timeout.

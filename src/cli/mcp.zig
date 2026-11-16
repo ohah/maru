@@ -117,7 +117,7 @@ fn withSurface(comptime extra: []const Arg) []const Arg {
 
 pub const tools = [_]Tool{
     .{ .name = "browser_list", .subcommand = "list", .description = "List the browser tabs of this maru instance (id, url, title, engine, controllable methods).", .args = &.{} },
-    .{ .name = "browser_open", .subcommand = "open", .description = "Open a Chromium tab behind the current one in this pane and wait for its first load. Returns the new tab id. Only from a maru pane; up to 8 tabs per pane. The tab uses the user's logged-in sites, so the first open from a pane asks the user once (allow up to 2 minutes for the answer); if they decline, opens from this pane are refused for about 10 minutes (agent_tabs_declined) — tell the user instead of retrying.", .args = &.{
+    .{ .name = "browser_open", .subcommand = "open", .description = "Open a Chromium tab behind the current one in this pane and wait for its first load. Returns the new tab id. Only from a maru pane; up to 8 tabs per pane. The tab uses the user's logged-in sites, so the first open from a pane asks the user once (allow up to 2 minutes for the answer); if they decline, opens from this pane are refused while the pane is open (agent_tabs_declined; the user can undo it in the Browser Grants menu) — tell the user instead of retrying.", .args = &.{
         .{ .key = "url", .kind = .string, .flag = "--url", .description = "http(s) address to load (omit for a blank tab)" },
         .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)", .min = 1, .max = 25000 },
     } },

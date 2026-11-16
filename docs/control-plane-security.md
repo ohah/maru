@@ -287,9 +287,11 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 - **pane 동의(사용자 결정 2026-11-16)**: 에이전트 탭(`browser.open`·그 탭의 페이지가 연 탭)은 사용자의 Chromium 쿠키 통을 그대로 쓴다 —
   통을 나누지 않는다(사용자 결정). 대신 pane 이 처음 탭을 열 때 확인 모달로 한 번 묻는다. 허용은 `(pane, pane, browser_agent_tabs)`
   grant 로 남아(그 scope 는 상속 fd 로 발급하지 않는다) 위 「누가 grant 를 쓰나」 의 자손 전부가 쓰고, pane 이 닫히거나 앱이 끝나면 사라진다
-  (grant 저장소와 같은 메모리 모델). 거부는 `control_agent_tab_consent.DenyMemory` 가 그 pane 에 `deny_quiet_ms`(10 분) 기억해 그동안은 모달
-  없이 `agent_tabs_declined` 로 거절한다 — 거부한 에이전트가 곧 다시 열어 모달을 거듭 띄우지(허용을 조르지) 못하게. 다른 grant 모달에는 없던
-  기억이라 관례가 아니라 값으로 골랐다. 사용자의 단추·키 답만 거부로 치고, 다른 모달이 덮은 것·시한(120 초 — `agent_tabs_unanswered`)은
+  (grant 저장소와 같은 메모리 모델). 거부는 `control_agent_tab_consent.PaneMemory` 가 **그 pane 이 사는 동안** 기억해 모달 없이
+  `agent_tabs_declined` 로 거절한다 — 거부한 에이전트가 곧 다시 열어 모달을 거듭 띄우지(허용을 조르지) 못하게(사용자 결정 2026-11-16 원문 「팬이
+  살아있는 동안인데 거부나 허용 해제할 수 있는 UI를 주세요」). 되돌리기는 앱 메뉴 ▸ Browser Grants: 허용 줄(wire 7)은 거두고, 「Agent tabs:
+  denied — 제목」 줄은 그 거부를 지운다(다음 open 이 다시 묻는다), 「Revoke All」 은 grant 와 거부를 모두 지운다. 줄의 pane 제목은 결정 순간의
+  것을 모달과 같은 규칙(`sanitizeTitle`)으로 거른 것이다. 사용자의 단추·키 답만 거부로 치고, 다른 모달이 덮은 것·시한(120 초 — `agent_tabs_unanswered`)은
   기억하지 않는다(§8.2a 신뢰 프롬프트와 같은 규칙). 동의를 Browser Grants 메뉴에서 거두면(wire 7) 그 pane 의 에이전트 탭도 사람의 탭이
   되고(탭과 함께 생긴 권한은 뿌리와 함께 간다 — §8.3 F3), 그 pane 의 남은 탭은 에이전트의 장으로 새 에이전트 탭을 만들지 못한다. 동의
   한 번 뒤의 위험은 이 결정 전과 같다 — 그 pane 의 에이전트(와 자손)는 묻지 않고 로그인된 사이트에서 행동할 수 있다(§8.3 browser_network 문단

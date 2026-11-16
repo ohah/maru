@@ -13976,13 +13976,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_control_revoke_browser_grant(ref.pane, ref.target, ref.scope)
     }
 
+    /// pane 동의(2026-11-16 — 「거부나 허용 해제할 수 있는 UI」): 거부 줄을 고르면 그 pane 의 거부를 지운다 — 다음 open 은 다시 묻는다.
+    @objc private func menuClearAgentTabsDenial(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem, let pane = item.representedObject as? UInt64 else { return }
+        _ = maru_macos_control_clear_agent_tabs_denial(pane)
+    }
+
+    /// pane 동의 줄에 보일 pane 제목(결정 순간 — Zig 가 모달과 같은 규칙으로 걸렀다). 없으면 빈 글.
+    private func agentTabsPaneTitle(_ pane: UInt64) -> String {
+        var buf = [UInt8](repeating: 0, count: 128)
+        let n = buf.withUnsafeMutableBufferPointer { maru_macos_control_agent_tabs_pane_title(pane, $0.baseAddress, $0.count) }
+        return String(decoding: buf[0..<Int(n)], as: UTF8.self)
+    }
+
     /// "Browser Grants" 서브메뉴 재생성(menuNeedsUpdate가 열릴 때 호출) — Zig grant store를 조회해 항목을 새로 만든다.
     /// count→grant_at으로 스냅샷을 읽어(revoke의 swap-remove로 인덱스가 바뀌므로 열 때마다 새로 읽음) 각 grant를 사람이
     /// 읽을 레이블(pane→대상 URL·scope)로 나열하고, 비면 disabled "No active grants", 끝에 separator + "Revoke All".
     private func rebuildBrowserGrantsMenu(_ menu: NSMenu) {
         menu.removeAllItems()
         let count = maru_macos_control_browser_grant_count()
-        if count == 0 {
+        let denied = maru_macos_control_agent_tabs_denied_count() // pane 동의를 거부한 pane — 고르면 거부를 지운다
+        if count == 0 && denied == 0 {
             let empty = NSMenuItem(title: "No active grants", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
@@ -13999,11 +14013,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 menu.addItem(item)
                 i += 1
             }
+            var d: UInt32 = 0
+            while d < denied {
+                var pane: UInt64 = 0
+                guard maru_macos_control_agent_tabs_denied_at(d, &pane) == 1 else { d += 1; continue }
+                let title = agentTabsPaneTitle(pane)
+                let shown = title.isEmpty ? "pane #\(pane)" : "\(title) (pane #\(pane))"
+                let item = NSMenuItem(title: "Agent tabs: denied — \(shown) · ask again", action: #selector(menuClearAgentTabsDenial(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = pane
+                menu.addItem(item)
+                d += 1
+            }
         }
         menu.addItem(.separator())
+        // 「Revoke All」 은 모두 처음으로 — grant 와 함께 거부한 pane 의 기억도 지운다(이 메뉴는 한 줄씩 + 끝의 하나가 관례다).
         let all = NSMenuItem(title: "Revoke All", action: #selector(menuRevokeBrowserGrants(_:)), keyEquivalent: "")
         all.target = self
-        all.isEnabled = count > 0
+        all.isEnabled = count > 0 || denied > 0
         menu.addItem(all)
     }
 
@@ -14051,7 +14078,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             scopeDesc = summary.isEmpty ? "device emulation" : "device emulation (\(summary))"
         // 7 = browser_agent_tabs(2026-11-16 — 그 pane 이 에이전트 탭을 열어도 된다는 동의, target 은 그 pane 자신). 철회하면 그 pane 은 다음 open 에서 다시
         // 묻고, 그 pane 이 연 에이전트 탭은 사람의 탭이 된다(◈ 도 사라진다).
-        case 7: return "Revoke pane #\(pane) · open agent tabs (your logged-in sites)"
+        case 7:
+            let title = agentTabsPaneTitle(pane)
+            let shown = title.isEmpty ? "pane #\(pane)" : "\(title) (pane #\(pane))"
+            return "Agent tabs: allowed — \(shown) · revoke (its agent tabs become yours)"
         default: scopeDesc = "control"
         }
         return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"

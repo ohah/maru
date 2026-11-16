@@ -7364,21 +7364,49 @@ fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_m
             if (noteworthy) control_log.info("control: no pane for this caller ({s})", .{if (pending.peer_reject) |r| @tagName(r) else "unknown"});
             break :blk null;
         };
-        if (!control_self_origin.stillForeground(control_self_origin_macos.provider(), origin)) {
+        const provider = if (builtin.is_test) (test_origin_provider orelse control_self_origin_macos.provider()) else control_self_origin_macos.provider();
+        if (!control_self_origin.stillForeground(provider, origin)) {
             if (noteworthy) control_log.info("control: no pane for this caller (its foreground ancestor pid={d} is no longer foreground)", .{origin.ctty_pid});
             break :blk null;
         }
-        for (refs) |ref| {
-            const app = ref.app_session orelse continue;
-            if (app.surfaceForSessionLeader(origin.sid)) |id| break :blk id;
-        }
-        if (noteworthy) control_log.info("control: no pane for this caller (session {d} matches no maru pane whose root pid is known — not a maru pane, or a session host pane before its first observation)", .{origin.sid});
+        if (paneForSession(refs, origin.sid)) |id| break :blk id;
+        // 사용자 결정 2026-11-16(「AI 가 모든 접근」): pane 안 tmux 의 명령 — 그 tmux 서버에 소켓으로 붙은 pane 안 foreground 클라이언트의 pane.
+        if (tmuxPaneForSession(refs, origin.sid)) |id| break :blk id;
+        if (noteworthy) control_log.info("control: no pane for this caller (session {d} matches no maru pane whose root pid is known, and no tmux server with a client in the foreground of a maru pane — not a maru pane, or a session host pane before its first observation)", .{origin.sid});
         break :blk null;
     };
     const a = control_self_origin.anchors(found, pending.selector);
     pending.selector = a.selector;
     pending.browser_pane = a.browser_pane;
 }
+
+/// 세션 번호를 뿌리 pid 로 가진 살아 있는 터미널 pane(1g).
+fn paneForSession(refs: []const ControlSessionRef, sid: i32) ?u64 {
+    for (refs) |ref| {
+        const app = ref.app_session orelse continue;
+        if (app.surfaceForSessionLeader(sid)) |id| return id;
+    }
+    return null;
+}
+
+/// tmux 잇기의 pid 목록 자리(메인 스레드 전용 — `resolveSelfOrigin` 만 쓴다). 64 KiB 라 스택에 두지 않는다.
+var tmux_pid_buf: [16384]i32 = undefined;
+
+/// pane 안 tmux(사용자 결정 2026-11-16): tmux 안 명령의 세션 → 그 서버의 pane 안 foreground 클라이언트들의 세션(`control_self_origin.tmuxClientSessions`
+/// — 소켓 고리로 잇는다) → 그 세션을 뿌리로 가진 pane. 여럿이면 클라이언트 pid 가 작은 쪽의 pane(결정적). 같은 서버의 다른 tmux 세션은 가르지 못한다
+/// (security §8.4 「pane 안 tmux」 — 받아들인 한계).
+fn tmuxPaneForSession(refs: []const ControlSessionRef, sid: i32) ?u64 {
+    const provider = if (builtin.is_test) (test_tmux_provider orelse control_self_origin_macos.tmuxProvider()) else control_self_origin_macos.tmuxProvider();
+    var out: [control_self_origin.max_tmux_clients]i32 = undefined;
+    for (control_self_origin.tmuxClientSessions(provider, sid, std.c.getuid(), &tmux_pid_buf, &out)) |client_sid| {
+        if (paneForSession(refs, client_sid)) |id| return id;
+    }
+    return null;
+}
+
+/// 시험 전용 공급자 — `resolveSelfOrigin` 의 foreground 다시 보기와 tmux 잇기(시험 프로세스에는 pane 출처가 없다). 제품 빌드는 읽지 않는다.
+var test_origin_provider: ?control_self_origin.Provider = null;
+var test_tmux_provider: ?control_self_origin.TmuxProvider = null;
 
 /// 시험 전용 출처 공급자 — 시험 프로세스에는 foreground 출처가 없어, 승인 뒤 재처리(`recheckSelfOrigin`)가 늘 pane 을 비운다. pane 동의 승인 뒤의
 /// open 이 탭 op 길로 가는지 재려면 「아직 foreground」 라고 답하는 공급자가 필요하다. 제품 빌드는 이 값을 읽지 않는다(`builtin.is_test` 갈래).
@@ -13873,6 +13901,94 @@ test "W9b③: open — 부른 pane 의 창에 뒤쪽 탭을 열고 grant·에이
     startAgentOpen(&refs, full_id, shell, "{\"timeout_ms\":25000}");
     try expectPendingErrorCode(&full, .internal_error);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+}
+
+// ── pane 안 tmux 잇기(사용자 결정 2026-11-16 「AI 가 모든 접근」) — `resolveSelfOrigin` 의 실제 배선 ─────────────────────────────────────
+// 순수 판정(`control_self_origin.tmuxClientSessions`)은 L2 시험이 잰다. 여기서는 그 결과가 **실제 AppSession 의 pane**(뿌리 pid)에 맞춰지는지,
+// 그리고 tmux 잇기가 pane 직접 출처를 덮지 않는지를 잰다. 공급자는 가짜 — 시험 프로세스에는 pane 출처도 tmux 도 없다.
+
+const TmuxWiringFake = struct {
+    /// Maru pane 의 뿌리 pid(실제 시험 pane 의 것) — 클라이언트의 세션.
+    var pane_leader: i32 = 0;
+    /// 클라이언트가 그 서버에 붙어 있는가(거짓이면 다른 서버의 소켓을 쥔다).
+    var linked: bool = true;
+    var dummy: u8 = 0;
+    const tmux_sid: i32 = 70_000; // tmux pane 의 셸(리더) — 1g 출처의 세션
+    const server: i32 = 70_001;
+    const client: i32 = 70_002;
+    fn lookup(_: *anyopaque, pid: i32) ?control_self_origin.ProcInfo {
+        return switch (pid) {
+            tmux_sid => .{ .pid = pid, .ppid = server, .pgid = pid, .uid = std.c.getuid(), .has_ctty = true, .tpgid = 70_003, .start_us = 20 },
+            70_003 => .{ .pid = pid, .ppid = tmux_sid, .pgid = pid, .uid = std.c.getuid(), .has_ctty = true, .tpgid = pid, .start_us = 21 },
+            server => .{ .pid = pid, .ppid = 1, .pgid = pid, .uid = std.c.getuid(), .has_ctty = false, .tpgid = 0, .start_us = 10 },
+            client => .{ .pid = pid, .ppid = 1, .pgid = pid, .uid = std.c.getuid(), .has_ctty = true, .tpgid = pid, .start_us = 11 },
+            else => null,
+        };
+    }
+    fn sessionOf(_: *anyopaque, pid: i32) ?i32 {
+        return switch (pid) {
+            tmux_sid, 70_003 => tmux_sid,
+            server => server,
+            client => pane_leader,
+            else => null,
+        };
+    }
+    fn pids(_: *anyopaque, buf: []i32) []const i32 {
+        buf[0] = client;
+        buf[1] = server;
+        buf[2] = tmux_sid;
+        return buf[0..3];
+    }
+    fn unixSockets(_: *anyopaque, pid: i32, buf: []control_self_origin.UnixSock) []const control_self_origin.UnixSock {
+        switch (pid) {
+            server => {
+                buf[0] = .{ .pcb = 0xA1, .conn_pcb = 0xB1 };
+                return buf[0..1];
+            },
+            client => {
+                buf[0] = .{ .pcb = if (linked) 0xB1 else 0xB2, .conn_pcb = 0xA1 };
+                return buf[0..1];
+            },
+            else => return buf[0..0],
+        }
+    }
+    fn isTmux(_: *anyopaque, pid: i32) bool {
+        return pid == server or pid == client;
+    }
+    fn base() control_self_origin.Provider {
+        return .{ .ctx = &dummy, .lookup = lookup, .session_of = sessionOf };
+    }
+    fn tmux() control_self_origin.TmuxProvider {
+        return .{ .base = base(), .ctx = &dummy, .pids = pids, .unix_sockets = unixSockets, .is_tmux = isTmux };
+    }
+    const origin: control_self_origin.Origin = .{ .ctty_pid = 70_003, .ctty_start_us = 21, .sid = tmux_sid };
+};
+
+test "1g tmux 잇기(실제 배선): pane 안 tmux 의 명령은 그 서버에 붙은 foreground 클라이언트의 pane 으로 — 붙지 않았으면 지금처럼 pane 없음" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const term = session.tabs.items[0].panes.items[0].terms.items[0];
+    const leader = session.backendFor(term).sessionLeaderPid(term.rt.handle) orelse return error.SkipZigTest;
+    TmuxWiringFake.pane_leader = leader;
+    test_origin_provider = TmuxWiringFake.base();
+    test_tmux_provider = TmuxWiringFake.tmux();
+    defer {
+        test_origin_provider = null;
+        test_tmux_provider = null;
+        TmuxWiringFake.linked = true;
+    }
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":5,\"selector\":\"h1\"}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .peer_origin = TmuxWiringFake.origin };
+    resolveSelfOrigin(&refs, &pending);
+    try std.testing.expectEqual(@as(?u64, term.surface.id), pending.browser_pane);
+    // 대조: 클라이언트가 다른 서버의 소켓을 쥐었다 — 잇지 않는다(1g 그대로 pane 없음).
+    TmuxWiringFake.linked = false;
+    var other: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .peer_origin = TmuxWiringFake.origin };
+    resolveSelfOrigin(&refs, &other);
+    try std.testing.expectEqual(@as(?u64, null), other.browser_pane);
 }
 
 // ── pane 동의(사용자 결정 2026-11-16): 에이전트 탭은 사용자의 로그인된 사이트를 쓴다 — pane 마다 처음 한 번 묻는다 ─────────────────────

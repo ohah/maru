@@ -21633,7 +21633,7 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @backingInt(EventKind.frame_tick);
             self.last_summary.quit_decision = @backingInt(self.quit_decision);
             self.quit_decision = .none;
-            self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresent(self)) 1 else 0;
+            self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresentPruningOsr(self)) 1 else 0;
             return self.last_summary;
         }
         const ft_on = diag_gate.maruDebugEnabled();
@@ -21732,7 +21732,7 @@ pub const AppSession = struct {
             );
             self.last_summary.quit_decision = @backingInt(self.quit_decision);
             self.quit_decision = .none;
-            self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresent(self)) 1 else 0;
+            self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresentPruningOsr(self)) 1 else 0;
             return self.last_summary;
         }
         self.runFramePreHousekeeping();
@@ -23265,7 +23265,8 @@ pub const AppSession = struct {
         // 4e-5: 활성 탭 web Term 존재 신호(Swift drain 게이트용). 매 tick 활성 탭 트리에서 계산(유지 카운터 아님 —
         // 창 간 이동 드리프트 없음, collectWebSurfaces와 같은 활성-탭 범위). writeSummaryFromState가 이 필드를 안
         // 건드리므로(last_summary는 매 tick 덮어쓰기가 아니라 필드별 갱신) epilogue가 quit_decision과 같은 단일 출처로 실는다.
-        self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresent(self)) 1 else 0;
+        // 웹 Term 이 0 이면 Swift 가 drain 을 건너뛰므로 Chromium 본문 rect 도 여기서 비운다(`webSurfacesPresentPruningOsr`).
+        self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresentPruningOsr(self)) 1 else 0;
         return self.last_summary;
     }
 
@@ -78005,6 +78006,66 @@ test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 windowH
     // tick 신호도 양 창 정합(epilogue가 각 세션 활성 탭 트리에서 파생).
     try std.testing.expectEqual(@as(u32, 1), (try dst.tick()).web_surfaces_present);
     try std.testing.expectEqual(@as(u32, 0), (try src.tick()).web_surfaces_present);
+}
+
+// 사용자 제보(2026-11-16, 「브라우저 한번 열린 Pane 을 공유하는 같은 탭들 클릭이 망가진다」): Chromium 탭의 본문 rect
+// (`osr_layouts`)는 Swift 가 전이 drain 을 부를 때만(`routeOsrLayouts`) 다시 계산되는데, Swift 는 `web_surfaces_present == 0`
+// 이고 WKWebView 패널이 없으면 drain 을 건너뛴다 — Chromium 탭은 WKWebView 를 만들지 않으므로 창의 **마지막** 웹 탭이 보이는
+// 채 닫히면 그 rect 가 영영 남아, 같은 pane 의 터미널 본문 누름·끌기·휠을 `osrMouseDown` 이 죽은 탭 것으로 삼켰다. 이 시험은
+// Swift 가 drain 을 건너뛰는 그 상태(tick 만 돈다)에서 rect 가 비고 누름이 터미널 선택으로 가는지를 고정한다.
+test "Chromium 탭: 창의 마지막 웹 탭이 보이는 채 닫히면 그 본문 rect 가 남아 터미널 누름을 삼키지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const sid = try w9c2R5Web(session, allocator);
+    // 그 탭이 보일 때 마지막 drain 이 남긴 본문 rect(터미널 본문과 같은 자리 — 같은 pane 이다).
+    const body_rect = session.termRect();
+    try session.osr_layouts.append(allocator, .{ .surface_id = sid, .rect = body_rect });
+    // 웹 탭이 살아 있는 동안은 tick 이 rect 를 건드리지 않는다(갱신은 drain 몫이다).
+    try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
+    try std.testing.expectEqual(@as(usize, 1), session.osr_layouts.items.len);
+    // 페이지가 스스로 닫혔다(닫힘 길 — pane 에는 셸 탭이 남는다).
+    web_ops.osrClosePageClosedTab(session, sid);
+    try std.testing.expect(term_ops.termBySurfaceId(session, sid) == null);
+    // Swift 는 이 신호가 0 이면 drain 을 부르지 않는다 — 그러니 tick 이 rect 를 비워야 한다.
+    try std.testing.expectEqual(@as(u32, 0), (try session.tick()).web_surfaces_present);
+    try std.testing.expectEqual(@as(usize, 0), session.osr_layouts.items.len);
+    // 옛 rect 한가운데 누름이 터미널 선택 드래그를 세운다(죽은 탭으로 가지 않는다).
+    const x = @as(f64, @floatFromInt(body_rect.x)) + @as(f64, @floatFromInt(body_rect.w)) / 2;
+    const y = @as(f64, @floatFromInt(body_rect.y)) + @as(f64, @floatFromInt(body_rect.h)) / 2;
+    session.mouse(1, x, y, 0, 0);
+    try std.testing.expect(session.pointer_gesture_owner != .web_osr);
+    try std.testing.expect(session.mouse_drag_selecting);
+    session.mouse(3, x, y, 0, 0);
+}
+
+// 같은 길의 둘째 경우: 웹 탭이 든 워크스페이스를 다른 창으로 옮겨 원래 창에 웹 Term 이 0 이 되면, 원래 창의 Swift 도 drain 을
+// 건너뛴다 — 원래 창에 남은 그 탭의 rect 가 비어야 한다. 옮겨 간 창의 rect 는 그 창 drain 이 맡는다(여기선 건드리지 않는다).
+test "Chromium 탭: 마지막 웹 탭을 다른 창으로 옮기면 원래 창의 본문 rect 가 빈다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+    try addMoveTestWorkspace(src, "web-ws");
+    src.dispatchAppAction(.new_web_tab);
+    const sid = pane_ops.activePane(src).activeTerm().surfaceId();
+    try src.osr_layouts.append(allocator, .{ .surface_id = sid, .rect = src.termRect() });
+    try dst.osr_layouts.append(allocator, .{ .surface_id = sid, .rect = dst.termRect() });
+    var buf: [8]u64 = undefined;
+    const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 1, &buf);
+    try std.testing.expect(outcome.cross_window);
+    try std.testing.expectEqual(@as(u32, 0), (try src.tick()).web_surfaces_present);
+    try std.testing.expectEqual(@as(usize, 0), src.osr_layouts.items.len);
+    // 대상 창은 웹 탭이 있으니 tick 이 rect 를 건드리지 않는다.
+    try std.testing.expectEqual(@as(u32, 1), (try dst.tick()).web_surfaces_present);
+    try std.testing.expectEqual(@as(usize, 1), dst.osr_layouts.items.len);
 }
 
 test "hasWebSurface: 창 간 이동 후 대상=live·원본=부재 (4e-4 이동↔닫힘 판정)" {

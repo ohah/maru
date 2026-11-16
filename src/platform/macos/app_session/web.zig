@@ -224,6 +224,18 @@ pub fn webSurfacesPresent(self: *AppSession) bool {
     return workspace_ops.windowHasWebTerm(self) or file_panel_ops.dockHasLiveSurface(self);
 }
 
+/// tick 이 frame summary 의 `web_surfaces_present`(Swift 전이 drain 게이트)를 실을 때 부른다. 웹 Term 이 하나도 없으면 Chromium
+/// 본문 rect(`osr_layouts`)도 비운다 — 그 rect 는 drain 이 부르는 `routeOsrLayouts` 만 다시 계산하는데, Swift 는 이 값이 0 이고
+/// WKWebView 패널이 없으면 drain 을 건너뛰고, Chromium 탭은 WKWebView 를 만들지 않는다. 그래서 창의 **마지막** 웹 탭이 보이는 채
+/// 닫히면(또는 다른 창으로 옮겨지면) 그 탭의 rect 가 남아 `osrMouseDown`·휠·hover 가 같은 자리의 터미널 입력을 죽은 탭 것으로
+/// 삼켰다(사용자 제보 2026-11-16 — 「브라우저를 열었던 pane 의 다른 탭에서 클릭이 안 된다」). 웹 Term 이 0 이면 그릴 본문도 0 이라
+/// 비우는 것이 정의상 맞고, drain 을 건너뛰는 조건과 **같은 술어**라 둘이 갈릴 틈이 없다.
+pub fn webSurfacesPresentPruningOsr(self: *AppSession) bool {
+    const present = webSurfacesPresent(self);
+    if (!present) self.osr_layouts.clearRetainingCapacity();
+    return present;
+}
+
 /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
 /// **자기 pane leaf rect**에서 탭 바(top inset)를 뺀 본문 rect(4a `contentRect`, §5 탭 바 노출)에 고정되고, visible은
 /// **자기 pane의 활성 Term인가**다(4c의 활성 pane 추종을 완전 제거 — 각 웹뷰가 제 pane에 붙박인다). **비활성 워크스페이스 탭의 web Term도

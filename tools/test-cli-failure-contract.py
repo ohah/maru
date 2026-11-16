@@ -419,6 +419,9 @@ def verify(cli, root):
     # An option left without its value names that option (before: "the option needs a value" on a line with several).
     p = run(['browser', 'click', '--surface', '1', '--selector'], 1)
     assert p.stderr.startswith("maru browser click: option '--selector' needs a value\n  click "), records[-1]
+    # A hidden character in an echoed word is shown, not dropped: dropping it made '--sel<ZWSP>ector' read as '--selector'.
+    p = run(['browser', 'click', '--surface', '1', '--sel\u200bector', 'a'], 1)
+    assert p.stderr.startswith("maru browser click: unknown option '--sel<U+200B>ector'\n"), records[-1]
     # M5: a screenshot without --out is refused before the socket (PNG bytes never reach stdout — an agent's shell
     # output is a pipe, so a terminal-only check would not protect it).
     p = run(['browser', 'screenshot', '--surface', '1'], 1)

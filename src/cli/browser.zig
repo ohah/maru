@@ -10,10 +10,13 @@
 //! surface_id 발견 — `maru sessions list`는 self scope라 형제 web 패널이 안 보인다, §9.6.1). 확장(screenshot·act·set/delete)은
 //! 서브커맨드 dispatch에 한 줄씩. 이 help 의 명령 목록은 에이전트 스킬 플러그인이 시험으로 따라간다(§9.6.3 — `tests/plugin_skill_sync.zig`).
 //!
-//! **L2 순수**: std + control_plane(1a)만. 소켓/OS 0(파싱·wire만 — I/O는 `cli/control_client.zig`·`cli/browser/run.zig`).
+//! **L2 순수**: std + control_plane(1a)·`net_policy` + 중립 leaf(`invisible_text`·`hazard` — std 만). 소켓/OS 0(파싱·wire만 — I/O는 `cli/control_client.zig`·`cli/browser/run.zig`).
 
 const std = @import("std");
 const cp = @import("../session/control_plane.zig");
+/// 보이지 않는 글자 판정(중립 leaf — pane 동의 제목의 `sanitizeTitle` 과 같은 규칙)과 그것을 보이게 쓰는 꼴(편집기와 같은 `<U+XXXX>`).
+const invisible_text = @import("../invisible_text.zig");
+const hazard = @import("../hazard.zig");
 
 /// `maru browser --help`. 구현된 서브커맨드만 노출한다(§11 help gate — 정직성). 대상 surface는 `maru browser list`로 발견.
 /// 명령 줄의 모양(두 칸 들여쓰기 + 이름)과 `open` 줄은 maru-browser 스킬의 점검이 기대어 있다 — 바꾸면 `zig build test-plugin-skill`.
@@ -825,15 +828,36 @@ pub fn writeDisplaySafeJsonText(w: *std.Io.Writer, text: []const u8) std.Io.Writ
 }
 
 /// 오류 글에 되비추는 인자 낱말(M8) — `'…'` 로 감싸서. 옵션이면 `=` 뒤 값은 버린다(`--passwrd=…` 처럼 값에 비밀이 있을 수 있고, 틀린 것은
-/// 이름이다). 보이지 않는 글자(제어·양방향)는 빼고 64 바이트(글자 경계)에서 잘라 `…` 를 붙인다 — 붙여 넣은 페이지 글이 화면을 속이지 못하게.
+/// 이름이다). 64 바이트(입력, 글자 경계)에서 잘라 `…` 를 붙인다.
+///
+/// **보이지 않는 글자는 빼지 않고 `<U+200B>` 꼴로 보이게 쓴다**(`invisible_text.isInvisible` — 제어·양방향·폭 0·변이 선택자·태그 …). 전에는
+/// 뺐는데, 빼면 틀린 낱말이 **맞는 옵션처럼** 보인다 — `--sel<ZWSP>ector` 가 「unknown option '--selector'」 로 읽혀 사람도 에이전트도 무엇이
+/// 틀렸는지 모른다(RLO·ESC 를 빼던 갈래도 같은 착시였다). 보이게 쓴 꼴은 ASCII 라 빼는 것만큼 화면을 흔들지 못하고, 무엇이 숨었는지 말한다.
+/// 꼴은 편집기가 숨은 글자를 보이는 꼴(`hazard.displayText`) 그대로다. 깨진 UTF-8 바이트는 `<U+FFFD>`.
 pub fn writeArgToken(w: *std.Io.Writer, token: []const u8) std.Io.Writer.Error!void {
     const head = if (std.mem.startsWith(u8, token, "-")) token[0 .. std.mem.indexOfScalar(u8, token, '=') orelse token.len] else token;
     const cap = 64;
     var end = @min(head.len, cap);
     while (end > 0 and end < head.len and (head[end] & 0xC0) == 0x80) end -= 1;
-    var buf: [cap]u8 = undefined;
-    const n = displaySafe(head[0..end], &buf);
-    try w.print("'{s}'{s}", .{ buf[0..n], if (end < head.len) "…" else "" });
+    try w.writeByte('\'');
+    var i: usize = 0;
+    var shown: [hazard.max_display_len]u8 = undefined;
+    while (i < end) {
+        // 시작 바이트가 아닌 바이트(0x80–0xBF·0xF8–0xFF)는 곧 `<U+FFFD>` — 한 바이트짜리 `utf8Decode` 는 그 값을 검사 없이 코드 포인트로 돌려주므로
+        // (그러면 날 바이트나 가짜 `<U+0080>` 이 나간다; 적대 리뷰 A R2) 길이를 모르면 디코드하지 않는다.
+        const len = std.unicode.utf8ByteSequenceLength(head[i]) catch {
+            try w.writeAll(hazard.displayText(0xFFFD, &shown));
+            i += 1;
+            continue;
+        };
+        const code: ?u21 = if (i + len <= end) std.unicode.utf8Decode(head[i .. i + len]) catch null else null;
+        const n = if (code != null) len else 1; // 깨진 시퀀스(overlong·surrogate·잘림)는 한 바이트씩 넘긴다
+        if (code) |c| {
+            if (invisible_text.isInvisible(c)) try w.writeAll(hazard.displayText(c, &shown)) else try w.writeAll(head[i .. i + n]);
+        } else try w.writeAll(hazard.displayText(0xFFFD, &shown));
+        i += n;
+    }
+    try w.print("'{s}", .{if (end < head.len) "…" else ""});
 }
 
 fn displaySafe(s: []const u8, out: []u8) usize {

@@ -2114,14 +2114,52 @@ test "M8: 모르는 옵션·남는 인자·모르는 명령은 그 낱말을 말
     try std.testing.expect(std.mem.startsWith(u8, try usageFor(&.{ "click", "--surface" }, &buf), "maru browser click: option '--surface' needs a value\n"));
 }
 
-test "M8: 되비추는 낱말 — 옵션의 `=` 뒤 값은 싣지 않고, 보이지 않는 글자는 빼고, 64 바이트에서 자른다" {
+test "M8: 되비추는 낱말 — 옵션의 `=` 뒤 값은 싣지 않고, 보이지 않는 글자는 `<U+XXXX>` 로 보이고, 64 바이트에서 자른다" {
     var buf: [16 * 1024]u8 = undefined;
     const secret = try usageFor(&.{ "emulate", "--surface", "1", "--zoom-json=hunter2" }, &buf);
     try std.testing.expect(std.mem.startsWith(u8, secret, "maru browser emulate: unknown option '--zoom-json'\n"));
     try std.testing.expect(std.mem.indexOf(u8, secret, "hunter2") == null);
+    // 보이지 않는 글자는 빼지 않고 **보이게** 쓴다 — 빼면 틀린 낱말이 맞는 옵션처럼 보인다(`--sel<ZWSP>ector` → 「unknown option '--selector'」).
+    // 쓰는 꼴은 편집기가 숨은 글자를 보이는 꼴과 같다(`hazard.displayText`). ASCII 라 화면을 흔들지 못한다.
     const esc = try usageFor(&.{ "get-url", "--surface", "1", "--\x1b[2J\u{202e}x" }, &buf);
     const first = esc[0..std.mem.indexOfScalar(u8, esc, '\n').?];
-    try std.testing.expectEqualStrings("maru browser get-url: unknown option '--[2Jx'", first);
+    try std.testing.expectEqualStrings("maru browser get-url: unknown option '--<U+001B>[2J<U+202E>x'", first);
+    const Hidden = struct { in: []const u8, shown: []const u8 };
+    for ([_]Hidden{
+        .{ .in = "--sel\u{200B}ector", .shown = "'--sel<U+200B>ector'" }, // ZWSP — #4729 적대 3 회차
+        .{ .in = "--sel\u{FEFF}ector", .shown = "'--sel<U+FEFF>ector'" }, // BOM
+        .{ .in = "--sel\u{2060}ector", .shown = "'--sel<U+2060>ector'" }, // word joiner
+        .{ .in = "--sel\u{00AD}ector", .shown = "'--sel<U+00AD>ector'" }, // soft hyphen
+        .{ .in = "--sel\u{200D}ector", .shown = "'--sel<U+200D>ector'" }, // ZWJ
+        .{ .in = "--sel\u{FE0F}ector", .shown = "'--sel<U+FE0F>ector'" }, // 변이 선택자
+        .{ .in = "--sel\u{3164}ector", .shown = "'--sel<U+3164>ector'" }, // 한글 채움(빈 칸으로 그려진다)
+        .{ .in = "--sel\u{E0041}ector", .shown = "'--sel<U+E0041>ector'" }, // 태그 글자
+        .{ .in = "--sel\u{2028}ector", .shown = "'--sel<U+2028>ector'" }, // 줄 구분
+        .{ .in = "--sel\x7fector", .shown = "'--sel<U+007F>ector'" }, // DEL
+        // 깨진 UTF-8 — 시작 바이트가 아닌 바이트(0xA0·0xFF)·홀로 선 C1 바이트(0x9B — CSI 의 8 비트 꼴)·surrogate 는 모두 `<U+FFFD>`(날 바이트도,
+        // 가짜 `<U+009B>` 도 아니다).
+        .{ .in = "--a\xa0b", .shown = "'--a<U+FFFD>b'" },
+        .{ .in = "--a\xffb", .shown = "'--a<U+FFFD>b'" },
+        .{ .in = "--a\x9bb", .shown = "'--a<U+FFFD>b'" },
+        .{ .in = "--a\xed\xa0\x80b", .shown = "'--a<U+FFFD><U+FFFD><U+FFFD>b'" },
+        .{ .in = "--a\xe2\x80", .shown = "'--a<U+FFFD><U+FFFD>'" }, // 끝에서 잘린 시퀀스
+        .{ .in = "--s\u{00A0}x", .shown = "'--s\u{00A0}x'" }, // 대조: NBSP 는 보이는 빈칸이라 그대로
+        .{ .in = "--한글", .shown = "'--한글'" }, // 대조: 보통 글자
+    }) |h| {
+        const u = try usageFor(&.{ "get-url", "--surface", "1", h.in }, &buf);
+        try std.testing.expect(std.mem.startsWith(u8, u, "maru browser get-url: unknown option "));
+        const line = u[0..std.mem.indexOfScalar(u8, u, '\n').?];
+        errdefer std.debug.print("되비춤: {s}\n", .{line});
+        try std.testing.expectEqualStrings(h.shown, line["maru browser get-url: unknown option ".len..]);
+    }
+    // 남는 인자·모르는 명령도 같은 함수다.
+    const extra = try usageFor(&.{ "get-url", "--surface", "1", "ex\u{200B}tra" }, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, extra, "maru browser get-url: too many arguments: 'ex<U+200B>tra' was not expected\n"));
+    const sub = try usageFor(&.{"cl\u{200B}ick"}, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, sub, "maru browser: unknown subcommand 'cl<U+200B>ick'\n"));
+    // 자르기는 **입력** 64 바이트에서(보이게 쓴 꼴이 길어져도 한 줄 — ZWSP 30 개 = 90 바이트 → 21 개 + 「…」).
+    const zw = try usageFor(&.{ "get-url", "--surface", "1", array_repeat.repeat("\u{200B}", 30) }, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, zw, "maru browser get-url: too many arguments: '" ++ array_repeat.repeat("<U+200B>", 21) ++ "'… was not expected\n"));
     const long = array_repeat.repeat("x", 200);
     const l = try usageFor(&.{ "get-url", "--surface", "1", long }, &buf);
     try std.testing.expect(std.mem.startsWith(u8, l, "maru browser get-url: too many arguments: '" ++ array_repeat.repeat("x", 64) ++ "'… was not expected\n"));

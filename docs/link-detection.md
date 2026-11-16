@@ -245,8 +245,23 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
   **뒤** `take_external_link_action`으로 drain하므로 "생성 → navigate" 순서가 구조적으로 보장된다(기존 패널 재사용도
   같은 경로로 보내 분기를 하나로 유지한다 — 한 tick 지연은 최대 ~16ms). 대상 패널이 그 사이 닫혔거나 load가 거부되면
   시스템 브라우저로 폴백한다 — 사용자가 누른 링크를 조용히 삼키지 않는다.
+- **Chromium 탭이면 누른 자리에서 보낸다**(P0-1). 위 pending action 의 실행은 Swift 의 WKWebView(`webPanels`)로
+  navigate 하는데, `browser.engine = chromium` 의 browser Term 은 sidecar 가 그리는 OSR 탭이라 WKWebView 가 없다 — 예전에는
+  그래서 링크가 시스템 브라우저로 빠지고, 새 탭을 만든 경우는 **빈 Chromium 탭**이 남았다(실앱 재현). 이제 Zig 가 대상을 고른
+  직후 엔진을 본다(`routeLinkToOsrTab`·`openLinkInNewOsrTab`): 보이는 Chromium 탭이면 주소창과 같은 사용자의 이동
+  (`web_osr.userNavigate` — sidecar 가 아직 그 탭을 모르면 첫 주소 `pending_url`)으로 곧바로 보내고 pending action 을 세우지
+  않는다. 그 탭에 남은 복원 주소·주소창 이동 대기는 버린다(다음 tick 에 뒤따라 가 링크를 덮지 않게 — 끌어 놓기와 같은 규율).
+  새 탭이 필요하면(`in-app`) 새 Chromium 탭을 열고 그 첫 주소로 싣는다. **엔진이 멈췄으면**(래치 — 시작 실패·거듭 크래시·
+  프로필 사용 중·버전 불일치) 그 탭에 보내지 않고 새 탭도 만들지 않은 채 시스템 브라우저로 연다 — 위 「load가 거부되면
+  시스템」 규칙과 같다. 엔진이 WebKit 이면(설치 없음 폴백 포함) 예전 길 그대로다. 파일 패널 외부 링크(`queueExternalLink`)도
+  같은 helper 를 쓴다.
+- **에이전트 탭은 재사용하지 않는다**(P0-1 — [control-plane-security.md](control-plane-security.md) §8.4 pane 동의). 사용자가 누른
+  링크는 사용자의 탭이다 — 에이전트 탭(그 pane 의 에이전트가 묻지 않고 제어한다)에 실으면 사용자가 고른 페이지를 에이전트가
+  동의 없이 읽는다. 보이는 브라우저를 고를 때 에이전트 탭 표(`agent_tab_known_callback` — 탭 줄 ◈ 와 같은 출처, 철회되면
+  사람의 탭)에 있는 탭은 건너뛴다. 새로 연 탭은 사람의 탭이다. WebKit 에는 에이전트 탭이 없어 무동작이다.
 - **연타 보호**: drain 전 두 번째 요청은 거부하고 시스템 브라우저로 보낸다. pending URL을 덮어쓰면 앞 링크를 잃거나
-  (in-app에서) 탭만 늘고 목적지가 바뀐 상태가 된다.
+  (in-app에서) 탭만 늘고 목적지가 바뀐 상태가 된다. Chromium 탭으로 곧바로 보내는 길에는 그 슬롯이 없어 연타는 같은 탭을 두 번
+  누른 것과 같다(마지막 링크가 이긴다).
 
 ## soft-wrap(강제개행)된 링크
 
@@ -360,7 +375,8 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
   `MaruAppHost.swift`(`handleUrlClick` — 지원 파일 형식은 file Term, 미지원 파일·일반 URL은 시스템 경로). ABI 경계는
   [macOS 앱 호스트 경계](macos-app-host-boundary.md).
 - 열기 대상 라우팅: `src/platform/macos/app_session.zig`(`openTerminalWebLink` — 정책 단일 출처,
-  `visibleBrowserSurfaceId`·`queueExternalLinkAction`[파일 패널과 공유하는 실행 경로]),
+  `visibleUserBrowserTerm`·`queueExternalLinkAction`[파일 패널과 공유하는 실행 경로],
+  Chromium 탭 갈래 `routeLinkToOsrTab`·`openLinkInNewOsrTab` — `app_session/web.zig`),
   `app_host_abi.{zig,h}`(`open_terminal_web_link`·`take_external_link_action`, ABI v147),
   `MaruAppHost.swift`(`handleUrlClick`가 0이면 `NSWorkspace.open` / tick drain이 `BrowserControl.navigate`).
   URL 허용 스킴·길이 상한은 `src/session/file_panel_bridge.zig`(`isExplicitHttpLink`·`max_http_link_bytes`).

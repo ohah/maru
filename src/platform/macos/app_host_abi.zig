@@ -13542,6 +13542,26 @@ test "전권: 표에 자리가 몇 개만 남으면 browser 부터 들어가는 
     try std.testing.expect(!control_pane_grant_store.hasGrant(4, 77, .browser));
 }
 
+test "2026-11-17 A1: browser.close 요청은 빈 표에도 전권 grant 를 넣지 않는다 — 닫지 못한 close 가 그 탭에 일곱 scope·지켜보기를 남기지 않게" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer control_pane_grant_store.clearAll();
+    control_pane_grant_store.clearAll();
+    const surfaces = [_]control_surface.SurfaceDto{.{ .surface_id = 78, .title = "human", .window = 1, .detail = .{ .web = .{ .url = "https://a.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true } } }};
+    const ids = [_]u64{78};
+    const windows = [_]maru.session.WindowMembershipSnapshot{.{ .window_id = 1, .window_kind = .normal, .surface_ids = &ids }};
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &surfaces, .windows = &windows };
+    var close: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.close\",\"params\":{\"id\":78}}", .selector = null, .io = std.testing.io, .browser_pane = 4 };
+    grantFullAccess(&control_server_storage, &close, snapshot);
+    try std.testing.expect(close.response == null);
+    try std.testing.expectEqual(@as(usize, 0), control_pane_grant_store.len);
+    // 대조: 같은 탭의 click 은 넣는다(판정이 공허하지 않다).
+    var click: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.click\",\"params\":{\"id\":78,\"selector\":\"h1\"}}", .selector = null, .io = std.testing.io, .browser_pane = 4 };
+    grantFullAccess(&control_server_storage, &click, snapshot);
+    try std.testing.expect(control_pane_grant_store.hasGrant(4, 78, .browser));
+}
+
 test "2026-11-17 B: 철회 뒤 그 pane 의 에이전트 탭에 온 요청의 전권은 태어날 때 grant(birth)로 다시 넣고 탭 표의 번호를 맞춘다 — 다른 pane 의 요청은 보통 grant" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     installTransferTestServer();

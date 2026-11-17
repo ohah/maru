@@ -9837,6 +9837,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case "overlay":
                 // 오버레이(알림 토스트 포함)가 열려 있는가 — 마우스 게이트가 보는 그 집합.
                 Self.testReport("overlay \(anyOverlayOpen)")
+            case "frames" where line.count >= 2:
+                // frames 이름 — 그린 Metal 프레임 수와 frame loop tick 수(P0-2 — 찾기가 열린 동안 다시 그리기 고리가 도는지 두 시점의 차로 잰다).
+                Self.testReport("frames \(line[1]) drawn=\(metalFramesDrawn) ticks=\(latestFrameSummary.frame_loop_ticks)")
             case "cursor":
                 Self.testReport("cursor \(Self.testCursorName(NSCursor.current))")
             case "ctxmenu":

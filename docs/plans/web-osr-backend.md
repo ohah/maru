@@ -5197,9 +5197,16 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   같은 경주(판정 `emu-page-nav-sw(obs)` — 고친 판·고치기 전 판 모두 3/3 샘, 데워진 렌더러); speculation **prefetch 된 밖 문서**의 prefetch 요청 머리(B 의 요청 —
   고친 판에서 활성화 뒤 JS 는 0/3, 고치기 전 3/3); 응답 뒤 다운로드·204 에서 B 가 새 세션이 붙을 때까지(~1–3 ms) 흉내 없이 보인다(허락한 사이트가 진짜를
   잠깐 보는 쪽); 밀려난 옛 이동의 늦은 응답이 새 사이트 안 이동 뒤에 와 떼면 그 문서가 같은 꼴로 잠깐 진짜. bfcache 는 꺼진 채다(복원은 응답·홉이 없다).
-- **#4737(전권, 2026-11-16) 뒤 제품 길**: 사용자 탭의 흉내 grant 는 어느 호스트든(`any_host`)으로 들어가(`control_pane_grant.fullAccessPlan` — `narrowAnyHost`
-  는 흉내를 좁히지 않는다) `web_osr_emulate.Tab.site` 가 비고 `site_bound` 가 서지 않는다 — **지금 사용자 탭의 흉내는 탭 전체**이고 이 고침은 sidecar 의
-  사이트 묶기 계약(판정자·호스트에 묶인 grant)에서 쓰인다. 되살리지 않았다(사용자 결정 대기 — 사이트 묶기를 전권과 어떻게 맞출지).
+- **#4737(전권, 2026-11-16) 뒤 제품 길 — 다시 묶기(사용자 결정 2026-11-17 「건 사이트에만 다시 묶기」)**: 전권은 사용자 탭의 흉내 grant 도 어느 호스트든
+  (`any_host`)으로 넣어(`control_pane_grant.fullAccessPlan` — `narrowAnyHost` 는 흉내를 좁히지 않는다) `web_osr_emulate.Tab.site` 가 비고 `site_bound` 가 서지
+  않았다 — 사용자 탭의 흉내가 **모든 사이트**에 걸렸다(격리 앱 실측: B 에 건 `LiveUA/1`·`fr-FR`·Asia/Tokyo 를 페이지 링크로 간 A 의 첫 스크립트·문서 요청이
+  봤다). 이제 사용자 탭은 grant 의 `any_host` 가 아니라 **탭과 함께 생긴 grant 인가**(`birth`)로 가르고(`web_osr_emulate.bindSite`), `set` 을 부를 때 그 탭이
+  보이는 페이지의 호스트(`web_osr.browserEmulate` — 막기 규칙의 사이트와 같은 `netKnownUrl` → `hostOfUrl`)에 묶는다. 덜 놀라운 쪽으로 정한 것: 다른
+  사이트에서 다시 `set` 하면 그 사이트로 옮긴다(덧쓰기 설정은 그대로, 지금 묶음이 그 페이지를 덮으면 그대로 — `www.` 에서 다시 걸어 좁아지지 않게), 웹 페이지가
+  아니거나 이동 중이면 `no_site`(-32602 — 탭 전체로 걸리거나 어디에도 안 걸린 채 성공처럼 보이지 않게), `clear` 는 어느 사이트에서든(묶음도 푼다), 결과의
+  `site` 는 묶인 호스트(에이전트 탭은 null), grant 동기화는 어느 호스트든 grant 면 묶음과 무관하게 둔다(그대로면 묶인 흉내가 다음 동기화에서 지워졌다). 같은
+  뿌리로 꺼져 있던 사용자 탭의 네트워크 조건 제한(프리셋만·offline 없음 — 도움말·MCP·플러그인은 그대로 말하고 있었다)도 `birth` 로 되살렸다. 에이전트가 연 탭
+  (◈)은 탭 전체 그대로. 계획 기록 `$S/emu_pagenav/PLAN3.md`·`ATTACK3.md`.
 - 판정: `--emulation` 57 → **83**, 새 세션 `emq`(`emulation_pagenav_check.zig` 27 — 종류 열(에이전트 CDP 의 `Page.navigateToHistoryEntry` 포함)마다
   `EMQ_ITERS` 판(기본 3), `detach-order`·`two-tabs`·`redirect`·`slow-wait`·`aborted`·`download`·`bounce`·`watch`·`mock`·`body-record`·`route-switch`·`sw-late`·
   `dead`, 관측 `sw`·`prefetch`·`block`; 손잡이 `EMQ_ONLY=1` 은 그 세션만), `emu-site-bound-bfcache-page` 를 관측에서 단언으로. 고치기 전 sidecar(main 의

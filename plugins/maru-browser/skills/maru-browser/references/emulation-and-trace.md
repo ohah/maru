@@ -21,11 +21,15 @@ maru browser emulate --surface 12 --clear
 
 | Setting | Lasts until |
 |---|---|
-| Viewport, user agent, locale, time zone, geolocation, media features, vision | `--clear` (or `--no-…`), the tab closes, or the user revokes it in the Browser Grants menu. On an older Maru, on a user's tab it is only paused while another site is shown and comes back with that site — clear it while the tab still shows the site (from another site `--clear` is refused). |
+| Viewport, user agent, locale, time zone, geolocation, media features, vision | `--clear` (or `--no-…`), the tab closes, or the user revokes it in the Browser Grants menu. On a user's tab it is only paused while another site is shown and comes back with that site. |
 | `--cpu` (1–20× slower) and `--network` (presets or `--latency`) | The process that set them exits — for you, this agent process. Clear them yourself before you finish. |
 
-- Current Maru does not ask the user (an older build asks once per site on a user's tab and applies it only while
-  that site is shown). On a user's tab `--network` takes a preset only, and not `offline`.
+- Current Maru does not ask the user (an older build asks once per site on a user's tab).
+- **On a user's tab the emulation applies only on the site the tab shows when you set it**, and its subdomains
+  (`site` in the result). Other sites see the real values. Setting it again while the tab shows another site moves
+  it there. A tab that shows no web page, or is between pages, answers `no_site` — set it again once the page has
+  loaded. On tabs you opened (◈) it applies on every site. `--clear` works from any site.
+- On a user's tab `--network` takes a preset only, and not `offline`.
 - One pane owns a tab's emulation. Another pane gets `emulated_by_other_pane`.
 - **If the user clicks or types in the tab, Maru drops your `--cpu` and `--network` there** (`released: human_input`).
   The other settings stay: clear them unless the user wants them kept. Do not apply anything again — the user is

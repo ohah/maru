@@ -6,10 +6,11 @@
 //!
 //! 세션 `emq` 하나(sidecar 의 host 로그 `emq.host.log` — `MARU_WEB_TEST_EMU_LOG`):
 //! - emu-page-nav-<종류>: `location.href=`·`a.click()`·사람의 누름(maru `mouse`)·`<meta refresh>`·폼 POST·`location.replace`·`history.back()`·
-//!   `history.go(-2)`·maru 의 주소 이동(#4721 게이트와 겹침) — 판마다 묶인 문서가 모든 흉내를 본 뒤(`in_ok`) 밖으로 가서, 밖 문서의 첫 스크립트·
+//!   `history.go(-2)`·에이전트 CDP 의 뒤로(`Page.navigateToHistoryEntry` — U2)·maru 의 주소 이동(#4721 게이트와 겹침) — 판마다 묶인 문서가 모든 흉내를 본 뒤(`in_ok`) 밖으로 가서, 밖 문서의 첫 스크립트·
 //!   pageshow·지금·첫 요청·pageshow 의 요청·문서 요청 머리가 모두 진짜(`EMQ_ITERS` 판, 기본 3).
 //! - emu-page-nav-detach-order: 위 판들의 host 로그 — 떠날 때마다 응답으로 뗀 줄(`detach resp`)이 하나씩, 「떼기 전에 커밋」 0 줄, 늦은 떼기 0 줄
 //!   (응답 시각 → 떼기 µs 와 떼기 → 커밋 µs 를 적는다 — U5: 차례는 실측이 근거다).
+//! - emu-page-nav-two-tabs: 같은 사이트에 묶인 다른 탭은 한 탭이 떠나도 흉내 그대로(무장·떼기는 탭마다).
 //! - emu-page-nav-redirect: 사이트 안 주소가 302 로 밖에 보낸다 — 첫 스크립트·첫 요청은 진짜(단언), 그 홉의 문서 요청 머리는 E12(관측).
 //! - emu-page-nav-slow-wait: 밖으로 가는 느린 응답(1.5 초)을 기다리는 동안 묶인 문서는 흉내를 그대로 본다(떼기는 응답에서 — 홉에서 떼면 진짜를
 //!   본다), 도착한 밖 문서는 진짜.
@@ -161,7 +162,7 @@ fn oneNav(r: *Run, kind: []const u8, tag: []const u8, out_base: []const u8, t: *
     var ipb2: [96]u8 = undefined;
     const in_path2 = std.fmt.bufPrint(&ipb2, "/qi?x={s}b&w=1", .{tag}) catch unreachable;
     const out_url = if (std.mem.eql(u8, out_base, "/qr")) uLoop(&uo, out_path) else uLocal(&uo, out_path);
-    if (std.mem.eql(u8, kind, "back")) {
+    if (std.mem.eql(u8, kind, "back") or std.mem.eql(u8, kind, "cdpback")) {
         try r.nav(1, uLocal(&u, out_path));
         try r.nav(1, uLoop(&u, in_path));
     } else if (std.mem.eql(u8, kind, "go2")) {
@@ -175,6 +176,12 @@ fn oneNav(r: *Run, kind: []const u8, tag: []const u8, out_base: []const u8, t: *
     if (std.mem.eql(u8, in_sg, full_emu)) t.in_ok += 1;
     if (std.mem.eql(u8, kind, "mnav")) {
         try r.host.send(.{ .navigate = .{ .browser = 1, .url = out_url, .user = true } });
+    } else if (std.mem.eql(u8, kind, "cdpback")) {
+        // 에이전트 CDP 의 뒤로(`browser.back` 의 길 — `Page.navigateToHistoryEntry`, wire 를 지나지 않는다; U2).
+        if (try r.call(1, "Page.getNavigationHistory", "{}", 5000)) |_| {
+            var hb: [96]u8 = undefined;
+            if (prevEntry(r.result.items)) |id| _ = try r.call(1, "Page.navigateToHistoryEntry", std.fmt.bufPrint(&hb, "{{\"entryId\":{d}}}", .{id}) catch unreachable, 5000);
+        }
     } else if (std.mem.eql(u8, kind, "ulink")) {
         _ = r.ev(1, std.fmt.bufPrint(&js, "NAV('ulink','{s}')", .{out_url}) catch unreachable, &d);
         r.userClick(1, 100, 100);
@@ -201,6 +208,26 @@ fn oneNav(r: *Run, kind: []const u8, tag: []const u8, out_base: []const u8, t: *
         @memcpy(t.sample[0..n], o[0..n]);
         t.sample_len = n;
     }
+}
+
+/// `Page.getNavigationHistory` 의 답에서 지금 항목 바로 앞 항목의 id.
+fn prevEntry(json: []const u8) ?i64 {
+    const ci = std.mem.indexOf(u8, json, "\"currentIndex\":") orelse return null;
+    var e = ci + 15;
+    while (e < json.len and std.ascii.isDigit(json[e])) e += 1;
+    const cur = std.fmt.parseInt(usize, json[ci + 15 .. e], 10) catch return null;
+    if (cur == 0) return null;
+    var at: usize = 0;
+    var k: usize = 0;
+    while (std.mem.indexOfPos(u8, json, at, "{\"id\":")) |i| : (at = i + 1) {
+        if (k == cur - 1) {
+            var j = i + 6;
+            while (j < json.len and std.ascii.isDigit(json[j])) j += 1;
+            return std.fmt.parseInt(i64, json[i + 6 .. j], 10) catch null;
+        }
+        k += 1;
+    }
+    return null;
 }
 
 fn iters() u32 {
@@ -240,7 +267,7 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     _ = try r.emulate(1, emu.bound_all);
 
     // (1) 종류마다 — 데워진 렌더러(묶인 문서가 밖 사이트의 iframe 을 품는다).
-    const kinds = [_][]const u8{ "loc", "link", "ulink", "meta", "fpost", "rep", "back", "go2", "mnav" };
+    const kinds = [_][]const u8{ "loc", "link", "ulink", "meta", "fpost", "rep", "back", "go2", "cdpback", "mnav" };
     const mark = emu.logLen(root, "emq");
     var leaves: u32 = 0;
     for (kinds) |k| {
@@ -263,6 +290,20 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         const s_resp = spread(lg, "detach resp dt=", &sb[0]);
         const s_commit = spread(lg, "commit after detach dt=", &sb[1]);
         report(resp == leaves and before == 0 and late == 0, "emu-page-nav-detach-order", std.fmt.bufPrint(&d, "떠남 {d} · 응답으로 뗌 {d} · 떼기 전에 커밋 {d} · 늦은 떼기 {d} · 응답→떼기 {s} · 떼기→커밋 {s}", .{ leaves, resp, before, late, s_resp, s_commit }) catch "");
+    }
+
+    // (1b) 같은 사이트에 묶인 탭 둘 — 한 탭이 떠나도 다른 탭의 세션은 그대로(무장·떼기는 탭마다).
+    {
+        try r.create(2, uLoop(&u, "/qi?x=two2&w=1"));
+        _ = try r.emulate(2, emu.bound_all);
+        r.pump(300);
+        var t: Tally = .{};
+        try oneNav(r, "loc", "twoq", "/qn", &t);
+        var sgb: [80]u8 = undefined;
+        const other = r.ev(2, "SG()", &sgb);
+        report(t.clean() and std.mem.eql(u8, other, full_emu), "emu-page-nav-two-tabs", std.fmt.bufPrint(&d, "{s} · 다른 탭 {s}", .{ t.text(&tb), other }) catch "");
+        try r.host.send(.{ .destroy_browser = 2 });
+        r.pump(300);
     }
 
     // (2) 사이트 안 주소의 302 로 떠남 — 첫 스크립트·그 요청은 진짜, 문서 요청 머리는 E12(관측).

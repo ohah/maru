@@ -13,7 +13,7 @@ const std = @import("std");
 
 /// 새 다운로드의 처음 상태.
 pub const Start = enum {
-    /// 저장할 곳을 묻는다(「매번 묻기」 — 사람이 누른 것만).
+    /// 저장할 곳을 묻는다(「매번 묻기」 — 사람이 누른 것과 에이전트가 몬 것).
     asking,
     /// 받지 않고 붙든다 — 목록 창에서 「받기」 를 눌러야 받는다.
     held,
@@ -34,10 +34,12 @@ pub const Facts = struct {
     asking_in_tab: bool,
 };
 
-/// 처음 상태. 묻기를 켰으면 지금 그대로다 — 사람이 누른 것만 묻고 나머지는 보류(에이전트 것도 — 저장 창은 사람이 답해야 해서 에이전트가
-/// 띄우게 하지 않는다, 사용자 확인 대기 결정). 묻기를 껐으면 실행 파일만 보류하되, 사람이나 에이전트가 몬 것은 받는다.
+/// 처음 상태. 묻기를 켰으면 사람이 누른 것과 **에이전트가 몬 것**을 묻는다 — 사람의 다운로드와 똑같은 저장 창이고 사람이 고를 때까지 기다린다
+/// (사용자 결정 2026-11-17 「저장 창 띄우기」 — 그 전에는 에이전트 것은 보류였다). 한 탭에는 한 번에 하나만 묻고 나머지와 아무도 몰지 않은 것은
+/// 보류한다. 저장 창이 어디에 뜨는지는 사람의 것과 같은 길이다 — 그 탭을 보이는 키 창, 아니면 1 초 뒤 목록 창(`web_downloads.nudgeAsking`).
+/// 묻기를 껐으면 실행 파일만 보류하되, 사람이나 에이전트가 몬 것은 받는다.
 pub fn start(f: Facts) Start {
-    if (f.ask) return if (f.by_user and !f.asking_in_tab) .asking else .held;
+    if (f.ask) return if ((f.by_user or f.by_agent) and !f.asking_in_tab) .asking else .held;
     if (f.risky and !f.by_user and !f.by_agent) return .held;
     return .save;
 }
@@ -63,7 +65,7 @@ test "묻기를 껐을 때: 실행 파일은 사람도 에이전트도 몰지 �
     for ([_]bool{ false, true }) |ask| for ([_]bool{ false, true }) |risky| for ([_]bool{ false, true }) |by_user| for ([_]bool{ false, true }) |by_agent| for ([_]bool{ false, true }) |busy| {
         const f: Facts = .{ .ask = ask, .risky = risky, .by_user = by_user, .by_agent = by_agent, .asking_in_tab = busy };
         const want: Start = if (ask)
-            (if (by_user and !busy) .asking else .held)
+            (if ((by_user or by_agent) and !busy) .asking else .held)
         else if (risky and !by_user and !by_agent) .held else .save;
         try T.expectEqual(want, start(f));
     };
@@ -73,10 +75,12 @@ test "묻기를 껐을 때: 실행 파일은 사람도 에이전트도 몰지 �
     try T.expectEqual(Start.save, start(.{ .ask = false, .risky = true, .by_user = true, .by_agent = false, .asking_in_tab = false })); // 사람의 .command(전과 같다)
 }
 
-test "묻기를 켰을 때: 에이전트가 몬 것도 저장 창을 띄우지 않고 보류한다(지금 그대로), 사람의 것은 한 탭에 하나씩 묻는다" {
+test "묻기를 켰을 때: 에이전트가 몬 것도 사람의 것처럼 저장 창으로 묻는다(2026-11-17), 한 탭에 하나씩, 아무도 몰지 않은 것은 보류" {
     const T = std.testing;
-    try T.expectEqual(Start.held, start(.{ .ask = true, .risky = true, .by_user = false, .by_agent = true, .asking_in_tab = false }));
-    try T.expectEqual(Start.held, start(.{ .ask = true, .risky = false, .by_user = false, .by_agent = true, .asking_in_tab = false }));
+    try T.expectEqual(Start.asking, start(.{ .ask = true, .risky = true, .by_user = false, .by_agent = true, .asking_in_tab = false }));
+    try T.expectEqual(Start.asking, start(.{ .ask = true, .risky = false, .by_user = false, .by_agent = true, .asking_in_tab = false }));
+    try T.expectEqual(Start.held, start(.{ .ask = true, .risky = true, .by_user = false, .by_agent = true, .asking_in_tab = true })); // 그 탭에 묻는 중
+    try T.expectEqual(Start.held, start(.{ .ask = true, .risky = true, .by_user = false, .by_agent = false, .asking_in_tab = false })); // 아무도 몰지 않았다
     try T.expectEqual(Start.asking, start(.{ .ask = true, .risky = true, .by_user = true, .by_agent = true, .asking_in_tab = false }));
     try T.expectEqual(Start.held, start(.{ .ask = true, .risky = false, .by_user = true, .by_agent = false, .asking_in_tab = true }));
 }
@@ -96,9 +100,13 @@ test "목록 창: 사람이 시작한 것(묻는 것은 빼고)·보류한 것·
     try T.expect(!showsList(user_ask, start(user_ask))); // 저장 창이 뜬다 — 목록과 겹치지 않게
     const user_save: Facts = .{ .ask = false, .risky = false, .by_user = true, .by_agent = false, .asking_in_tab = false };
     try T.expect(showsList(user_save, start(user_save)));
-    // 묻기 켬의 에이전트 것은 보류라 창을 낸다(받기를 눌러야 한다).
+    // 묻기 켬의 에이전트 것은 사람의 것처럼 묻는다 — 곧바로 목록 창을 내지 않는다(저장 창이 뜰 수 있다; 아무 창도 맡지 않으면 1 초 뒤
+    // `nudgeAsking` 이 낸다). 그 탭에 이미 묻는 것이 있어 보류된 둘째는 낸다.
     const agent_ask: Facts = .{ .ask = true, .risky = true, .by_user = false, .by_agent = true, .asking_in_tab = false };
-    try T.expect(showsList(agent_ask, start(agent_ask)));
+    try T.expectEqual(Start.asking, start(agent_ask));
+    try T.expect(!showsList(agent_ask, start(agent_ask)));
+    const agent_ask_busy: Facts = .{ .ask = true, .risky = true, .by_user = false, .by_agent = true, .asking_in_tab = true };
+    try T.expect(showsList(agent_ask_busy, start(agent_ask_busy)));
 }
 
 test "몸짓 시각: 창 안이고 그 뒤 새 문서가 없을 때만 — 창의 끝은 들고, 새 문서와 같은 시각은 무효" {

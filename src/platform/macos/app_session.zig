@@ -62137,6 +62137,73 @@ test "captureWorkspaceTab: URL 있는 브라우저만 있는 pane은 셸 placeho
     }
 }
 
+// 복원한 브라우저 탭이 다음 실행에 사라지던 결함(2026-11-17 실측): 저장이 본 주소(nav 상태)만 봐서, 엔진이 뜨기 전에 저장되거나 복원 주소가
+// 열리지 않은(접속 거부) 탭이 다음 저장에서 빠졌다. 그 탭이 보이려던 주소를 싣고(활성이면 active-browser 도), 다운로드처럼 문서 없이 끝난
+// 이동의 주소는 싣지 않는다(다음 실행마다 그 파일을 다시 받는다). 규칙 자체는 L2 `workspace.browserTermUrl` 이 시험한다 — 여기는 배선.
+test "captureWorkspaceTab: 아직 넘기지 않은 복원 주소·열리지 않은 이동의 주소도 저장한다 — 문서 없이 끝난 이동은 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const prev_engine = web_osr.setDecidedForTest(false);
+    defer _ = web_osr.setDecidedForTest(prev_engine);
+    defer web_osr.testForget(allocator); // 창 정리(아래 deinit — 먼저 돈다)가 그 탭의 기록을 놓은 뒤
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.dispatchAppAction(.new_web_tab); // pane = [터미널, 브라우저(활성)]
+    const pane = pane_ops.activePane(session);
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    const web = pane.terms.items[1];
+    const sid = web.surfaceId();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // (a) WebKit 탭 — 아직 넘기지 않은 복원 주소(엔진이 뜨기 전 저장, 실측 M2). 활성 탭이라 active-browser.
+    web.pending_url = try allocator.dupe(u8, "https://e.test/restored");
+    {
+        const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
+        try std.testing.expectEqual(@as(usize, 1), wp.browser_terms.len);
+        try std.testing.expectEqualStrings("https://e.test/restored", wp.browser_terms[0].url);
+        try std.testing.expectEqual(@as(?usize, 0), wp.active_browser);
+    }
+    allocator.free(web.pending_url.?);
+    web.pending_url = null;
+
+    // (b) Chromium 탭 — 넘겼지만 주소를 못 받은 이동(만드는 중, 그 뒤 접속 거부 — 실측 M1).
+    try web_osr.testHold(allocator, sid);
+    web_osr.navigate(allocator, sid, "https://e.test/refused");
+    {
+        const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
+        try std.testing.expectEqual(@as(usize, 1), wp.browser_terms.len);
+        try std.testing.expectEqualStrings("https://e.test/refused", wp.browser_terms[0].url);
+    }
+    web_osr.testRunning(sid);
+    web_osr.navigate(allocator, sid, "https://e.test/refused2");
+    web_osr.testApply(allocator, .{ .error_page = .{ .browser = sid, .error_code = -102 } });
+    web_osr.testApply(allocator, .{ .nav_state = .{ .browser = sid, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    {
+        const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
+        try std.testing.expectEqual(@as(usize, 1), wp.browser_terms.len);
+        try std.testing.expectEqualStrings("https://e.test/refused2", wp.browser_terms[0].url);
+    }
+    // (c) 다운로드로 끝난 이동 — 싣지 않는다(빈 탭과 같다).
+    web_osr.navigate(allocator, sid, "https://e.test/file.zip");
+    web_osr.testApply(allocator, .{ .nav_state = .{ .browser = sid, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    web_osr.testApply(allocator, .{ .nav_state = .{ .browser = sid, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    {
+        const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
+        try std.testing.expectEqual(@as(usize, 0), wp.browser_terms.len);
+        try std.testing.expectEqual(@as(?usize, null), wp.active_browser);
+    }
+    // (d) 본 주소가 오면 그것(nav 상태가 다음 tick 에 오기 전에도 — 엔진이 안 주소).
+    web_osr.testApply(allocator, .{ .url_changed = .{ .browser = sid, .url = "https://e.test/page" } });
+    {
+        const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
+        try std.testing.expectEqual(@as(usize, 1), wp.browser_terms.len);
+        try std.testing.expectEqualStrings("https://e.test/page", wp.browser_terms[0].url);
+    }
+}
+
 // FP16f 회귀(사용자 손 테스트 제보 "파일이 유지 안 된다"): 활성 탭이 **비영속 브라우저이고 pane의 마지막**이면
 // remap 카운트가 persisted_total과 같아져 `active-term`이 한 칸 넘쳤다. 파일 Term이 섞인 pane에서는 reader의
 // validatePaneFileTerms가 그 조건을 BadLine으로 보고 **그 창을 fail-close 강등**해 열려 있던 파일 탭이 통째로

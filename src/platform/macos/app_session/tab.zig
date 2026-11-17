@@ -35,6 +35,7 @@ const VirtualLayout = AppSession.VirtualLayout;
 const group_normalize = app_session_mod.group_normalize;
 const input_math = app_session_mod.input_math;
 const term_ops = @import("term.zig");
+const web_ops = @import("web.zig");
 const find_ops = @import("find.zig");
 const git_ops = @import("git.zig");
 const workspace_ops = @import("workspace.zig");
@@ -65,7 +66,6 @@ const Pane = app_session_mod.Pane;
 const PaneTree = app_session_mod.PaneTree;
 const TabRef = app_session_mod.TabRef;
 const Term = app_session_mod.Term;
-const addr_nav_url_cap = app_session_mod.addr_nav_url_cap;
 const agentFlagUtf8 = @import("agent.zig").agentFlagUtf8;
 const agent_ops = @import("agent.zig"); // RB2: 캡처가 이어갈 에이전트를 묻는다(`resumableAgentOf`)
 const blendRgb = app_session_mod.blendRgb;
@@ -1390,16 +1390,15 @@ pub fn captureWorkspaceTabWithEditors(self: *AppSession, arena: std.mem.Allocato
                 continue;
             }
             if (term.kind == .web) {
-                // 브라우저: 관측된 현재 URL을 싣는다. URL이 없거나(아직 아무것도 안 띄운 빈 패널) 주소창
-                // navigate 상한을 넘으면(큰 data: URI — 한 줄 길이·512 필드 cap 위협) **저장하지 않는다**.
-                if (self.webNavState(term.surfaceId())) |nav| {
-                    if (nav.url.len > 0 and nav.url.len <= addr_nav_url_cap) {
-                        if (pane.active_term == term_i) active_browser = browser_terms.items.len;
-                        try browser_terms.append(arena, .{
-                            .insert_after = persisted_index,
-                            .url = try arena.dupe(u8, nav.url),
-                        });
-                    }
+                // 브라우저: 그 탭이 보이는(보이려던) 주소를 싣는다 — 본 주소, 없으면 아직 넘기지 않은 복원 주소·열리지 않은 이동의
+                // 주소(규칙은 `web_ops.persistedBrowserUrl` → L2 `workspace.browserTermUrl`). 아무것도 없거나(아직 아무것도 안 띄운 빈
+                // 패널) 주소창 navigate 상한을 넘으면(큰 data: URI — 한 줄 길이·512 필드 cap 위협) **저장하지 않는다**.
+                if (web_ops.persistedBrowserUrl(self, term)) |url| {
+                    if (pane.active_term == term_i) active_browser = browser_terms.items.len;
+                    try browser_terms.append(arena, .{
+                        .insert_after = persisted_index,
+                        .url = try arena.dupe(u8, url),
+                    });
                 }
                 // 브라우저는 persisted 시퀀스에 안 든다(인덱스 불변).
                 continue;

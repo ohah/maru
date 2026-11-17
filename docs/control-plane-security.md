@@ -42,13 +42,17 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
 - accept마다 peer uid 검증. **1b 구현**: `getpeereid(2)`(LOCAL_PEERCRED/xucred·SO_PEERCRED/ucred 이식 wrapper, uid만; pid/LOCAL_PEERPID는 1e/1g)로 peer 유효 uid를 읽어 서버 uid와 비교, 불일치 시 연결 종료. 파일 권한에만 의존하지 않는다.
 
 ### 8.3 capability 인가
+- **2026-11-16 이후의 읽는 법(§8.9 「전권」)**: 아래 browser scope 문단들이 말하는 「확인 모달·사이트마다 한 번 묻는다·pane 동의」 는 사용자
+  결정 2026-11-16 으로 걷혔다 — 신원 판정(§8.4 1g)을 지난 pane 은 탭에 닿는 순간 그 탭의 모든 browser scope 를 어느 호스트든 묻지 않고 받는다.
+  각 문단은 그 grant 가 **무엇을 보이고 무엇을 지우는지**(투영·철회·수명)의 출처로 남는다. 모달을 전제한 문장은 그 결정 전의 이력이다.
 - 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. capability는 `metadata:self`(자기 surface 열거/조회), `metadata:window`(호출 surface가 현재 속한 window 안의 surface 열거/조회), `metadata:all`(primary+quick 포함 전체 열거/조회), `bind`(`panel.bindSession`), `read-output`(`capture`/`subscribeOutput`), `write`(`send*`), `lifecycle`(`spawn`/`close`/`resize`/`focus`/`panel.open`), `browser`(페이지 조작/관찰=`browser.getCookies` 외 `browser.*`), `browser-storage`(`browser.getCookies`/`setCookie`/`deleteCookie`/`clearStorage` — 쿠키/스토리지 **읽기·쓰기·comprehensive 삭제**, §9.4 D5로 `browser`에서 분리·`allowedViaInheritedFd=false`)로 나눈다(§6 매핑의 단일 출처).
 - unix socket path와 peer-cred는 "같은 사용자"와 "같은 인스턴스 발견"만 증명한다. 특정 surface 권한은 (a) capability fd(§8.5)로 받은 nonce, 또는 (b) `metadata:self`에 한정된 self-origin 증명(§8.4)으로만 생긴다. fd가 없거나 scope/generation/surface가 맞지 않으면 `unauthorized`다.
-- **authz 실패는 surface 존재 여부와 무관하게 균일한 `unauthorized`를 존재검사 이전에 반환한다.** `surface_id`가 monotonic u64라 추측 가능하므로(§3), "존재하나 unauthorized" vs "없음/`process-exited`"의 에러가 다르면 live surface·generation 열거 oracle이 된다. `session.get`/`capture` 등 surface-scoped 메서드는 scope 판정을 존재·generation 확인보다 먼저 수행한다. **`browser.*` 의 예외 둘**: 발견용 `browser.list` 는 ungated 라(control-plane-browser.md §9.6) 거기 나오는 web 탭은 이미 알려진 것이다. 그래서 (1) 그 탭에 대한 제어 요청은 cap 이 없으면 pane 이 확인될 때 확인 모달(needs_grant)로 가고(§8.4 1g), (2) 그 탭의 엔진이 그 메서드를 지원하지 않거나 브라우저 탭이 아니면 인가 판정 **전에** `-32008 unsupported_by_engine` 으로 답한다(W9-0 — 목록의 `engine`·`controllable`·`methods` 가 이미 알려 준 것만 되풀이한다). 목록에 없는 id·터미널은 여전히 균일 unauthorized 다.
+- **authz 실패는 surface 존재 여부와 무관하게 균일한 `unauthorized`를 존재검사 이전에 반환한다.** `surface_id`가 monotonic u64라 추측 가능하므로(§3), "존재하나 unauthorized" vs "없음/`process-exited`"의 에러가 다르면 live surface·generation 열거 oracle이 된다. `session.get`/`capture` 등 surface-scoped 메서드는 scope 판정을 존재·generation 확인보다 먼저 수행한다. **`browser.*` 의 예외 둘**: 발견용 `browser.list` 는 ungated 라(control-plane-browser.md §9.6) 거기 나오는 web 탭은 이미 알려진 것이다. 그래서 (1) 그 탭에 대한 제어 요청은 cap 이 없으면 pane 이 확인될 때 전권 grant 를 받아 실행되고(§8.9 — 2026-11-16 전에는 확인 모달(needs_grant)이었다), (2) 그 탭의 엔진이 그 메서드를 지원하지 않거나 브라우저 탭이 아니면 인가 판정 **전에** `-32008 unsupported_by_engine` 으로 답한다(W9-0 — 목록의 `engine`·`controllable`·`methods` 가 이미 알려 준 것만 되풀이한다). 목록에 없는 id·터미널은 여전히 균일 unauthorized 다.
 - spawn profile의 기본 grant는 보수적으로 둔다. 일반 login shell 자식은 `$MARU_SESSION` 기반 발견과 self-origin 증명을 통과한 `metadata:self`까지만 기본으로 둔다. self-origin 증명이 구현·실측되지 않았거나 실패하면 일반 login shell CLI도 metadata를 열지 않는다. `read-output:self`는 capability fd 보존이 실측된 non-login trusted agent/control profile 또는 별도 one-shot grant UX에만 붙인다. `write`·`lifecycle`·`browser`·cross-surface 권한은 기본 거부 또는 사용자 확인이다.
 - **`sessions.list`와 `events.subscribe`는 전역 표면이라 `metadata:self`만으로 다른 surface 상태(cwd·생성/종료)가 누설되면 안 된다.** `metadata:self`는 응답을 자기 `(surface_id, generation)` 하나로 필터링하고, `events.subscribe` filter도 self-surface로 강제한다. 같은 창 전체는 현재 WindowGraph membership에 대한 `metadata:window`, quick 포함 전체는 `metadata:all`이 필요하다(filter 스키마 §13).
 - **`lsp.trust.*`(언어 서버 신뢰 조회·철회·잊기, [워크스페이스 신뢰 계획](plans/workspace-trust.md) WT4b — 2026-10-09 사용자 결정; 감사 기록 조회 `lsp.trust.log` 도 같은 관문이다 — [계획](plans/workspace-trust-audit.md) TA2)는 scope 가 없다.** 셀렉터 없이 붙은 연결(같은 uid 의 그 사용자 자신 — §8.4 「셀렉터 없음」, SSH 로 붙은 폰 포함)이면 확인 없이 열고, 셀렉터를 댄 연결은 params 검사 이전에 균일 `unauthorized` 다(「나는 이 패인 하나」라고 주장한 연결이 앱 전역 표에 닿을 근거가 없다). 근거: 같은 uid 는 신뢰 파일(`~/Library/Application Support/maru/lsp-trust`)을 직접 고칠 수 있다(이 메서드가 그 사용자에게 없던 힘을 주지 않는다). 신뢰를 **주는** 메서드는 없다(부여는 앱 안 사용자 클릭으로만, 계획 WT2; 판정자 LSPB23 이 그 자리 수를 센다). 철회는 권한을 낮추기만 한다. **잊기는 거부를 「결정 없음」으로 되돌릴 수 있다** — 그 저장소의 파일을 다시 열면 시트가 다시 뜨므로, 패인 안 에이전트가 거부를 잊힌 뒤 사용자에게 허용 클릭을 유도하는 흐름이 생긴다. 이 위험을 알고 「같은 사용자면 확인 없이」를 택했다(사용자 결정 — 대안 「잊기만 앱 안 확인」을 함께 보였다). 완화: 잊기는 곧바로 묻지 않고 「결정 없음 — 묻기」로 두며, 시트는 처음 포커스가 거부고 키보드 허용은 재확인 뒤 ⌘⏎ 뿐이다(tooling §8.2a). **셀렉터 거절은 방어 경계가 아니다** — 셀렉터는 클라이언트의 주장이라 같은 uid 는 빼고 붙으면 된다(§8.4). 「자기 패인 하나」라고 주장한 연결을 앱 전역 표에서 일관되게 떼어 두는 정리일 뿐이다. maru 패인 안의 CLI 도 이 명령에서는 셀렉터를 보내지 않는다(`control_client.Anchor.none`).
-- **`browser.upload`(W9c③)는 인가를 지나도 부를 때마다 확인 모달을 거친다.** `browser` scope(grant·cap)는 「그 탭을 다뤄도 된다」 까지이고, 사용자의 파일을
+- **`browser.upload`(W9c③) — 2026-11-16 부터 확인 모달이 없다(§8.9).** 앱이 파일을 열고(연 파일과 페이지가 받는 바이트가 같다는 사본 규칙은
+  그대로) 넣기 전 확인이 끝나면 곧 사본을 넣는다. 아래는 그 전의 계약이다: **`browser.upload` 는 인가를 지나도 부를 때마다 확인 모달을 거쳤다.** `browser` scope(grant·cap)는 「그 탭을 다뤄도 된다」 까지이고, 사용자의 파일을
   페이지로 보내는 것은 op 마다 앱이 띄우는 모달(파일마다 실제 경로·크기·엿보기, 출처만 — 목록이 다 보이지 않으면 허용이 막힌다)이 정한다 — cap 으로 붙은 연결도
   건너뛰지 못하고 결정은 기억하지 않는다. **관문은 그 모달뿐이다**: 앱(같은 uid, 샌드박스 없음)이 파일을 읽으므로 샌드박스에 갇힌 에이전트가 자기는 못 읽는 파일을
   올리자고 물을 수 있다(confused deputy — 사용자 결정 2026-10-15 로 경로 방식을 택했다; CLI 가 에이전트 권한으로 연 fd 를 넘기는 방식은 뒤로 미뤘다). 시험의
@@ -284,7 +288,15 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 - **누가 grant 를 쓰나**: grant 는 pane 단위(Model B)라, 그 pane 의 foreground 작업의 **자손 전부**가 쓴다 — 에이전트 본체만이
   아니라 그것이 띄운 도구·MCP 서버·플러그인, pane 셸이 쉬는 동안 그 셸이 띄워 둔 setsid 데몬도. 연결 하나의 출처는 연결에
   고정되고, 같은 fd 를 물려받은 프로세스는 그 조상이 foreground 인 동안 같은 출처로 요청한다.
-- **pane 동의(사용자 결정 2026-11-16)**: 에이전트 탭(`browser.open`·그 탭의 페이지가 연 탭)은 사용자의 Chromium 쿠키 통을 그대로 쓴다 —
+- **pane 안 tmux(사용자 결정 2026-11-16 「AI 가 모든 접근」 — 같은 날 구현)**: tmux 안 명령의 사슬은 tmux **서버**(launchd 아래 데몬)에서 끊겨
+  찾은 세션이 어느 pane 의 뿌리와도 맞지 않는다(실측: `Unauthorized (-32002)`, 앱 로그 `session N matches no maru pane`). 그 세션의 리더의 부모가
+  같은 uid·제어 터미널 없음·이름 `tmux`·리더보다 먼저 시작한 프로세스면 tmux 서버로 보고, 그 서버가 받은 unix 소켓의 상대 pcb 를 제 소켓으로 쥔
+  **pane 안 foreground** 클라이언트(`tmux`)의 세션을 pane 의 뿌리와 맞춘다(`control_self_origin.tmuxClientSessions` — L2 순수, macOS 공급자는
+  `proc_listallpids`·`proc_pidfdinfo(PROC_PIDFDSOCKETINFO)` 의 `soi_pcb`·`unsi_conn_pcb`; tmux 3.6b 실측). 여럿이면 클라이언트 pid 가 작은 쪽의
+  pane. 요청마다 다시 본다(클라이언트가 떠나면 곧 거절). **받아들인 한계**: 같은 tmux 서버의 다른 세션(예: ssh 로 붙은 클라이언트의 세션)과 Maru
+  클라이언트의 세션을 OS 만으로는 가를 수 없다 — 그 서버에 Maru pane 의 foreground 클라이언트가 하나라도 있으면 서버의 모든 tmux pane 이 통과한다.
+  screen·tmux 안의 tmux(두 겹)·`ssh localhost` 는 잇지 않는다. 이름 `tmux` 는 거름일 뿐 증명은 소켓 고리다.
+- **pane 동의(사용자 결정 2026-11-16 — 같은 날 걷힘, §8.9)**: 아래는 걷기 전의 계약(#4731)이다. 에이전트 탭(`browser.open`·그 탭의 페이지가 연 탭)은 사용자의 Chromium 쿠키 통을 그대로 쓴다 —
   통을 나누지 않는다(사용자 결정). 대신 pane 이 처음 탭을 열 때 확인 모달로 한 번 묻는다. 허용은 `(pane, pane, browser_agent_tabs)`
   grant 로 남아(그 scope 는 상속 fd 로 발급하지 않는다) 위 「누가 grant 를 쓰나」 의 자손 전부가 쓰고, pane 이 닫히거나 앱이 끝나면 사라진다
   (grant 저장소와 같은 메모리 모델). 거부는 `control_agent_tab_consent.PaneMemory` 가 **그 pane 이 사는 동안** 기억해 모달 없이
@@ -300,14 +312,15 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
   「앵커 없음 = metadata 전체」다. 그 폴백을 metadata 밖 scope 로 넓히면 1g 가 버린 셀렉터가 오히려 권한 확장이 된다 — 새 scope
   는 앵커가 없으면 거절해야 한다. auth.grant 로 받은 metadata cap 도 앵커가 셀렉터라 1g 뒤로는 셀렉터가 버려지면 무효가 된다(지금은
   라이브 발급이 없다).
-- **CLI 안내**: `maru browser` 가 unauthorized 를 받으면 「maru pane 의 foreground 에서, 다른 터미널·tmux·다른 작업이 터미널을 쥔
-  동안의 백그라운드가 아니라」 안내를 늘 붙인다(서버는 이유를 주지 않는다 — 클라이언트가 이미 아는 사실만).
+- **CLI 안내**: `maru browser` 가 까닭 없는 unauthorized 를 받으면 「maru pane(foreground job 과 그 자손, pane 안 tmux)에서 — 다른 터미널·screen·
+  ssh·다른 작업이 터미널을 쥔 동안의 백그라운드·maru 밖 프로그램이 아니라」 와 「maru 는 묻지 않는다」 를 붙인다(서버는 이유를 주지 않는다 —
+  클라이언트가 이미 아는 사실만).
 - **진단**: browser 요청이나 셀렉터를 댄 요청에서 pane 을 못 찾은 이유(출처 거절 사유·foreground 를 잃음·maru pane 의 세션이
   아님)와 모달 승인 뒤 재확인 실패는 앱 로그(`control` info)에 남는다. 클라이언트에게는 §8.3 균일 unauthorized 다.
 - **한계**: 최선의 노력이지 하드 경계가 아니다 — 같은 uid 는 그 pane 안에서 명령을 띄울 수 있다(rc 파일, 접근성 키 입력 등).
   pane 과 출처를 세션 번호 = 뿌리 pid 라는 숫자로만 잇는다 — pane 의 셸이 끝난 뒤 앱이 그것을 보기 전의 짧은 틈에 같은 pid 를 받은
-  세션은 가리지 못한다(터미널 장치 대조는 세션 호스트 쪽 PTY 장치 번호가 필요해 후속). pane 안에서 띄운 터미널 안의 터미널(tmux·
-  screen·`ssh localhost`·`script`·편집기 내장 터미널) 안의 명령은 그 안쪽 터미널의 세션이라 거절된다 — 도구 명령을 PTY 로 돌리는
+  세션은 가리지 못한다(터미널 장치 대조는 세션 호스트 쪽 PTY 장치 번호가 필요해 후속). pane 안에서 띄운 터미널 안의 터미널(screen·
+  `ssh localhost`·`script`·편집기 내장 터미널, 두 겹 tmux — 한 겹 tmux 는 위 「pane 안 tmux」 가 잇는다) 안의 명령은 그 안쪽 터미널의 세션이라 거절된다 — 도구 명령을 PTY 로 돌리는
   에이전트(node-pty 등)도 같다. 「다른 작업이 foreground 인 동안의 백그라운드 거절」은 협조적인 프로세스의 오귀속을 막을 뿐이다 —
   `SIGTTOU` 를 무시하고 `tcsetpgrp` 로 잠깐 foreground 를 쥐는 프로세스는 가리지 못한다. 시작 시각은 벽시계라 시계를 뒤로 맞추는
   동안 생긴 프로세스는 잘못 거절될 수 있다. 비대화형 대본의 `&`(job
@@ -357,3 +370,30 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 - `maru browser` 의 `--out`(exec·screenshot·network-request·trace, repl·`maru mcp` 포함)은 **새 파일만**, **현재 폴더·`$TMPDIR`·`/tmp` 아래만**, **숨은 이름(점으로 시작하는 조각·`~/Library`) 금지**다 — 판정은 앱에 닿기 전에 한다. 에이전트가 묻지 않고 부를 수 있는 명령(`Bash(maru browser *)`)이 셸 설정·자동 시작 자리를 쓰거나 사용자 파일을 덮지 못하게 하는 경계다. 단일 출처는 [`browser.*` 코어와 CLI §9.6 「`--out` 규칙」](control-plane-browser.md).
 - `network-request --out` 은 **임시 폴더만**이다 — 본문은 서버가 정한 바이트 그대로라 현재 폴더에 두면 `conftest.py`·`Makefile`·`CLAUDE.md` 처럼 도구가 읽는 파일이 될 수 있다(사용자 결정 2026-11-15).
 - 남는 것: exec·screenshot·trace 는 현재 폴더 안의 보이는 새 이름을 막지 않는다(exec 결과는 strict JSON, screenshot 은 PNG, trace 는 gzip — 실행 코드가 되기 어렵다). 숨은 폴더 아래(`.claude/worktrees/x`)에서는 현재 폴더에 못 쓴다(받아들인 대가).
+
+### 8.9 전권 — 신원 판정을 지난 pane 은 묻지 않는다 (사용자 결정 2026-11-16)
+
+사용자 결정(원문): 「원인부터 고치고 판단」 → 「그 권한요청 이런거 다 없애주세요 그냥 AI가 모든 접근 가능하게」 · 「모든 권한 다 줘버리는게 좋을것
+같아요」. 배경은 사용자가 `maru browser` 를 직접 돌렸다가 권한 오류(`Unauthorized (-32002)`)를 받은 것이다 — 재현(이 Mac 의 격리 앱)에서 원인은
+pane 안 **tmux** 의 거절(§8.4 「pane 안 tmux」 가 고친다)과 확인 모달들(거부·무응답이 -32002·-32004)이었다.
+
+- **계약**: 신원 판정(§8.4 1g — pane 의 foreground 작업과 그 자손, pane 안 tmux)을 지난 요청이 제어할 수 있는 web 탭을 가리키면, 디스패치 전에 그
+  (pane, 탭) 에 `browser`·`browser_storage`·`browser_network`·`browser_network_body`·`browser_network_block`·`browser_network_mock`·`browser_emulation`
+  grant 를 **어느 호스트든** 넣는다(`app_host_abi.grantFullAccess` ← 순수 계획 `control_pane_grant.fullAccessPlan`, 대상 `control_browser.fullAccessTarget`).
+  그다음 디스패치는 늘 인가된다. 이미 덮이면 표를 바꾸지 않는다(번호가 그대로 — 네트워크·콘솔의 읽는 쪽이 다시 시작하지 않는다). 설정
+  `browser.agent-network-full` 을 끈 채 사용자가 몬 탭의 좁혀진 자리는 **지금 호스트로** 다시 넣는다(예전 모달 허용과 같은 값 — 끈 설정 아래 사이트
+  경계의 뜻을 지킨다). `browser.open` 은 pane 이 확인되면 곧 연다(pane 동의 scope `browser_agent_tabs` 를 걷었다 — ABI 262).
+- **걷힌 것**: 사용자 탭 제어(Model B)·쿠키·저장소 지우기·네트워크·본문·막기·가짜·흉내의 확인 모달, 업로드의 부를 때마다 모달, pane 동의와 그
+  거부 기억·Browser Grants 의 동의·거부 줄, 시험 결정 소스(`MARU_TEST_GRANT_DECISION`·`MARU_TEST_UPLOAD_DECISION`·`-Dweb-upload-test-decision`).
+- **남는 것**: 신원 판정 자체(pane 밖·launchd 아래 데몬·다른 터미널은 균일 -32002 — 모달 없이), `--out` 규칙(§8.8 — 파일 시스템 경계), `close` 는
+  그 pane 이 연 탭만, 다른 pane 의 막기·가짜·흉내를 끄지 못함(`other_pane`), 사용자 탭 trace 는 지원하지 않음(-32008 — W9e② 사용자 결정 4),
+  사용자가 시작하지 않은 실행 파일 다운로드의 보류(브라우저 자체의 안전 — 에이전트 권한이 아니다), ◈ 에이전트 탭 표지(권한이 아니라 정보).
+  Browser Grants 메뉴는 「에이전트가 손댄 탭」 의 목록이고 철회·Revoke All 은 「지금 세운 것(막기·가짜·흉내·기록·trace·◈)을 거둔다」 — 다음 요청은
+  다시 전권을 받는다.
+- **표 상한**: 보통 grant 는 쌍 64 개 × 일곱(`control_pane_grant.max_grants`), 차면 그 요청은 `grants_full`(-32603)로 분명히 끝난다.
+- **위험(받아들인 것)**: pane 안의 모든 프로세스(에이전트·그 도구·npm 스크립트, pane 안 tmux 의 모든 세션 — 같은 서버의 ssh 세션 포함)가 사용자의
+  모든 탭에서 로그인된 사이트로 행동하고, 쿠키·인증 헤더 값·응답 본문을 읽고, 페이지를 가짜로 바꾸고, 사용자의 파일을 올릴 수 있다. 1g 는 최선의
+  노력이지 하드 경계가 아니다(§8.4 「한계」).
+- **남은 틈(이 결정 밖)**: 원격 — 다른 기계의 Maru pane 에서 ssh 로 이 기계에 붙은 에이전트는 그 클라이언트의 브라우저에 닿는 길이 없다(이 기계에는
+  붙을 앱이 없어 「no running maru instance」 — 거꾸로 가는 컨트롤 채널은 새 설계라 따로 정한다, control-plane §4a). 사용자 탭의 네트워크 기록은
+  그 pane 이 처음 닿은 뒤의 요청만 보인다(기록은 grant 가 생길 때 켜진다).

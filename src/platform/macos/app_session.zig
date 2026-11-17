@@ -67328,7 +67328,9 @@ test "P0-1: 파일 패널 링크(in-app)는 새 Chromium 탭에 주소를 싣는
     try std.testing.expectEqual(terms_before + 1, pane.terms.items.len);
 }
 
-test "P0-1: 사용자가 누른 링크는 에이전트 탭을 재사용하지 않는다 — auto 는 시스템, in-app 은 새 사람의 탭, 철회돼 사람의 탭이 되면 재사용" {
+test "P0-1: 보이는 브라우저가 에이전트 탭(◈)이어도 사용자가 누른 링크는 그 탭을 재사용한다 — auto·in-app 모두, 새 탭 없이" {
+    // 사용자 결정 2026-11-17: 에이전트 탭도 다른 보이는 탭처럼 재사용한다(에이전트에게 브라우저 전체 접근을 주는 결정과 함께 — 동의
+    // 없이 읽힌다는 걱정이 더는 해당하지 않는다). 에이전트 탭 표가 있어도 고르기는 그 표를 보지 않는다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try w6jSession(allocator);
@@ -67344,24 +67346,19 @@ test "P0-1: 사용자가 누른 링크는 에이전트 탭을 재사용하지 �
     p01_agent_tab = agent_tab;
     const left = tab_ops.activeTab(session).panes.items[0];
     try std.testing.expect(pane_ops.focusPaneByPtr(session, left));
+    const left_before = left.terms.items.len;
     var url_buf: [512]u8 = undefined;
 
-    // ① auto: 보이는 사용자 브라우저가 없다 — 시스템(에이전트 탭은 그대로).
-    try std.testing.expect(!web_ops.openTerminalWebLink(session, "https://a.co/mine"));
-    try std.testing.expect(web_osr.testLastUrl(agent_tab) == null);
+    // ① auto: 보이는 에이전트 탭이 대상이다(시스템으로 보내지 않는다).
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/agent-auto"));
+    try std.testing.expectEqualStrings("https://a.co/agent-auto", (web_osr.testLastUrl(agent_tab) orelse return error.TestUnexpectedResult));
     try std.testing.expect(session.takeExternalLinkAction(&url_buf) == null);
-    // ② in-app: 새 사람의 탭(누른 pane — 왼쪽)에 싣는다.
+    // ② in-app: 새 탭을 만들지 않고 같은 에이전트 탭을 재사용한다.
     session.loaded_config.config.input.link_open_target = .in_app;
-    const left_before = left.terms.items.len;
-    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/mine2"));
-    try std.testing.expectEqual(left_before + 1, left.terms.items.len);
-    try std.testing.expectEqualStrings("https://a.co/mine2", (left.activeTerm().pending_url orelse return error.TestUnexpectedResult));
-    try std.testing.expect(web_osr.testLastUrl(agent_tab) == null);
-    // ③ 철회로 사람의 탭이 되면(표에서 빠짐) 보이는 브라우저로 다시 친다 — 왼쪽은 터미널 탭으로 돌려 보이는 브라우저는 오른쪽 하나.
-    p01_agent_tab = 0;
-    term_ops.focusTerm(session, 0);
-    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/now-human"));
-    try std.testing.expectEqualStrings("https://a.co/now-human", (web_osr.testLastUrl(agent_tab) orelse return error.TestUnexpectedResult));
+    try std.testing.expect(web_ops.openTerminalWebLink(session, "https://a.co/agent-inapp"));
+    try std.testing.expectEqualStrings("https://a.co/agent-inapp", (web_osr.testLastUrl(agent_tab) orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(left_before, left.terms.items.len);
+    try std.testing.expect(pane_ops.activePane(session) == left); // 포커스는 그대로
 }
 
 test "P0-1: 보이는 Chromium 탭이 둘이면 활성 pane 의 탭이 먼저다 — pane 순서의 첫 탭이 아니다" {
@@ -67393,7 +67390,6 @@ test "P0-1: 엔진이 WebKit 이면(설치 없음 폴백 포함) 링크는 예�
     defer session.deinit();
     // 개발자 셸의 `MARU_WEB_OSR_DIR` 이 `enabled()` 를 켜지 않게 엔진을 **명시**한다(결정 = WebKit).
     _ = web_osr.setDecidedForTest(false);
-    session.agent_tab_known_callback = p01AgentTabKnown; // WebKit 에는 에이전트 탭이 없다 — 표가 비어 있으면 무동작
     try pane_ops.splitActivePane(session, .horizontal);
     const browser_id = try pane_ops.appendWebTermInActivePane(session, .browser);
     const right = pane_ops.activePane(session);

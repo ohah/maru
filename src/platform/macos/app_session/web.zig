@@ -2728,26 +2728,18 @@ pub fn isBrowserTerm(term: *const Term) bool {
     return term.kind == .web and term.file_entry == null and term.web_panel_kind == .browser;
 }
 
-/// 지금 **화면에 보이는** 사용자의 browser 패널(없으면 null). 각 pane의 **활성 Term만** 본다 — 숨은 Term 탭의
+/// 지금 **화면에 보이는** browser 패널(없으면 null). 각 pane의 **활성 Term만** 본다 — 숨은 Term 탭의
 /// 브라우저에 링크를 띄우면 화면이 그대로라 "아무 일도 안 일어난 것"처럼 보인다. 활성 pane의 browser를 먼저
 /// 고른다(브라우저를 보다가 옆 터미널 링크를 누르는 흐름이 가장 흔하다). 여럿이면 이 순서의 첫 번째.
-/// **에이전트 탭은 고르지 않는다**(P0-1 — #4731 pane 동의): 사용자가 누른 링크는 사용자의 탭이다. 에이전트 탭에 실으면 사용자가
-/// 고른 페이지를 그 pane 의 에이전트가 동의 없이 읽는다(에이전트는 제 탭을 묻지 않고 제어한다). 판정은 에이전트 탭 표
-/// (`agent_tab_known_callback` — 탭 줄 ◈ 와 같은 출처, 철회되면 사람의 탭)다. WebKit 에는 에이전트 탭이 없어 무동작이다.
-fn visibleUserBrowserTerm(self: *AppSession) ?*Term {
+/// 에이전트 탭(◈)도 다른 보이는 탭과 같이 고른다(사용자 결정 2026-11-17 — 보이는 탭이면 누가 열었든 링크를 띄운다).
+fn visibleBrowserTerm(self: *AppSession) ?*Term {
     const active = pane_ops.activePane(self).activeTerm();
-    if (isUserBrowserTerm(self, active)) return active;
+    if (isBrowserTerm(active)) return active;
     for (tab_ops.activeTab(self).panes.items) |pane| {
         const term = pane.activeTerm();
-        if (isUserBrowserTerm(self, term)) return term;
+        if (isBrowserTerm(term)) return term;
     }
     return null;
-}
-
-fn isUserBrowserTerm(self: *AppSession, term: *Term) bool {
-    if (!isBrowserTerm(term)) return false;
-    const known = self.agent_tab_known_callback orelse return true;
-    return !known(term.surfaceId());
 }
 
 /// 링크(P0-1)를 Chromium 길로 보낸 결과 — `webkit` 이면 호출자가 예전 WebKit 길(pending action)로, `system` 이면 시스템 브라우저로.
@@ -2823,7 +2815,7 @@ pub fn openTerminalWebLink(self: *AppSession, url: []const u8) bool {
     // **호출 계약**: `urlAt`이 비어 있지 않은 URL을 돌려준 뒤에만 불린다(Swift handleUrlClick). 그 경로가 이미
     // surface_initialized와 활성 탭 존재를 통과했으므로 여기서 다시 방어하지 않는다(프로젝트 규칙 "헛방어 금지").
     // P0-1: 대상이 Chromium 탭이면 Swift 실행(WKWebView)을 세우지 않고 여기서 sidecar 로 보낸다 — 엔진이 WebKit 이면 아래 예전 길 그대로.
-    const visible: u64 = if (visibleUserBrowserTerm(self)) |term| switch (routeLinkToOsrTab(self, term, url)) {
+    const visible: u64 = if (visibleBrowserTerm(self)) |term| switch (routeLinkToOsrTab(self, term, url)) {
         .opened => return true,
         .system => return false,
         .webkit => term.surfaceId(),

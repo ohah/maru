@@ -5676,6 +5676,6 @@ WebKit 걷어내기를 준비하는 Chromium 쪽 PR 의 첫째(사용자 결정 
 in-app 으로 새 탭을 만든 경우(터미널 `input.link-open-target = in-app`, 파일 패널 기본 `in-app`)는 **빈 Chromium 탭(about:blank)이 남았다** — 링크의 실행이
 Swift `webPanels`(WKWebView)로만 navigate 하는데 OSR 탭에는 WKWebView 가 없다. 고침: Zig 가 대상을 고른 직후 엔진을 본다(`web.zig` `routeLinkToOsrTab`·
 `openLinkInNewOsrTab`, `file_panel.zig` `queueExternalLink`) — 보이는 Chromium 탭이면 `userNavigate`(배치 전이면 `pending_url`), 새 탭이면 새 Chromium 탭의
-`pending_url`, 엔진이 멈췄으면(래치) 새 탭 없이 시스템, WebKit 이면 예전 길. 보이는 브라우저가 에이전트 탭이면 재사용하지 않는다(#4731 pane 동의 —
-사용자가 누른 링크는 사람의 탭). 계약은 [링크 감지](../link-detection.md) §링크를 어디에 여는가. 남은 틈: 새 탭의 첫 이동은 `navigate`(사용자 이동 아님 —
+`pending_url`, 엔진이 멈췄으면(래치) 새 탭 없이 시스템, WebKit 이면 예전 길. 보이는 브라우저가 에이전트 탭(◈)이어도 재사용한다(사용자 결정 2026-11-17 —
+처음 판은 #4731 동의를 이유로 건너뛰었으나, 에이전트에게 브라우저 전체 접근을 주기로 한 결정과 함께 바꿨다). 계약은 [링크 감지](../link-detection.md) §링크를 어디에 여는가. 남은 틈: 새 탭의 첫 이동은 `navigate`(사용자 이동 아님 —
 끌어 놓은 새 탭과 같다), 탭마다의 GPU 거절(D9) 탭에도 실린다, 새 탭을 첫 주소가 가기 전에 저장하면 주소를 잃는다(P0-4 의 캡처 폴백).

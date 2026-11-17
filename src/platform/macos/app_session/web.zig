@@ -583,6 +583,49 @@ pub fn tickWebOsr(self: *AppSession) void {
         };
     }
     tickOsrDialog(self);
+    // P0-3: 사람과 복원이 세운 이동을 보낸다 — 예전에는 Swift 가 tick 뒤에 부르는 take 안에서 나갔다(WebKit 을 걷어내면 그 take 가 사라진다).
+    // 맨 끝인 이유: 이 tick 에 닫힌 탭(`osrClosePageClosedTab` 등 → `dropAddrEditIfSurface`)의 대기는 이미 비워져 보내지 않는다.
+    sendOsrNavigations(self);
+}
+
+/// P0-3: Chromium 탭의 주소창 Enter·주소 띠에 놓은 링크(`addr_navigate_pending`), 새 탭·복원·에이전트 탭의 첫 주소(`pending_url`),
+/// 주소창 ←→⟳ 단추(`web_nav_action_pending`)를 sidecar 로 보낸다 — 예전 drain(`take_web_addr_navigate` → `take_web_nav_action`)과 같은 차례.
+/// WebKit 탭의 몫은 건드리지 않는다(Swift take 가 가져간다). 첫 주소는 sidecar 표에 있을 때만(배치 전이면 다음 tick) — 브라우저가 아직
+/// 만들어지기 전이면 `navigate` 가 적어 두었다가 만들어지면 보낸다.
+fn sendOsrNavigations(self: *AppSession) void {
+    if (self.addr_navigate_pending) |sid| if (isOsrSurface(sid)) {
+        self.addr_navigate_pending = null;
+        // 사용자의 몰기를 먼저 적고 이동을 보낸다(`userNavigate` — W10a: 주소창에 친 파일 주소는 사용자가 시작한 다운로드, W9d① 적대 리뷰
+        // 3 회차 W2: 설정이 꺼졌으면 좁힌 네트워크 지켜보기가 이동보다 먼저 sidecar 에 간다).
+        web_osr.userNavigate(self.allocator, sid, self.addr_navigate_url_buf[0..self.addr_navigate_url_len]);
+    };
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                const url = term.pending_url orelse continue;
+                if (!isOsrTerm(term)) continue;
+                // OSR 탭은 wire 주소 상한까지(W6e — 페이지가 연 새 탭의 긴 링크가 4 KiB 에서 버려져 빈 탭이 됐다, 적대 검증 1 차).
+                if (url.len == 0 or url.len > ws.wire.max_url_bytes) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
+                    self.allocator.free(url);
+                    term.pending_url = null;
+                    continue;
+                }
+                if (!web_osr.owns(term.surfaceId())) continue; // 아직 배치 전 — 다음 tick
+                web_osr.navigate(self.allocator, term.surfaceId(), url);
+                self.allocator.free(url);
+                term.pending_url = null;
+            }
+        }
+    }
+    if (self.web_nav_action_pending) |sid| if (isOsrSurface(sid)) {
+        self.web_nav_action_pending = null;
+        // 0=back·1=forward·2=reload(주소창 단추 — WebNavAction 과 같은 번호).
+        web_osr.navAction(self.allocator, sid, switch (self.web_nav_action_code) {
+            0 => .back,
+            1 => .forward,
+            else => .reload,
+        });
+    };
 }
 
 fn osrNoticeKey(notice: web_osr.Notice) maru.i18n.Key {
@@ -1807,7 +1850,7 @@ pub fn dropUrlAt(self: *AppSession, x_px: f64, y_px: f64, url: []const u8) AppSe
         .navigate => |t| {
             if (!pane_ops.focusPaneByPtr(self, t.pane)) return .not_applicable;
             term_ops.focusTerm(self, t.index);
-            // 주소창의 이동과 같은 길 — Chromium 탭은 sidecar 로, WebKit 탭은 Swift 로(`takeWebAddrNavigate`). 아직 부르지 못한 복원
+            // 주소창의 이동과 같은 길 — Chromium 탭은 tick 이 sidecar 로(`sendOsrNavigations`), WebKit 탭은 Swift 로(`takeWebAddrNavigate`). 아직 부르지 못한 복원
             // 주소가 있으면 버린다 — 같은 tick 에 그것이 뒤따라 가 놓은 주소를 덮었다(적대 검증).
             const term = t.pane.terms.items[t.index];
             if (term.pending_url) |u| {
@@ -3087,40 +3130,27 @@ pub fn takeWebAddrFocusPull(self: *AppSession) ?u64 {
     return v;
 }
 
+/// WebKit 탭의 주소창 이동(없으면 WebKit 복원 탭의 첫 주소)을 Swift 에 넘긴다. Chromium 탭의 것은 tick 이 보낸다(`sendOsrNavigations`, P0-3) —
+/// 여기서는 **걷지 않는다**: tick 뒤에 세워진 것을 걷어 Swift 에 넘기면 WKWebView 가 없어 잃는다. 그 대기가 남은 동안은 복원도 보지 않는다
+/// (복원의 WebKit 가지가 같은 `addr_navigate_url_buf` 에 써 다음 tick 이 보낼 주소를 덮는다 — 엔진이 켜져 있으면 WebKit 복원은 없지만 구조로 막는다).
 pub fn takeWebAddrNavigate(self: *AppSession) ?WebNavigateRequest {
     if (self.addr_navigate_pending) |sid| {
+        if (isOsrSurface(sid)) return null;
         self.addr_navigate_pending = null;
-        const url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len];
-        // OSR 탭은 Swift 에 WKWebView 가 없다 — sidecar 로 보낸다(W3b).
-        if (isOsrSurface(sid)) {
-            // 사용자의 몰기를 먼저 적고 이동을 보낸다(`userNavigate` — W10a: 주소창에 친 파일 주소는 사용자가 시작한 다운로드, W9d① 적대 리뷰
-            // 3 회차 W2: 설정이 꺼졌으면 좁힌 네트워크 지켜보기가 이동보다 먼저 sidecar 에 간다).
-            web_osr.userNavigate(self.allocator, sid, url);
-            return takeRestoredBrowserNavigate(self);
-        }
-        return .{ .surface_id = sid, .url = url };
+        return .{ .surface_id = sid, .url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len] };
     }
     return takeRestoredBrowserNavigate(self);
 }
 
-/// 복원된 브라우저 하나의 `pending_url`을 소비해 navigate 신호로 바꾼다(WP-P). URL을 세션 버퍼로 옮겨 담아
-/// 반환 슬라이스 수명을 주소창 경로와 **같게** 맞춘다(호출자가 즉시 복사한다는 계약 공유).
+/// 복원된 WebKit 브라우저 하나의 `pending_url`을 소비해 navigate 신호로 바꾼다(WP-P — Chromium 탭은 tick 이 보낸다, P0-3). URL을 세션
+/// 버퍼로 옮겨 담아 반환 슬라이스 수명을 주소창 경로와 **같게** 맞춘다(호출자가 즉시 복사한다는 계약 공유).
 pub fn takeRestoredBrowserNavigate(self: *AppSession) ?WebNavigateRequest {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 const url = term.pending_url orelse continue;
-                // OSR 탭은 wire 주소 상한까지(W6e — 페이지가 연 새 탭의 긴 링크가 4 KiB 에서 버려져 빈 탭이 됐다, 적대 검증 1 차).
-                const cap = if (isOsrTerm(term)) ws.wire.max_url_bytes else addr_nav_url_cap;
-                if (url.len == 0 or url.len > cap) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
-                    self.allocator.free(url);
-                    term.pending_url = null;
-                    continue;
-                }
-                // OSR 탭: sidecar 가 그 브라우저를 들고 있으면 넘긴다(만들어지기 전이면 만들어진 뒤 보낸다 — web_osr).
-                if (isOsrTerm(term)) {
-                    if (!web_osr.owns(term.surfaceId())) continue; // 아직 배치 전 — 다음 tick
-                    web_osr.navigate(self.allocator, term.surfaceId(), url);
+                if (isOsrTerm(term)) continue; // Chromium 탭의 첫 주소는 tick 이 보낸다(`sendOsrNavigations`, P0-3)
+                if (url.len == 0 or url.len > addr_nav_url_cap) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
                     self.allocator.free(url);
                     term.pending_url = null;
                     continue;
@@ -3533,18 +3563,11 @@ pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
 
 /// Phase 7e-3: nav 버튼(back/forward/reload) 클릭 신호를 drain(1회성). null=이번 tick 없음. 7e-3 Swift가 code에 따라
 /// BrowserControl.goBack/goForward/reload(webPanels[surface_id].webView)를 실행한다. code: 0=back·1=forward·2=reload.
+/// Chromium 탭의 단추는 tick 이 보낸다(`sendOsrNavigations`, P0-3) — 여기서는 걷지 않고 null(Swift 에 넘기면 WKWebView 가 없어 잃는다).
 pub fn takeWebNavAction(self: *AppSession) ?WebNavAction {
     if (self.web_nav_action_pending) |sid| {
+        if (isOsrSurface(sid)) return null;
         self.web_nav_action_pending = null;
-        if (isOsrSurface(sid)) {
-            // 0=back·1=forward·2=reload(주소창 버튼 — WebNavAction 과 같은 번호).
-            web_osr.navAction(self.allocator, sid, switch (self.web_nav_action_code) {
-                0 => .back,
-                1 => .forward,
-                else => .reload,
-            });
-            return null;
-        }
         return .{ .surface_id = sid, .code = self.web_nav_action_code };
     }
     return null;

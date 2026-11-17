@@ -10239,7 +10239,7 @@ test "W9d① 적대 리뷰 3 회차 재현 W2: 설정이 꺼졌을 때 사용자
     apply(gpa, .{ .url_changed = .{ .browser = 94, .url = "https://agent.test/" } }, 0);
     networkSync(&.{.{ .tab = 94, .who = 7, .birth = true, .any_host = true }});
     outbox_pending.clearRetainingCapacity();
-    userNavigate(gpa, 94, "https://bank.test/login"); // AppSession.takeWebAddrNavigate 가 부르는 길
+    userNavigate(gpa, 94, "https://bank.test/login"); // 주소창 Enter 의 길(AppSession tick 의 `sendOsrNavigations`, P0-3)
     var sent: [8]Message = undefined;
     const n = sentFrames(&sent);
     var watch_at: ?usize = null;

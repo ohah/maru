@@ -46,8 +46,10 @@ A file a page downloads is saved to the user's `~/Downloads` (a name already the
 that includes files that can run (`.dmg`, `.pkg`, `.command`, `.sh` …) when the download follows your own action
 within about 3 seconds (`click`, `navigate`, `exec` …) or happens in a tab you opened; the user's download list
 shows them. A file that can run and that a user's page starts by itself, with nobody acting, is held for the user
-(an older Maru holds every such file you start). Download only what the task needs, and never open what you
-downloaded unless the user asked for that exact file.
+(an older Maru holds every such file you start). If the user turned on asking where to save each file, current Maru
+asks the user for your downloads too (a save panel, or the download list for a hidden tab): the file appears only
+after the user picks a place, so tell the user what is waiting instead of downloading again. Download only what the
+task needs, and never open what you downloaded unless the user asked for that exact file.
 
 ## Cookies and storage
 

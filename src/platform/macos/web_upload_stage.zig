@@ -1,17 +1,18 @@
-//! 에이전트의 파일 올리기(W9c③ `browser.upload`)에서 **파일을 여는 일과 사본을 만드는 일**(L4 — POSIX). 업로드의 유일한 관문은 확인 모달이고
-//! (사용자 결정 2026-10-15 — 앱이 파일을 읽는다), 모달이 보인 파일과 페이지가 받는 바이트가 같아야 한다. 그래서(계획 공격 A3·A4·A7):
+//! 에이전트의 파일 올리기(W9c③ `browser.upload`)에서 **파일을 여는 일과 사본을 만드는 일**(L4 — POSIX). 앱이 파일을 읽는다(사용자 결정
+//! 2026-10-15). 확인 모달은 사용자 결정 2026-11-16(「AI 가 모든 접근」)으로 걷혔다 — 그래도 연 파일과 페이지가 받는 바이트가 같아야 한다
+//! (그 사이 파일을 바꿔치는 길을 막는다). 그래서(계획 공격 A3·A4·A7):
 //!
-//! - **모달 전에 연다**(`prepare`): `realpath` → `open(O_RDONLY|O_NONBLOCK|O_NOFOLLOW)` → `fstat`(정규 파일만 — 폴더·FIFO·장치·소켓은
-//!   거절, `O_NONBLOCK` 이라 FIFO 를 열다 멈추지 않는다) → `F_GETPATH`(모달이 보일 실제 경로 — 연 fd 의 것) → 앞부분 4 KiB. fd 를 쥔 채로
+//! - **먼저 연다**(`prepare`): `realpath` → `open(O_RDONLY|O_NONBLOCK|O_NOFOLLOW)` → `fstat`(정규 파일만 — 폴더·FIFO·장치·소켓은
+//!   거절, `O_NONBLOCK` 이라 FIFO 를 열다 멈추지 않는다) → `F_GETPATH`(실제 경로 — 연 fd 의 것) → 앞부분 4 KiB. fd 를 쥔 채로
 //!   둔다. realpath 뒤 마지막 이름이 링크로 바뀌면 `O_NOFOLLOW` 가 막는다(ELOOP).
-//! - **승인 뒤에 쥔 fd 에서 사본**(`stageFile`): `fclonefileat`(같은 볼륨 — 2 ms, 원본이 갈라질 때까지 공간을 쓰지 않는다), 안 되면 fd 에서
-//!   복사(다른 볼륨 — 상한 안에서만). 사본 뒤 fd 를 다시 `fstat` 해 (장치·inode·크기·mtime·ctime) 가 모달 때와 다르면 실패 — 「승인 뒤
+//! - **그 뒤에 쥔 fd 에서 사본**(`stageFile`): `fclonefileat`(같은 볼륨 — 2 ms, 원본이 갈라질 때까지 공간을 쓰지 않는다), 안 되면 fd 에서
+//!   복사(다른 볼륨 — 상한 안에서만). 사본 뒤 fd 를 다시 `fstat` 해 (장치·inode·크기·mtime·ctime) 가 열 때와 다르면 실패 — 「연 뒤
 //!   파일이 바뀌었다」. ctime 은 사용자가 되돌릴 수 없다(적대 리뷰 1 회차 — 같은 길이로 제자리에서 바꿔 쓰고 `futimens` 로 mtime 을 되돌리면
 //!   mtime 만으로는 몰랐다). **다만 공유 매핑(`mmap` MAP_SHARED)으로 쓴 것은 msync 전까지 mtime·ctime 을 움직이지 않는다**(적대 리뷰 3 회차 실측 —
-//!   복제·복사는 바뀐 바이트를 가져갔다). 그래서 내용으로도 본다: 모달 전에 앞부분을 읽는 그 읽기로 SHA-256 을 내고(`hash_cap_per_call` 까지 —
-//!   엿보기는 늘 그 안이다), 사본의 같은 앞부분을 다시 읽어 같지 않으면 `changed`. 복제는 그 순간 원본과 갈라지므로(CoW) 사본을 재면 페이지가
+//!   복제·복사는 바뀐 바이트를 가져갔다). 그래서 내용으로도 본다: 열 때 앞부분을 읽는 그 읽기로 SHA-256 을 내고(`hash_cap_per_call` 까지 —
+//!   앞부분은 늘 그 안이다), 사본의 같은 앞부분을 다시 읽어 같지 않으면 `changed`. 복제는 그 순간 원본과 갈라지므로(CoW) 사본을 재면 페이지가
 //!   읽을 바이트를 잰다. 복제는 원본의 파일 플래그(Finder 의 「잠금」 `uchg`)도 옮긴다 — 사본에서 푼다(못 풀면 0400 도, 지우기도 막혔다).
-//!   페이지는 사본만 본다: 승인 뒤 원본을 바꾸거나 링크를 바꿔도 닿지 않는다(실측 k9c — 원본 경로를 넘기면 바뀐 대상을 읽었다).
+//!   페이지는 사본만 본다: 연 뒤 원본을 바꾸거나 링크를 바꿔도 닿지 않는다(실측 k9c — 원본 경로를 넘기면 바뀐 대상을 읽었다).
 //! - **사본 자리**: `<프로필>/upload-staging/<탭>/<op>/<i>/<이름>` — 폴더 0700, 파일 0400. 탭이 닫힐 때 그 탭의 폴더를 지우고(방문 기록
 //!   뒤로가기가 그 파일을 새 문서에 되살린다 — 실측 l), 이 실행이 처음 프로필을 잡을 때 전부 지운다. 뿌리는 한 번 `realpath` 한
 //!   정규 경로다(정규가 아닌 경로는 읽기가 깨지거나 렌더러가 죽었다 — 실측 k3·k4).
@@ -23,7 +24,8 @@ const array_repeat = @import("array_repeat");
 
 const std = @import("std");
 const builtin = @import("builtin");
-const display = @import("maru").session.web_upload_display;
+/// 파일을 열 때 앞부분을 이만큼 읽어 같은 읽기로 해시한다(사본의 같은 앞부분과 견준다 — 적대 리뷰 3 회차 M1).
+pub const head_bytes = 4096;
 
 extern "c" fn fclonefileat(srcfd: c_int, dst_dirfd: c_int, dst: [*:0]const u8, flags: u32) c_int;
 extern "c" fn fchflags(fd: c_int, flags: c_uint) c_int;
@@ -69,7 +71,7 @@ pub const Prepared = struct {
     /// 상태가 바뀐 시각 — 내용·mtime 을 바꾸면 움직이고 사용자가 되돌릴 수 없다(`futimens` 도 이것을 지금으로 바꾼다).
     ctime_sec: i64,
     ctime_nsec: i64,
-    /// 앞부분(최대 `display.head_bytes`, 소유) — 엿보기.
+    /// 앞부분(최대 `head_bytes`, 소유) — 해시의 앞쪽.
     head: []u8,
     /// 앞 `hashed` 바이트의 SHA-256 — `head` 를 읽은 그 읽기에서 낸다(적대 리뷰 3 회차 M1). 사본의 같은 앞부분과 견준다.
     digest: [Sha256.digest_length]u8,
@@ -82,11 +84,7 @@ pub const Prepared = struct {
         self.* = undefined;
     }
 
-    pub fn info(self: *const Prepared) display.FileInfo {
-        return .{ .path = self.real, .size = self.size, .nlink = self.nlink, .peek = display.classify(self.head, self.size) };
-    }
-
-    /// 사본의 이름 — 실제 경로의 마지막 이름(모달이 보인 그 이름을 페이지가 받는다. 링크의 이름이 아니다 — 작성자 선택).
+    /// 사본의 이름 — 실제 경로의 마지막 이름(링크의 이름이 아니다 — 작성자 선택).
     pub fn name(self: *const Prepared) []const u8 {
         const slash = std.mem.lastIndexOfScalar(u8, self.real, '/') orelse return self.real;
         return self.real[slash + 1 ..];
@@ -173,7 +171,7 @@ pub fn prepareWith(gpa: std.mem.Allocator, path: []const u8, hash_budget: *u64) 
     // 파일(iCloud 「Mac 저장 공간 최적화」·Dropbox 온라인 전용 — dataless)은 읽는 순간 내려받아 채워지고 ctime 이 움직인다. 처음 적은 상태로는
     // 승인 뒤 사본의 비교가 늘 「changed」 라 사용자가 모달을 두 번 보았다(적대 리뷰 2 회차 LOW-C). 그래서 읽기 뒤 상태가 다르면 한 번 더 읽고
     // 두 번째 상태를 쓴다 — 그것도 다르면 계속 바뀌는 파일이니 거절(모달이 보일 것을 정할 수 없다).
-    // 내용 해시(3 회차 M1)도 같은 읽기에서 낸다 — 엿보기가 해시한 바이트의 앞부분이어야 사본의 해시가 같을 때 사본의 앞부분이 모달이 보인 그것이다.
+    // 내용 해시(3 회차 M1)도 같은 읽기에서 낸다 — 엿보기가 해시한 바이트의 앞부분이어야 사본의 해시가 같을 때 사본의 앞부분이 연 때의 그것이다.
     var attempt: u8 = 0;
     const snap: Snapshot = while (true) : (attempt += 1) {
         const before = statOf(fd) orelse return .{ .refused = .unreadable };
@@ -224,10 +222,10 @@ fn sameState(a: std.c.Stat, b: std.c.Stat) bool {
 
 const HeadHashed = struct { head: []u8, digest: [Sha256.digest_length]u8, hashed: u64 };
 
-/// 앞부분(최대 `display.head_bytes` — 엿보기, 소유)을 읽고, 같은 읽기로 앞 `max(엿보기, min(크기, budget))` 바이트의 SHA-256 을 낸다(파일이
+/// 앞부분(최대 `head_bytes`, 소유)을 읽고, 같은 읽기로 앞 `max(엿보기, min(크기, budget))` 바이트의 SHA-256 을 낸다(파일이
 /// 짧아졌으면 읽은 만큼 — 부른 쪽의 stat 비교가 다시 읽게 한다). 읽기 오류면 null.
 fn readHeadHashed(gpa: std.mem.Allocator, fd: c_int, size: u64, budget: u64) !?HeadHashed {
-    const want_head: usize = @intCast(@min(size, display.head_bytes));
+    const want_head: usize = @intCast(@min(size, head_bytes));
     const limit = @max(@as(u64, want_head), @min(size, budget));
     const buf = try gpa.alloc(u8, @intCast(@min(limit, hash_chunk_bytes)));
     defer gpa.free(buf);
@@ -556,7 +554,6 @@ test "W9c③ 열기: 링크는 실제 경로로(모달이 보이는 것), 폴더
         try testing.expectEqualStrings("a.txt", r.ok.name());
         try testing.expectEqual(@as(u64, 6), r.ok.size);
         try testing.expectEqualStrings("hello\n", r.ok.head);
-        try testing.expectEqualStrings("hello", r.ok.info().peek.text.?);
     }
     try testing.expectEqual(@as(c_int, 0), std.c.mkdir(t.join(&b1, "d").ptr, 0o700));
     try expectRefused(try prepare(testing.allocator, t.join(&b1, "d")), .is_folder);
@@ -1072,7 +1069,7 @@ test "W9c③ 적대 리뷰 5 회차 변이 PRctime: 해시 예산 밖의 바이�
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var t = try Tmp.init();
     defer t.deinit();
-    const body = array_repeat.repeat("x", (2 * display.head_bytes));
+    const body = array_repeat.repeat("x", (2 * head_bytes));
     try t.write("big.txt", body);
     var b1: [std.fs.max_path_bytes]u8 = undefined;
     const root = try ensureRoot(testing.allocator, t.path);
@@ -1080,11 +1077,11 @@ test "W9c③ 적대 리뷰 5 회차 변이 PRctime: 해시 예산 밖의 바이�
     var hash_budget: u64 = 0; // 이 호출의 예산을 앞 파일들이 다 썼다 — 엿보기(앞 4 KiB)만 해시한다
     var p = (try prepareWith(testing.allocator, t.join(&b1, "big.txt"), &hash_budget)).ok;
     defer p.deinit(testing.allocator);
-    try testing.expectEqual(@as(u64, display.head_bytes), p.hashed);
+    try testing.expectEqual(@as(u64, head_bytes), p.hashed);
     const fd = std.c.open(t.join(&b1, "big.txt").ptr, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
     try testing.expect(fd >= 0);
     defer _ = std.c.close(fd);
-    try testing.expectEqual(@as(isize, 6), std.c.pwrite(fd, "SECRET", 6, display.head_bytes + 100));
+    try testing.expectEqual(@as(isize, 6), std.c.pwrite(fd, "SECRET", 6, head_bytes + 100));
     const times = [2]std.c.timespec{ .{ .sec = p.mtime_sec, .nsec = p.mtime_nsec }, .{ .sec = p.mtime_sec, .nsec = p.mtime_nsec } };
     try testing.expectEqual(@as(c_int, 0), futimens(fd, &times));
     var budget: u64 = copy_cap_per_call;

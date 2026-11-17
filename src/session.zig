@@ -143,7 +143,6 @@ pub const web_osr_context_menu = @import("session/web_osr_context_menu.zig"); //
 pub const web_search = @import("session/web_search.zig"); // W6h①: 우클릭 메뉴 「…에서 '…' 검색」의 틀 검증·엔진 이름·주소 — L2 순수
 pub const web_osr_drag_file = @import("session/web_osr_drag_file.zig"); // W6d③: 끌어낸 이미지 파일 이름 — L2 순수
 pub const web_osr_dialog_cause = @import("session/web_osr_dialog_cause.zig"); // W9c②: JS 대화상자의 원인·에이전트가 답해도 되나 — L2 순수
-pub const web_upload_display = @import("session/web_upload_display.zig"); // W9c③: 업로드 확인 모달의 파일 줄(보이지 않는 글자는 코드로·~·표지·엿보기) — L2 순수
 pub const web_osr_network = @import("session/web_osr_network.zig"); // W9d①: Chromium 탭 네트워크 기록의 maru 쪽 보관(읽는 쪽마다 시작점·설정이 꺼지면 투영) — L2 순수
 pub const web_osr_block = @import("session/web_osr_block.zig"); // W9d③: Chromium 탭의 요청 막기 규칙·엄격 모드(주인 pane·사이트·세대·수) — L2 순수
 pub const web_osr_mock = @import("session/web_osr_mock.zig"); // W9d④: Chromium 탭의 가짜 응답 규칙·본문·엄격 모드(주인 pane·사이트·실행 사이트·세대·수) — L2 순수
@@ -361,7 +360,6 @@ test {
     @import("std").testing.refAllDecls(web_osr_mock_pump);
     @import("std").testing.refAllDecls(web_osr_emulate);
     @import("std").testing.refAllDecls(web_osr_trace);
-    @import("std").testing.refAllDecls(web_upload_display);
     @import("std").testing.refAllDecls(editor.lsp);
     @import("std").testing.refAllDecls(editor.syntax_stamp);
     @import("std").testing.refAllDecls(editor.syntax.request);

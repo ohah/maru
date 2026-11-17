@@ -73,13 +73,13 @@
 #                   옮겨 오류 페이지가 되면 처음 읽어도 앞 사이트의 줄이 없다(대조: 연 pane 은 그 줄을 봤다), 쏟고 곧 옮긴 문서의 버린 수가 옮겨
 #                   간 문서의 표지로 보이지 않는다(대조: 연 pane 은 표지를 봤다), A → B(처음 읽어 묶임) → C 의 빠른 사슬에서 C 가 A·B 출처로
 #                   300 줄씩 남겨 둘 다 버려지면 B 에 묶인 쪽에게 B 의 표지가 있다(A 의 줄은 두 문서 앞으로 숨는다 — 사슬이 1 초 창 안이었다는 증거)
-#   w9c-upload      (W9c③) 에이전트가 연 탭의 파일 입력칸에 파일을 넣는다(확인 모달은 시험 빌드의 자동 결정 — 앱을
-#                   `-Dweb-upload-test-decision=true` 로 만든다, `MARU_TEST_UPLOAD_DECISION` 이 가리키는 파일을 호출마다 바꾼다): 한 파일 —
+#   w9c-upload      (W9c③) 에이전트가 연 탭의 파일 입력칸에 파일을 넣는다(확인 모달은 없다 — 사용자 결정 2026-11-16 「AI 가 모든
+#                   접근」): 한 파일 —
 #                   페이지가 진짜 change(isTrusted)로 받아 내용을 읽어 보낸다 · 상대 경로 둘을 multiple 칸에(CLI 의 현재 폴더로 붙인다) ·
 #                   받은 뒤 change 에서 칸을 비우는 칸·칸을 새 것으로 바꿔 끼우는 칸은 성공에 kept:false(다시 올리지 말라는 안내 — 적대 리뷰 1 회차) ·
-#                   꺼진 칸·한 파일 칸에 둘·폴더 칸(webkitdirectory)은 모달 전에 거절 · 거부는 -32002 · 사본은 프로필의 upload-staging/<탭>/ 아래 0400 ·
+#                   꺼진 칸·한 파일 칸에 둘·폴더 칸(webkitdirectory)은 넣기 전에 거절 · 사본은 프로필의 upload-staging/<탭>/ 아래 0400 ·
 #                   지난 실행이 남긴 사본은 이 실행이 처음 프로필을 잡을 때 지운다(적대 리뷰 5 회차) ·
-#                   모달 동안 페이지가 옮겨 가면 「page changed」 이고 새 문서는 아무것도 받지 않는다 · change 처리기가 곧 같은 출처로 옮기는 칸은
+#                   change 처리기가 곧 같은 출처로 옮기는 칸은
 #                   성공에 navigated:true(「try again」 없음 — 적대 리뷰 2 회차) · change 처리기가 alert 를 띄우는 칸은 성공에 dialog:true(「try
 #                   again」 없음 — 적대 리뷰 3 회차), 그 alert 는 에이전트 것(cause=agent)이라 handle-dialog 로 답하면 페이지가 내용을 한 번 받는다 ·
 #                   change 처리기가 응답이 40 초 걸리는 주소로 옮기는 칸도 요청 시한 전에 성공에 navigated:true(3 회차 T1) ·
@@ -286,7 +286,6 @@ printf '<!doctype html><title>up3</title>up3' > "$root/www/up3.html"
 mkdir -p "$root/files"
 printf 'alpha\n' > "$root/files/a.txt"
 printf 'bravo\n' > "$root/files/b.txt"
-echo approve > "$root/updecision"
 # W9f: `maru mcp`·`maru browser repl` 이 움직이는 페이지.
 printf '<!doctype html><title>mcp</title><button id=mb style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?mb-&#39;+event.isTrusted">Mcp go</button><input id=mt aria-label=Query style="position:absolute;left:30px;top:100px" oninput="new Image().src=&#39;/hit?mt-&#39;+event.isTrusted+&#39;-&#39;+encodeURIComponent(this.value)"><button id=rb style="position:absolute;left:30px;top:160px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?rb2-&#39;+event.isTrusted">Repl go</button>' > "$root/www/mcp.html"
 # W9f: 에이전트가 MCP 서버를 띄우는 모양 — 새 세션(제어 터미널 없음)·파이프 입출력. 표준 출력의 줄은 모두 JSON-RPC 여야 한다.
@@ -1176,10 +1175,9 @@ echo "\$ep" > "\$out/p2-ep"; echo "\$k3" > "\$out/p2-k3"; echo "\$k2" > "\$out/p
 touch "\$out/p2-go"
 n=0; while [ ! -f "\$out/p2-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
 for t in "\$ep" "\$k3" "\$k2"; do "\$cli" browser close --surface "\$t" > /dev/null 2>&1 || true; done
-# W9c③: 업로드 — 에이전트가 연 탭(그 pane 의 grant). 결정은 파일로(호출마다 바꾼다).
+# W9c③: 업로드 — 에이전트가 연 탭. 묻지 않는다(사용자 결정 2026-11-16).
 "\$cli" browser open --url "http://127.0.0.1:$port/up.html" > "\$out/up-open" 2>&1
 up=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/up-open")
-echo approve > "$root/updecision"
 "\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/a.txt" > "\$out/up-one" 2>&1; echo "rc=\$?" >> "\$out/up-one"
 hit_seen 'up-one-1-true-a.txt%3A6%3Aalpha' && echo yes > "\$out/up-one-hit" || echo no > "\$out/up-one-hit"
 # 사본 — 프로필의 upload-staging 아래 그 탭의 폴더(파일 0400).
@@ -1192,22 +1190,13 @@ hit_seen 'up-multi-2-true-a.txt%3A6%3Aalpha%7Cb.txt%3A6%3Abravo' && echo yes > "
 hit_seen 'up-clr-1-true-a.txt%3A6%3Aalpha' && echo yes > "\$out/up-clr-hit" || echo no > "\$out/up-clr-hit"
 "\$cli" browser upload --surface "\$up" --selector '#rr' "$root/files/b.txt" > "\$out/up-rr" 2>&1; echo "rc=\$?" >> "\$out/up-rr"
 hit_seen 'up-rr-1-true-b.txt%3A6%3Abravo' && echo yes > "\$out/up-rr-hit" || echo no > "\$out/up-rr-hit"
-# 모달 전 거절 — 꺼진 칸, 한 파일 칸에 둘.
+# 넣기 전 거절 — 꺼진 칸, 한 파일 칸에 둘.
 "\$cli" browser upload --surface "\$up" --selector '#dis' "$root/files/a.txt" > "\$out/up-dis" 2>&1; echo "rc=\$?" >> "\$out/up-dis"
 "\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/a.txt" "$root/files/b.txt" > "\$out/up-single" 2>&1; echo "rc=\$?" >> "\$out/up-single"
-# 폴더 칸(webkitdirectory) — Chromium 은 그 칸에 파일을 조용히 넣지 않았다(실측 i): 모달 전에 그 이유로 거절(그 검사는 페이지의 JS 라 단위 시험이 못 본다 — 5 회차 변이 JSdir 를 덮는 단계가 없었다).
+# 폴더 칸(webkitdirectory) — Chromium 은 그 칸에 파일을 조용히 넣지 않았다(실측 i): 넣기 전에 그 이유로 거절(그 검사는 페이지의 JS 라 단위 시험이 못 본다 — 5 회차 변이 JSdir 를 덮는 단계가 없었다).
 "\$cli" browser upload --surface "\$up" --selector '#dir' "$root/files/a.txt" > "\$out/up-dir" 2>&1; echo "rc=\$?" >> "\$out/up-dir"
-# 거부.
-echo deny > "$root/updecision"
-"\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/b.txt" > "\$out/up-deny" 2>&1; echo "rc=\$?" >> "\$out/up-deny"
-# 모달 동안 페이지가 다음 문서로 옮겨 간다(1.2 초 뒤) — 승인(3 초 뒤) 뒤 다시 찾으면 다른 문서: 넣지 않는다.
-echo approve-after-ms:3000 > "$root/updecision"
-"\$cli" browser click --surface "\$up" --selector '#later' > "\$out/up-later" 2>&1
-"\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/b.txt" > "\$out/up-moved" 2>&1; echo "rc=\$?" >> "\$out/up-moved"
-sleep 1
-grep -c 'GET /hit?up2-' "$root/http.log" > "\$out/up2-hits" || true
 # 적대 리뷰 3 회차: 넣자 change 처리기가 alert 를 띄운다(탭은 지금 up2) — 넣기의 답은 대화상자가 답해질 때까지 붙잡힌다. 받았다는 성공(dialog:true)이어야
-# 한다(실패면 에이전트가 답한 뒤 다시 올려 모달이 또 뜨고 두 번 올라간다). 그 alert 는 에이전트 것이다(넣기 바로 앞에 에이전트 시각을 적었다) — 답하면
+# 한다(실패면 에이전트가 답한 뒤 다시 올려 두 번 올라간다). 그 alert 는 에이전트 것이다(넣기 바로 앞에 에이전트 시각을 적었다) — 답하면
 # 처리기가 이어 내용을 읽어 보낸다(FileReader 는 alert 뒤에 돈다). 한 번만.
 "\$cli" browser upload --surface "\$up" --selector '#dlg' "$root/files/a.txt" > "\$out/up-dlg" 2>&1; echo "rc=\$?" >> "\$out/up-dlg"
 "\$cli" browser dialog --surface "\$up" > "\$out/up-dlg-list" 2>&1; echo "rc=\$?" >> "\$out/up-dlg-list"
@@ -1216,7 +1205,7 @@ hit_seen 'up2-dlg-1-true-a.txt%3A6%3Aalpha' && echo yes > "\$out/up-dlg-hit" || 
 sleep 0.5
 grep -c 'GET /hit?up2-dlg-' "$root/http.log" > "\$out/up-dlg-hits" || true
 # 적대 리뷰 2 회차: 넣자 change 처리기가 같은 출처로 옮겨 간다 — 넣은 뒤 읽기는 문서가 사라져 못 한다. 받았다는 성공(navigated:true)이어야 한다
-# (실패·「then try again」 이면 에이전트가 다시 불러 모달이 또 뜨고 두 번 올라간다). 이 호출 하나뿐이다 — 옮겨 간 문서의 요청 수로 두 번 넣지 않았음을 본다.
+# (실패·「then try again」 이면 에이전트가 다시 불러 두 번 올라간다). 이 호출 하나뿐이다 — 옮겨 간 문서의 요청 수로 두 번 넣지 않았음을 본다.
 "\$cli" browser upload --surface "\$up" --selector '#nav' "$root/files/a.txt" > "\$out/up-nav" 2>&1; echo "rc=\$?" >> "\$out/up-nav"
 sleep 1
 grep -c 'GET /up3.html?nav-1-true-a.txt%3A6' "$root/http.log" > "\$out/up-nav-loads" || true
@@ -1253,7 +1242,6 @@ b1=\$(date +%s)
 echo "\$((b1 - b0))" > "\$out/up-busy2-secs"
 sleep 14
 "\$cli" browser close --surface "\$upb2" > /dev/null 2>&1 || true
-echo approve > "$root/updecision"
 "\$cli" browser close --surface "\$up" > "\$out/up-close" 2>&1
 sleep 0.5
 find "\$HOME/Library/Application Support/maru/web" -path "*upload-staging/\$up" > "\$out/up-after-close" 2>&1
@@ -1482,7 +1470,6 @@ printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-a
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
     MARU_SMOKE_OUT="$out" MARU_SMOKE_HOME="$root/home" MARU_WEB_OSR_TEST_INPUT="$root/hide.txt" \
-    MARU_TEST_UPLOAD_DECISION="$root/updecision" \
     "$app" > "$root/app.log" 2>&1 &
 app_pid=$!
 i=0
@@ -1733,7 +1720,7 @@ grep -q '^\[maru\] [0-9]* console messages from pages or origins this tab had ju
 echo "PASS w9c-console-first-reader: after a failed navigation to an error page a pane that never read the tab sees none of the previous site's lines (control: the opener saw the line), the dropped count of a page that flooded and moved on is not a marker of the next page for it (control: the opener saw the marker), and a reader latched on B in a fast A → B → C chain sees B's own old-line dropped marker (chain $(cat "$out/cn-k2-ms") ms)"
 echo "PASS w9c-console: levels (info as log), a click's line is in the next read, lines are kept across navigation after the first read, --clear empties, a 3000-line flood keeps $flood_lines lines and counts the other $flood_dropped in a dropped marker, an uncaught error carries source:line, console answers during an alert, on a user's tab the first read after A, B with three cross-origin iframes shows none of A's lines, nor does a read after a fast move on to C (control: the old page's unload line did arrive), on a tab the agent opened the first read keeps the error of a page that moved to another site, and 300 lines a page logged while leaving keep $uf_lines lines with a previous-page dropped marker"
 # W9c③: 업로드.
-up_hint="(the app must be built with -Dweb-upload-test-decision=true so the upload dialog is answered automatically)"
+up_hint="(no upload dialog — user decision 2026-11-16)"
 grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-one" && grep -q '^rc=0$' "$out/up-one" && [ "$(cat "$out/up-one-hit")" = yes ] \
     || fail "upload of one file did not reach the page as a trusted change with its content ($(tr '\n' ' ' < "$out/up-one") · $(grep 'GET /hit?up' "$root/http.log" | tr '\n' ' ')) $up_hint"
 grep -q '^-r--------[@+]* .*/a\.txt$' "$out/up-stage" || fail "the staged copy was not under the profile's upload-staging/<tab> with mode 0400 ($(tr '\n' ' ' < "$out/up-stage"))"
@@ -1744,12 +1731,8 @@ for w in clr rr; do
 done
 grep -q '^rc=1$' "$out/up-dis" && grep -q 'disabled' "$out/up-dis" || fail "a disabled file input was not refused ($(tr '\n' ' ' < "$out/up-dis"))"
 grep -q '^rc=1$' "$out/up-single" && grep -q 'takes one file' "$out/up-single" || fail "two files into a single-file input were not refused ($(tr '\n' ' ' < "$out/up-single"))"
-grep -q '^rc=1$' "$out/up-dir" && grep -q 'takes a folder' "$out/up-dir" || fail "a folder (webkitdirectory) file input was not refused before the dialog ($(tr '\n' ' ' < "$out/up-dir"))"
+grep -q '^rc=1$' "$out/up-dir" && grep -q 'takes a folder' "$out/up-dir" || fail "a folder (webkitdirectory) file input was not refused before inserting ($(tr '\n' ' ' < "$out/up-dir"))"
 [ ! -e "$up_stale" ] || fail "an upload copy left by an earlier run was not wiped when this run first held the profile ($up_stale)"
-grep -q '^rc=1$' "$out/up-deny" && grep -q 'declined.*(-32002)' "$out/up-deny" || fail "a declined upload did not fail with -32002 ($(tr '\n' ' ' < "$out/up-deny"))"
-! grep -q 'GET /hit?up-one-1-true-b.txt' "$root/http.log" || fail "a declined or moved upload still reached the page ($(grep 'GET /hit?up' "$root/http.log" | tr '\n' ' '))"
-grep -q '^rc=1$' "$out/up-moved" && grep -q 'page changed' "$out/up-moved" || fail "an upload whose page moved during the dialog did not fail with page changed ($(tr '\n' ' ' < "$out/up-moved"))"
-[ "$(cat "$out/up2-hits")" = 0 ] || fail "the page the tab moved to during the dialog received files ($(grep 'GET /hit?up2' "$root/http.log" | tr '\n' ' '))"
 grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-nav" && grep -q '^rc=0$' "$out/up-nav" && grep -q 'navigated: true' "$out/up-nav" && ! grep -q 'try again' "$out/up-nav" \
     && [ "$(cat "$out/up-nav-loads")" = 1 ] \
     || fail "an input whose change handler navigated right away was not reported as received with navigated:true, or the agent was told to try again ($(tr '\n' ' ' < "$out/up-nav") · loads $(cat "$out/up-nav-loads") · $(grep 'GET /up3' "$root/http.log" | tr '\n' ' '))"
@@ -1771,7 +1754,7 @@ grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-busy2" && grep -q '^rc=
     || fail "an upload whose verify answered ok after 7 s of page work, while 12 more seconds of page work held the release, was not answered at once as kept ($(tr '\n' ' ' < "$out/up-busy2") · $(cat "$out/up-busy2-secs")s)"
 echo "PASS w9c-upload-busy: a verify held by 15 s of page work ends at the 10 s limit as navigated:true ($(cat "$out/up-busy-secs")s), and a verify that answers ok while the page then stays busy is answered at once as kept, not held by the release ($(cat "$out/up-busy2-secs")s)"
 [ ! -s "$out/up-after-close" ] || fail "closing the tab did not remove its upload-staging folder ($(tr '\n' ' ' < "$out/up-after-close"))"
-echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input, two files into a single-file input and a folder (webkitdirectory) input are refused before the dialog, a copy left by an earlier run is wiped when the profile is first held, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), an input whose change handler shows an alert is a success with dialog:true (no try again) and the agent answers that alert (cause agent) so the page reads the file once, an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), and so is one whose handler navigates to a server that answers after 40 s (answered in $(cat "$out/up-slow-secs")s, before the request deadline), closing the tab removes its copies"
+echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input, two files into a single-file input and a folder (webkitdirectory) input are refused before inserting, a copy left by an earlier run is wiped when the profile is first held, no dialog is shown (user decision 2026-11-16), an input whose change handler shows an alert is a success with dialog:true (no try again) and the agent answers that alert (cause agent) so the page reads the file once, an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), and so is one whose handler navigates to a server that answers after 40 s (answered in $(cat "$out/up-slow-secs")s, before the request deadline), closing the tab removes its copies"
 grep -q '^rc=0$' "$out/nw-agent" && grep -q ' xhr http://127.0.0.1:[0-9]*/netapi.json?a' "$out/nw-agent" && grep -q 'http://127.0.0.1:[0-9]*/setck' "$out/nw-agent" \
     && grep -q 'netf-api.json.*\[cross-site iframe\]' "$out/nw-agent" \
     || fail "the agent's tab did not record its requests from birth with the cross-site iframe mark ($(tr '\n' ' ' < "$out/nw-agent"))"

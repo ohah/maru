@@ -58,6 +58,7 @@ const web_panel_layout = app_session_mod.web_panel_layout;
 const workspace_ops = @import("workspace.zig");
 const sidebar_ops = @import("sidebar.zig");
 const settings_ops = @import("settings.zig");
+const find_ops = @import("find.zig");
 const Model = app_session_mod.Model;
 const Pane = app_session_mod.Pane;
 const PaneTree = app_session_mod.PaneTree;
@@ -3371,7 +3372,6 @@ fn submitOsrFind(self: *AppSession, sid: u64, q: []const u8, forward: bool) void
             self.web_find_osr_surface = sid;
             self.web_find_osr_request = request;
             self.web_find_osr_seen = 0; // 새 번호 — 그 탭의 답 세대는 이어 오르므로 처음부터 받는다
-            self.web_find_osr_closed = !self.chrome_host.find.open; // 닫힌 오버레이의 ⌘G
         },
         .refused => {
             // 보낼 수 없는 글(제어 문자 등) — 다시 해도 같으니 「보냈다」로 치고 수는 비운다. 칠해 둔 앞 찾기도 지운다.
@@ -3401,26 +3401,34 @@ fn stopOsrFindKeeping(self: *AppSession, keep_selection: bool) void {
     if (self.web_find_last_surface == self.web_find_osr_surface) self.web_find_last_surface = 0;
     self.web_find_osr_surface = 0;
     self.web_find_osr_request = 0;
-    self.web_find_osr_closed = false;
-}
-
-/// P0-2: 닫힌 오버레이에서 ⌘G 가 낸 찾기의 마지막 답이 오면 칠한 것을 거두고 그 일치만 선택으로 남긴다. 거두지 않으면 노란 칠이 찾기 상자
-/// 없이 다음 ⌘F 까지 남는다(실앱에서 본 것 — WebKit 탭의 ⌘G 는 일치를 잠깐 표시하고 선택만 남는다). 선택이 남으므로 다음 ⌘G 는 그 뒤에서
-/// 다시 찾는다. 답이 오기 전에 오버레이를 열면 열림 가장자리가 먼저 멈춘다(`reconcileOsrFind`).
-pub fn settleClosedOsrFind(self: *AppSession) void {
-    if (!self.web_find_osr_closed or self.chrome_host.find.open) return;
-    const answer = web_osr.findAnswer(self.web_find_osr_surface) orelse return;
-    if (answer.request != self.web_find_osr_request or !answer.final) return;
-    stopOsrFindKeeping(self, true);
 }
 
 /// P0-2: 오버레이가 열리거나 닫힐 때(가장자리) Chromium 찾기를 멈춘다 — 닫는 길(Esc·⌘F 다시·배타 오버레이·diff 찾기 정리 …)마다 넣으면 하나를
-/// 빠뜨리므로 tick 이 값의 바뀜으로 본다. 열림에서도 멈춘다: 닫힌 채 ⌘G 로 칠한 하이라이트가 새 빈 찾기 밑에 남지 않게.
+/// 빠뜨리므로 tick 이 값의 바뀜으로 본다. **닫힘은 칠만 지우고 지금 일치를 선택으로 남긴다**(P0-2 후속 — Chrome 의 Esc 와 같다): 그래야 닫힌 채 누른
+/// ⌘G 가 상자를 다시 열며 그 **다음** 일치로 이어진다(`reopenOsrFind` — 선택을 지우면 처음부터 찾았다, 실앱 실측). 선택은 그 탭이 키 포커스를 가질 때만
+/// 남는다(판정자 `find-keep`) — 못 남기면 다음 ⌘G 가 처음부터일 뿐이다. 열림(⌘F 새 찾기)에서는 남은 선택까지 지운다.
 pub fn reconcileOsrFind(self: *AppSession) void {
     const open = self.chrome_host.find.open;
     if (open == self.web_find_open_seen) return;
     self.web_find_open_seen = open;
-    stopOsrFind(self);
+    stopOsrFindKeeping(self, !open);
+}
+
+/// P0-2 후속(사용자 결정 2026-11-17 「Chrome 처럼 상자 다시 열기」): Chromium 탭에서 찾기 상자가 닫힌 채 ⌘G·⇧⌘G 를 누르면 상자를 **마지막 검색어로** 다시 열고
+/// 다음·이전 일치로 한 걸음 — 답이 오면 `cur/total` 이 선다. 상자가 닫힐 때 지금 일치를 선택으로 남겼으므로(`reconcileOsrFind`) 그 뒤에서 이어진다.
+/// 참이면 처리했다. 거짓(상자가 열렸다·활성 Term 이 Chromium 탭이 아니다 — WebKit 탭·파일 Term·터미널·편집기·검색 이력이 없다)이면 부르는 쪽이 예전 길로 간다
+/// — WebKit 탭과 파일 패널은 닫힌 채 찾고 선택만 남긴다(지금 그대로).
+pub fn reopenOsrFind(self: *AppSession, backwards: bool) bool {
+    if (self.chrome_host.find.open) return false;
+    if (!isOsrTerm(pane_ops.activePane(self).activeTerm())) return false;
+    if (self.chrome_host.find.input.query.items.len == 0) return false;
+    find_ops.reopenFindKeepingQuery(self);
+    // 이 열림은 가장자리로 보지 않는다 — 보면 다음 tick 이 방금 낸 찾기를 멈춘다(열림의 멈춤은 ⌘F 의 새 빈 찾기를 위한 것이다).
+    self.web_find_open_seen = true;
+    self.chrome_host.find.nav_forward = !backwards;
+    submitWebFind(self, backwards);
+    self.metal_dirty = true; // 상자를 그린다
+    return true;
 }
 
 /// P0-2: tick 의 「이미 이 탭에 이 검색어를 보냈나」 중 엔진 몫 — WebKit 탭은 늘 참(예전 판정 그대로). Chromium 탭은 이 창의 찾기가 그 탭에

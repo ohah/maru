@@ -255,10 +255,8 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
   프로필 사용 중·버전 불일치) 그 탭에 보내지 않고 새 탭도 만들지 않은 채 시스템 브라우저로 연다 — 위 「load가 거부되면
   시스템」 규칙과 같다. 엔진이 WebKit 이면(설치 없음 폴백 포함) 예전 길 그대로다. 파일 패널 외부 링크(`queueExternalLink`)도
   같은 helper 를 쓴다.
-- **에이전트 탭은 재사용하지 않는다**(P0-1 — [control-plane-security.md](control-plane-security.md) §8.4 pane 동의). 사용자가 누른
-  링크는 사용자의 탭이다 — 에이전트 탭(그 pane 의 에이전트가 묻지 않고 제어한다)에 실으면 사용자가 고른 페이지를 에이전트가
-  동의 없이 읽는다. 보이는 브라우저를 고를 때 에이전트 탭 표(`agent_tab_known_callback` — 탭 줄 ◈ 와 같은 출처, 철회되면
-  사람의 탭)에 있는 탭은 건너뛴다. 새로 연 탭은 사람의 탭이다. WebKit 에는 에이전트 탭이 없어 무동작이다.
+- **에이전트 탭(◈)도 재사용한다**(사용자 결정 2026-11-17). 보이는 브라우저가 에이전트가 연 탭이어도 다른 보이는 탭과 같이
+  링크를 그 탭에 띄운다 — 「보이는 탭에 띄운다」 는 규칙이 누가 그 탭을 열었는지 가리지 않는다. 새로 연 탭은 사람의 탭이다.
 - **연타 보호**: drain 전 두 번째 요청은 거부하고 시스템 브라우저로 보낸다. pending URL을 덮어쓰면 앞 링크를 잃거나
   (in-app에서) 탭만 늘고 목적지가 바뀐 상태가 된다. Chromium 탭으로 곧바로 보내는 길에는 그 슬롯이 없어 연타는 같은 탭을 두 번
   누른 것과 같다(마지막 링크가 이긴다).
@@ -375,7 +373,7 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
   `MaruAppHost.swift`(`handleUrlClick` — 지원 파일 형식은 file Term, 미지원 파일·일반 URL은 시스템 경로). ABI 경계는
   [macOS 앱 호스트 경계](macos-app-host-boundary.md).
 - 열기 대상 라우팅: `src/platform/macos/app_session.zig`(`openTerminalWebLink` — 정책 단일 출처,
-  `visibleUserBrowserTerm`·`queueExternalLinkAction`[파일 패널과 공유하는 실행 경로],
+  `visibleBrowserTerm`·`queueExternalLinkAction`[파일 패널과 공유하는 실행 경로],
   Chromium 탭 갈래 `routeLinkToOsrTab`·`openLinkInNewOsrTab` — `app_session/web.zig`),
   `app_host_abi.{zig,h}`(`open_terminal_web_link`·`take_external_link_action`, ABI v147),
   `MaruAppHost.swift`(`handleUrlClick`가 0이면 `NSWorkspace.open` / tick drain이 `BrowserControl.navigate`).

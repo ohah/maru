@@ -7921,7 +7921,6 @@ fn answerNetworkMock(async_id: u64, op: control_browser.BrowserOp, g: control_br
         .pane = g.pane,
         .any_host = now.any_host,
         .grant_host = now.host.slice(),
-        .birth = now.birth,
         .action = action,
         .pattern = a.pattern,
         .types = a.types,
@@ -8263,7 +8262,7 @@ fn writeDialogList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const
 const dialog_none_reason = "no dialog is showing in this tab — a dialog in a tab it opened, or that opened it, is answered with its token (see maru browser dialog)";
 /// 번호가 없거나 grant 가 없는 탭의 번호 — 둘을 가르지 않는다(다른 탭의 대화상자를 떠보지 못하게).
 const dialog_unknown_reason = "no such dialog — it was answered already, or it is not in a tab this caller controls (see maru browser dialog)";
-const dialog_file_reason = "a file chooser can only be dismissed here (--dismiss) — to put files in a file input, dismiss it and use browser upload (it asks the user each time)";
+const dialog_file_reason = "a file chooser can only be dismissed here (--dismiss) — to put files in a file input, dismiss it and use browser upload (it checks and copies the files)";
 
 // ── W9b①: Chromium 탭의 op 실행 — DevTools 호출 차례 ──────────────────────────────────────────────────────────────
 // 한 op = `web_cdp_ops.Op` 하나(호출 여러 번). 호출마다 `web_osr.devtoolsCall` 로 보내고, 답(`pump` 끝에서 온다)을 차례에
@@ -8802,6 +8801,7 @@ fn startAgentClose(refs: []const ControlSessionRef, async_id: u64, op: control_b
         .closed, .not_found => completeAgentClose(async_id, true, null),
         .page_asks => completeAgentClose(async_id, false, agentClosePageAsks(op.surface_id)),
         .not_browser => completeTabStatus(async_id, .failed, "this is not a browser tab"),
+        .busy => completeTabStatus(async_id, .failed, "a close confirmation or a tab drag is in progress in that window — try again in a moment"),
         .only_tab => completeTabStatus(async_id, .failed, "this is the only tab in its window — closing it would close the window, so it is left open"),
         .asking => tab_runs.append(allocator, .{ .async_id = async_id, .kind = .close, .tab = op.surface_id, .pane = pane, .deadline_ms = cdpNowMs() + agent_tab_close_wait_ms }) catch completeAgentClose(async_id, false, "out of memory"),
     }
@@ -13678,7 +13678,7 @@ test "다운로드 보류(2026-11-17): 세션을 만들면 다운로드 목록�
 }
 
 // 사용자 결정 2026-11-16: 탭 줄의 라벨 함수(`diffAwareLabel` — 사용자가 보는 제목의 단일 자리)가 에이전트 탭에만 ◈ 를 붙이고, 그 출처는 에이전트
-// 탭 표다 — 사람의 탭·철회한 탭(사람의 탭이 됐다)·pane 이 닫힌 탭에는 없다. 제품이 거는 콜백(`onAgentTabKnown`)을 그대로 건다.
+// 탭 표다 — 사람의 탭·pane 이 닫힌 탭에는 없고, Browser Grants 철회로는 남는다(2026-11-17 B). 제품이 거는 콜백(`onAgentTabKnown`)을 그대로 건다.
 test "에이전트 탭 표지: 탭 줄 라벨과 사이드바 행이 에이전트 탭에만 ◈ 를 붙인다 — 사람의 탭·pane 이 닫힌 탭에는 없다, Browser Grants 철회로는 남는다(2026-11-17 B)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();

@@ -272,7 +272,9 @@ pub const Tab = struct {
                 // 잃자 처음 pane 의 엄격이 사라졌다)의 뜻을 이 꼴로 지킨다. 주인의 grant 가 사라지면 `sync` 가 거둔다.
                 if (on) {
                     const site = try siteOf(call.site, fail, "the tab is not showing an http(s) page — navigate first (strict mode is bound to the site it was turned on on)");
-                    if (!self.strict_on or !self.strict_site.eql(&site)) {
+                    // 지금 엄격이 그 사이트를 이미 덮으면(같은 호스트·하위 도메인 — sidecar 의 `hostCovers` 와 같은 셈) 바뀌지 않는다: 주인·사이트 그대로
+                    // (2026-11-17 A2 적대 검증 R-B1 — `www.` 에서 다시 켠 다른 pane 이 주인이 되고 사이트를 좁혀, 그 pane 의 철회가 처음 pane 의 엄격을 지웠다).
+                    if (!self.strict_on or !policy.hostCovers(self.strict_site.slice(), site.slice())) {
                         // 다른 사이트로 옮긴다 — 옛 사이트의 리다이렉트 수·경고는 그 사이트의 것이다(3 차 검증 N-B3-b: 끄지 않고 옮기면 남았다).
                         strict_reset = self.strict_on;
                         self.strict_on = true;
@@ -882,6 +884,21 @@ test "W9d③ v20b R16a DEF-3 → 2026-11-17 A2: 엄격은 누구든 끄고 옮�
     try testing.expect(t.strict_on and t.strict_owner == 5);
     try testing.expect(t.sync(&.{.{ .pane = 6, .any_host = true }}, &.{6}));
     try testing.expect(!t.strict_on);
+}
+
+test "2026-11-17 A2 적대 검증 R-B1: 지금 엄격이 덮는 하위 도메인에서 다른 pane 이 다시 켜면 바뀌지 않는다 — 주인·사이트 그대로, 그 pane 의 철회가 지우지 않는다; 덮지 않는 사이트로는 옮긴다" {
+    var t: Tab = .{};
+    defer t.deinit(testing.allocator);
+    var fail: Failure = undefined;
+    _ = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = true, .site = "a.test" }), &fail);
+    const g0 = t.gen;
+    const sub = try t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .site = "www.a.test", .now_ms = 1 }), &fail);
+    try testing.expect(!sub.changed and t.strict_owner == 5 and t.gen == g0);
+    try testing.expectEqualStrings("a.test", t.strict_site.slice());
+    try testing.expect(!t.sync(&.{.{ .pane = 5, .any_host = true }}, &.{5})); // pane 6 의 철회 — 그대로
+    try testing.expect(t.strict_on);
+    const moved = try t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .site = "b.test", .now_ms = 2 }), &fail);
+    try testing.expect(moved.changed and t.strict_owner == 6);
 }
 
 test "W9d③ v20b R16b → 2026-11-17 A2: remove 에 있는 번호와 없는 번호를 섞으면 아무것도 지우지 않는다(원자성), 패턴 지우기는 사이트·종류·주인이 달라도 모두" {

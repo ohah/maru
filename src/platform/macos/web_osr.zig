@@ -3820,13 +3820,11 @@ fn pumpMockBodies(gpa: std.mem.Allocator) void {
 }
 
 /// W9d④: `browser.networkMock` 한 번(인자는 L2 가 정규형으로 풀고 검사했다). `grant_host` 는 그 pane 의 mock grant 호스트(사용자 탭 — 규칙의
-/// 사이트·실행 사이트), `any_host` 면 지금 페이지의 호스트가 사이트다(에이전트 탭 — 실행 사이트는 묻지 않는다). `birth` — 그 grant 가 탭과 함께
-/// 생겼다(에이전트 탭 — 사람의 누름 예외를 걸지 않는다, UD2).
+/// 사이트·실행 사이트), `any_host` 면 지금 페이지의 호스트가 사이트다(에이전트 탭 — 실행 사이트는 묻지 않는다).
 pub const MockRequest = struct {
     pane: u64,
     any_host: bool,
     grant_host: []const u8 = "",
-    birth: bool = false,
     action: mock_mod.Action,
     pattern: []const u8 = "",
     types: u32 = 0,
@@ -4958,7 +4956,8 @@ pub const DialogAccess = struct {
 pub const AgentReplyError = error{
     /// 답할 대화상자가 없다 — 번호를 줬으면 그 번호가 없거나 grant 가 없는 탭의 것이다(둘을 가르지 않는다).
     NoDialog,
-    /// 파일 선택은 닫기만 — 고르기는 `browser.upload`(부를 때마다 확인 모달·사본)의 길이다. 이 답에서 파일을 주면 그 관문을 비켜 간다.
+    /// 파일 선택은 닫기만 — 파일을 넣는 길은 `browser.upload`(정규 파일만·사본·크기 상한·승인 뒤 foreground 다시 보기)다. 이 답에서 파일을 주면 그
+    /// 검사를 비켜 간다.
     FileChooser,
 };
 
@@ -12443,11 +12442,11 @@ test "W9d④: 보내기 차례 — browser_created 면 net_watch → net_record 
     const body = try gpa.alloc(u8, 40 * 1024);
     defer gpa.free(body);
     @memset(body, 'b');
-    switch (try networkMock(gpa, 191, .{ .pane = 5, .any_host = true, .birth = true, .action = .add, .pattern = "https://agent.test/api/*", .types = 1 << 13, .response = .{ .content_type = "application/json", .body = body } })) {
+    switch (try networkMock(gpa, 191, .{ .pane = 5, .any_host = true, .action = .add, .pattern = "https://agent.test/api/*", .types = 1 << 13, .response = .{ .content_type = "application/json", .body = body } })) {
         .ok => |json| gpa.free(json),
         .fail => return error.TestUnexpectedResult,
     }
-    switch (try networkMock(gpa, 191, .{ .pane = 5, .any_host = true, .birth = true, .action = .add, .pattern = "https://agent.test/empty", .types = 1 << 13 })) {
+    switch (try networkMock(gpa, 191, .{ .pane = 5, .any_host = true, .action = .add, .pattern = "https://agent.test/empty", .types = 1 << 13 })) {
         .ok => |json| gpa.free(json),
         .fail => return error.TestUnexpectedResult,
     }
@@ -12561,7 +12560,7 @@ test "W9d④ 변이: Grants 줄의 수·엄격은 그 pane 의 것만, 바꾼 �
     networkMockSync(&mocks, &browsers);
     const add = struct {
         fn f(pane: u64, pattern: []const u8, body: []const u8) !void {
-            switch (try networkMock(std.testing.allocator, 193, .{ .pane = pane, .any_host = true, .birth = true, .action = .add, .pattern = pattern, .types = 1 << 13, .response = .{ .content_type = "application/json", .body = body } })) {
+            switch (try networkMock(std.testing.allocator, 193, .{ .pane = pane, .any_host = true, .action = .add, .pattern = pattern, .types = 1 << 13, .response = .{ .content_type = "application/json", .body = body } })) {
                 .ok => |json| std.testing.allocator.free(json),
                 .fail => return error.TestUnexpectedResult,
             }
@@ -12573,7 +12572,7 @@ test "W9d④ 변이: Grants 줄의 수·엄격은 그 pane 의 것만, 바꾼 �
     try add(5, "https://agent.test/a", "bbbb"); // 바꾸기 — 옛 번호의 본문은 보낼 줄에서 빠진다
     for (mock_pump.queue.items) |q| try std.testing.expect(q.body_id != old_id);
     try add(6, "https://agent.test/b", "");
-    switch (try networkMock(gpa, 193, .{ .pane = 5, .any_host = true, .birth = true, .action = .strict, .on = true })) {
+    switch (try networkMock(gpa, 193, .{ .pane = 5, .any_host = true, .action = .strict, .on = true })) {
         .ok => |json| gpa.free(json),
         .fail => return error.TestUnexpectedResult,
     }

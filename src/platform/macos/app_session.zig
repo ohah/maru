@@ -102328,8 +102328,11 @@ test "W9b③·2026-11-17 A1: 에이전트 닫기 — 어느 브라우저 탭이�
     web_osr.testApply(allocator, .{ .js_dialog = .{ .browser = tab2, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
     try std.testing.expectEqual(web_osr.CloseAskPhase.asked, web_osr.closeAskPhase(tab2));
     try std.testing.expectEqual(web_ops.AgentCloseStart.page_asks, web_ops.agentCloseTab(session, tab2));
-    // 브라우저가 아직 없으면(물을 페이지가 없다) 곧 닫는다.
+    // 브라우저가 아직 없으면(물을 페이지가 없다) 곧 닫는다 — 닫기 확인 모달이 떠 있으면 닫지 않는다(사람이 고른 닫기의 자리를 밀지 않게 — 적대 검증 R-A1).
     const tab3 = try web_ops.openAgentTab(session, shell, null);
+    session.pending_confirm = .{ .close = .term_or_pane };
+    try std.testing.expectEqual(web_ops.AgentCloseStart.busy, web_ops.agentCloseTab(session, tab3));
+    session.pending_confirm = .none;
     try std.testing.expectEqual(web_ops.AgentCloseStart.closed, web_ops.agentCloseTab(session, tab3));
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     // 창의 유일한 탭(셸을 닫아 에이전트 탭만 남았다) — 닫으면 창이 닫힌다: 닫지 않는다.
@@ -102405,7 +102408,12 @@ test "W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽으로, app_
     }
 }
 
-test "2026-11-17 A3: 사용자 탭에서 에이전트가 누른 새 탭은 누른 pane 의 에이전트 탭이다(뒤쪽) — 장이 없으면 열지 않는다" {
+var a3_known_pane: u64 = 0;
+fn a3KnownPane(pane: u64) bool {
+    return pane == a3_known_pane;
+}
+
+test "2026-11-17 A3: 사용자 탭에서 에이전트가 누른 새 탭은 누른 pane 의 에이전트 탭이다(뒤쪽) — 장이 없으면 열지 않는다, 그 pane 의 생존은 제품과 같은 콜백으로 본다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     inline for (.{ true, false }) |agent| {
@@ -102418,6 +102426,10 @@ test "2026-11-17 A3: 사용자 탭에서 에이전트가 누른 새 탭은 누�
         w9b3_adopted = 0;
         const pane = pane_ops.activePane(session);
         const shell = pane.activeTerm().surfaceId();
+        // 제품은 생존을 앱의 표로 본다(`onAgentPaneKnown` — 에이전트 탭이 없어도 장을 준 pane 은 산다): 같은 꼴의 콜백을 건다.
+        session.agent_pane_known_callback = a3KnownPane;
+        a3_known_pane = shell;
+        defer a3_known_pane = 0;
         const human = try pane_ops.appendWebTermInActivePane(session, .browser); // 사람이 연 탭(`agent_opener` 0)
         try web_osr.testHold(allocator, human);
         web_osr.testRunning(human);

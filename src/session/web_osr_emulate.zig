@@ -902,19 +902,24 @@ pub const Tab = struct {
         }
         out.changed = !std.meta.eql(next, self.settings) or p.reload;
         const settings_changed = !std.meta.eql(next, self.settings);
+        // 2026-11-17 A2 적대 검증: 조건의 주인 프로세스도 pane 주인과 같은 규칙 — 다른 pane 이 같은 값을 다시 걸면 옮기지 않는다(옮기면 그 pane 의
+        // 프로세스가 끝날 때 먼저 건 pane 의 조건이 풀렸다). 같은 pane 의 다시 걸기는 지금처럼 이 호출로(W9e② — MCP·REPL 이 이어 쥔다).
+        const own_call = self.owner == 0 or self.owner == call.pane;
+        const cpu_takes = sets_cpu and (own_call or !std.meta.eql(next.cpu, self.settings.cpu));
+        const net_takes = sets_net and (own_call or !std.meta.eql(next.network, self.settings.network));
         if (settings_changed) {
             self.settings = next;
             self.bump();
         }
-        // W9e②: 무리마다 주인 — 건 호출의 것(같은 값을 다시 걸어도 주인은 이 호출로), 지우면 없다.
+        // W9e②: 무리마다 주인 — 건 호출의 것(같은 pane 이 같은 값을 다시 걸어도 주인은 이 호출로, 다른 pane 은 바꿀 때만), 지우면 없다.
         if (p.action == .clear or p.cpu == .clear) self.cpu_owner = null;
         if (p.action == .clear or p.network == .clear) self.net_owner = null;
-        if (sets_cpu) {
+        if (cpu_takes) {
             self.cpu_owner = call.owner;
             self.cpu_release = null;
             self.cpu_set_gen = self.gen;
         }
-        if (sets_net) {
+        if (net_takes) {
             self.net_owner = call.owner;
             self.net_release = null;
             self.net_set_gen = self.gen;
@@ -1667,6 +1672,36 @@ test "W9e①·2026-11-17 A2: 주인 pane — 다른 pane 의 set·clear 도 된�
     try testing.expect(!t.active() and t.owner == 0);
     _ = try t.apply(testCall(&set, 6, 3100), &why);
     try testing.expectEqual(@as(u64, 6), t.owner);
+}
+
+test "2026-11-17 A2 적대 검증 R1: 다른 pane 이 같은 CPU·네트워크 값을 다시 걸면 조건의 주인 프로세스도 그대로 — 그 pane 의 프로세스가 끝나도 먼저 건 pane 의 조건은 남는다, 바꾸면 옮긴다" {
+    var t: Tab = .{};
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const cpu4 = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":4}", &w);
+    const a_proc: self_origin.Owner = .{ .job = .{ .pid = 500, .start_us = 1 } };
+    const b_proc: self_origin.Owner = .{ .job = .{ .pid = 600, .start_us = 2 } };
+    var call = testCall(&cpu4, 5, 0);
+    call.owner = a_proc;
+    _ = try t.apply(call, &why);
+    call = testCall(&cpu4, 6, 1);
+    call.owner = b_proc;
+    _ = try t.apply(call, &why);
+    try testing.expectEqual(@as(u64, 5), t.owner);
+    try testing.expectEqual(@as(i32, 500), t.cpu_owner.?.job.pid);
+    // 같은 pane 의 다시 걸기는 지금처럼 이 호출로(W9e②).
+    const a2: self_origin.Owner = .{ .job = .{ .pid = 501, .start_us = 3 } };
+    call = testCall(&cpu4, 5, 2);
+    call.owner = a2;
+    _ = try t.apply(call, &why);
+    try testing.expectEqual(@as(i32, 501), t.cpu_owner.?.job.pid);
+    // 다른 pane 이 값을 바꾸면 그 pane 의 프로세스가 주인(흉내 주인도).
+    const cpu6 = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":6}", &w);
+    call = testCall(&cpu6, 6, 3);
+    call.owner = b_proc;
+    _ = try t.apply(call, &why);
+    try testing.expectEqual(@as(u64, 6), t.owner);
+    try testing.expectEqual(@as(i32, 600), t.cpu_owner.?.job.pid);
 }
 
 test "W9e①: grant sync — 주인의 grant 가 사라지거나 다른 호스트로 바뀌면 모두 지운다, 같은 호스트면 그대로, 에이전트 탭은 어느 호스트든" {

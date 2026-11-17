@@ -1654,8 +1654,8 @@ pub const sidecar_inbox_bytes: usize = 1024 * 1024;
 pub const NetMockRuleFlags = packed struct(u8) {
     /// 문서 종류(주 프레임·하위 프레임·object)는 `exec_site` 가 요청 호스트를 덮어야 맞는다(사이트에 묶인 grant 의 규칙 — 계획 §5-2).
     exec_site_bound: bool = false,
-    /// 사용자 탭의 규칙(주인의 mock grant 가 탭과 함께 생긴 것이 아니다) — 사람이 누른 링크·폼으로 시작한 이동의 **주 문서**에는 맞지 않는다
-    /// (사용자 결정 Q2 2026-10-21). 하위 자원은 그대로 맞는다.
+    /// 이 규칙은 사람이 누른 링크·폼으로 시작한 이동의 **주 문서**에는 맞지 않는다(옛 사용자 결정 Q2 2026-10-21 — 사용자 탭의 규칙; 하위 자원은 그대로
+    /// 맞는다). sidecar 의 능력으로 남는다 — maru 는 2026-11-17(A8 「사용자 탭의 가짜도 사람이 누른 이동의 문서를」)부터 이 깃발을 싣지 않는다.
     human_nav_real: bool = false,
     _reserved: u6 = 0,
 };

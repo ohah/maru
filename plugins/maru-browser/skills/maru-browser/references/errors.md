@@ -42,7 +42,7 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 | `(-32004)` from `click`, `type`, `press`, `hover` or `exec` | The page did not answer in time — the input or script **may already have run** | Do not repeat it. Take a snapshot and check what happened first. |
 | `(-32005)` | An `exec` result is over the limit | Return less, or use `--out` or `--max-result-bytes`. |
 | `(-32006)` with `script error (kind): name: message` | Your `exec` expression threw | Fix the expression. |
-| `(-32008)` with `[not a browser tab]`, `[engine=webkit]` or `[param=…]` | A file view or markdown panel, a WebKit tab, or a flag that engine lacks; `trace` on a user's tab | Use a Chromium tab of your own (`open`). |
+| `(-32008)` with `[not a browser tab]`, `[engine=webkit]` or `[param=…]` | A file view or markdown panel, a WebKit tab, or a flag that engine lacks; `trace` on a tab you did not open in an older Maru | Use a Chromium tab of your own (`open`). |
 | `(-32602)` with a `reason` | A bad value (for example `too_many_rules`, `no_site`, `unknown_rule`, an `emulate` value) | Fix the value. |
 | `(-32603)` with `emulated_by_other_pane`, `resource_busy` or `trace_busy` | Another pane owns that tab's emulation, more than 10 changes a second, or another trace is running | Wait a little and retry once, or ask. |
 | `(-32603)` with `human_input` | The user used the tab | Stop and ask. Do not fight the user. |

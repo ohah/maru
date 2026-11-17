@@ -33,7 +33,8 @@ maru browser emulate --surface 12 --clear
 
 ## `trace` — record a performance trace
 
-Only on tabs your pane opened. A hidden tab keeps rendering while it records.
+Works on any Chromium tab, the user's too (an older Maru traces only tabs your pane opened and answers `-32008`
+on others). A hidden tab keeps rendering while it records. Trace a user's tab only when the task is about it.
 
 ```sh
 maru browser trace --surface 12 --duration 5s --out "$TMPDIR/maru-trace-1.json.gz"
@@ -45,5 +46,6 @@ maru browser trace --surface 12 --duration 5s --out "$TMPDIR/maru-trace-1.json.g
 - 1–30 s, 5 s by default. `stop` prints a summary; `--out` also writes the trace (gzip JSON for Chrome DevTools'
   Performance panel) to a new file only — the `--out` rules in section 4 of SKILL.md. Use a fresh name in `$TMPDIR`.
 - One trace at a time per browser (`trace_busy` — wait and retry once). The tab title shows ◔ while recording.
-- The trace is discarded if the user uses the tab, or another tab's frame shares its renderer process.
+- The trace is discarded if the user uses the tab (`human_input` — likely on the user's tabs; ask before trying
+  again), or another tab's frame shares its renderer process.
 - This is not `maru trace`, which is Maru's own terminal trace tool.

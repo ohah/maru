@@ -1700,6 +1700,8 @@ pub export fn maru_macos_app_session_create(
     session.agent_tab_room_callback = onAgentTabRoom;
     session.agent_pane_known_callback = onAgentPaneKnown;
     session.agent_tab_known_callback = onAgentTabKnown; // 2026-11-16: 탭 줄의 에이전트 탭 표지 ◈
+    // 2026-11-17: 다운로드 목록(앱 전역 하나)이 에이전트 탭의 다운로드를 보류하지 않게 같은 표를 묻는다(「실행 파일 다운로드 보류 없애기」).
+    session_mod.web_downloads.agent_tab_known = onAgentTabKnown;
 
     out.* = session;
     return @backingInt(Status.ok);
@@ -7977,15 +7979,15 @@ fn answerEmulate(async_id: u64, op: control_browser.BrowserOp, g: control_browse
 /// trace 를 기다리는 op 의 시한(시작 — sidecar 의 5 s, 멈춤 — 길이 30 s + 읽기 30 s + 거르기, 넉넉히).
 const trace_wait_ns: i128 = 150 * std.time.ns_per_s;
 
-/// W9e②: `browser.trace` — 에이전트가 연 탭만(L2 가 모달 전에 갈랐다 — 여기서는 그 grant 가 지금도 탭과 함께 생긴 것인지 다시 본다). 곧 답하거나
+/// W9e②: `browser.trace` — 그 (pane, 탭) 의 `browser_network`·`browser` grant 로(사용자 탭도 — 사용자 결정 2026-11-17 「사용자 탭 trace 열기」;
+/// L2 가 인가했다 — 여기서는 디스패치 뒤 그 둘이 아직 있는지 다시 본다, 그 사이 철회됐을 수 있다). 곧 답하거나
 /// (status·abort·read·끝난 결과의 stop) web_osr 가 답을 쥐었다가(start 는 기록이 시작되면, stop 은 거른 결과가 나오면) `pollTraceAnswers` 로 끝낸다.
 fn answerTrace(async_id: u64, op: control_browser.BrowserOp, g: control_browser.GrantProvenance) void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
     defer parsed.deinit();
     var why: ?maru.session.web_osr_trace.Why = null;
     const params = maru.session.web_osr_trace.parseParams(parsed.value, &why) catch return completeTabStatus(async_id, .failed, "invalid arguments");
-    const now = control_pane_grant_store.get(g.pane, op.surface_id, .browser_network) orelse return completeTabStatus(async_id, .failed, "{\"reason\":\"needs_grant\",\"message\":\"the permission for this tab is gone\"}");
-    if (!now.birth) return completeTabStatus(async_id, .failed, "{\"reason\":\"left_agent_control\",\"message\":\"this tab is no longer a tab this pane opened\"}");
+    if (!traceAllowed(g.pane, op.surface_id)) return completeTabStatus(async_id, .failed, "{\"reason\":\"needs_grant\",\"message\":\"the permission for this tab is gone\"}");
     const answer = session_mod.web_osr.browserTrace(allocator, op.surface_id, .{ .pane = g.pane, .params = &params, .async_id = async_id }) catch return completeTabStatus(async_id, .failed, "out of memory");
     switch (answer) {
         .ok => |json| {
@@ -8104,17 +8106,28 @@ fn syncNetworkWatch() void {
     session_mod.web_osr.networkBlockSync(block_list[0..nk]);
     session_mod.web_osr.networkMockSync(mock_list[0..nm], browser_list[0..nbr]);
     session_mod.web_osr.emulationSync(emu_list[0..ne]);
-    // W9e②: trace 권한 — 탭과 함께 생긴 `browser_network` grant 와 그 탭의 `browser` grant 를 함께 쥔 (pane, 탭). 잃으면 진행 중 trace 를 버리고
-    // 결과 칸을 지운다(PLAN v2 §6.3 — grant 철회·pane 닫힘).
+    // W9e②: trace 권한 — `browser_network` grant 와 그 탭의 `browser` grant 를 함께 쥔 (pane, 탭)(`traceAllowed` — 사용자 탭도, 2026-11-17).
+    // 잃으면 진행 중 trace 를 버리고 결과 칸을 지운다(PLAN v2 §6.3 — grant 철회·Revoke All·pane 닫힘).
     var trace_tabs: [control_pane_grant.capacity]session_mod.web_osr.TraceTab = undefined;
-    var nt: usize = 0;
+    session_mod.web_osr.traceSync(traceTabsInto(&trace_tabs));
+}
+
+/// trace 할 수 있는 (pane, 탭) 모두(`traceAllowed`) — 진행 중 trace 와 남은 결과가 이 목록 밖이면 버려진다(`web_osr.traceSync`).
+fn traceTabsInto(out: *[control_pane_grant.capacity]session_mod.web_osr.TraceTab) []const session_mod.web_osr.TraceTab {
+    var n: usize = 0;
     for (control_pane_grant_store.grants[0..control_pane_grant_store.len]) |*g| {
-        if (g.scope != .browser_network or !g.birth) continue;
-        if (control_pane_grant_store.get(g.pane, g.target, .browser) == null) continue;
-        trace_tabs[nt] = .{ .pane = g.pane, .tab = g.target };
-        nt += 1;
+        if (g.scope != .browser_network or !traceAllowed(g.pane, g.target)) continue;
+        out[n] = .{ .pane = g.pane, .tab = g.target };
+        n += 1;
     }
-    session_mod.web_osr.traceSync(trace_tabs[0..nt]);
+    return out[0..n];
+}
+
+/// W9e②: 그 pane 이 그 탭을 trace 할 수 있는가 — `browser_network` grant 와 `browser` grant 를 함께 쥐었다(호스트는 L2 가 디스패치 때 본다).
+/// 사용자 결정 2026-11-17 「사용자 탭 trace 열기」 전에는 네트워크 grant 가 탭과 함께 생긴 것(에이전트가 연 탭)이어야 했다 — 그 조건을 걷었다.
+/// 디스패치 뒤 다시 보기(`answerTrace`)와 진행 중 trace 를 지키는 목록(`syncNetworkWatch` → `traceSync`)이 같은 규칙을 쓴다.
+fn traceAllowed(pane: u64, tab: u64) bool {
+    return control_pane_grant_store.get(pane, tab, .browser_network) != null and control_pane_grant_store.get(pane, tab, .browser) != null;
 }
 
 /// W9d① 적대 리뷰 1 회차 F5(설정 `browser.agent-network-full` 이 꺼졌을 때): 사용자가 몬 에이전트 탭의 어느 호스트든 `browser_network` grant 를
@@ -13509,6 +13522,88 @@ test "전권(적대 검증 R3): 좁혀진 에이전트 탭을 다른 사이트�
     // 철회 연쇄: 사용자가 browser 를 거두면 탭과 함께 생긴(넓혀진) 네트워크 grant 도 함께 거둔다 — 번호가 맞춰졌기 때문이다.
     _ = maru_macos_control_revoke_browser_grant(3, 66, 0);
     try std.testing.expect(!control_pane_grant_store.hasGrant(3, 66, .browser_network));
+}
+
+// 사용자 결정 2026-11-17 「사용자 탭 trace 열기」: 전권이 사용자 탭에 넣은 grant(탭과 함께 생긴 것이 아니다)로 trace 가 된다 — 디스패치 뒤 다시
+// 보기(`traceAllowed`)와 진행 중 trace 를 지키는 목록(`traceTabsInto` → `web_osr.traceSync`)이 그 쌍을 담고, 사람이 Browser Grants 에서
+// 거두면 빠진다(그때 진행 중 trace 는 버려진다). 에이전트 탭은 전처럼 든다.
+test "사용자 탭 trace(2026-11-17): 전권 grant 의 사용자 탭이 trace 목록에 들고, 철회하면 빠진다 — 에이전트 탭은 그대로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer agent_tabs.clearRetainingCapacity();
+    try std.testing.expect(adoptAgentTab(3, 66));
+    const surfaces = [_]control_surface.SurfaceDto{
+        .{ .surface_id = 66, .title = "agent", .window = 1, .detail = .{ .web = .{ .url = "https://agent.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true } } },
+        .{ .surface_id = 77, .title = "user", .window = 1, .detail = .{ .web = .{ .url = "https://user.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true } } },
+    };
+    const ids = [_]u64{ 66, 77 };
+    const windows = [_]maru.session.WindowMembershipSnapshot{.{ .window_id = 1, .window_kind = .normal, .surface_ids = &ids }};
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &surfaces, .windows = &windows };
+    try std.testing.expect(!traceAllowed(3, 77)); // 아직 닿지 않았다
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.trace\",\"params\":{\"id\":77,\"action\":\"start\"}}", .selector = null, .io = std.testing.io, .browser_pane = 3 };
+    grantFullAccess(&control_server_storage, &pending, snapshot);
+    const net = control_pane_grant_store.get(3, 77, .browser_network) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!net.birth); // 사용자 탭 — 탭과 함께 생긴 grant 가 아니다
+    try std.testing.expect(traceAllowed(3, 77));
+    try std.testing.expect(traceAllowed(3, 66));
+    try std.testing.expect(!traceAllowed(4, 77)); // 다른 pane 은 제 grant 가 생길 때까지 아니다
+    // 디스패치(L2 — 같은 표)도 op 로 간다(-32008 이 아니다).
+    switch (try control_browser.dispatchBrowser(std.testing.allocator, pending.request_bytes, snapshot, &.{}, 3, &control_pane_grant_store, 0)) {
+        .op => |op| {
+            defer std.testing.allocator.free(op.arg);
+            try std.testing.expectEqual(control_browser.BrowserMethod.trace, op.method);
+            try std.testing.expectEqual(@as(u64, 3), op.pane_grant.?.pane);
+        },
+        .err => |e| {
+            std.testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+    var buf: [control_pane_grant.capacity]session_mod.web_osr.TraceTab = undefined;
+    const Has = struct {
+        fn f(list: []const session_mod.web_osr.TraceTab, pane: u64, tab: u64) bool {
+            for (list) |t| if (t.pane == pane and t.tab == tab) return true;
+            return false;
+        }
+    };
+    var list = traceTabsInto(&buf);
+    try std.testing.expect(Has.f(list, 3, 77) and Has.f(list, 3, 66));
+    // 사람이 Browser Grants 에서 그 탭의 제어를 거뒀다 — 목록에서 빠진다(진행 중 trace 는 `traceSync` 가 버린다). 에이전트 탭은 그대로.
+    _ = maru_macos_control_revoke_browser_grant(3, 77, 0);
+    try std.testing.expect(!traceAllowed(3, 77));
+    list = traceTabsInto(&buf);
+    try std.testing.expect(!Has.f(list, 3, 77) and Has.f(list, 3, 66));
+}
+
+// 사용자 결정 2026-11-17 「실행 파일 다운로드 보류 없애기」: 다운로드 목록(앱 전역)이 에이전트 탭을 묻는 함수는 세션을 만드는 제품 진입점이 건다 —
+// 탭 줄의 ◈ 와 같은 함수(`onAgentTabKnown`), 같은 표. 걸리지 않으면 에이전트 탭의 실행 파일이 보류된다(순수 판정은 맞는데 엉뚱한 값을 받는 꼴).
+test "다운로드 보류(2026-11-17): 세션을 만들면 다운로드 목록이 에이전트 탭 표를 묻는 함수가 걸린다 — 표에 든 탭만 참" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const saved = session_mod.web_downloads.agent_tab_known;
+    defer session_mod.web_downloads.agent_tab_known = saved;
+    session_mod.web_downloads.agent_tab_known = null;
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer agent_tabs.clearRetainingCapacity();
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+    const known = session_mod.web_downloads.agent_tab_known orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!known(66));
+    try std.testing.expect(adoptAgentTab(3, 66));
+    try std.testing.expect(known(66));
+    try std.testing.expect(!known(67));
+    forgetAgentTab(3); // 에이전트의 pane 이 닫혔다 — 사람의 탭이 된다
+    try std.testing.expect(!known(66));
 }
 
 // 사용자 결정 2026-11-16: 탭 줄의 라벨 함수(`diffAwareLabel` — 사용자가 보는 제목의 단일 자리)가 에이전트 탭에만 ◈ 를 붙이고, 그 출처는 에이전트

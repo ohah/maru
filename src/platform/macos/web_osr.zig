@@ -30,6 +30,7 @@ const plan = maru.session.web_osr_plan;
 const mailbox = ws.mailbox;
 const osr_input = maru.session.web_osr_input;
 const dialog_cause = maru.session.web_osr_dialog_cause;
+const download_rule = maru.session.web_osr_download; // 2026-11-17: 다운로드를 「몬」 시각의 규칙(사람·에이전트 같은 규칙)
 const console_ring = maru.session.web_osr_console;
 const net_ring = maru.session.web_osr_network;
 const block_mod = maru.session.web_osr_block; // W9d③: 요청 막기 규칙·엄격 모드
@@ -147,6 +148,10 @@ const Surface = struct {
     /// 다운로드만의 사용자 동작(W10a) — 주소창 이동·연 탭에서 물려받은 누름. 페이지 입력(`last_user_input_ms`)과 따로 둔다: 그쪽은
     /// 제안 목록 막음(W6m②)도 쓰는데, 주소창으로 연 페이지·팝업이 손대지 않은 채 목록을 띄울 수 있게 됐다(적대 리뷰 4 회차).
     download_gesture_ms: i64 = std.math.minInt(i64) / 2,
+    /// 연 탭에서 물려받은 **에이전트의** 다운로드 동작 시각(2026-11-17 — 사용자 결정 「실행 파일 다운로드 보류 없애기」). 에이전트가 누른
+    /// `target=_blank` 첨부는 팝업 브라우저의 다운로드인데, 그 팝업이 에이전트 탭 표에 붙는 것(창 tick)보다 다운로드가 먼저 올 수 있다 —
+    /// 사람 쪽 `download_gesture_ms` 와 같은 자리에서 물려준다. 이 탭 자신의 에이전트 동작은 `agent_input_ms` 다.
+    agent_download_ms: i64 = std.math.minInt(i64) / 2,
     /// W9c②: 에이전트가 이 탭에 마지막으로 한 「움직이는」 일(누름·키·이동·스크립트·닫기·대화상자 답 — 단조 ms, `noteAgentInput`). 대화상자가
     /// 오면 가족의 이 값과 사용자 값으로 누가 띄웠는지 정한다(`dialog_cause`). 스냅숏·기다림·주소 읽기는 세지 않는다(페이지를 움직이지 않는다).
     agent_input_ms: i64 = std.math.minInt(i64) / 2,
@@ -1103,6 +1108,99 @@ test "a click counts as the user starting a download only until the page moves o
     s7.last_nav_ms = monotonicNow() + 5; // 친 주소가 문서를 열었다(그 뒤)
     try std.testing.expect(!recentUserInput(7, 3000, monotonicNow() + 5));
     try std.testing.expect(!recentUserInput(8, 3000, now)); // 모르는 탭
+}
+
+// 사용자 결정 2026-11-17 「실행 파일 다운로드 보류 없애기」: 에이전트가 몬 다운로드(에이전트 탭이거나 에이전트의 최근 동작)는 실행 파일이어도
+// 보류하지 않는다. 이 시험은 실제 `apply(download_begin)` → `web_downloads.onBegin` 길로 갈래마다 처음 상태를 본다(순수 판정은
+// `web_osr_download.zig` 가 따로 잰다 — 여기서는 그 판정이 **그 자리에서 그 값으로** 불리는지). 경로는 시험 폴더에만 만든다.
+test "에이전트가 몬 실행 파일 다운로드는 받는다 — 에이전트 탭·에이전트 동작(새 문서 전까지)·그것을 이어 받은 팝업, 아무도 몰지 않은 것은 보류(2026-11-17)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    web_downloads.testReset();
+    defer web_downloads.testReset();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [1024]u8 = undefined;
+    web_downloads.test_downloads_dir = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    defer web_downloads.test_downloads_dir = null;
+    const saved_known = web_downloads.agent_tab_known;
+    defer web_downloads.agent_tab_known = saved_known;
+    web_downloads.agent_tab_known = null;
+    try testSurfaces(gpa, &.{ 7, 8, 9 });
+    const Begin = struct {
+        var next: u32 = 1;
+        fn on(g: std.mem.Allocator, browser: u64, name: []const u8) web_downloads.State {
+            const n = next;
+            next += 1;
+            apply(g, .{ .download_begin = .{ .browser = browser, .download = n, .url = "https://a.example/f", .name = name, .mime = "application/octet-stream", .total = 4 } }, 0);
+            return web_downloads.at(web_downloads.count() - 1).?.state;
+        }
+    };
+    // 아무도 몰지 않은 실행 파일 — 보류(전과 같다). 보통 파일은 받는다.
+    try std.testing.expect(!recentAgentInput(7, 3000, monotonicNow()));
+    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 7, "a.command"));
+    try std.testing.expectEqual(web_downloads.State.preparing, Begin.on(gpa, 7, "a.txt"));
+    // 에이전트가 그 탭을 움직였다(누름·이동·스크립트 — `noteAgentInput`) — 실행 파일도 받는다.
+    noteAgentInput(7);
+    try std.testing.expect(recentAgentInput(7, 3000, monotonicNow()));
+    try std.testing.expectEqual(web_downloads.State.preparing, Begin.on(gpa, 7, "b.command"));
+    // 목록 창 — 에이전트가 받은 실행 파일은 사람에게 보인다(예전의 보류처럼).
+    var shown_surface: u64 = 0;
+    const shown_before = web_downloads.showRequest(&shown_surface);
+    try std.testing.expectEqual(web_downloads.State.preparing, Begin.on(gpa, 7, "c.pkg"));
+    try std.testing.expectEqual(shown_before +% 1, web_downloads.showRequest(&shown_surface));
+    try std.testing.expectEqual(@as(u64, 7), shown_surface);
+    // 같은 문서 안의 주소 바꾸기는 이동이 아니다.
+    apply(gpa, .{ .url_changed = .{ .browser = 7, .url = "https://a.example/next" } }, 0);
+    try std.testing.expect(recentAgentInput(7, 3000, monotonicNow()));
+    // 창 밖 — 오래된 동작은 몬 것이 아니다.
+    try std.testing.expect(!recentAgentInput(7, 3000, monotonicNow() + 3001));
+    // 에이전트가 연 문서가 스스로 받는 것은 그 동작의 다운로드가 아니다(사람과 같은 규칙) — 사용자 탭이면 보류.
+    apply(gpa, .{ .page_started = 7 }, 0);
+    try std.testing.expect(!recentAgentInput(7, 3000, monotonicNow()));
+    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 7, "d.command"));
+    // 에이전트 탭(◈ — 표가 출처, 콜백)이면 페이지가 스스로 받은 것도 받는다. 표에 없는 탭은 그대로 보류.
+    const Known = struct {
+        fn f(tab: u64) bool {
+            return tab == 8;
+        }
+    };
+    web_downloads.agent_tab_known = Known.f;
+    try std.testing.expectEqual(web_downloads.State.preparing, Begin.on(gpa, 8, "e.command"));
+    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 9, "f.command"));
+    // 묻기를 켰으면 지금 그대로 — 에이전트 탭의 것도 저장 창을 띄우지 않고 보류한다(사용자 확인 대기 결정).
+    web_downloads.setAsk(true);
+    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 8, "g.command"));
+    web_downloads.setAsk(false);
+    // 에이전트의 누름이 연 팝업 — 연 탭의 **유효한** 에이전트 시각을 물려받는다(표에 붙기 전에 다운로드가 와도).
+    noteAgentInput(9);
+    surfaces.getPtr(9).?.agent_new_tab_credits.grant(monotonicNow());
+    reservePopupId(gpa, 200);
+    applyD(gpa, .{ .popup_created = .{ .opener = 9, .browser = 200, .placement = .foreground, .url = "https://a.example/dl" } });
+    try std.testing.expect(surfaces.getPtr(200) != null);
+    try std.testing.expect(recentAgentInput(200, 3000, monotonicNow()));
+    try std.testing.expectEqual(web_downloads.State.preparing, Begin.on(gpa, 200, "h.command"));
+    // 연 탭의 동작이 이미 새 문서로 무효면 물려주지 않는다.
+    apply(gpa, .{ .page_started = 9 }, 0);
+    surfaces.getPtr(9).?.agent_new_tab_credits.grant(monotonicNow());
+    reservePopupId(gpa, 201);
+    applyD(gpa, .{ .popup_created = .{ .opener = 9, .browser = 201, .placement = .foreground, .url = "https://a.example/dl" } });
+    try std.testing.expect(surfaces.getPtr(201) != null);
+    try std.testing.expect(!recentAgentInput(201, 3000, monotonicNow()));
+    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 201, "i.command"));
+    try std.testing.expect(!recentAgentInput(4242, 3000, monotonicNow())); // 모르는 탭
+    // 작업 스레드가 시험 폴더에 임시 파일을 다 만들 때까지(폴더를 지우기 전에) 기다린다.
+    var waited: usize = 0;
+    while (waited < 300) : (waited += 1) {
+        web_downloads.reapPrepared();
+        var busy = false;
+        for (0..web_downloads.count()) |i| busy = busy or web_downloads.at(i).?.state == .preparing;
+        if (!busy) break;
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    for (0..web_downloads.count()) |i| try std.testing.expect(web_downloads.at(i).?.state != .preparing);
 }
 
 test "datalist is owned per surface, replaced by a newer list, closed only by its own list, picked once (W6m②)" {
@@ -2286,6 +2384,13 @@ pub fn noteUserNavigation(surface_id: u64) void {
 /// 이 탭의 다운로드용 사용자 동작 시각 — 페이지 입력과 다운로드만의 것 중 나중 것, 그 뒤로 새 문서가 오지 않았을 때만.
 fn downloadGestureMs(s: *const Surface) i64 {
     const t = @max(s.last_user_input_ms, s.download_gesture_ms);
+    return if (t > s.last_nav_ms) t else std.math.minInt(i64) / 2;
+}
+
+/// 이 탭의 다운로드용 **에이전트** 동작 시각(2026-11-17) — 에이전트가 이 탭을 움직인 때(`agent_input_ms` — 누름·키·이동·스크립트·업로드
+/// 넣기·대화상자 답, 읽기는 아니다)와 연 탭에서 물려받은 것 중 나중 것, 그 뒤로 새 문서가 오지 않았을 때만(사람과 같은 규칙).
+fn agentDownloadMs(s: *const Surface) i64 {
+    const t = @max(s.agent_input_ms, s.agent_download_ms);
     return if (t > s.last_nav_ms) t else std.math.minInt(i64) / 2;
 }
 
@@ -4412,14 +4517,15 @@ fn traceTabGone(gpa: std.mem.Allocator, surface_id: u64, reason: []const u8) voi
     if (surface_id != 0) dropKeptFor(gpa, 0, surface_id);
 }
 
-/// grant 가 바뀌었다 — 그 pane 이 그 탭의 trace 권한(탭과 함께 생긴 네트워크 grant)을 잃으면 trace 를 버리고 결과를 지운다(PLAN v2 §6.3).
+/// grant 가 바뀌었다 — 그 pane 이 그 탭의 trace 권한(네트워크 grant + browser grant — 사용자 탭도, 2026-11-17)을 잃으면 trace 를 버리고 결과를
+/// 지운다(PLAN v2 §6.3).
 pub const TraceTab = struct { pane: u64, tab: u64 };
 
-pub fn traceSync(birth_tabs: []const TraceTab) void {
+pub fn traceSync(allowed: []const TraceTab) void {
     const gpa = gpa_ref orelse return;
     if (trace_run) |r| {
         var still = false;
-        for (birth_tabs) |b| if (b.pane == r.pane and b.tab == r.surface) {
+        for (allowed) |b| if (b.pane == r.pane and b.tab == r.surface) {
             still = true;
         };
         if (!still and r.phase != .done and r.phase != .discarded and r.phase != .failed) {
@@ -4431,7 +4537,7 @@ pub fn traceSync(birth_tabs: []const TraceTab) void {
     while (i < trace_kept.items.len) {
         const k = trace_kept.items[i];
         var still = false;
-        for (birth_tabs) |b| if (b.pane == k.pane and b.tab == k.surface) {
+        for (allowed) |b| if (b.pane == k.pane and b.tab == k.surface) {
             still = true;
         };
         if (!still) {
@@ -5408,6 +5514,7 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
     // 리뷰 3 회차: 사용자가 누른 실행 파일이 보류됐다). 팝업이 문서를 열면 `page_started` 가 지운다.
     // 연 탭이 그 뒤 다른 문서로 갔다면 그 누름은 이미 무효다 — 무효가 아닌 것만 물려준다(4 회차). 제안 목록 막음은 물려받지 않는다.
     const opener_gesture_ms = downloadGestureMs(surfaces.getPtr(v.opener).?);
+    const opener_agent_ms = agentDownloadMs(surfaces.getPtr(v.opener).?); // 2026-11-17: 에이전트의 누름도 같은 자리에서 물려준다
     const queued_url = gpa.dupe(u8, v.url) catch null;
     const last_url = gpa.dupe(u8, v.url) catch null;
     if (queued_url == null or last_url == null) {
@@ -5427,6 +5534,7 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
         .popup_opener = v.opener,
         .popup_family = popupFamily(v.opener),
         .download_gesture_ms = opener_gesture_ms,
+        .agent_download_ms = opener_agent_ms,
         .page_opened = true,
     }) catch {
         gpa.free(queued_url.?);
@@ -6402,7 +6510,15 @@ pub fn sendToSidecar(gpa: std.mem.Allocator, message: Message) void {
 /// 누름으로 시작한 다운로드는 가르지 못한다(문서마다의 사용자 활성화는 Chromium 안에 있다).
 pub fn recentUserInput(surface_id: u64, window_ms: i64, now_ms: i64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
-    return now_ms - downloadGestureMs(s) <= window_ms;
+    return download_rule.gestureLive(@max(s.last_user_input_ms, s.download_gesture_ms), s.last_nav_ms, now_ms, window_ms);
+}
+
+/// 이 탭에 `window_ms` 안에 **에이전트가** 움직이는 op 를 보냈고(또는 연 탭에서 물려받았고) 그 뒤로 주 프레임에 새 문서가 오지 않았는가
+/// (2026-11-17 — 사용자 결정 「실행 파일 다운로드 보류 없애기」: 에이전트가 몬 다운로드는 실행 파일이어도 보류하지 않는다). 규칙은 사람의
+/// `recentUserInput` 과 같다(`web_osr_download.gestureLive`) — 에이전트가 연 다른 문서가 몇 초 뒤 스스로 받는 것은 그 동작의 다운로드가 아니다.
+pub fn recentAgentInput(surface_id: u64, window_ms: i64, now_ms: i64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return download_rule.gestureLive(@max(s.agent_input_ms, s.agent_download_ms), s.last_nav_ms, now_ms, window_ms);
 }
 
 /// 시험 전용(W9e② v20c N3): 마지막으로 보낸 대화상자·파일·권한 답의 `user` — app_session 의 sheet 진입(`osrDialogReply` 등)이 답을 사람의 것으로

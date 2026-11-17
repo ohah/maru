@@ -3,7 +3,9 @@
 //!
 //! 사용자 결정(2026-10-08): 묻지 않고 `~/Downloads` 에 저장(같은 이름은 `이름 (1).확장자` — 「매번 묻기」 설정은 W10b), 진행은
 //! 목록 창. 받는 중 탭을 닫으면 그 브라우저를 숨겨 끝까지 받고, 종료 확인이 받는 중인 수를 알린다(W10c). 페이지가 사용자 동작 없이 내려받게 한 「실행될 수 있는 파일」(`.command`·`.pkg`·`.dmg`·
-//! `.webloc` 등 — Gatekeeper 를 피해 간 전례가 있는 종류)은 저장하지 않고 보류해 묻는다(사용자 결정).
+//! `.webloc` 등 — Gatekeeper 를 피해 간 전례가 있는 종류)은 저장하지 않고 보류해 묻는다(사용자 결정). **에이전트가 몬 것은 예외다**(사용자 결정
+//! 2026-11-17 「실행 파일 다운로드 보류 없애기」 — 에이전트 탭(◈)이거나 에이전트의 최근 동작): 사람이 몬 것처럼 받는다. 처음 상태의 규칙은
+//! `session/web_osr_download.zig`(L2 순수)가 소유한다.
 //!
 //! 파일은 이렇게 다룬다(W10a 설계 적대 검토):
 //! - 받는 동안은 `이름.maru-part` 쪽 — maru 가 그 이름을 `O_CREAT|O_EXCL|O_NOFOLLOW` 로 미리 만들어(이름 맡아 두기) 그 경로로 받게
@@ -26,6 +28,15 @@ const web_osr = @import("web_osr.zig");
 
 const ws = maru.session.web_sidecar;
 const message = ws.message;
+const rule = maru.session.web_osr_download;
+
+/// 그 탭이 지금 에이전트 탭(◈)인가 — 에이전트 탭 표는 `app_host_abi` 가 쥐고 세션을 만들 때 이 자리에 건다(`onAgentTabKnown` — 탭 줄의 ◈ 와
+/// 같은 함수, 같은 출처). 이 파일이 `app_host_abi` 를 import 하지 않게(그쪽이 이쪽을 부른다) 함수로 받는다. 걸리지 않았으면(시험·호스트 없는
+/// 경로) 에이전트 탭은 없다.
+pub var agent_tab_known: ?*const fn (u64) bool = null;
+
+/// 시험 빌드에서 「받는 폴더」(`~/Downloads` 대신) — 시험이 실제 홈에 파일을 만들지 않게. 비었으면 시험의 저장 갈래는 실패로 끝난다.
+pub var test_downloads_dir: ?[]const u8 = null;
 
 pub const State = enum(u8) {
     /// 경로를 만드는 중(작업 스레드).
@@ -420,6 +431,7 @@ const Job = struct {
 };
 
 fn startPrepare(e: *const Entry) bool {
+    if (builtin.is_test) return startPrepareIn(e, test_downloads_dir orelse return false, false, false);
     const home = std.c.getenv("HOME") orelse return false;
     var dir_buf: [max_path_bytes]u8 = undefined;
     const dir = std.fmt.bufPrint(&dir_buf, "{s}/Downloads", .{std.mem.span(home)}) catch return false;
@@ -671,6 +683,10 @@ pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
     e.origin_len = originOf(v.url, &e.origin_buf).len;
     e.risky = isRisky(e.name());
     const by_user = web_osr.recentUserInput(v.browser, user_gesture_window_ms, now_ms);
+    // 2026-11-17: 에이전트가 몰았나 — 에이전트 탭이거나, 그 탭(또는 그것을 연 탭)에 에이전트가 사람과 같은 창 안에 움직이는 op 를 보냈다.
+    const agent_tab = if (agent_tab_known) |known| known(v.browser) else false;
+    const agent_action = web_osr.recentAgentInput(v.browser, user_gesture_window_ms, now_ms);
+    const facts: rule.Facts = .{ .ask = ask_enabled, .risky = e.risky, .by_user = by_user, .by_agent = agent_tab or agent_action, .asking_in_tab = askingIn(v.browser) };
     if (activeCount(null) >= max_active_app or activeCount(v.browser) >= max_active_tab) {
         e.state = .too_many;
         entries.append(allocator(), e) catch return false;
@@ -678,22 +694,24 @@ pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
         changed();
         return true;
     }
-    if (ask_enabled) {
-        // W10b 매번 묻기 — 저장 창은 사용자가 누른 다운로드에만 곧바로 띄운다(페이지가 저장 창을 스스로 띄우지 못하게 — 그 밖은 종류와
-        // 상관없이 보류: 목록에서 「받기」를 누르면 묻는다). 한 탭에는 한 번에 하나만 묻는다(누를 때마다 창이 줄을 서지 않게 —
-        // 설계 공격 H3).
-        e.state = if (by_user and !askingIn(v.browser)) .asking else .held;
-    } else if (e.risky and !by_user) {
-        e.state = .held;
-    } else if (!startPrepare(&e)) {
-        e.state = .failed;
-        queue(e.key, .decide_cancel);
+    // W10b 매번 묻기 — 저장 창은 사용자가 누른 다운로드에만 곧바로 띄운다(페이지가 저장 창을 스스로 띄우지 못하게 — 그 밖은 종류와
+    // 상관없이 보류: 목록에서 「받기」를 누르면 묻는다). 한 탭에는 한 번에 하나만 묻는다(누를 때마다 창이 줄을 서지 않게 — 설계 공격 H3).
+    // 묻기를 껐으면 아무도 몰지 않은 실행 파일만 보류한다(규칙은 `web_osr_download.start`).
+    const begin = rule.start(facts);
+    switch (begin) {
+        .asking => e.state = .asking,
+        .held => e.state = .held,
+        .save => if (!startPrepare(&e)) {
+            e.state = .failed;
+            queue(e.key, .decide_cancel);
+        },
     }
     entries.append(allocator(), e) catch return false;
-    // 사용자가 시작한 것과 보류한 것 — 보류는 목록에서 「받기」를 눌러야 받으니, 목록이 보이지 않으면 모르고 지나간다. 창을 낼지는
-    // Swift 가 정한다(maru 가 앞에 있고 터미널 창이 키일 때만, 키는 빼앗지 않는다). 묻는 행은 저장 창이 뜨므로 목록 창을 내지 않는다
-    // (고른 뒤 받기 시작하면 목록에 보인다 — 저장 창과 겹치지 않게).
-    if ((by_user and e.state != .asking) or e.state == .held) {
+    if (testReporting()) std.debug.print("osr-test download {d} {s} state={s} risky={} user={} agent_tab={} agent_action={}\n", .{ e.key, @tagName(begin), @tagName(e.state), e.risky, by_user, agent_tab, agent_action });
+    // 사용자가 시작한 것과 보류한 것 — 보류는 목록에서 「받기」를 눌러야 받으니, 목록이 보이지 않으면 모르고 지나간다. 에이전트가 받은 실행
+    // 파일도(예전의 보류 — 사람이 무엇을 받았는지 알게). 창을 낼지는 Swift 가 정한다(maru 가 앞에 있고 터미널 창이 키일 때만, 키는 빼앗지
+    // 않는다). 묻는 행은 저장 창이 뜨므로 목록 창을 내지 않는다(고른 뒤 받기 시작하면 목록에 보인다 — 저장 창과 겹치지 않게).
+    if (rule.showsList(facts, begin)) {
         show_request +%= 1;
         show_surface = v.browser;
     }
@@ -1197,6 +1215,12 @@ fn reask(e: *Entry, too_long: bool) bool {
     e.ask_retry_long = too_long;
     changed();
     return true;
+}
+
+/// 실앱 실측(`MARU_WEB_OSR_TEST_INPUT` — web_osr 의 시험 보고와 같은 스위치)에서만 새 다운로드의 판정을 한 줄 남긴다(제품 로그에는 쓰지 않는다 —
+/// 파일 이름이 들어 있지 않아도 다운로드 기록은 사용자의 것이다).
+fn testReporting() bool {
+    return !builtin.is_test and std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null;
 }
 
 fn askingIn(browser: u64) bool {

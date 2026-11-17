@@ -10,6 +10,7 @@
 //!   pageshow·지금·첫 요청·pageshow 의 요청·문서 요청 머리가 모두 진짜(`EMQ_ITERS` 판, 기본 3).
 //! - emu-page-nav-detach-order: 위 판들의 host 로그 — 떠날 때마다 응답으로 뗀 줄(`detach resp`)이 하나씩, 「떼기 전에 커밋」 0 줄, 늦은 떼기 0 줄
 //!   (응답 시각 → 떼기 µs 와 떼기 → 커밋 µs 를 적는다 — U5: 차례는 실측이 근거다).
+//! - emu-page-nav-set-reload: 처음 거는 흉내 곧 뒤의 새로고침 — 세션을 붙이는 동안 maru 의 이동은 기다린다(새 문서의 요청·첫 스크립트가 흉내).
 //! - emu-page-nav-two-tabs: 같은 사이트에 묶인 다른 탭은 한 탭이 떠나도 흉내 그대로(무장·떼기는 탭마다).
 //! - emu-page-nav-redirect: 사이트 안 주소가 302 로 밖에 보낸다 — 첫 스크립트·첫 요청은 진짜(단언), 그 홉의 문서 요청 머리는 E12(관측).
 //! - emu-page-nav-slow-wait: 밖으로 가는 느린 응답(1.5 초)을 기다리는 동안 묶인 문서는 흉내를 그대로 본다(떼기는 응답에서 — 홉에서 떼면 진짜를
@@ -318,6 +319,30 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         const other = r.ev(2, "SG()", &sgb);
         report(t.clean() and std.mem.eql(u8, other, full_emu), "emu-page-nav-two-tabs", std.fmt.bufPrint(&d, "{s} · 다른 탭 {s}", .{ t.text(&tb), other }) catch "");
         try r.host.send(.{ .destroy_browser = 2 });
+        r.pump(300);
+    }
+
+    // (1c) 처음 거는 흉내 곧 뒤의 새로고침(`browser.emulate … --reload` 의 꼴 — maru 는 흉내 frame 바로 뒤에 `nav_action reload` 를 낸다): 세션을 붙이는
+    // 동안 새로고침은 기다린다 — 새 문서의 요청·첫 스크립트가 흉내(격리 앱에서 처음에 둘 다 진짜였다).
+    {
+        try r.create(3, uLoop(&u, "/qi?x=sr"));
+        r.pump(300);
+        r.gen[3] += 1;
+        var e = emu.bound_all;
+        e.browser = 3;
+        e.generation = r.gen[3];
+        const before = r.loads[3];
+        try r.host.send(.{ .emulation = e });
+        try r.host.send(.{ .nav_action = .{ .browser = 3, .action = .reload } });
+        _ = r.until(Run.loadsAt, 3, before + 1, 5000);
+        r.pump(500);
+        var tb3: [80]u8 = undefined;
+        const t0 = r.ev(3, "T0", &tb3);
+        var ld: emu.Leaks = undefined;
+        emu.leaksOn("/qi?x=sr", "127.0.0.1", &ld);
+        // 처음 문서(흉내 전) 하나와 새로고침 문서 하나 — 새로고침 문서의 머리만 흉내여야 한다.
+        report(std.mem.eql(u8, t0, full_emu) and ld.total == 2 and ld.header == 1, "emu-page-nav-set-reload", std.fmt.bufPrint(&d, "새로고침 문서 첫 스크립트 {s} · 문서 요청 {d}개(흉내 머리 {d})", .{ t0, ld.total, ld.header }) catch "");
+        try r.host.send(.{ .destroy_browser = 3 });
         r.pump(300);
     }
 

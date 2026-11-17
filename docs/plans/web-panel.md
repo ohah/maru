@@ -148,3 +148,4 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane plan](control-pla
   ③(닫을 때 하이라이트 정리)은 **필요 없어 취소**했다 — 위 확인 결과.
   ④ Chromium 탭(**완료** — 2026-11-17, [OSR 백엔드 계획](web-osr-backend.md) P0-2): CEF 찾기로 수·차례(`cur/total`), 닫힘·열림 가장자리에서 멈춤,
   Swift 「전달 못함」 다시 그리기 고리 제거. WebKit 탭·파일 패널의 ①②는 그대로.
+  ⑤ Chromium 탭의 닫힌 상자 ⌘G·⇧⌘G 가 상자를 마지막 검색어로 다시 연다(**완료** — 2026-11-17, 사용자 결정 「Chrome 처럼」, P0-2 후속).

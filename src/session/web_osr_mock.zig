@@ -794,15 +794,19 @@ test "W9d④·2026-11-17 A2: remove·clear·엄격·초당 10 번 — 남의 규
     try testing.expectEqual(@as(?usize, 1), fail.index);
     const r = try t.apply(testing.allocator, &b, mkCall(6, .remove, .{ .pattern = "https://a.test/y", .now_ms = 5 }), &fail);
     try testing.expectEqualSlices(u32, &.{2}, r.removed.slice());
+    // 번호로도 남의 규칙을 지운다 — pane 6 이 pane 5 의 규칙 1 을(그다음 같은 것을 다시 둔다).
+    const by_id = try t.apply(testing.allocator, &b, mkCall(6, .remove, .{ .rules = &.{1}, .now_ms = 5 }), &fail);
+    try testing.expectEqualSlices(u32, &.{1}, by_id.removed.slice());
+    _ = try t.apply(testing.allocator, &b, mkCall(5, .add, .{ .pattern = "https://a.test/x", .now_ms = 5 }), &fail);
     const c = try t.apply(testing.allocator, &b, mkCall(5, .clear, .{ .now_ms = 6 }), &fail);
-    try testing.expectEqualSlices(u32, &.{ 1, 3 }, c.removed.slice()); // pane 6 의 것도
+    try testing.expectEqualSlices(u32, &.{ 3, 4 }, c.removed.slice()); // pane 6 의 것도
     try testing.expectEqual(@as(usize, 0), b.app_bytes);
     try testing.expect(t.strict_on);
     t.onState(.{ .browser = 1, .generation = t.gen, .ok = true, .strict = .on });
     try testing.expect(t.strict_state == .on);
     _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = false, .now_ms = 7 }), &fail);
     try testing.expect(!t.strict_on);
-    for (0..2) |_| _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .now_ms = 8 }), &fail); // 1 초 안의 열째까지(거절된 remove 도 센다)
+    // 1 초 안의 열째까지 이미 썼다(거절된 remove 도 센다 — 번호로 남의 규칙 지우기·다시 넣기 둘을 더했다).
     try testing.expectError(error.Rejected, t.apply(testing.allocator, &b, mkCall(5, .clear, .{ .now_ms = 9 }), &fail));
     try testing.expectEqualStrings("resource_busy", fail.reason);
     _ = try t.apply(testing.allocator, &b, mkCall(5, .list, .{ .now_ms = 9 }), &fail); // 보기는 세지 않는다

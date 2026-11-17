@@ -18,6 +18,9 @@ const overlay_input = @import("overlay_input.zig"); // 검색어·조합 입력 
 /// 제품(`editor_ops.DiffSide`)이 이 타입을 **그대로** 쓴다 — 같은 모양을 두 군데 두면 값이 갈린다.
 pub const DiffSide = enum { left, right };
 
+/// 페이지 검색의 차례와 수(P0-2 — Chromium 탭). `active` 는 1 부터, 일치가 없으면 0 이다.
+pub const PageCount = struct { active: u32, total: u32 };
+
 /// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
 
@@ -74,10 +77,17 @@ fn ruleFlags(state: *const State) []const u8 {
     return "";
 }
 
-/// 페이지 검색은 **매치 수를 알 수 없다** — `WKFindResult`가 `matchFound`만 준다(docs/web-panel-features.md §8).
-/// 그래서 "cur/total" 자리에 찾음/없음만 낸다. 그 자리에 "0/0"을 그리면 WebKit이 노랗게 하이라이트한 화면과
-/// 정면으로 모순된다("매치 0개"로 읽힌다). 결과가 아직 없으면(제출 전·응답 대기) 아무것도 그리지 않는다.
-fn pageIndicator(state: *const State) ?[]const u8 {
+/// 페이지 검색의 표시. **Chromium 탭은 수를 안다**(CEF `on_find_result` — P0-2) — 그때는 스크롤백과 같은 "cur/total" 을 그린다
+/// (`page_count`, 일치가 없으면 "0/0" — 그 화면에는 칠한 것도 없으니 참이다). **WebKit 탭은 수를 알 수 없다** — `WKFindResult`가
+/// `matchFound`만 준다(docs/web-panel-features.md ⌘F 분기). 그래서 그 자리에 찾음/없음만 낸다. 거기에 "0/0"을 그리면 WebKit이 노랗게
+/// 하이라이트한 화면과 정면으로 모순된다("매치 0개"로 읽힌다). 결과가 아직 없으면(제출 전·응답 대기) 아무것도 그리지 않는다.
+/// 수는 `arena` 로 글을 만들고, 폭만 잴 때(`counterCols`)는 `null` 을 넘겨 숫자 자릿수로 센다 — 두 길이 같은 값이어야 입력이 카운터를
+/// 침범하지 않는다(시험이 고정한다).
+fn pageIndicator(state: *const State, arena: ?std.mem.Allocator) !?[]const u8 {
+    if (state.page_count) |c| {
+        const a = arena orelse return "";
+        return try std.fmt.allocPrint(a, "{d}/{d}", .{ c.active, c.total });
+    }
     const found = state.page_found orelse return null;
     // **영어 고정**(계약 §2.1). find 오버레이는 "읽고 판단"이 아니라 **찾아서 옮겨 다니는** 자리라,
     // 같은 오버레이가 `Find: ` 를 영어로 쓰는데 결과만 한국어이면 한 상자 안에서 언어가 섞인다.
@@ -90,7 +100,8 @@ fn pageIndicator(state: *const State) ?[]const u8 {
 /// 이름으로 짚어 "영어는 5칸이라 그 예약을 침범한다"고 경고한 그대로다. 폭을 문자열에서 파생시키면
 /// 문구가 바뀔 때 예약이 따라오고, 아래 테스트가 `counterCols == displayCols(counter)` 를 고정한다.
 fn pageIndicatorCols(state: *const State) u32 {
-    const label = pageIndicator(state) orelse return 0;
+    if (state.page_count) |c| return numDigits(c.active) + 1 + numDigits(c.total);
+    const label = (pageIndicator(state, null) catch unreachable) orelse return 0;
     return overlay_input.displayCols(label);
 }
 fn numDigits(n: usize) u32 {
@@ -274,6 +285,9 @@ pub const State = struct {
     nav_forward: bool = true,
     /// 페이지 검색의 마지막 결과. null=아직 모름(제출 전·응답 대기). scrollback일 땐 안 본다.
     page_found: ?bool = null,
+    /// Chromium 탭 페이지 검색의 지금 차례(1 부터, 없으면 0)와 일치 수(P0-2 — CEF 가 준다). 있으면 `page_found` 대신 "cur/total" 로
+    /// 그린다. null=아직 모름이거나 WebKit 탭(수를 모른다). session 이 답마다 실어 주고, 열 때·대상이 바뀔 때 비운다.
+    page_count: ?PageCount = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.ime_input.deinit(allocator);
@@ -340,6 +354,7 @@ pub const State = struct {
         self.current = 0;
         self.match_count = 0;
         self.page_found = null; // 지난 검색의 찾음/없음이 새로 연 창에 남지 않게(target은 session이 tick에 세운다)
+        self.page_count = null; // 수도 같다(P0-2)
         self.regex_error = null;
         // **고른 열도 여기서 버린다**(§5.1 — *"찾기를 닫으면 사라진다"*). 닫는 자리가 아니라 **여는
         // 자리**에서 버리는 이유는 두 가지다: 닫는 경로가 여럿이라 한 곳만 빠뜨려도 지난 선택이
@@ -574,9 +589,9 @@ pub fn view(
         try out.append(arena, .{ .text = .{ .origin = .{ .x = button.x, .y = button.y }, .runs = button_runs, .role = if (state.regex) .accent_bar else .surface_fg } });
     }
 
-    // 우측 정렬 카운터. 스크롤백은 "cur/total"(매치 없으면 "0/0", 1-based 현재), 페이지는 찾음/없음(매치 수를
-    // 알 수 없다). 패널에 안 들어가면(좁음) 생략. counter_cols는 textCols가 예약한 폭과 같아야 한다(입력 침범 방지).
-    const counter: ?[]const u8 = if (state.target == .page) pageIndicator(state) else if (state.regex_error != null)
+    // 우측 정렬 카운터. 스크롤백은 "cur/total"(매치 없으면 "0/0", 1-based 현재), 페이지는 Chromium 탭이면 같은 "cur/total",
+    // WebKit 탭이면 찾음/없음(매치 수를 알 수 없다). 패널에 안 들어가면(좁음) 생략. counter_cols는 textCols가 예약한 폭과 같아야 한다(입력 침범 방지).
+    const counter: ?[]const u8 = if (state.target == .page) try pageIndicator(state, arena) else if (state.regex_error != null)
         try std.fmt.allocPrint(arena, "{s}{s}{s}", .{ sideFlag(state), ruleFlags(state), state.regex_error.? })
     else blk: {
         const total = state.match_count;
@@ -1145,7 +1160,7 @@ test "find 카운터의 예약 폭은 실제 글자 폭과 같다 (계약 §6.1)
     // 두 상태 모두 예약 == 실제 폭.
     for ([_]bool{ true, false }) |found| {
         s.page_found = found;
-        const label = pageIndicator(&s) orelse return error.NoIndicator;
+        const label = (try pageIndicator(&s, null)) orelse return error.NoIndicator;
         try std.testing.expectEqual(overlay_input.displayCols(label), pageIndicatorCols(&s));
     }
 
@@ -1155,6 +1170,56 @@ test "find 카운터의 예약 폭은 실제 글자 폭과 같다 (계약 §6.1)
     const found_cols = pageIndicatorCols(&s);
     s.page_found = false;
     try std.testing.expect(found_cols != pageIndicatorCols(&s));
+}
+
+test "P0-2 페이지 카운터: Chromium 수가 있으면 cur/total(0/0 포함), 예약 폭 == 그린 글 폭, 없으면 WebKit 찾음/없음 그대로, 열면 비운다" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var s: State = .{};
+    s.target = .page;
+    s.page_found = true; // WebKit 의 답이 남아 있어도 수가 이긴다
+    for ([_]PageCount{ .{ .active = 3, .total = 7 }, .{ .active = 0, .total = 0 }, .{ .active = 12, .total = 1234 }, .{ .active = 0, .total = 5 } }) |c| {
+        s.page_count = c;
+        const label = (try pageIndicator(&s, arena.allocator())) orelse return error.NoIndicator;
+        const want = try std.fmt.allocPrint(arena.allocator(), "{d}/{d}", .{ c.active, c.total });
+        try std.testing.expectEqualStrings(want, label);
+        try std.testing.expectEqual(overlay_input.displayCols(label), counterCols(&s));
+    }
+    s.page_count = null;
+    try std.testing.expectEqualStrings("found", (try pageIndicator(&s, arena.allocator())).?);
+    s.page_count = .{ .active = 1, .total = 2 };
+    s.show();
+    try std.testing.expect(s.page_count == null and s.page_found == null);
+    // 스크롤백·편집기는 페이지 수를 안 본다.
+    s.page_count = .{ .active = 1, .total = 2 };
+    s.target = .scrollback;
+    s.setMatchCount(4);
+    try std.testing.expectEqual(@as(u32, 3), counterCols(&s)); // "1/4"
+}
+
+test "P0-2 페이지 카운터는 view 가 그린 글로 나온다 — 입력 칸이 그 자리를 비워 둔다" {
+    const allocator = std.testing.allocator;
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 600 }, .active_pane = .{ .x = 0, .y = 0, .w = 1000, .h = 600 } };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var s: State = .{};
+    defer s.deinit(allocator);
+    s.show();
+    s.target = .page;
+    try s.input.query.appendSlice(allocator, "apple");
+    s.page_count = .{ .active = 2, .total = 7 };
+    var ops: std.ArrayList(draw.Op) = .empty;
+    try view(&s, p, &tk, arena.allocator(), &ops);
+    var found = false;
+    for (ops.items) |op| switch (op) {
+        .text => |t| for (t.runs) |r| {
+            if (std.mem.eql(u8, r.text, "2/7")) found = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(found);
 }
 
 test "find paired scope: draw·hit·caret 모두 자기 열을 쓰고 비활성 입력은 caret이 없다" {

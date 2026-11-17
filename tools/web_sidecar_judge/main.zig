@@ -40,6 +40,7 @@ const dialogs_check = @import("dialogs_check.zig");
 const permissions_check = @import("permissions_check.zig");
 const popup_check = @import("popup_check.zig");
 const tooltip_check = @import("tooltip_check.zig");
+const find_check = @import("find_check.zig"); // P0-2
 const contextmenu_check = @import("contextmenu_check.zig");
 const drag_check = @import("drag_check.zig");
 const newtab_check = @import("newtab_check.zig");
@@ -540,6 +541,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         tooltipChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--find")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        findChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--permissions")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
@@ -586,6 +595,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     permissionChecks(host_path, profile_root);
     popupChecks(host_path, profile_root);
     tooltipChecks(host_path, profile_root);
+    findChecks(host_path, profile_root);
     contextMenuChecks(host_path, profile_root);
     dragChecks(host_path, profile_root);
     newTabChecks(host_path, profile_root);
@@ -885,6 +895,14 @@ fn tooltipChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var profile_buf: [1024]u8 = undefined;
     const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/j", .{profile_root}, 0) catch return report(false, "tooltip", "프로필 경로가 길다", .{});
     tooltip_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "tooltip", "{s}", .{@errorName(err)});
+}
+
+/// 페이지 찾기 판정(P0-2) — 프로필은 `<뿌리>/fd`.
+fn findChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "find", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/fd", .{profile_root}, 0) catch return report(false, "find", "프로필 경로가 길다", .{});
+    find_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "find", "{s}", .{@errorName(err)});
 }
 
 /// 팝업 판정(W6a) — 프로필은 `<뿌리>/i`.

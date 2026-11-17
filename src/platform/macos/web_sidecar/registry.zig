@@ -68,6 +68,9 @@ pub const Entry = struct {
     /// 바깥이 마지막으로 스크롤한 때(W6m③ — 단조 ms, 0 = 없음). iframe 의 제안 목록 원점이 낡았는가(`datalist.onScrolled`).
     datalist_scrolled_ms: i64 = 0,
     drop_is_path: bool = false,
+    /// 페이지 찾기 한 판(P0-2 — maru 의 번호와 CEF identifier 의 짝, `protocol.find`). identifier 의 셈은 프로세스에 하나다
+    /// (`browsers.state.find_counter`).
+    find: protocol.find.Session = .{},
 };
 
 pub const Error = error{ Duplicate, Full };

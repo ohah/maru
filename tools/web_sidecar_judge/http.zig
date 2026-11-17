@@ -334,6 +334,7 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/keys")) return keys_page;
     if (std.mem.eql(u8, path, "/sel")) return select_page;
     if (std.mem.eql(u8, path, "/tip") or std.mem.eql(u8, path, "/tip2")) return tooltip_page;
+    if (std.mem.eql(u8, path, "/find")) return find_page; // P0-2 — `find_check`
     if (std.mem.eql(u8, path, "/cm")) return context_menu_page;
     // 팝업 이어 받기 판정(W6f①) — 자리는 `popupadopt_check.zig` 와 맞춘다.
     if (std.mem.eql(u8, path, "/pa")) return "<!doctype html><title>loading</title><style>body{margin:0}button{position:absolute;width:120px;height:30px}</style><body>" ++
@@ -607,6 +608,14 @@ const context_menu_page =
     "<div oncontextmenu='event.preventDefault();document.title=\"prevented\"' style='left:300px;top:150px;width:160px;height:40px;background:#cfc'>no menu here</div>" ++
     "<div id=long style='left:480px;top:40px;width:150px;height:90px;overflow:hidden'></div>" ++
     "<script>document.getElementById('long').textContent='\u{AC00}'.repeat(5000);sessionStorage.n=(+sessionStorage.n||0)+1;document.title='cm '+sessionStorage.n</script>";
+
+/// P0-2 찾기 판정(`find_check`) — `apple` 일곱(소문자 여섯·대문자 하나)·`banana` 하나·`사과` 둘. 일치 사이를 띄워 스크롤이 생기게 한다.
+const find_page =
+    \\<!doctype html><meta charset=utf-8><title>loading</title><style>body{font:16px sans-serif;margin:8px}.gap{height:700px}</style>
+    \\<p>apple one and apple two</p><p>banana 사과</p><div class=gap></div><p>APPLE three, apple four</p><div class=gap></div>
+    \\<p>apple five 사과 apple six</p><div class=gap></div><p>last apple seven</p>
+    \\<script>requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='find-ready'})});</script>
+;
 
 const tooltip_page =
     \\<!doctype html><title>loading</title><style>body{margin:0}div{position:absolute}#a{left:0;top:0;width:300px;height:200px}#b{left:320px;top:0;width:300px;height:200px}#x{left:0;top:220px;width:300px;height:80px}#y{left:320px;top:220px;width:300px;height:80px}</style>

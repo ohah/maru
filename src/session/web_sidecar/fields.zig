@@ -526,6 +526,66 @@ pub fn readText(cursor: *ReadCursor) Error![]const u8 {
     return text;
 }
 
+/// 페이지 찾기 글(P0-2) — 비지 않고 `max_find_text_bytes` 까지, UTF-8, 제어 문자 없음(탭·줄바꿈도 — 오버레이 검색어는 한 줄이다).
+pub fn checkFindText(text: []const u8) Error!void {
+    if (text.len == 0 or text.len > wire.max_find_text_bytes) return error.InvalidFind;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    if (hasControl(text)) return error.ControlCharacter;
+}
+
+/// `find`(P0-2): browser · request(0 아님) · forward · 글(u32 길이 + 바이트).
+pub fn writeFind(cursor: *Cursor, value: message.Find) Error!void {
+    try writeBrowser(cursor, value.browser);
+    if (value.request == 0) return error.InvalidFind;
+    try checkFindText(value.text);
+    try cursor.writeU32(value.request);
+    try cursor.writeByte(@intFromBool(value.forward));
+    try cursor.writeU32(@intCast(value.text.len));
+    try cursor.writeBytes(value.text);
+}
+
+pub fn readFind(cursor: *ReadCursor) Error!message.Find {
+    const browser = try readBrowser(cursor);
+    const request = try cursor.readU32();
+    if (request == 0) return error.InvalidFind;
+    const forward = try readBool(cursor);
+    const len = try cursor.readU32();
+    // 길이만으로 거절할 수 있으면 본문을 읽기 전에 거절한다(같은 상한을 `checkFindText` 가 다시 본다).
+    if (len == 0 or len > wire.max_find_text_bytes) return error.InvalidFind;
+    const text = try cursor.readBytes(len);
+    try checkFindText(text);
+    return .{ .browser = browser, .request = request, .forward = forward, .text = text };
+}
+
+/// 찾기 답의 닫힌 칸(P0-2) — request 0 아님, 차례는 일치 수를 넘지 않고, 일치가 없으면 차례도 0.
+pub fn checkFindResult(value: message.FindResult) Error!void {
+    if (value.request == 0) return error.InvalidFind;
+    if (value.active > value.count) return error.InvalidFind;
+    if (value.count == 0 and value.active != 0) return error.InvalidFind;
+}
+
+/// `find_result`(P0-2): browser · request · count · active · final.
+pub fn writeFindResult(cursor: *Cursor, value: message.FindResult) Error!void {
+    try writeBrowser(cursor, value.browser);
+    try checkFindResult(value);
+    try cursor.writeU32(value.request);
+    try cursor.writeU32(value.count);
+    try cursor.writeU32(value.active);
+    try cursor.writeByte(@intFromBool(value.final));
+}
+
+pub fn readFindResult(cursor: *ReadCursor) Error!message.FindResult {
+    const value: message.FindResult = .{
+        .browser = try readBrowser(cursor),
+        .request = try cursor.readU32(),
+        .count = try cursor.readU32(),
+        .active = try cursor.readU32(),
+        .final = try readBool(cursor),
+    };
+    try checkFindResult(value);
+    return value;
+}
+
 /// bootstrap 이름은 1~127 바이트의 출력 가능한 ASCII(공백 제외)만 받는다 — 이름이 곧 신뢰 경계의 주소라 느슨하게 받지 않는다.
 fn validService(name: []const u8) bool {
     if (name.len == 0 or name.len > wire.max_service_bytes) return false;

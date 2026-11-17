@@ -44,6 +44,7 @@ var file_dialog: c.cef_dialog_handler_t = undefined;
 var context_menu: c.cef_context_menu_handler_t = undefined;
 var permission: c.cef_permission_handler_t = undefined;
 var frame_handler: c.cef_frame_handler_t = undefined;
+var find_handler: c.cef_find_handler_t = undefined; // P0-2: 페이지 찾기의 답
 var title_task: c.cef_task_t = undefined;
 var title_flush_posted = false;
 var ready = false;
@@ -74,6 +75,9 @@ pub fn get() *c.cef_client_t {
         object.staticRefCounted(&permission.base);
         frame_handler = object.zeroed(c.cef_frame_handler_t);
         object.staticRefCounted(&frame_handler.base);
+        find_handler = object.zeroed(c.cef_find_handler_t);
+        object.staticRefCounted(&find_handler.base);
+        find_handler.on_find_result = &@import("find.zig").onFindResult;
         title_task = object.zeroed(c.cef_task_t);
         object.staticRefCounted(&title_task.base);
         title_task.execute = &flushTitles;
@@ -89,6 +93,7 @@ pub fn get() *c.cef_client_t {
         client_obj.get_permission_handler = &getPermission;
         client_obj.get_download_handler = &getDownload;
         client_obj.get_frame_handler = &getFrameHandler;
+        client_obj.get_find_handler = &getFindHandler; // P0-2
         // W5c: helper 의 알림 대리 스크립트가 보내는 프로세스 메시지.
         client_obj.on_process_message_received = &notifications.onProcessMessageReceived;
         life_span.on_before_popup = &onBeforePopup;
@@ -134,6 +139,10 @@ pub fn get() *c.cef_client_t {
         permission.on_request_media_access_permission = &permissions.onRequestMediaAccessPermission;
     }
     return &client_obj;
+}
+
+fn getFindHandler(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_find_handler_t {
+    return &find_handler;
 }
 
 fn getFrameHandler(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_frame_handler_t {

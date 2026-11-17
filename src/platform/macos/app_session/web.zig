@@ -3325,6 +3325,10 @@ pub fn addrEditPaste(self: *AppSession, bytes: []const u8) void {
 /// 1이면 NSOpenPanel을 연다). take_bell과 같은 패턴. (배경 이미지 파일 선택 — 사용자 요청)
 /// 웹 탭 페이지 내 찾기 질의를 낸다(§8 슬라이스 ②). 활성 web 탭이 없으면 무동작.
 /// 매 호출이 새 `seq`를 달아 **늦게 오는 이전 회신을 무효로** 만든다.
+///
+/// **엔진으로 갈린다(P0-2).** 활성 Term 이 Chromium 탭이면(`isOsrTerm`) Swift 를 거치지 않고 sidecar 로 보낸다(`submitOsrFind`) — 예전에는
+/// 여기서 Swift 질의를 세웠고, Swift 는 그 탭의 WKWebView 가 없어 「전달 못함」을 돌려주고, tick 이 다시 내 **창 전체를 화면 주사율로 계속
+/// 다시 그렸다**(실측 776 번·≈ 62 fps — docs/plans/web-osr-backend.md P0-2). WebKit 탭·파일 Term(html·md — `isBrowserTerm` 이 거른다)은 예전 길 그대로다.
 pub fn submitWebFind(self: *AppSession, backwards: bool) void {
     const sid = activeWebSurfaceIdAnyKind(self);
     if (sid == 0) return;
@@ -3333,10 +3337,15 @@ pub fn submitWebFind(self: *AppSession, backwards: bool) void {
         self.web_find_pending = null;
         self.web_find_last_surface = 0;
         self.chrome_host.find.page_found = null; // 검색한 것이 없으니 찾음/없음도 없다
+        self.chrome_host.find.page_count = null;
+        stopOsrFind(self); // Chromium 은 칠한 것을 지운다(P0-2 — 검색어를 다 지웠다)
         return;
     }
     const q = self.chrome_host.find.input.query.items;
     if (q.len > self.web_find_query_buf.len) return; // 상한 초과는 제출하지 않는다(잘라 보내지 않는다)
+    if (isOsrTerm(pane_ops.activePane(self).activeTerm())) return submitOsrFind(self, sid, q, !backwards);
+    stopOsrFind(self); // 다른 대상으로 옮겼다 — 앞 Chromium 탭의 하이라이트를 지운다(P0-2, 없으면 무동작)
+    self.chrome_host.find.page_count = null;
     @memcpy(self.web_find_query_buf[0..q.len], q);
     self.web_find_query_len = q.len;
     self.web_find_seq +%= 1;
@@ -3345,6 +3354,104 @@ pub fn submitWebFind(self: *AppSession, backwards: bool) void {
     self.metal_dirty = true;
     findTestReport("submit route=webkit sid={d} seq={d}", .{ sid, self.web_find_seq });
 }
+
+/// P0-2: Chromium 탭의 페이지 찾기 — sidecar 에 곧바로(`web_osr.find`). 그 탭의 브라우저가 아직 없으면(`not_ready` — 막 연 탭·sidecar 재시작)
+/// 아무것도 세우지 않고 돌아간다: 「보냈다」 표지가 없으니 tick 이 다음에 다시 내고, **다시 그리기를 청하지 않는다**(보낸 것이 없다 — 고리가
+/// 되지 않는다). 보냈으면 표지(`web_find_last_surface`·질의 사본)를 세워 tick 이 같은 탭·같은 검색어로 다시 내지 않게 한다.
+/// `web_find_seq` 도 올린다 — WebKit 탭에 낸 질의의 늦은 답이 이 탭의 오버레이에 붙지 않게(`provideWebFindResult` 는 seq 와 대상만 본다).
+fn submitOsrFind(self: *AppSession, sid: u64, q: []const u8, forward: bool) void {
+    if (self.web_find_osr_surface != 0 and self.web_find_osr_surface != sid) {
+        stopOsrFind(self); // 앞 탭의 찾기(다른 탭으로 옮겼다)
+        self.chrome_host.find.page_count = null;
+    }
+    const sent = web_osr.find(self.allocator, sid, q, forward);
+    switch (sent) {
+        .not_ready => return,
+        .sent => |request| {
+            self.web_find_osr_surface = sid;
+            self.web_find_osr_request = request;
+            self.web_find_osr_seen = 0; // 새 번호 — 그 탭의 답 세대는 이어 오르므로 처음부터 받는다
+            self.web_find_osr_closed = !self.chrome_host.find.open; // 닫힌 오버레이의 ⌘G
+        },
+        .refused => {
+            // 보낼 수 없는 글(제어 문자 등) — 다시 해도 같으니 「보냈다」로 치고 수는 비운다. 칠해 둔 앞 찾기도 지운다.
+            stopOsrFind(self);
+            self.chrome_host.find.page_count = null;
+        },
+    }
+    self.chrome_host.find.page_found = null; // WebKit 의 찾음/없음은 이 탭 것이 아니다
+    @memcpy(self.web_find_query_buf[0..q.len], q);
+    self.web_find_query_len = q.len;
+    self.web_find_seq +%= 1;
+    self.web_find_pending = null;
+    self.web_find_last_surface = sid;
+    findTestReport("submit route=osr sid={d} {s}", .{ sid, @tagName(sent) });
+}
+
+/// P0-2: 이 창이 Chromium 탭에 낸 찾기를 멈춘다(하이라이트를 지운다) — 그 탭의 지금 찾기가 이 창의 번호일 때만 sidecar 에 간다(`findStop`).
+/// 그 탭의 「보냈다」 표지도 내린다 — 그 탭으로 돌아와 오버레이가 열려 있으면 tick 이 다시 낸다(멈춘 찾기를 보냈다고 남기면 수가 비고 칠한
+/// 것도 없는 채 다시 내지 않는다). 없으면 무동작.
+pub fn stopOsrFind(self: *AppSession) void {
+    stopOsrFindKeeping(self, false);
+}
+
+fn stopOsrFindKeeping(self: *AppSession, keep_selection: bool) void {
+    if (self.web_find_osr_surface == 0) return;
+    web_osr.findStop(self.allocator, self.web_find_osr_surface, self.web_find_osr_request, keep_selection);
+    if (self.web_find_last_surface == self.web_find_osr_surface) self.web_find_last_surface = 0;
+    self.web_find_osr_surface = 0;
+    self.web_find_osr_request = 0;
+    self.web_find_osr_closed = false;
+}
+
+/// P0-2: 닫힌 오버레이에서 ⌘G 가 낸 찾기의 마지막 답이 오면 칠한 것을 거두고 그 일치만 선택으로 남긴다. 거두지 않으면 노란 칠이 찾기 상자
+/// 없이 다음 ⌘F 까지 남는다(실앱에서 본 것 — WebKit 탭의 ⌘G 는 일치를 잠깐 표시하고 선택만 남는다). 선택이 남으므로 다음 ⌘G 는 그 뒤에서
+/// 다시 찾는다. 답이 오기 전에 오버레이를 열면 열림 가장자리가 먼저 멈춘다(`reconcileOsrFind`).
+pub fn settleClosedOsrFind(self: *AppSession) void {
+    if (!self.web_find_osr_closed or self.chrome_host.find.open) return;
+    const answer = web_osr.findAnswer(self.web_find_osr_surface) orelse return;
+    if (answer.request != self.web_find_osr_request or !answer.final) return;
+    stopOsrFindKeeping(self, true);
+}
+
+/// P0-2: 오버레이가 열리거나 닫힐 때(가장자리) Chromium 찾기를 멈춘다 — 닫는 길(Esc·⌘F 다시·배타 오버레이·diff 찾기 정리 …)마다 넣으면 하나를
+/// 빠뜨리므로 tick 이 값의 바뀜으로 본다. 열림에서도 멈춘다: 닫힌 채 ⌘G 로 칠한 하이라이트가 새 빈 찾기 밑에 남지 않게.
+pub fn reconcileOsrFind(self: *AppSession) void {
+    const open = self.chrome_host.find.open;
+    if (open == self.web_find_open_seen) return;
+    self.web_find_open_seen = open;
+    stopOsrFind(self);
+}
+
+/// P0-2: tick 의 「이미 이 탭에 이 검색어를 보냈나」 중 엔진 몫 — WebKit 탭은 늘 참(예전 판정 그대로). Chromium 탭은 이 창의 찾기가 그 탭에
+/// 아직 살아 있어야 참이다: sidecar 가 다시 떠 브라우저가 새로 만들어졌으면(`browser_created` 가 찾기를 비운다) 다시 낸다. 보낼 수 없는
+/// 글이었으면(`refused` — 번호 없이 표지만 섰다) 다시 내지 않는다.
+pub fn osrFindCurrent(self: *AppSession, sid: u64) bool {
+    if (!isOsrTerm(pane_ops.activePane(self).activeTerm())) return true;
+    if (self.web_find_osr_surface == sid) return web_osr.findLive(sid, self.web_find_osr_request);
+    // 그 탭에 이 창의 찾기가 없는데 표지가 섰다 — 보낼 수 없는 글이었다(`refused` — 멈춤은 표지를 내린다). 다시 내지 않는다.
+    return self.web_find_last_surface == sid;
+}
+
+/// P0-2: 이 창의 Chromium 찾기의 새 답을 오버레이에 싣는다 — 오버레이가 열려 있고, 보이는 탭이 그 탭이고, 답이 이 창의 지금 번호이며 처음
+/// 보는 세대일 때만(WebKit 답의 규칙과 같다 — 닫힌 오버레이·옮긴 탭·늦은 답은 반영하지 않는다).
+pub fn pollOsrFindResult(self: *AppSession) void {
+    const sid = self.web_find_osr_surface;
+    if (sid == 0 or !self.chrome_host.find.open) return;
+    if (activeWebSurfaceIdAnyKind(self) != sid) return;
+    const answer = web_osr.findAnswer(sid) orelse return;
+    if (answer.request != self.web_find_osr_request or answer.generation == self.web_find_osr_seen) return;
+    self.web_find_osr_seen = answer.generation;
+    self.chrome_host.find.page_count = .{ .active = answer.active, .total = answer.count };
+    self.metal_dirty = true;
+    findTestReport("result route=osr request={d} {d}/{d} final={}", .{ answer.request, answer.active, answer.count, answer.final });
+}
+
+comptime {
+    // 두 엔진이 같은 길이까지 찾는다 — Chromium 의 wire 상한이 오버레이 질의 사본(WebKit 과 함께 쓴다)보다 작으면 긴 질의를 sidecar 가 거절한다.
+    std.debug.assert(@typeInfo(@FieldType(AppSession, "web_find_query_buf")).array.len <= ws_find_cap);
+}
+const ws_find_cap = maru.session.web_sidecar.wire.max_find_text_bytes;
 
 /// 시험 앱(`MARU_WEB_OSR_TEST_INPUT`)에서만 찾기의 제출·답을 stderr 에 한 줄씩 적는다(P0-2 — 다시 제출하는 고리를 세는 실앱 판정).
 fn findTestReport(comptime fmt: []const u8, args: anytype) void {

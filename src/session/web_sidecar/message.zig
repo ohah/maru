@@ -203,6 +203,14 @@ pub const Tag = enum(u8) {
     /// 를 스스로 낸다(브라우저 전체에 trace 하나 — 실측 t2). 숨은 탭이면 측정하는 동안만 focus 흉내를 켠다(사용자 결정 5). 답은 `trace_state`,
     /// 바이트는 `trace_data`, 그 탭 가족의 프레임 id 는 `trace_frames`.
     trace = 141,
+    /// 그 탭의 페이지 찾기(P0-2 — 사용자의 ⌘F 글·Enter·⌘G). sidecar 는 CEF `find`(대소문자 무시, `findNext=1`)를 부른다 — 글이 바뀌었거나
+    /// 멈춘 뒤면 CEF 가 새로 찾아 첫 일치를, 같은 글이 이어지면 다음·이전 일치를 고른다(실측 — `findNext=0` 은 일치를 칠하기만 하고 지금
+    /// 일치를 고르지 않는다: 차례 0). `request` 는 maru 가 매긴 0 아닌 번호로, 답(`find_result`)이 그것을 싣는다.
+    find = 142,
+    /// 그 탭의 찾기를 멈추고 하이라이트를 지운다(P0-2 — CEF `stop_finding`). 오버레이를 닫거나 열 때·검색어를 비울 때·다른 탭으로 옮겨 다시
+    /// 낼 때는 지금 일치의 선택까지 지우고(`keep_selection` 거짓), 닫힌 오버레이에서 ⌘G 가 찾은 뒤에는 칠한 것만 지우고 그 일치를 선택으로
+    /// 남긴다(참 — WebKit 탭의 ⌘G 처럼 어디인지는 남고 노란 칠은 남지 않는다). 그 뒤의 늦은 답은 sidecar 가 버린다.
+    find_stop = 143,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
@@ -260,6 +268,9 @@ pub const Tag = enum(u8) {
     /// 그 탭 가족(그 탭·그 탭이 연 팝업)의 프레임 id(W9e② — 시작 전 `Page.getFrameTree` 와 trace 동안의 `Page.frameAttached`·`frameNavigated`).
     /// maru 의 거르기(F3)가 이 집합 밖의 프레임을 보면 trace 를 통째로 버린다. 64 개씩 나눠 `trace_state` 의 `done` 앞에 온다.
     trace_frames = 85,
+    /// 찾기의 답(P0-2 — CEF `on_find_result`). 일치 수와 지금 일치의 차례(1 부터, 일치가 없으면 0)·마지막 답인가. Chromium 은 수를 세는
+    /// 동안 여러 번 답한다. sidecar 는 **그 탭의 지금 찾기**의 답만 보낸다(앞 질의의 늦은 답·멈춘 뒤의 답은 버린다 — `find.zig`).
+    find_result = 86,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -1025,6 +1036,37 @@ pub const UrlChanged = struct {
 pub const BrowserText = struct {
     browser: BrowserId,
     text: []const u8,
+};
+
+/// 페이지 찾기(P0-2 — `find`). 대소문자는 늘 무시한다(WebKit 탭의 찾기와 같은 규칙 — 칸을 두지 않는다). 새 찾기와 다음 일치를 가르는 칸도
+/// 없다 — CEF 가 글로 가른다(글이 바뀌었거나 멈춘 뒤면 새 찾기).
+pub const Find = struct {
+    browser: BrowserId,
+    /// maru 가 매긴 0 아닌 번호 — 답이 싣는다.
+    request: u32,
+    /// 앞으로(글을 침·Enter·⌘G) — 거짓이면 뒤로(⇧Enter·⌘⇧G).
+    forward: bool = true,
+    /// 찾을 글 — 비지 않은 UTF-8, 제어 문자 없음, `wire.max_find_text_bytes` 까지.
+    text: []const u8,
+};
+
+/// 찾기 멈춤(P0-2 — `find_stop`).
+pub const FindStop = struct {
+    browser: BrowserId,
+    /// 지금 일치를 선택으로 남긴다(CEF `clearSelection` 의 반대).
+    keep_selection: bool = false,
+};
+
+/// 찾기의 답(P0-2 — `find_result`).
+pub const FindResult = struct {
+    browser: BrowserId,
+    request: u32,
+    /// 일치 수.
+    count: u32,
+    /// 지금 일치의 차례(1 부터). 일치가 없거나 아직 모르면 0 — `count` 보다 크지 않다.
+    active: u32,
+    /// 이 찾기의 마지막 답이다(Chromium 이 수 세기를 끝냈다).
+    final: bool,
 };
 
 pub const NavAction = struct {
@@ -2064,6 +2106,8 @@ pub const Message = union(Tag) {
     net_mock_commit: NetMockCommit,
     emulation: Emulation,
     trace: Trace,
+    find: Find,
+    find_stop: FindStop,
     main_frame_navigating: BrowserId,
     console_message: ConsoleMessage,
     error_page: ErrorPage,
@@ -2084,6 +2128,7 @@ pub const Message = union(Tag) {
     trace_state: TraceState,
     trace_data: TraceData,
     trace_frames: TraceFrames,
+    find_result: FindResult,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

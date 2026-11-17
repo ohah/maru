@@ -1156,6 +1156,12 @@ test "에이전트가 몬 실행 파일 다운로드는 받는다 — 에이전�
     try std.testing.expect(recentAgentInput(7, 3000, monotonicNow()));
     // 창 밖 — 오래된 동작은 몬 것이 아니다.
     try std.testing.expect(!recentAgentInput(7, 3000, monotonicNow() + 3001));
+    // …실제 다운로드 길에서도(부르는 자리가 3 초 창을 넘긴다 — 적대 검증 변이 L4-5: 그 자리에 1 시간을 넘겨도 초록이었다). 새 문서 없이 3.5 초 전의
+    // 에이전트 동작은 몬 것이 아니다 — 보류.
+    const fresh_agent_ms = surfaces.getPtr(7).?.agent_input_ms;
+    surfaces.getPtr(7).?.agent_input_ms = monotonicNow() - 3_500;
+    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 7, "stale.command"));
+    surfaces.getPtr(7).?.agent_input_ms = fresh_agent_ms;
     // 에이전트가 연 문서가 스스로 받는 것은 그 동작의 다운로드가 아니다(사람과 같은 규칙) — 사용자 탭이면 보류.
     apply(gpa, .{ .page_started = 7 }, 0);
     try std.testing.expect(!recentAgentInput(7, 3000, monotonicNow()));

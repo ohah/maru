@@ -30,7 +30,8 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* v260: W9e② browser performance-trace summary for the Browser Grants menu. */
 /* v261: grant scope wire 7 (browser_agent_tabs — per-pane consent to open agent tabs) and the agent-tabs denial/title exports for the Browser Grants menu. */
 /* v262: user decision 2026-11-16 (full agent access) — grant scope wire 7 and the four agent-tabs denial/title exports are removed. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 262u
+/* v263: P0-3 — maru_macos_control_tick (the browser-control clock work that ran at the top of take_browser_op). */
+#define MARU_MACOS_APP_HOST_ABI_VERSION 263u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);
@@ -2476,7 +2477,11 @@ void maru_macos_control_server_drain(const MaruControlSessionRef *refs, size_t c
 /* accept 스레드를 멈추고 join한 뒤 소켓을 닫는다(앱 종료 시). idempotent(미시작이면 무동작). */
 void maru_macos_control_server_stop(void);
 
-/* 5e-2b: 매 frame tick 호출 — (1) hung browser op timeout reap, (2) browser op 큐에서 하나 pop. 반환 1=op 있음·0=없음.
+/* P0-3(v263): 앱 tick 마다 한 번(drainBrowserOps 앞, 컨트롤 서버가 떴을 때) — 잠든 Chromium op 깨우기(서버가 멈췄어도), 시한이 지난
+   실행의 timeout 응답, 남은 지난 in-flight 거두기, 끝난 wait 표 비우기. 예전엔 take_browser_op 맨 앞에 있었다. 메인 스레드에서만. */
+void maru_macos_control_tick(void);
+
+/* 5e-2b: 매 frame tick 호출 — browser op 큐에서 하나 pop(시각 일은 그 앞의 maru_macos_control_tick). 반환 1=op 있음·0=없음.
    op 있으면 Swift가 out_surface_id의 webView를 찾아 BrowserControl에서 실행한다. op_kind:
    0=navigate·1=getUrl·2=executeScript·4=getCookies·5=screenshot·6=setCookie·7=deleteCookie·
    8=getLocalStorage·9=setLocalStorage·10=removeLocalStorage·11=clearStorage·12=click·13=type·14=scroll·15=wait.

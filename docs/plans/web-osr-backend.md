@@ -5805,3 +5805,25 @@ WebKit 걷어내기를 준비하는 Chromium 쪽 PR 의 둘째(사용자 결정 
   판정자 무변경(`find-keep` 이 keep 동작을 잰다), 실앱 before/after·반복 판.
 - 남은 틈: Esc 의 선택 남기기는 그 탭이 키 포커스를 가질 때만 — 못 남기면 다음 ⌘G 는 첫 일치부터, 열린 상자에서의 ⌘G 는 지금처럼 모달이 잡는다(열린 상자의 Enter 가
   그 일이다), 검색어 끝의 caret 만 서고 Chrome 처럼 글 전체가 선택되지는 않는다(오버레이 입력은 끝 caret 만 안다).
+
+### P0-3 — Swift drain 에 숨은 Zig 일을 Zig tick 으로(2026-11-17, 완료)
+
+WebKit 걷어내기의 준비(`refactor`, 동작 불변). 예전에는 Chromium 탭의 이동 몇 가지와 에이전트 브라우저 제어의 시각 일이 Swift 가 tick 뒤에 부르는 **WebKit 용
+take 안에서** 나갔다 — P1 이 그 take·drain 을 지우면 함께 사라질 일이었다.
+
+- **Chromium 탭의 이동**: 주소창 Enter·주소 띠에 놓은 링크(`addr_navigate_pending`), 새 탭·복원·에이전트 탭의 첫 주소(`pending_url` — 터미널 링크로 여는 새
+  Chromium 탭과 `maru browser open` 도 이 길), 주소창 ←→⟳ 단추(`web_nav_action_pending`)는 이제 `tickWebOsr` 의 **끝**(`sendOsrNavigations`)에서 보낸다 — 예전
+  drain(`take_web_addr_navigate` → `take_web_nav_action`)과 같은 차례(주소창 → 첫 주소 → 단추). 끝인 이유: 같은 tick 에 닫힌 탭의 대기는 닫기(`dropAddrEditIfSurface`)가
+  먼저 비운다. take 셋은 WebKit 탭 몫만 돌려주고 Chromium 탭의 대기는 **걷지 않는다**(tick 뒤에 세워진 것을 걷어 Swift 에 넘기면 WKWebView 가 없어 잃는다). 그 대기가
+  남은 동안 `take_web_addr_navigate` 는 복원도 보지 않는다 — 복원의 WebKit 가지가 같은 `addr_navigate_url_buf` 에 써 보낼 주소를 덮지 않게.
+- **에이전트 제어의 시각 일**: 잠든 Chromium op 깨우기(wait·navigate 의 확인 간격 — 서버가 멈췄어도)·시한이 지난 실행의 `timeout` 응답·남은 지난 in-flight
+  거두기·끝난 wait 표 비우기가 새 export `maru_macos_control_tick`(ABI 263)으로 — Swift `tickAppSession` 이 결과 펌프 뒤·`drainBrowserOps` 앞에, 컨트롤 서버가
+  떴을 때 한 번 부른다(예전 `take_browser_op` 맨 앞과 같은 자리·같은 순서). `take_browser_op` 은 WKWebView op 꺼내기만 한다.
+- **달라진 것(보이지 않음)**: 이번 tick 의 drain 이 처음 배치한 탭(`routeOsrLayouts` → `ensure`)의 첫 주소는 같은 drain 이 아니라 다음 tick 에 간다 — 브라우저가
+  만들어지기 전이면 `navigate` 가 적어 두었다가 `browser_created` 때 보내고, 만들기는 sidecar 왕복이라 한 tick(≤ 16 ms)보다 길어 보내는 frame·순서는 같다.
+  take loop 안 둘째 이후 take 의 거듭 시각 일은 없어졌다(같은 tick 안 µs 차이 — 다음 tick 이 거둔다).
+- **범위 밖**: OSR 탭 배치(`routeOsrLayouts` — 브라우저 만들기·크기)는 여전히 drain 의 `web_surface_transitions_count` 안이다. 파일 패널(WKWebView)이 남아
+  그 drain 은 P1 뒤에도 남는다.
+- **검증**: 앱 시험(take 없이 tick 만으로 주소창·단추·첫 주소가 차례대로 나간다, take 가 먼저 불려도 걷지 않고 다음 tick 이 보낸다, 배치 전 탭의 첫 주소는 남는다,
+  같은 tick 에 닫힌 탭엔 보내지 않는다), ABI 시험(take 없이 control tick 만으로 잠든 navigate 가 loaded 로 끝난다·서버가 멈춰도 깨운다·시한 응답이 거두기보다
+  먼저·take 는 시각 일을 하지 않는다), Swift 원본 판정자(부르는 자리), 격리 실앱 전·후.

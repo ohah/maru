@@ -2303,6 +2303,13 @@ pub fn grantNewTabCredit(gpa: std.mem.Allocator, surface_id: u64, pane: u64) voi
     if (s.created and (state == .running or state == .starting)) send(gpa, .{ .new_tab_credit = surface_id });
 }
 
+/// 그 탭의 배치를 숨김으로 sidecar 에 보냈는가(기록의 `hidden` — 창의 배치가 매 tick 맞춘다). 기록이 없으면 null(아직 배치되지 않았다).
+/// `browser.show` 가 보인 탭의 배치가 sidecar 로 갔는지 볼 때 쓴다 — 곧 이은 op 이 `hidden` 페이지를 보지 않게.
+pub fn layoutHidden(surface_id: u64) ?bool {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return s.record.hidden;
+}
+
 /// 워크스페이스 저장이 그 탭의 주소를 고르는 데 쓰는 엔진 쪽 사실(규칙은 L2 `workspace.browserTermUrl` 하나 — 여기는 사실만). `open` 은
 /// 보낸 이동이 아직 열려 있는가 — 브라우저를 만드는 중(만들어지면 `last_url` 로 보낸다), 진행 중, 오류 페이지로 끝났다. 다운로드·204 처럼
 /// 문서 없이 끝난 이동은 거짓(다음 실행마다 그 파일을 다시 받지 않게). 모르는 탭(한 번도 배치되지 않았다)은 null.

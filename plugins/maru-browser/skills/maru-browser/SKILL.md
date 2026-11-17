@@ -55,6 +55,8 @@ maru browser close --surface 12                      # always, when done
   with `--visible`, or `--load`. After a click, wait for something only the next page has: `--load` checks the
   current document, which right after a click can still be the old page — do not click again because of it.
   `scroll`, `hover` and `press` target elements like `click`.
+- `show --surface 12` brings a tab to the front of its pane when the user should see it (their keys stay out of
+  the page until they click it) — see [tabs-and-permissions.md](references/tabs-and-permissions.md).
 - `click`, `type`, `press` and `hover` send real input. `ok` plus a dialog warning means the input landed:
   do not repeat it — see [dialogs-and-uploads.md](references/dialogs-and-uploads.md). A pane holds at most 8 agent tabs.
 

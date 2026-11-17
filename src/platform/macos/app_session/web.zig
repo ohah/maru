@@ -492,6 +492,8 @@ pub fn takeDownloadAsk(self: *AppSession) ?*const web_osr.downloads.Entry {
     if (!web_osr.enabled() or !self.surface_initialized) return null;
     const term = pane_ops.activePane(self).activeTerm();
     if (!isOsrTerm(term)) return null;
+    // 에이전트가 보이며 키를 막아 둔 탭 — 저장 창은 이름 칸이 사람이 치던 키를 받는다. 사람이 그 페이지를 누를 때까지 맡지 않는다(1 초 뒤 목록 창).
+    if (term.surfaceId() == self.osr_key_hold) return null;
     return web_osr.downloads.claimAskFor(term.surfaceId());
 }
 
@@ -1135,6 +1137,8 @@ pub fn osrMouseDown(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_bu
     // 제스처가 살아 있으면(왼쪽으로 끄는 중 다른 버튼) 누른 자리가 본문 밖이어도 그 탭이 받는다 — 페이지가 capture 를 쥐고 있다.
     const owned: ?app_session_mod.OsrLayout = if (self.pointer_gesture_owner == .web_osr) osr_input.find(self.osr_layouts.items, self.pointer_gesture_owner.web_osr.surface_id) else null;
     const layout = owned orelse osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
+    // 사람이 그 페이지를 눌렀다(어느 단추든) — 에이전트가 보이며 막아 둔 키를 이제 그 페이지에 준다(`browser.show`).
+    if (owned == null) releaseKeyHold(self, layout.surface_id);
     const button = osr_input.button(xterm_button) orelse return true; // 모르는 버튼 — 본문 것이니 삼킨다
     var held = osr_input.Held.one(button);
     if (owned != null) {
@@ -1325,7 +1329,20 @@ pub fn osrKeyTarget(self: *AppSession) ?u64 {
     if (self.terminalOwnsInput()) return null;
     const term = pane_ops.activePane(self).activeTerm();
     if (!isOsrTerm(term)) return null;
+    // 에이전트가 보인 탭 — 사람이 그 페이지를 누를 때까지 키·조합·포커스를 주지 않는다(`browser.show` 의 「키는 막기」).
+    if (term.surfaceId() == self.osr_key_hold) return null;
     return term.surfaceId();
+}
+
+/// 사람의 키를 받는 자리(이 창의 화면 워크스페이스의 활성 pane 의 앞 탭) — 창이 키인지·모달은 보지 않는다. 없으면 0.
+fn keyboardSlot(self: *AppSession) u64 {
+    if (!self.surface_initialized or self.tabs.items.len == 0) return 0;
+    return pane_ops.activePane(self).activeTerm().surfaceId();
+}
+
+/// 사람이 그 탭을 스스로 골랐다(페이지·탭 머리를 눌렀다) — 에이전트가 막아 둔 키를 푼다. 다음 동기화가 포커스를 준다.
+pub fn releaseKeyHold(self: *AppSession, surface_id: u64) void {
+    if (self.osr_key_hold != 0 and self.osr_key_hold == surface_id) self.osr_key_hold = 0;
 }
 
 /// 키 대상이 바뀌었으면 포커스를 옮긴다(C5 모달 에지): 옛 탭은 조합을 그대로 확정하고(`ime_finish_composing`) 포커스를
@@ -1353,6 +1370,9 @@ pub fn markFocusByApp(self: *AppSession, from: u64, to: ?u64) void {
 }
 
 pub fn syncOsrKeyTarget(self: *AppSession) void {
+    // 키 받는 자리가 막아 둔 탭을 떠났다(사람이 다른 탭·pane·워크스페이스로 옮겼다, 탭이 닫혔다) — 막음은 끝난다. 다시 그 탭으로 돌아오는 것은
+    // 사람이 옮긴 것이라 키를 받는다. 창이 키를 잃는 것은 풀지 않는다(자리는 그대로다).
+    if (self.osr_key_hold != 0 and keyboardSlot(self) != self.osr_key_hold) self.osr_key_hold = 0;
     const now = osrKeyTarget(self) orelse 0;
     if (now == self.osr_key_target) return;
     // 새 탭이 아직 sidecar 기록에 없으면(배치가 이 tick 뒤에 브라우저를 만든다) 미룬다 — 먼저 대상을 바꿔 두면 포커스를
@@ -1923,6 +1943,104 @@ pub fn openAgentTab(self: *AppSession, opener: u64, url: ?[]const u8) AgentOpenE
     self.workspaceChanged(.topology);
     self.metal_dirty = true;
     return term.surfaceId();
+}
+
+// ── 탭 보이기(`browser.show` — 사용자 결정 2026-11-17·18) ─────────────────────────────────────────────────────────────
+// 사람이 탭 머리를 누르듯 그 탭을 **그 pane 의 앞 탭**으로 한다. 사람의 누름과 다른 점 셋: ① pane 포커스·워크스페이스·창 순서는 건드리지 않는다
+// (「그 pane 안에서만 바꾸기」 — 다른 워크스페이스·다른 창이어도 그 pane 의 앞 탭만), ② 그 pane 이 사람의 키를 받는 pane 이면 페이지는 보이되
+// 사람이 그 페이지·그 탭 머리를 누를 때까지 키·조합·포커스를 주지 않는다(「바꾸되 키는 막기」 — `osr_key_hold`), ③ 사람이 그 순간 할 수 없는
+// 일은 하지 않는다(모달·sheet·탭 끌기·그 pane 에서 편집 중이면 거절).
+
+pub const ShowRefusal = enum {
+    /// 그 탭이 이 창에 없다(닫혔다·옮겨 갔다).
+    not_found,
+    /// 탭 줄을 숨긴 창(`chrome_minimal`) — 사람도 탭을 눌러 고를 수 없다.
+    tabs_hidden,
+    /// 이 창에 모달(오버레이)이 떠 있다 — 사람은 그동안 탭을 누를 수 없다(닫기 확인은 탭을 **자리**로 든다).
+    modal,
+    /// 이 창에 sheet(JS 대화상자·권한·파일 선택·다운로드 저장 창)가 떠 있다 — 창-모달이다.
+    sheet,
+    /// 사람이 그 pane 의 탭을 끌고 있다(미리 보기 순서 중 앞 탭이 바뀌면 놓는 자리가 어긋난다).
+    dragging,
+    /// 사람이 그 pane(키 받는 pane)의 주소창·탭 이름을 편집하고 있다 — 치던 글이 숨은 탭으로 간다.
+    editing,
+    /// 터미널의 조합을 확정하지 못했다(`tryCommitComposition` 이 받지 않았다).
+    composing,
+};
+
+pub const AgentShow = union(enum) {
+    shown: struct {
+        /// maru 가 그 탭을 숨기지 않는가 — 그 창의 화면 워크스페이스에 있다(창이 가려졌는지·최소화됐는지는 모른다).
+        visible: bool,
+        /// 앞 탭이 바뀌었나(이미 앞 탭이면 거짓).
+        changed: bool,
+        /// 사람의 키를 그 페이지에 주지 않고 있다(사람이 누를 때까지).
+        key_held: bool,
+    },
+    refused: ShowRefusal,
+};
+
+/// 그 탭을 그 pane 의 앞 탭으로(위 절). 이 창 안에서 찾는다 — 부른 쪽이 그 탭을 든 창을 고른다(`appSessionOwningSurface`).
+pub fn agentShowTab(self: *AppSession, surface_id: u64) AgentShow {
+    const loc = term_ops.findTermWhere(self, surface_id, struct {
+        fn pred(want: u64, term: *Term) bool {
+            return term.surfaceId() == want;
+        }
+    }.pred) orelse return .{ .refused = .not_found };
+    // Chromium 브라우저 탭만(L2 가 이미 거른다 — 터미널·파일 뷰를 앞으로 내는 길이 되지 않게 한 번 더).
+    if (!isOsrTerm(loc.pane.terms.items[loc.term_index])) return .{ .refused = .not_found };
+    if (self.tabsBlocked()) return .{ .refused = .tabs_hidden };
+    if (self.anyModalOverlayOpen()) return .{ .refused = .modal };
+    if (self.osr_dialog != null or downloadSheetIn(self)) return .{ .refused = .sheet };
+    switch (self.pointer_gesture_owner) {
+        .terminal_tab => |drag| if (drag.pane == loc.pane) return .{ .refused = .dragging },
+        else => {},
+    }
+    const tab = self.tabs.items[loc.tab_index];
+    const visible = loc.tab_index == self.app_window.active_tab;
+    // 사람의 키를 받는 pane — 화면 워크스페이스의 활성 pane(창이 키인지와 상관없이: 사람이 돌아오면 곧 키를 받는 자리다).
+    const keyboard_pane = visible and tab.panes.items[tab.active_pane] == loc.pane;
+    if (loc.pane.active_term == loc.term_index) {
+        return .{ .shown = .{ .visible = visible, .changed = false, .key_held = keyboard_pane and self.osr_key_hold == surface_id } };
+    }
+    if (!keyboard_pane) {
+        selectTermInPane(self, loc.tab_index, loc.pane, loc.term_index);
+        return .{ .shown = .{ .visible = visible, .changed = true, .key_held = false } };
+    }
+    if (self.addr_edit != null or self.rename != null) return .{ .refused = .editing };
+    const old_target = self.osr_key_target;
+    // 사람의 탭 전환과 같은 길(조합 확정·닫기 보류 무효·탭 대표·스크롤·찾기·저장) — 조합을 확정하지 못하면 바꾸지 않는다.
+    if (!term_ops.tryFocusTerm(self, loc.term_index)) return .{ .refused = .composing };
+    self.osr_key_hold = surface_id;
+    // 옛 키 대상(다른 페이지)의 포커스를 거두는 것은 maru 가 옮긴 것이다 — 사람의 몰기로 치지 않는다.
+    if (old_target != 0) markFocusByApp(self, old_target, null);
+    syncOsrKeyTarget(self);
+    return .{ .shown = .{ .visible = visible, .changed = true, .key_held = true } };
+}
+
+/// 활성 pane 이 아닌 pane 의 앞 탭만 바꾼다(포커스는 그대로). 사람의 탭 전환(`term.tryFocusTerm`)에서 포커스·조합에 매인 것을 뺀 뒷정리 —
+/// 그 pane 이 그 워크스페이스의 활성 pane 이면 워크스페이스 대표(`surface_ptrs`)도 맞춘다(화면 밖 워크스페이스의 활성 pane 일 수 있다).
+fn selectTermInPane(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
+    pane.active_term = term_index;
+    const tab = self.tabs.items[tab_index];
+    if (tab.panes.items[tab.active_pane] == pane) {
+        self.surface_ptrs.items[tab_index] = tab.activeTerm().surface;
+        self.app_window.tabs = self.surface_ptrs.items;
+    }
+    term_ops.ensureActiveTermVisible(self, pane); // 화면 워크스페이스의 pane 만 — 다른 워크스페이스는 배치가 없어 그대로
+    dock_ops.dropPendingDockFocusIfHidden(self);
+    self.file_tree_rows_dirty = true;
+    self.metal_dirty = true;
+    self.workspaceChanged(.selection);
+}
+
+/// 이 창의 탭에 다운로드 저장 창이 떠 있다(맡은 묻기 — W10b, 창-모달 sheet).
+fn downloadSheetIn(self: *AppSession) bool {
+    var i: usize = 0;
+    while (web_osr.downloads.at(i)) |e| : (i += 1) {
+        if (e.state == .asking and e.ask_claimed and term_ops.termBySurfaceId(self, e.browser) != null) return true;
+    }
+    return false;
 }
 
 /// 그 surface 를 든 pane(이 창 안).

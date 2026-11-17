@@ -1,8 +1,8 @@
-//! Chromium 탭 JS 대화상자의 「누가 띄웠나」와 「에이전트가 답해도 되나」(W9c② — docs/plans/web-osr-backend.md W9c C6''·C13) — L2 순수.
+//! Chromium 탭 JS 대화상자의 「누가 띄웠나」(W9c② — docs/plans/web-osr-backend.md W9c C6''·C13) — L2 순수.
 //!
-//! 시험이 증명하는 것: 대화상자가 도착한 순간의 두 시각(에이전트 입력·사용자 입력)으로 원인을 한 번 정하고, 그 원인과 지금 상태로
-//! 에이전트의 답을 허락한다. 브라우저 패널에서 중요한 이유 — 에이전트가 사용자의 「저장하지 않은 입력이 있습니다」 질문에 몰래 「떠나기」로
-//! 답하면 사용자의 글이 사라진다. 그래서 사용자가 띄운 것은 절대, 누가 띄웠는지 모르는 것은 에이전트가 연 탭에서만 답하게 한다.
+//! 시험이 증명하는 것: 대화상자가 도착한 순간의 두 시각(에이전트 입력·사용자 입력)으로 원인을 한 번 정한다. 원인은 목록(`browser.dialog`)이 싣는
+//! 정보다 — 에이전트가 답해도 되는가는 가르지 않는다(사용자 결정 2026-11-17 「에이전트는 사용자와 같은 힘」: 사람이 띄운 것·누가 띄웠는지 모르는 것·
+//! 사람이 입력한 문서의 떠나기 확인도 에이전트가 답한다 — 옛 `mayAnswer`·`mayLeave` 를 걷었다).
 //!
 //! 원인은 **도착할 때 한 번** 정해 대화상자에 적는다(계획 공격 3 회차 — 답할 때 「지금 − 사용자 시각」 으로 재면 시간이 지나며 판정이
 //! 바뀌었다). 시각은 모두 같은 단조 시계(web_osr 의 CLOCK_MONOTONIC)여야 한다 — 다른 시계와 섞으면 잠자기 뒤 몇 시간이 어긋났다(실측
@@ -47,38 +47,6 @@ pub fn classify(agent_ms: i64, user_ms: i64, now: i64, user_close: bool) Cause {
     return .unknown;
 }
 
-/// 답하는 순간의 상태(대화상자 하나).
-pub const Situation = struct {
-    cause: Cause,
-    /// 어느 창이 sheet 로 사용자에게 보이고 있다(`Dialog.shown_by != 0`).
-    shown: bool,
-    /// 대화상자가 도착한 뒤 사용자가 그 탭에 손댔다(페이지 입력·주소창·탐색 단추).
-    user_input_since_arrival: bool,
-    /// 그 탭은 묻는 에이전트(pane)가 `browser.open` 으로 연 탭이다(C13).
-    agent_tab: bool,
-};
-
-/// 에이전트가 이 대화상자에 답해도 되는가(닫기·확인 공통). C6'':
-/// - 사용자가 띄운 것 — 절대.
-/// - 에이전트가 띄운 것 — 된다.
-/// - 둘 다 — 사용자에게 보이지 않고 도착 뒤 사용자가 손대지 않았을 때만.
-/// - 모름 — 에이전트가 연 탭에서, 사용자에게 보이지 않을 때만(C13: grant 는 세션 내내 남는다 — 오래된 grant 로 사람 탭의 누가 띄웠는지
-///   모르는 질문에 답하지 않게).
-pub fn mayAnswer(s: Situation) bool {
-    return switch (s.cause) {
-        .user => false,
-        .agent => true,
-        .ambiguous => !s.shown and !s.user_input_since_arrival,
-        .unknown => s.agent_tab and !s.shown,
-    };
-}
-
-/// 떠나기 확인(`before_unload`)을 「떠나기」로 답해도 되는가 — `mayAnswer` 에 더해, 사용자가 이 문서에 한 번도 손대지 않았어야 한다
-/// (저장하지 않은 사용자 입력을 지킨다). 「머무르기」는 `mayAnswer` 만 본다.
-pub fn mayLeave(s: Situation, document_touched_by_user: bool) bool {
-    return mayAnswer(s) and !document_touched_by_user;
-}
-
 // ── 시험 ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -101,40 +69,4 @@ test "W9c②: 사용자가 묻는 닫기의 떠나기 확인은 에이전트가 
     const now: i64 = 50_000;
     try testing.expectEqual(Cause.user, classify(now - 1, never, now, true));
     try testing.expectEqual(Cause.user, classify(never, never, now, true));
-}
-
-test "W9c②: 답해도 되나 — 사용자 것은 절대, 에이전트 것은 늘, 모호는 안 보이고 손대지 않았을 때, 모름은 에이전트가 연 탭에서 안 보일 때만" {
-    const base: Situation = .{ .cause = .agent, .shown = true, .user_input_since_arrival = true, .agent_tab = false };
-    try testing.expect(mayAnswer(base)); // 에이전트 것 — 보여도·손댔어도
-    var s = base;
-    s.cause = .user;
-    s.shown = false;
-    s.user_input_since_arrival = false;
-    s.agent_tab = true;
-    try testing.expect(!mayAnswer(s)); // 사용자 것 — 어떤 상태든
-
-    s = .{ .cause = .ambiguous, .shown = false, .user_input_since_arrival = false, .agent_tab = false };
-    try testing.expect(mayAnswer(s));
-    s.shown = true;
-    try testing.expect(!mayAnswer(s)); // 사용자가 sheet 로 보고 있다
-    s.shown = false;
-    s.user_input_since_arrival = true;
-    try testing.expect(!mayAnswer(s)); // 도착 뒤 사용자가 손댔다
-
-    s = .{ .cause = .unknown, .shown = false, .user_input_since_arrival = false, .agent_tab = false };
-    try testing.expect(!mayAnswer(s)); // 사람의 탭(오래된 grant) — C13
-    s.agent_tab = true;
-    try testing.expect(mayAnswer(s));
-    s.shown = true;
-    try testing.expect(!mayAnswer(s));
-}
-
-test "W9c②: 떠나기 확인의 「떠나기」는 사용자가 그 문서에 손대지 않았을 때만 — 「머무르기」는 답할 수 있으면 된다" {
-    const s: Situation = .{ .cause = .agent, .shown = false, .user_input_since_arrival = false, .agent_tab = true };
-    try testing.expect(mayLeave(s, false));
-    try testing.expect(!mayLeave(s, true)); // 사용자가 쓴 글이 있다
-    try testing.expect(mayAnswer(s)); // 머무르기는 된다
-    var u = s;
-    u.cause = .user;
-    try testing.expect(!mayLeave(u, false));
 }

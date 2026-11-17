@@ -31,7 +31,9 @@ maru browser emulate --surface 12 --clear
   until you set it while a site is shown (a tab already bound keeps its site). On tabs you opened (◈) it applies on
   every site. `--clear` works from any site.
 - `--network` takes the presets, `offline` and `--latency` on any tab, the user's too.
-- One pane owns a tab's emulation. Another pane gets `emulated_by_other_pane`.
+- One pane owns a tab's emulation — the one that last changed it. Another pane can change or clear it and then owns
+  it (`other_pane` in the result while it is not yours; setting the same values again does not take it over). An
+  older Maru refuses other panes with `emulated_by_other_pane`.
 - **If the user clicks or types in the tab, Maru drops your `--cpu` and `--network` there** (`released: human_input`).
   The other settings stay: clear them unless the user wants them kept. Do not apply anything again — the user is
   using the tab. Ask.
@@ -51,6 +53,8 @@ maru browser trace --surface 12 --duration 5s --out "$TMPDIR/maru-trace-1.json.g
 - 1–30 s, 5 s by default. `stop` prints a summary; `--out` also writes the trace (gzip JSON for Chrome DevTools'
   Performance panel) to a new file only — the `--out` rules in section 4 of SKILL.md. Use a fresh name in `$TMPDIR`.
 - One trace at a time per browser (`trace_busy` — wait and retry once). The tab title shows ◔ while recording.
+- A tab keeps one trace result. `stop`, `status` and `abort` work on it whoever started it (an older Maru: only the
+  pane that started it), and a new `start` replaces the tab's old result.
 - The trace is discarded if the user uses the tab (`human_input` — likely on the user's tabs; ask before trying
   again), or another tab's frame shares its renderer process.
 - This is not `maru trace`, which is Maru's own terminal trace tool.

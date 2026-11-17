@@ -208,8 +208,11 @@ const Surface = struct {
     /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」·「새 탭에서 이미지 열기」(W6h①) 답이 준다. sidecar 의 `open_tab`
     /// 하나가 쓴다 — sidecar 도 같은 규칙을 지키지만 maru 는 sidecar 가 보낸 것을 그대로 믿지 않는다(W6e 적대 검증 2 차).
     new_tab_credits: ws.new_tab.Credits = .{},
-    /// 에이전트의 누름이 준 장(W9b③ — 에이전트가 연 탭에만). 사람의 장을 먼저 쓴다.
+    /// 에이전트의 누름이 준 장(W9b③ — 에이전트가 연 탭, 2026-11-17 부터 사용자 탭도). 사람의 장과 따로 세고 시각으로 고른다(`takeCredit`).
     agent_new_tab_credits: ws.new_tab.Credits = .{},
+    /// 마지막으로 에이전트의 장을 준 pane(2026-11-17 A3) — 그 장으로 열린 새 탭은 그 pane 의 에이전트 탭이 된다(연 탭이 다른 pane 의 에이전트 탭이면
+    /// 그 탭의 주인이 먼저 — `insertNewTab`). 5 초 안에 두 pane 이 누르면 마지막 pane(장의 시각 짐작과 같은 거칠기).
+    agent_credit_pane: u64 = 0,
     /// 새 창 한 장(W6h①) — 메뉴 「새 창에서 링크 열기」 답만 준다(그때의 단조 시각 ms, 0 은 없음). 자리가 `new_window` 인 `open_tab`
     /// 하나가 쓴다 — 페이지 입력의 새 탭 장으로는 새 창을 받지 않는다(sidecar 가 새 창 자리를 보내도). 한 칸이다 — sidecar 의 답이 오기
     /// 전에 같은 탭에서 또 고르면 앞 것은 쓰지 못한다(드물다 — W6h① 적대 검증에서 받아들임).
@@ -371,6 +374,8 @@ pub const NewTab = struct {
     /// 에이전트의 누름이 준 장으로 열렸다(W9b③) — 그때만 뒤쪽·상한·에이전트 소유. 사람의 누름·메뉴로 연 새 탭은 사람의 탭이다(적대 리뷰
     /// 2 회차: 사람이 에이전트 탭에서 연 탭이 상한에 걸려 사라지거나 에이전트 것이 됐다).
     by_agent: bool = false,
+    /// `by_agent` 면 그 장을 준 pane(2026-11-17 A3 — 사용자 탭에서 에이전트가 누른 새 탭의 주인). 0 은 모름.
+    agent_pane: u64 = 0,
 };
 
 // ── W6f②: 팝업 이어 받기 ─────────────────────────────────────────────────────────────────────────────────
@@ -1987,14 +1992,6 @@ pub fn testDialogToken(surface_id: u64) ?u64 {
     return s.dialogs.items[0].token;
 }
 
-/// 시험 전용(W9d④): 그 탭의 `index` 번째 가짜 규칙이 사람의 누름 예외(`human_nav_real` — 사용자 탭의 규칙)를 싣는가.
-pub fn testMockRuleHuman(surface_id: u64, index: usize) ?bool {
-    if (!builtin.is_test) @compileError("test only");
-    const s = surfaces.getPtr(surface_id) orelse return null;
-    if (index >= s.mock.rules.items.len) return null;
-    return s.mock.rules.items[index].human_nav_real;
-}
-
 /// 시험 전용(W9c②): 그 탭의 마지막 에이전트 입력 시각.
 pub fn testAgentInputMs(surface_id: u64) i64 {
     if (!builtin.is_test) @compileError("test only");
@@ -2296,10 +2293,12 @@ pub fn devtoolsFireAndForget(gpa: std.mem.Allocator, surface_id: u64, method: []
 /// W9b③: DevTools 로 보내는 진짜 입력이 활성을 주는가(sidecar 와 같은 규칙 — `new_tab.devtoolsInputActivates`).
 pub const devtoolsInputActivates = ws.new_tab.devtoolsInputActivates;
 
-/// W9b③: 에이전트가 자기가 연 탭에 진짜 누름·키를 보냈다 — 사람의 입력처럼 새 탭 장 하나(그 페이지가 새 탭을 열 수 있게).
-pub fn grantNewTabCredit(gpa: std.mem.Allocator, surface_id: u64) void {
+/// W9b③: 에이전트가 탭에 진짜 누름·키를 보냈다 — 사람의 입력처럼 새 탭 장 하나(그 페이지가 새 탭을 열 수 있게). 2026-11-17 A3: 사용자 탭에도 —
+/// `pane` 은 그 장으로 열린 새 탭의 주인이 될 pane.
+pub fn grantNewTabCredit(gpa: std.mem.Allocator, surface_id: u64, pane: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.agent_new_tab_credits.grant(monotonicNow());
+    s.agent_credit_pane = pane;
     // sidecar 도 장을 쥔다(팝업을 만들지는 sidecar 가 먼저 정한다) — 같은 관이라 뒤따르는 DevTools 입력보다 먼저 닿는다.
     if (s.created and (state == .running or state == .starting)) send(gpa, .{ .new_tab_credit = surface_id });
 }
@@ -3322,26 +3321,13 @@ pub const DialogEntry = struct {
     message: []const u8,
     origin: []const u8,
     default_text: []const u8,
+    /// 누가 띄웠나(정보 — 에이전트가 답해도 되는가는 가르지 않는다, 사용자 결정 2026-11-17).
     cause: dialog_cause.Cause,
-    shown: bool,
-    user_input_since_arrival: bool,
-    /// 새 문서가 열린 뒤 사용자가 페이지에 입력했다 — 떠나기 확인을 「떠나기」로 답하지 않는다(`dialog_cause.mayLeave`).
-    document_touched: bool,
-
-    /// `dialog_cause.mayAnswer` 에 넣을 상태 — 그 탭이 묻는 에이전트가 연 탭인지(C13)는 앱이 안다.
-    pub fn situation(self: DialogEntry, agent_tab: bool) dialog_cause.Situation {
-        return .{ .cause = self.cause, .shown = self.shown, .user_input_since_arrival = self.user_input_since_arrival, .agent_tab = agent_tab };
-    }
 
     pub fn kindName(self: DialogEntry) []const u8 {
         return self.kind.wireName();
     }
 };
-
-/// 도착 뒤 사용자가 그 탭에 손댔는가(페이지 입력·페이지 밖 동작).
-fn userInputSince(s: *const Surface, since_ms: i64) bool {
-    return @max(s.last_user_input_ms, s.user_action_ms) > since_ms;
-}
 
 fn entryOf(id: u64, s: *const Surface, d: *const Dialog) DialogEntry {
     return .{
@@ -3355,10 +3341,6 @@ fn entryOf(id: u64, s: *const Surface, d: *const Dialog) DialogEntry {
         // 에이전트가 물은 닫기를 사용자가 이어받았으면(⌘W) 그 떠나기 확인은 이제 사용자 것이다(W9c② 적대 리뷰 1 회차: 에이전트가 「머무르기」
         // 로 사용자의 닫기를 무를 수 있었다).
         .cause = if (d.kind == .before_unload and (s.close_ask == .asking or s.close_ask == .asked) and !s.close_ask_agent) .user else d.cause,
-        // 키 포커스가 그 탭에 있으면 사용자가 보고 있다 — sheet 가 다음 tick 에 뜬다(여러 창의 tick 사이 경쟁 — 1 회차).
-        .shown = d.shown_by != 0 or s.focus_owner != 0,
-        .user_input_since_arrival = userInputSince(s, d.arrived_ms),
-        .document_touched = s.last_user_input_ms != never_ms and s.last_user_input_ms >= s.last_nav_ms,
     };
 }
 
@@ -3854,6 +3836,14 @@ pub const MockRequest = struct {
     on: ?bool = null,
 };
 
+/// 시험 전용(W9d④): 그 탭의 `index` 번째 가짜 규칙이 sidecar 에 사람의 누름 예외(`human_nav_real`)를 싣는가 — 2026-11-17 A8 부터 늘 거짓.
+pub fn testMockRuleHuman(surface_id: u64, index: usize) ?bool {
+    if (!builtin.is_test) @compileError("test only");
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (index >= s.mock.rules.items.len) return null;
+    return s.mock.ruleWire(surface_id, index).flags.human_nav_real;
+}
+
 pub const MockAnswer = union(enum) { ok: []u8, fail: mock_mod.Failure };
 
 pub fn networkMock(out: std.mem.Allocator, surface_id: u64, req: MockRequest) std.mem.Allocator.Error!MockAnswer {
@@ -3874,7 +3864,6 @@ pub fn networkMock(out: std.mem.Allocator, surface_id: u64, req: MockRequest) st
         .on = req.on,
         .site = site,
         .exec_site = if (req.any_host) "" else req.grant_host,
-        .human_nav_real = !req.birth,
         .now_ms = monotonicNow(),
     }, &why) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -3976,7 +3965,7 @@ pub fn browserEmulate(out: std.mem.Allocator, surface_id: u64, req: EmulateReque
     // `reload:true` — 걸고 나서 새로고침(첫 문서의 머리·터치 이벤트까지 — 실측 E5·E6). 에이전트의 새로고침이다(사용자 이동이 아니다 — D2 예외 없음).
     const reloaded = req.params.reload and req.params.action != .get and s.created;
     if (reloaded) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = .reload } });
-    return .{ .ok = try s.emu.resultJson(out, s.record.size.width, s.record.size.height, reloaded, outcome.touch_added) };
+    return .{ .ok = try s.emu.resultJsonFor(out, req.pane, s.record.size.width, s.record.size.height, reloaded, outcome.touch_added) };
 }
 
 /// W9e①: 그 탭에 흉내가 설정됐는가(탭 제목 앞 ◫·`browser.list` 의 `emulation` — 사용자 탭이 사이트 밖이라 걸려 있지 않아도). 요약 글은
@@ -4180,7 +4169,9 @@ pub fn browserTrace(out: std.mem.Allocator, surface_id: u64, req: TraceRequest) 
             };
             if (!s.created) return .{ .fail = .{ .reason = "not_ready", .message = "the tab is still starting — try again in a moment" } };
             dropTraceRun(gpa);
-            dropKeptFor(gpa, req.pane, surface_id); // 그 pane 의 옛 결과는 새 start 가 버린다(PLAN v2 §6.3 — 남의 pane 결과는 그대로)
+            // 그 탭의 옛 결과는 새 start 가 버린다 — 누가 남겼든(2026-11-17 A2: trace 결과는 탭에 하나, start 는 그 탭의 trace 를 바꾸는 호출이라 부른
+            // pane 이 주인이 된다; 옛 PLAN v2 §6.3 은 남의 pane 결과를 두었다).
+            dropKeptFor(gpa, 0, surface_id);
             trace_gen +%= 1;
             if (trace_gen == 0) trace_gen = 1;
             const r = gpa.create(TraceRun) catch return error.OutOfMemory;
@@ -4191,35 +4182,39 @@ pub fn browserTrace(out: std.mem.Allocator, surface_id: u64, req: TraceRequest) 
             if (testReporting()) std.debug.print("osr-test trace start {d} gen={d} hidden={}\n", .{ surface_id, r.generation, s.record.hidden });
             return .pending;
         },
+        // stop·status·abort·read 는 그 탭의 trace 를 본다 — 누가 시작했든(사용자 결정 2026-11-17 A2 「에이전트는 사용자와 같은 힘」). 시작하지 않은
+        // pane 의 stop 은 그 trace 를 바꾸는 호출이라 그 pane 이 주인이 된다(결과·철회의 대조), status·read 는 옮기지 않는다.
         .stop => {
-            if (trace_run) |r| if (r.surface == surface_id and r.pane == req.pane) switch (r.phase) {
+            if (trace_run) |r| if (r.surface == surface_id) switch (r.phase) {
                 .starting, .recording => {
                     if (r.stop_waiter != null) return .{ .fail = .{ .reason = "trace_busy", .message = "a stop is already waiting for this trace", .retry_after_ms = 2000 } };
+                    r.pane = req.pane;
                     r.stop_waiter = req.async_id;
                     send(gpa, .{ .trace = .{ .browser = surface_id, .generation = r.generation, .action = .stop } });
                     return .pending;
                 },
                 .receiving, .filtering => {
                     if (r.stop_waiter != null) return .{ .fail = .{ .reason = "trace_busy", .message = "a stop is already waiting for this trace", .retry_after_ms = 2000 } };
+                    r.pane = req.pane;
                     r.stop_waiter = req.async_id;
                     return .pending;
                 },
                 .done, .discarded, .failed => {},
             };
-            for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == req.pane) return .{ .ok = try out.dupe(u8, k.json) };
+            for (trace_kept.items) |k| if (k.surface == surface_id) return .{ .ok = try out.dupe(u8, k.json) };
             return .{ .fail = .{ .reason = "not_tracing", .message = "no performance trace on this tab — start one with maru browser trace start" } };
         },
-        .status => return .{ .ok = try traceStatusJson(out, surface_id, req.pane, now) },
+        .status => return .{ .ok = try traceStatusJson(out, surface_id, now) },
         .abort => {
-            if (trace_run) |r| if (r.surface == surface_id and r.pane == req.pane and r.phase != .done and r.phase != .discarded and r.phase != .failed) {
+            if (trace_run) |r| if (r.surface == surface_id and r.phase != .done and r.phase != .discarded and r.phase != .failed) {
                 send(gpa, .{ .trace = .{ .browser = surface_id, .generation = r.generation, .action = .abort } });
                 finishTrace(gpa, r, .discarded, "aborted");
             };
-            dropKeptFor(gpa, req.pane, surface_id);
+            dropKeptFor(gpa, 0, surface_id);
             return .{ .ok = try out.dupe(u8, "{\"state\":\"aborted\"}") };
         },
         .read => {
-            for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == req.pane) {
+            for (trace_kept.items) |k| if (k.surface == surface_id) {
                 if (k.gz.len == 0) return .{ .fail = .{ .reason = "no_file", .message = "this trace was not kept as a file (it was discarded or failed)" } };
                 if (p.offset > k.gz.len) return .{ .fail = .{ .reason = "offset_invalid", .message = "offset is past the end of the trace file" } };
                 const end = @min(k.gz.len, @as(usize, p.offset) + trace_mod.read_chunk_bytes);
@@ -4255,12 +4250,12 @@ fn conditionsJson(gpa: std.mem.Allocator, s: *const Surface) ![]u8 {
 /// 진행 중이면 그 단계·경과, 끝났으면 **stop 이 답할 결과 칸 그대로**(요약·파일 크기·sha256, 버림·실패면 이유 — 칸은 지우지 않는다), 칸이 없으면
 /// (10 분 지남·철회·탭 닫힘) stop 처럼 남은 것이 없다(`idle`). W9e② 실앱 스모크: 전에는 끝난 `trace_run`(다음 start 까지 남는다)의 단계 이름만
 /// `{state:"done",elapsed_ms,…}` 로 내 CLI 가 요약 없는 done 을 `malformed trace result`(종료 1)로 냈다.
-fn traceStatusJson(out: std.mem.Allocator, surface_id: u64, pane: u64, now: i64) ![]u8 {
-    if (trace_run) |r| if (r.surface == surface_id and r.pane == pane) switch (r.phase) {
+fn traceStatusJson(out: std.mem.Allocator, surface_id: u64, now: i64) ![]u8 {
+    if (trace_run) |r| if (r.surface == surface_id) switch (r.phase) {
         .starting, .recording, .receiving, .filtering => return std.fmt.allocPrint(out, "{{\"state\":\"{s}\",\"elapsed_ms\":{d},\"auto_stop_ms\":{d},\"hidden\":{},\"focus_emulated\":{}}}", .{ @tagName(r.phase), traceElapsed(r, now), r.duration_ms, r.hidden, r.focus_emulated }),
         .done, .discarded, .failed => {},
     };
-    for (trace_kept.items) |k| if (k.surface == surface_id and k.pane == pane) return out.dupe(u8, k.json);
+    for (trace_kept.items) |k| if (k.surface == surface_id) return out.dupe(u8, k.json);
     return out.dupe(u8, "{\"state\":\"idle\"}");
 }
 
@@ -4379,7 +4374,7 @@ fn finishTrace(gpa: std.mem.Allocator, r: *TraceRun, phase: TracePhase, reason: 
     }
     // 끝난 상태를 결과 칸에도(다음 stop·status 가 이유를 본다 — 파일 없음).
     if (phase == .discarded or phase == .failed) {
-        dropKeptFor(gpa, r.pane, r.surface); // 이유만 든 칸은 상한에 세지 않는다 — 남의 결과를 밀어내지 않는다(V-14)
+        dropKeptFor(gpa, 0, r.surface); // 결과는 탭에 하나(2026-11-17 A2). 이유만 든 칸은 상한에 세지 않는다(V-14)
         const copy = gpa.dupe(u8, json) catch return;
         trace_kept.append(gpa, .{ .pane = r.pane, .surface = r.surface, .finished_ms = monotonicNow(), .json = copy, .gz = &.{} }) catch gpa.free(copy);
     }
@@ -4604,7 +4599,7 @@ fn traceWorkerDone(gpa: std.mem.Allocator, r: *TraceRun, w: *TraceWorker) void {
         return finishTrace(gpa, r, .failed, "too_large");
     };
     r.phase = .done;
-    dropKeptFor(gpa, r.pane, r.surface);
+    dropKeptFor(gpa, 0, r.surface); // 결과는 탭에 하나(2026-11-17 A2)
     capTraceKept(gpa, r.pane);
     trace_kept.append(gpa, .{ .pane = r.pane, .surface = r.surface, .finished_ms = monotonicNow(), .json = json, .gz = gz }) catch {
         gpa.free(json);
@@ -4958,25 +4953,20 @@ pub const DialogAccess = struct {
     ctx: ?*const anyopaque = null,
     /// 그 탭의 대화상자를 보고 답할 수 있는가(그 탭의 grant — cap 연결은 자기 탭만).
     granted: *const fn (?*const anyopaque, u64) bool,
-    /// 그 탭은 이 에이전트가 `browser.open` 으로 연 탭인가(C13).
-    agent_tab: *const fn (?*const anyopaque, u64) bool,
 };
 
 pub const AgentReplyError = error{
     /// 답할 대화상자가 없다 — 번호를 줬으면 그 번호가 없거나 grant 가 없는 탭의 것이다(둘을 가르지 않는다).
     NoDialog,
-    /// 사용자 것이다(또는 누구 것인지 모르는데 사람의 탭·보이는 중이다) — 사용자가 정한다.
-    NotYours,
-    /// 파일 선택은 닫기만 — 고르기는 이 메서드가 하지 않는다.
+    /// 파일 선택은 닫기만 — 고르기는 `browser.upload`(부를 때마다 확인 모달·사본)의 길이다. 이 답에서 파일을 주면 그 관문을 비켜 간다.
     FileChooser,
-    /// 사용자가 이 문서에 손댔다 — 떠나기 확인은 머무르기만(저장하지 않은 입력을 지킨다).
-    LeaveRefused,
 };
 
 pub const AgentReplied = struct { kind: DialogKind, continues: bool };
 
 /// W9c②: 에이전트의 답(`browser.handleDialog`). `token` 이 없으면 그 탭 자신의 첫 JS 대화상자(없으면 첫 파일 선택), 있으면 가족에서 그
-/// 번호 — grant 가 있는 탭의 것만. 답해도 되는지는 `dialog_cause` 가 정한다. 답은 사용자의 답과 같은 길(`replyDialog` — 닫기 묻기·미룬
+/// 번호 — grant 가 있는 탭의 것만. 누가 띄웠든(사람·모름도) 답한다 — 사람이 입력한 문서의 떠나기 확인의 「떠나기」 도(사용자 결정 2026-11-17
+/// 「에이전트는 사용자와 같은 힘」 — 옛 `dialog_cause.mayAnswer`·`mayLeave` 를 걷었다). 답은 사용자의 답과 같은 길(`replyDialog` — 닫기 묻기·미룬
 /// 놓기)로 가고, 떠 있던 sheet 는 창의 다음 tick 이 거둔다(`tickOsrDialog`). 에이전트는 「더 띄우지 못하게」 를 고르지 않는다.
 pub fn agentReplyDialog(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, accept: bool, text: []const u8, access: DialogAccess) AgentReplyError!AgentReplied {
     const target: struct { id: u64, s: *Surface, d: *Dialog } = blk: {
@@ -4999,9 +4989,6 @@ pub fn agentReplyDialog(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, ac
         for (me.dialogs.items) |*d| if (d.kind.isFile()) break :blk .{ .id = surface_id, .s = me, .d = d };
         return error.NoDialog;
     };
-    const entry = entryOf(target.id, target.s, target.d);
-    const situation = entry.situation(access.agent_tab(access.ctx, target.id));
-    if (!dialog_cause.mayAnswer(situation)) return error.NotYours;
     const kind = target.d.kind;
     const tok = target.d.token;
     if (kind.isFile()) {
@@ -5011,11 +4998,7 @@ pub fn agentReplyDialog(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, ac
         return .{ .kind = kind, .continues = false };
     }
     const leaving = kind == .before_unload and accept;
-    if (leaving) {
-        // 이 문서에 사용자가 손댔다(새 문서가 열린 뒤의 페이지 입력) — 떠나면 그 입력을 잃을 수 있다.
-        if (!dialog_cause.mayLeave(situation, entry.document_touched)) return error.LeaveRefused;
-        target.s.agent_nav.before_unload = false; // 떠나기 — 이동은 이어진다(그 navigate op 은 이미 끝났다)
-    }
+    if (leaving) target.s.agent_nav.before_unload = false; // 떠나기 — 이동은 이어진다(그 navigate op 은 이미 끝났다)
     // 답이 부른 다음 대화상자(confirm 뒤 alert)도 에이전트 것이다.
     target.s.agent_input_ms = monotonicNow();
     replyDialog(gpa, target.id, tok, accept, text, false, .program);
@@ -5526,7 +5509,7 @@ fn queueNewTab(gpa: std.mem.Allocator, s: *Surface, v: ws.message.OpenTab, now_m
         by_agent = ws.new_tab.takeCredit(&s.new_tab_credits, &s.agent_new_tab_credits, now_ms) orelse return;
     }
     const url = gpa.dupe(u8, v.url) catch return;
-    s.new_tabs.append(gpa, .{ .url = url, .placement = v.placement, .arrived_ms = now_ms, .by_agent = by_agent }) catch gpa.free(url);
+    s.new_tabs.append(gpa, .{ .url = url, .placement = v.placement, .arrived_ms = now_ms, .by_agent = by_agent, .agent_pane = if (by_agent) s.agent_credit_pane else 0 }) catch gpa.free(url);
 }
 
 /// 우클릭 메뉴 「…에서 '…' 검색」(W6h①) — maru 가 만든 검색 주소를 그 탭의 새 탭 줄에 앞 탭으로 넣는다(사용자가 maru 의 메뉴에서
@@ -5662,7 +5645,7 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
     if (reserved.ring) |ring| if (adopted.view.adopt(ring)) |never_drawn| never_drawn.release();
     // `put` 이 표를 옮겼을 수 있다 — 연 탭을 다시 찾는다.
     const opener = surfaces.getPtr(v.opener).?;
-    opener.new_tabs.append(gpa, .{ .url = queued_url.?, .placement = v.placement, .arrived_ms = now_ms, .adopt = v.browser, .by_agent = by_agent }) catch {
+    opener.new_tabs.append(gpa, .{ .url = queued_url.?, .placement = v.placement, .arrived_ms = now_ms, .adopt = v.browser, .by_agent = by_agent, .agent_pane = if (by_agent) opener.agent_credit_pane else 0 }) catch {
         gpa.free(queued_url.?);
         abandonPopup(gpa, v.browser);
     };
@@ -8590,12 +8573,13 @@ test "W9b③ 적대 리뷰 2 회차: 에이전트의 장은 sidecar 에도 new_t
     }
     try devtoolsTestSurface(7, true);
     var frames: [4]Message = undefined;
-    grantNewTabCredit(gpa, 7);
+    grantNewTabCredit(gpa, 7, 5);
     try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
     try std.testing.expectEqual(@as(u64, 7), frames[0].new_tab_credit);
     const s = surfaces.getPtr(7).?;
     try std.testing.expect(s.agent_new_tab_credits.any());
     try std.testing.expect(!s.new_tab_credits.any());
+    try std.testing.expectEqual(@as(u64, 5), s.agent_credit_pane); // 2026-11-17 A3: 장을 준 pane — 그 장으로 열린 새 탭의 주인
 }
 
 fn w9b3r3Cleanup(gpa: std.mem.Allocator) void {
@@ -9122,7 +9106,6 @@ test "W9a 적대 리뷰 5 회차: 가족 탭의 대화상자는 같은 호스트
 /// 시험의 grant·에이전트 탭 표(탭 번호 비트 — 0..63).
 const TestAccess = struct {
     granted: u64 = 0,
-    agent: u64 = 0,
     fn has(bits: u64, tab: u64) bool {
         return tab < 64 and bits & (@as(u64, 1) << @intCast(tab)) != 0;
     }
@@ -9130,14 +9113,22 @@ const TestAccess = struct {
         const self: *const TestAccess = @ptrCast(@alignCast(ctx.?));
         return has(self.granted, tab);
     }
-    fn agentFn(ctx: ?*const anyopaque, tab: u64) bool {
-        const self: *const TestAccess = @ptrCast(@alignCast(ctx.?));
-        return has(self.agent, tab);
-    }
     fn access(self: *const TestAccess) DialogAccess {
-        return .{ .ctx = self, .granted = grantedFn, .agent_tab = agentFn };
+        return .{ .ctx = self, .granted = grantedFn };
     }
 };
+
+/// 시험 전용: 번호 없는 `agentReplyDialog` 가 고를 대화상자(그 탭의 첫 JS 대화상자, 없으면 첫 파일 선택)의 원인(`dialogList` 와 같은 `entryOf`).
+pub fn testReplyCause(surface_id: u64) dialog_cause.Cause {
+    if (!builtin.is_test) @compileError("test only");
+    const s = surfaces.getPtr(surface_id).?;
+    for (s.dialogs.items) |*d| switch (d.kind) {
+        .alert, .confirm, .prompt, .before_unload => return entryOf(surface_id, s, d).cause,
+        else => {},
+    };
+    for (s.dialogs.items) |*d| if (d.kind.isFile()) return entryOf(surface_id, s, d).cause;
+    unreachable;
+}
 
 fn testLastDialog(surface_id: u64) *Dialog {
     const s = surfaces.getPtr(surface_id).?;
@@ -9471,10 +9462,8 @@ test "W9c②: dialogList — 가족의 대화상자를 (탭 번호, 도착) 순�
     try std.testing.expectEqual(@as(u64, 7), list[0].tab);
     try std.testing.expectEqualStrings("before_unload", list[0].kindName());
     try std.testing.expectEqualStrings("https://a.test:8443", list[0].origin);
-    try std.testing.expect(list[0].user_input_since_arrival);
     try std.testing.expectEqualStrings("file", list[1].kindName());
     try std.testing.expectEqualStrings("", list[1].default_text); // 사용자의 마지막 폴더가 새지 않게
-    try std.testing.expect(!list[1].user_input_since_arrival);
     try std.testing.expectEqual(@as(u64, 8), list[2].tab);
     try std.testing.expectEqualStrings("prompt", list[2].kindName());
     try std.testing.expectEqualStrings("기본", list[2].default_text);
@@ -9490,14 +9479,14 @@ test "W9c②: dialogList — 가족의 대화상자를 (탭 번호, 도착) 순�
     try std.testing.expectEqualStrings("", urlOrigin("about:blank"));
 }
 
-test "W9c②: agentReplyDialog — 사용자 것은 거절, 에이전트 것은 보여도 답한다(sheet 는 다음 tick 에 닫힌다), 번호는 grant 있는 가족 탭만(모르는 번호와 같은 실패), 모름은 에이전트 탭에서만" {
+test "W9c②·2026-11-17 A4: agentReplyDialog — 누가 띄웠든 답한다(사람·모름·모호, 보여도 — sheet 는 다음 tick 에 닫힌다), 원인은 그대로 갈린다, 번호는 grant 있는 가족 탭만(모르는 번호와 같은 실패), 파일 선택은 닫기만" {
     const gpa = std.testing.allocator;
     state = .running;
     test_record_sends = true;
     defer testTeardown(gpa);
     try testSurfaces(gpa, &.{ 7, 8 });
     surfaces.getPtr(8).?.popup_family = 7;
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    var acc: TestAccess = .{ .granted = 1 << 7 };
     const s7 = surfaces.getPtr(7).?;
     try std.testing.expectError(error.NoDialog, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
     // 에이전트가 띄웠다 — 사용자에게 sheet 로 보이는 중이어도 답한다.
@@ -9521,12 +9510,14 @@ test "W9c②: agentReplyDialog — 사용자 것은 거절, 에이전트 것은 
     _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
     // 아래는 지금보다 한참 뒤의 시각으로 잰다 — 답이 적은 진짜 시각(지금)은 창 밖이 된다.
     const t: i64 = monotonicNow() + 10_000_000;
-    // 사용자가 띄웠다 — 거절(보이지 않아도).
+    // 사용자가 띄웠다 — 원인은 user, 그래도 답한다(2026-11-17 A4).
     s7.agent_input_ms = never_ms;
     s7.last_user_input_ms = t + 50_000;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .confirm, .origin = "", .message = "" } }, t + 50_100);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
-    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false, .program);
+    try std.testing.expectEqual(dialog_cause.Cause.user, testReplyCause(7));
+    const ur = try agentReplyDialog(gpa, 7, null, false, "", acc.access());
+    try std.testing.expectEqual(DialogKind.confirm, ur.kind);
+    try std.testing.expectEqual(@as(usize, 0), s7.dialogs.items.len);
     // 가족 탭의 대화상자 — 번호로. grant 가 없으면 모르는 번호와 같은 실패.
     surfaces.getPtr(8).?.agent_input_ms = t + 100_000;
     apply(gpa, .{ .js_dialog = .{ .browser = 8, .request = 4, .kind = .alert, .origin = "", .message = "" } }, t + 100_001);
@@ -9537,26 +9528,22 @@ test "W9c②: agentReplyDialog — 사용자 것은 거절, 에이전트 것은 
     acc.granted |= 1 << 8;
     _ = try agentReplyDialog(gpa, 7, t8, true, "", acc.access());
     try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(8).?.dialogs.items.len);
-    // 누가 띄웠는지 모른다 — 사람의 탭이면 거절, 에이전트가 연 탭이면 안 보일 때만.
+    // 누가 띄웠는지 모른다 — 사람의 탭이어도, 사용자에게 보이는 중이어도 답한다(옛 C13 은 에이전트 탭에서 안 보일 때만).
     s7.last_user_input_ms = never_ms;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 5, .kind = .alert, .origin = "", .message = "" } }, t + 900_000);
     try std.testing.expectEqual(dialog_cause.Cause.unknown, testLastDialog(7).cause);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
-    acc.agent = 1 << 7;
     markDialogShown(7, testLastDialog(7).token, 11);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
-    markDialogShown(7, testLastDialog(7).token, 0);
     _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
-    // 모호 — 사용자에게 보이거나 도착 뒤 사용자가 손댔으면 거절.
+    try std.testing.expectEqual(@as(usize, 0), s7.dialogs.items.len);
+    // 모호 — 도착 뒤 사용자가 손댔어도 답한다.
     s7.agent_input_ms = t + 1_000_001; // 에이전트가 더 늦다(사용자가 더 늦으면 사용자 것 — 2 회차)
     s7.last_user_input_ms = t + 1_000_000;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .alert, .origin = "", .message = "" } }, t + 1_000_002);
     try std.testing.expectEqual(dialog_cause.Cause.ambiguous, testLastDialog(7).cause);
     s7.user_action_ms = t + 1_000_003;
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
     s7.user_action_ms = never_ms;
     s7.last_user_input_ms = never_ms;
-    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
     // 파일 선택 — 닫기만.
     outbox_pending.clearRetainingCapacity();
     noteAgentInput(7);
@@ -9569,25 +9556,25 @@ test "W9c②: agentReplyDialog — 사용자 것은 거절, 에이전트 것은 
     try std.testing.expect(!frames[0].file_dialog_reply.accept);
 }
 
-test "W9c②: 떠나기 확인의 「떠나기」 — 사용자가 이 문서에 손댔으면 거절(머무르기는 된다), 손대지 않았으면 이동이 이어진다고 답한다, 에이전트가 묻는 닫기는 닫힌다" {
+test "W9c②·2026-11-17 A4: 떠나기 확인의 「떠나기」 — 사용자가 이 문서에 손댔어도 떠난다(이동이 이어진다고 답한다), 에이전트가 묻는 닫기는 닫힌다, 사용자가 고른 닫기의 떠나기 확인에도 답한다" {
     const gpa = std.testing.allocator;
     state = .running;
     test_record_sends = true;
     defer testTeardown(gpa);
     try testSurfaces(gpa, &.{7});
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 1 << 7 };
+    var acc: TestAccess = .{ .granted = 1 << 7 };
     const s7 = surfaces.getPtr(7).?;
-    // 사용자가 이 문서에 글을 쳤다(새 문서 뒤의 페이지 입력) — 에이전트의 이동이 부른 떠나기 확인이어도 떠나기는 거절.
+    // 사용자가 이 문서에 글을 쳤다(새 문서 뒤의 페이지 입력) — 그래도 떠난다(옛 `mayLeave` 를 걷었다).
     s7.last_nav_ms = 100;
     s7.last_user_input_ms = 200;
     try std.testing.expect(agentNavigate(gpa, 7, "https://b.test/"));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
     try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
     try std.testing.expect(s7.agent_nav.before_unload);
-    try std.testing.expectError(error.LeaveRefused, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
-    const stay = try agentReplyDialog(gpa, 7, null, false, "", acc.access());
-    try std.testing.expect(!stay.continues);
-    // 손대지 않은 문서 — 떠나기, 이동은 이어진다.
+    const typed_leave = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+    try std.testing.expect(typed_leave.continues and !s7.agent_nav.before_unload);
+    endAgentNav(7);
+    // 머무르기도 된다(손대지 않은 문서 — 떠나기, 이동은 이어진다).
     s7.last_nav_ms = 300;
     try std.testing.expect(agentNavigate(gpa, 7, "https://b.test/"));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
@@ -9603,11 +9590,13 @@ test "W9c②: 떠나기 확인의 「떠나기」 — 사용자가 이 문서에
     _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
     try std.testing.expectEqual(CloseAskPhase.asking, closeAskPhase(7));
     try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, monotonicNow()));
-    // 사용자가 고른 닫기의 떠나기 확인은 에이전트 탭이어도 사용자 것 — 머무르기도 못 한다.
+    // 사용자가 고른 닫기의 떠나기 확인 — 원인은 사용자, 그래도 답한다(머무르기 — 사용자의 닫기를 무른다).
     s7.close_ask = .none;
     try std.testing.expect(askClose(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 4, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
+    try std.testing.expectEqual(dialog_cause.Cause.user, testReplyCause(7));
+    const stay_user = try agentReplyDialog(gpa, 7, null, false, "", acc.access());
+    try std.testing.expect(!stay_user.continues);
 }
 
 // ── W9c② 적대 리뷰 1·2 회차 재현 ─────────────────────────────────────────────────────────────────────────────
@@ -9617,26 +9606,26 @@ fn w9c2ReviewSetup(gpa: std.mem.Allocator) !void {
     try testSurfaces(gpa, &.{7});
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 A: 사용자가 스크롤한 뒤 페이지의 confirm 은 1 초 전 에이전트 hover 가 있어도 에이전트가 답하지 못한다" {
+test "W9c② 적대 리뷰 1 회차 재현 A: 사용자가 스크롤한 뒤 페이지의 confirm 은 1 초 전 에이전트 hover 가 있어도 원인이 사용자 쪽으로 갈린다(2026-11-17 A4 부터 답은 막지 않는다)" {
     const gpa = std.testing.allocator;
     try w9c2ReviewSetup(gpa);
     defer testTeardown(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     noteAgentInput(7); // 이 탭에 에이전트의 움직이는 op(hover 등)
     try std.testing.expect(sendInput(gpa, .{ .wheel = .{ .browser = 7, .point = .{ .x = 10, .y = 10 }, .delta_x = 0, .delta_y = -120 } }));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11); // 사용자가 sheet 를 보고 있다
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 B: 사용자가 maru 알림을 누른 뒤 페이지의 confirm 은 에이전트가 답하지 못한다" {
+test "W9c② 적대 리뷰 1 회차 재현 B: 사용자가 maru 알림을 누른 뒤 페이지의 confirm 은 원인이 사용자 쪽으로 갈린다(2026-11-17 A4 부터 답은 막지 않는다)" {
     const gpa = std.testing.allocator;
     try w9c2ReviewSetup(gpa);
     defer {
         shown_notes = @as([shown_notes.len]?ShownNote, @splat(null));
         testTeardown(gpa);
     }
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     apply(gpa, .{ .web_notification = .{ .browser = 7, .notification = 1, .origin = "https://chat.example", .title = "t", .body = "b" } }, 0);
     const note = takeWebNotification(7).?;
     defer note.free(gpa);
@@ -9644,46 +9633,46 @@ test "W9c② 적대 리뷰 1 회차 재현 B: 사용자가 maru 알림을 누른
     clickWebNotification(gpa, 7, note.token); // 사용자가 maru 알림을 누른다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://chat.example", .message = "Join call?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 C: 사용자가 권한 sheet 에 답한 뒤 페이지의 confirm 은 에이전트가 답하지 못한다" {
+test "W9c② 적대 리뷰 1 회차 재현 C: 사용자가 권한 sheet 에 답한 뒤 페이지의 confirm 은 원인이 사용자 쪽으로 갈린다(2026-11-17 A4 부터 답은 막지 않는다)" {
     const gpa = std.testing.allocator;
     try w9c2ReviewSetup(gpa);
     defer testTeardown(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 1, .origin = "https://meet.example", .kinds = ws.message.PermissionKind.notifications.bit() } }, 0);
     const ptoken = testLastDialog(7).token;
     noteAgentInput(7);
     try std.testing.expect(replyPermission(gpa, 7, ptoken, .accept, .program)); // 사용자가 권한 sheet 에 답한다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .confirm, .origin = "https://meet.example", .message = "Share?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 D: 사용자가 포인터를 옮긴 뒤 페이지의 confirm 은 에이전트가 답하지 못한다" {
+test "W9c② 적대 리뷰 1 회차 재현 D: 사용자가 포인터를 옮긴 뒤 페이지의 confirm 은 원인이 사용자 쪽으로 갈린다(2026-11-17 A4 부터 답은 막지 않는다)" {
     const gpa = std.testing.allocator;
     try w9c2ReviewSetup(gpa);
     defer testTeardown(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     noteAgentInput(7);
     try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 5, .y = 5 } } }));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "", .message = "" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
 test "W9c② 적대 리뷰 1 회차 재현 E: 에이전트가 물은 닫기를 사용자가 ⌘W 로 이어받으면 에이전트는 「머무르기」 로 사용자의 닫기를 무르지 못한다" {
     const gpa = std.testing.allocator;
     try w9c2ReviewSetup(gpa);
     defer testTeardown(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 1 << 7 };
+
     try std.testing.expect(askCloseByAgent(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
     try std.testing.expectEqual(CloseAskPhase.asked, closeAskPhase(7));
     try std.testing.expect(askClose(gpa, 7, 0)); // 이제 사용자가 닫기를 고른다(⌘W) — 사람이 닫기를 골랐으면 사람의 닫기다
     try std.testing.expect(!closeAskedByAgent(7));
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
 // 창 번호 11 = maru 창. AppKit 이 키를 옮길 때 `syncOsrKeyTarget` 이 부르는 차례 그대로 — 대화상자 sheet 가 붙으면 부모 창이 키를 잃어
@@ -9703,7 +9692,7 @@ test "W9c② 적대 리뷰 2 회차 재현 A: 포커스 탭에서 에이전트 �
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     _ = try w9c2R2Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    var acc: TestAccess = .{ .granted = 1 << 7 };
     noteAgentInput(7); // 에이전트 click
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
     try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
@@ -9720,7 +9709,7 @@ test "W9c② 적대 리뷰 2 회차 재현 B: 같은 흐름에서 alert 가 포�
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     _ = try w9c2R2Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    var acc: TestAccess = .{ .granted = 1 << 7 };
     noteAgentInput(7);
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
@@ -9735,7 +9724,7 @@ test "W9c② 적대 리뷰 2 회차 대조 C: 5 초 넘어 답했고 alert 가 �
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R2Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    var acc: TestAccess = .{ .granted = 1 << 7 };
     noteAgentInput(7);
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
@@ -9753,7 +9742,7 @@ test "W9c② 적대 리뷰 2 회차 재현 D: 에이전트 누름이 연 앞 팝
     defer testTeardown(gpa);
     _ = try w9c2R2Setup(gpa);
     testSetPopupFamily(8, 7);
-    var acc: TestAccess = .{ .granted = (1 << 7) | (1 << 8), .agent = 0 };
+    var acc: TestAccess = .{ .granted = (1 << 7) | (1 << 8) };
     noteAgentInput(7); // 에이전트가 「X 로 로그인」 을 누른다 → window.open
     // insertNewTab(visible=true)이 팝업을 활성 탭으로 → syncOsrKeyTarget
     setFocus(gpa, 7, false, 11);
@@ -9769,7 +9758,7 @@ test "W9c② 적대 리뷰 2 회차 재현 E: 터미널에 대문자를 치는 �
     setFocus(gpa, 7, false, 11); // 키 대상은 터미널 pane 이다
     s7.user_action_ms = monotonicNow() - 60_000;
     s7.last_move_point = .{ .x = 40, .y = 40 }; // 포인터는 1 분 전 그 자리에 와서 멈춰 있다
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    var acc: TestAccess = .{ .granted = 1 << 7 };
     noteAgentInput(7);
     // 터미널에 치는 동안 Shift 누르고 뗌 — MaruAppHost.swift flagsChanged → handleModifierHover → osrHover → 같은 자리 move
     try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 40, .y = 40 } } }));
@@ -9778,20 +9767,20 @@ test "W9c② 적대 리뷰 2 회차 재현 E: 터미널에 대문자를 치는 �
     _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
 }
 
-test "W9c② 적대 리뷰 2 회차 재현 F: 사용자가 페이지 항목을 다른 앱에 놓은 뒤 dragend 의 confirm 은 에이전트가 답하지 못한다" {
+test "W9c② 적대 리뷰 2 회차 재현 F: 사용자가 페이지 항목을 다른 앱에 놓은 뒤 dragend 의 confirm 은 원인이 사용자 쪽으로 갈린다(2026-11-17 A4 부터 답은 막지 않는다)" {
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R2Setup(gpa);
     setFocus(gpa, 7, false, 11);
     s7.user_action_ms = monotonicNow() - 7_000; // 7 초 전 누르고 끌기 시작(OS 끌기 세션 전 마지막 sendInput)
     s7.last_user_input_ms = monotonicNow() - 7_000;
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 3, .allowed = 1 | 16, .point = .{ .x = 4, .y = 5 } } }, monotonicNow());
     _ = takeDragOut(7).?; // 창이 macOS 끌기 세션을 시작했다
     noteAgentInput(7); // 놓기 1 초 전 에이전트의 움직이는 op(scroll 등)
     try std.testing.expect(endDragOut(gpa, 7, 3, .{ .x = 900, .y = 5 }, 1)); // 사용자가 Finder 에 놓는다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://files.test", .message = "Remove the original?" } }, monotonicNow());
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
 test "W9c② 적대 리뷰 2 회차: 사용자 시각은 사용자가 만든 것만 — 끌기·datalist 고르기·다른 앱에 놓기는 찍고, 포커스 바뀜·같은 자리 hover·leave·capture_lost·끌기 만료는 찍지 않는다" {
@@ -9867,31 +9856,31 @@ test "W9c② 적대 리뷰 3 회차 재현 A: 사용자가 탭 막대·⌘숫자
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R3Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     s7.agent_input_ms = monotonicNow() - 1_000; // 에이전트가 1 초 전 이 뒤 탭의 칸을 채웠다
     w9c2MoveKeyTarget(gpa, 8, 7, true); // 사용자가 탭 막대에서 7 을 누른다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "A new version is available. Reload?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
-test "W9c② 적대 리뷰 3 회차 재현 B: 사용자가 터미널 pane 을 눌러 생긴 blur 의 confirm 은 에이전트가 답하지 못한다" {
+test "W9c② 적대 리뷰 3 회차 재현 B: 사용자가 터미널 pane 을 눌러 생긴 blur 의 confirm 은 원인이 사용자 쪽으로 갈린다(2026-11-17 A4 부터 답은 막지 않는다)" {
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R3Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     w9c2MoveKeyTarget(gpa, 0, 7, false);
     s7.agent_input_ms = monotonicNow() - 1_000; // 에이전트가 1 초 전 편집 칸에 썼다
     w9c2MoveKeyTarget(gpa, 7, 0, true); // 사용자가 터미널 pane 을 누른다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://cms.test", .message = "Discard your edits?" } }, monotonicNow());
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
 test "W9c② 적대 리뷰 3 회차 재현 C: 창이 키를 잃어 leave 를 보낸 뒤에도 수식 키의 같은 자리 hover 는 사용자 입력이 아니다 — 에이전트의 confirm 은 에이전트가 답한다" {
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R3Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    var acc: TestAccess = .{ .granted = 1 << 7 };
     try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 40, .y = 40 } } })); // 1 분 전 그 자리에 멈췄다
     s7.user_action_ms = monotonicNow() - 60_000;
     try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .leave, .point = .{ .x = -1, .y = -1 } } })); // ⌘Tab 으로 나갔다 왔다
@@ -9905,14 +9894,14 @@ test "W9c② 적대 리뷰 3 회차 D(설계 확인): 에이전트 누름 뒤 �
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R3Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     s7.agent_input_ms = monotonicNow() - 800;
     try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 10, .y = 10 } } }));
     try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 30, .y = 12 } } }));
     s7.user_action_ms -= 600; // 지나간 것은 에이전트 누름 200 ms 뒤, alert 는 1 초 뒤
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "https://a.test", .message = "Saved" } }, monotonicNow());
     try std.testing.expectEqual(dialog_cause.Cause.user, testLastDialog(7).cause);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
 test "W9c② 적대 리뷰 3 회차 재현 E: 에이전트 누름이 연 앞 팝업으로 키가 옮겨 갈 때 maru 가 보낸 조합 마침은 사용자 입력이 아니다 — 팝업의 alert 는 에이전트가 답한다" {
@@ -9920,7 +9909,7 @@ test "W9c② 적대 리뷰 3 회차 재현 E: 에이전트 누름이 연 앞 팝
     defer testTeardown(gpa);
     const s7 = try w9c2R3Setup(gpa);
     testSetPopupFamily(8, 7);
-    var acc: TestAccess = .{ .granted = (1 << 7) | (1 << 8), .agent = 0 };
+    var acc: TestAccess = .{ .granted = (1 << 7) | (1 << 8) };
     w9c2MoveKeyTarget(gpa, 0, 7, false);
     s7.composing = true; // 사용자가 한글 한 글자를 조합하다 멈췄다(10 초 전)
     s7.agent_input_ms = monotonicNow(); // 에이전트가 「X 로 로그인」 을 누른다 → window.open
@@ -9929,36 +9918,36 @@ test "W9c② 적대 리뷰 3 회차 재현 E: 에이전트 누름이 연 앞 팝
     _ = try agentReplyDialog(gpa, 8, null, true, "", acc.access());
 }
 
-test "W9c② 적대 리뷰 4 회차 재현 A: 메뉴 단축키(⌘⌥[)로 옮겨 간 Chromium 탭의 focus confirm 은 에이전트가 답하지 못한다 — 사용자 바뀜이 기본" {
+test "W9c② 적대 리뷰 4 회차 재현 A: 메뉴 단축키(⌘⌥[)로 옮겨 간 Chromium 탭의 focus confirm 은 원인이 사용자 쪽으로 갈린다(2026-11-17 A4 부터 답은 막지 않는다) — 사용자 바뀜이 기본" {
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R3Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     s7.agent_input_ms = monotonicNow() - 1_000;
     w9c2MoveKeyTarget(gpa, 0, 8, true);
     w9c2MoveKeyTarget(gpa, 8, 7, true); // maru 표시가 없는 바뀜 — 사용자 것
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "A new version is available. Reload?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
-test "W9c② 적대 리뷰 4 회차 재현 B: ⌘Tab 으로 다른 앱에 가며 생긴 blur 의 confirm 은 에이전트가 답하지 못한다" {
+test "W9c② 적대 리뷰 4 회차 재현 B: ⌘Tab 으로 다른 앱에 가며 생긴 blur 의 confirm 은 원인이 사용자 쪽으로 갈린다(2026-11-17 A4 부터 답은 막지 않는다)" {
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R3Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+
     w9c2MoveKeyTarget(gpa, 0, 7, false);
     s7.agent_input_ms = monotonicNow() - 1_000;
     w9c2MoveKeyTarget(gpa, 7, 0, true); // 창이 키를 잃었다 — maru 표시 없음
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://cms.test", .message = "Discard your edits?" } }, monotonicNow());
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
 }
 
 test "W9c② 변이 생존 재현(W4): sheet 가 아직 없어도 키 포커스를 쥔 탭의 「모호」 대화상자는 보이는 중으로 거절 — 포커스가 없으면 답한다" {
     const gpa = std.testing.allocator;
     defer testTeardown(gpa);
     const s7 = try w9c2R3Setup(gpa);
-    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    var acc: TestAccess = .{ .granted = 1 << 7 };
     // 사용자가 누른 직후 에이전트가 눌렀다 — 둘 다 창 안, 에이전트가 늦다(모호).
     s7.user_action_ms = monotonicNow() - 200;
     s7.agent_input_ms = monotonicNow() - 100;
@@ -9966,7 +9955,7 @@ test "W9c② 변이 생존 재현(W4): sheet 가 아직 없어도 키 포커스�
     s7.user_action_ms = monotonicNow() - 200;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "" } }, monotonicNow());
     try std.testing.expectEqual(dialog_cause.Cause.ambiguous, testLastDialog(7).cause);
-    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    try std.testing.expect(testReplyCause(7) != .agent); // 2026-11-17 A4: 원인은 그대로 갈린다(사용자 쪽) — 답은 막지 않는다
     // 포커스를 잃었다(다른 pane) — 보이지 않는다, 도착 뒤 사용자 입력도 없다.
     w9c2MoveKeyTarget(gpa, 7, 0, false);
     _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
@@ -12060,7 +12049,7 @@ test "W9d③ v20b R18a: 사용자 알림 — 몰기는 세대마다 한 번, 같
     try std.testing.expect(!takeBlockNotice(98));
 }
 
-test "W9d③ v20b R16c: 두 pane — 목록의 block_pattern 은 주인에게만(둘째 pane 은 번호만), Grants 줄의 수·엄격은 pane 마다, ⊘ 의 수는 합" {
+test "W9d③ v20b R16c: 두 pane — 목록의 block_pattern 은 주인에게만(둘째 pane 은 번호만), Grants 줄의 수·엄격은 pane 마다, ⊘ 의 수는 합, 결과는 남의 규칙도 보인다(other_pane — 2026-11-17 A2)" {
     const gpa = std.testing.allocator;
     state = .starting;
     defer testTeardown(gpa);
@@ -12089,14 +12078,15 @@ test "W9d③ v20b R16c: 두 pane — 목록의 block_pattern 은 주인에게만
         defer gpa.free(j);
         try std.testing.expectEqual(c.want_pattern, std.mem.indexOf(u8, j, "\"block_pattern\"") != null);
     }
-    // pane 6 의 결과 — 제 규칙 1 개, 다른 pane 2 개, 엄격은 제 것.
+    // pane 6 의 결과 — 다른 pane 의 규칙 2 개도 보인다(other_pane), 엄격은 제 것.
     const j6 = try v20bBlockOk(gpa, 100, .{ .pane = 6, .any_host = false, .grant_host = "app.test", .action = .list });
     defer gpa.free(j6);
-    try std.testing.expect(std.mem.indexOf(u8, j6, "\"other_rules\":2") != null and std.mem.indexOf(u8, j6, "\"other_pane\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, j6, "\"other_rules\":2") != null and std.mem.indexOf(u8, j6, "t.test/a/") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, j6, "\"other_pane\":true")); // 규칙 둘 — 엄격은 제 것
     const j5 = try v20bBlockOk(gpa, 100, .{ .pane = 5, .any_host = true, .action = .list });
     defer gpa.free(j5);
     try std.testing.expect(std.mem.indexOf(u8, j5, "\"other_rules\":1") != null and std.mem.indexOf(u8, j5, "\"other_pane\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, j5, "t.test/c/") == null); // 남의 패턴은 안 보인다
+    try std.testing.expect(std.mem.indexOf(u8, j5, "t.test/c/") != null); // 남의 패턴도 보인다(2026-11-17 A2)
 }
 
 test "W9d③ 20 회 검증 B DEF-2: 만들지 못한 net_block 은 보낸 것으로 적지 않는다 — 결과는 failed(엄격도), 고친 다음 세대는 간다" {
@@ -12464,7 +12454,7 @@ test "W9d④: 보내기 차례 — browser_created 면 net_watch → net_record 
     try std.testing.expect(networkMocking(191) != null); // ▣ — sidecar 확인 전에도
     try std.testing.expectEqualStrings("agent.test", s.mock.rules.items[0].site.slice()); // 에이전트 탭 — 지금 페이지의 사이트
     try std.testing.expectEqual(@as(usize, 0), s.mock.rules.items[0].exec_site.slice().len); // 어느 호스트든 — 실행 사이트를 묻지 않는다
-    try std.testing.expect(!s.mock.rules.items[0].human_nav_real); // 에이전트 탭 — 사람의 누름 예외 없음(UD2)
+    try std.testing.expect(!s.mock.ruleWire(191, 0).flags.human_nav_real); // 에이전트 탭 — 사람의 누름 예외 없음(UD2)
     try std.testing.expectEqual(@as(usize, 40 * 1024), mock_budget.app_bytes);
     const old_body_id = s.mock.rules.items[0].body_id;
     const last = try gpa.dupe(u8, "https://agent.test/page");
@@ -12501,7 +12491,7 @@ test "W9d④: 보내기 차례 — browser_created 면 net_watch → net_record 
     state = .running;
 }
 
-test "W9d④: 주 프레임 문서 가짜가 에이전트 이동을 mocked 로 끝내고 사용자가 몬 탭이면 알린다, 사용자 탭 규칙은 grant 호스트·실행 사이트·사람 표시, browser grant 철회·지켜보기 끝이 규칙과 본문 셈을 거둔다" {
+test "W9d④: 주 프레임 문서 가짜가 에이전트 이동을 mocked 로 끝내고 사용자가 몬 탭이면 알린다, 사용자 탭 규칙은 grant 호스트·실행 사이트(사람의 누름 예외는 없다 — A8), browser grant 철회·지켜보기 끝이 규칙과 본문 셈을 거둔다" {
     const gpa = std.testing.allocator;
     state = .starting;
     defer testTeardown(gpa);
@@ -12518,7 +12508,7 @@ test "W9d④: 주 프레임 문서 가짜가 에이전트 이동을 mocked 로 �
     const r = &s.mock.rules.items[0];
     try std.testing.expectEqualStrings("example.test", r.site.slice()); // 사용자 탭 — grant 호스트
     try std.testing.expectEqualStrings("example.test", r.exec_site.slice()); // 문서 가짜는 그 사이트 안에서만(M25)
-    try std.testing.expect(r.human_nav_real); // 사용자 결정 Q2
+    try std.testing.expect(!s.mock.ruleWire(192, 0).flags.human_nav_real); // 사용자 결정 2026-11-17 A8 — 사용자 탭 규칙도 사람의 누름 문서를 바꾼다(옛 Q2 예외 없음)
     try std.testing.expectEqual(@as(u32, 1), mockSummary(192, 6).rules);
     // 에이전트 이동 — 그 주 프레임 문서의 끝이 가짜였다.
     try std.testing.expect(agentNavigate(gpa, 192, "https://app.example.test/doc"));
@@ -12728,7 +12718,7 @@ test "W9e①: 보내기 차례 — browser_created 면 net_mock 뒤·navigate �
     for (emuFrames(&buf)) |m| try std.testing.expect(m != .emulation);
 }
 
-test "W9e①: 다른 pane 은 바꾸지 못하고(get 은 된다), grant 동기화가 주인을 잃은 흉내를 지우고 보낸다 — ◫ 가 사라지고 사용자 탭은 사이트에 묶인다" {
+test "W9e①·2026-11-17 A2: 다른 pane 도 바꾼다(같은 값이면 주인 그대로, 바꾸면 그 pane 이 주인), grant 동기화는 그 순간의 주인을 잃은 흉내를 지우고 보낸다 — ◫ 가 사라지고 사용자 탭은 사이트에 묶인다" {
     const gpa = std.testing.allocator;
     state = .running;
     test_record_sends = true;
@@ -12749,24 +12739,39 @@ test "W9e①: 다른 pane 은 바꾸지 못하고(get 은 된다), grant 동기�
     const sent = emuFrames(&buf);
     try std.testing.expect(sent.len == 1 and sent[0].emulation.flags.site_bound);
     try std.testing.expectEqualStrings("a.test", sent[0].emulation.site);
+    // 다른 pane 이 같은 값을 건다 — 받지만 바뀌지 않아 주인은 그대로(2026-11-17 A2), 결과는 other_pane.
     switch (try browserEmulate(gpa, 293, .{ .pane = 6, .any_host = false, .grant_host = "a.test", .params = &p })) {
         .ok => |json| {
-            gpa.free(json);
-            return error.TestUnexpectedResult;
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"other_pane\":true") != null);
         },
-        .fail => |f| try std.testing.expectEqualStrings("emulated_by_other_pane", f.reason),
-    }
-    const get = try emuParams("{\"action\":\"get\"}");
-    switch (try browserEmulate(gpa, 293, .{ .pane = 6, .any_host = false, .grant_host = "a.test", .params = &get })) {
-        .ok => |json| gpa.free(json),
         .fail => return error.TestUnexpectedResult,
     }
     var sb: [160]u8 = undefined;
     try std.testing.expectEqualStrings("UTC", emulationSummary(293, 5, &sb));
     try std.testing.expectEqual(@as(usize, 0), emulationSummary(293, 6, &sb).len); // 주인이 아니면 Grants 줄이 비었다
-    // 주인의 grant 철회 — 지우고 곧 보낸다(◫ 도 사라진다).
-    outbox_pending.clearRetainingCapacity();
+    // pane 6 의 grant 철회 — 주인(5)의 흉내는 남는다.
+    emulationSync(&.{.{ .tab = 293, .who = 0, .host = "a.test", .pane = 5 }});
+    var eb0: [160]u8 = undefined;
+    try std.testing.expect(emulation(293, &eb0) != null);
+    emulationSync(&.{ .{ .tab = 293, .who = 0, .host = "a.test", .pane = 5 }, .{ .tab = 293, .who = 0, .host = "a.test", .pane = 6 } });
+    // pane 6 이 다른 무리를 바꾼다 — 통째로 pane 6 의 것(Grants 줄도 옮긴다), 결과에 other_pane 없음.
+    const loc = try emuParams("{\"action\":\"set\",\"locale\":\"fr-FR\"}");
+    switch (try browserEmulate(gpa, 293, .{ .pane = 6, .any_host = false, .grant_host = "a.test", .params = &loc })) {
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "other_pane") == null);
+        },
+        .fail => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), emulationSummary(293, 5, &sb).len);
+    try std.testing.expect(emulationSummary(293, 6, &sb).len > 0);
+    // 옛 주인(5)의 grant 철회 — 그대로.
     emulationSync(&.{.{ .tab = 293, .who = 0, .host = "a.test", .pane = 6 }});
+    try std.testing.expect(emulation(293, &eb0) != null);
+    // 지금 주인(6)의 grant 철회 — 지우고 곧 보낸다(◫ 도 사라진다).
+    outbox_pending.clearRetainingCapacity();
+    emulationSync(&.{.{ .tab = 293, .who = 0, .host = "a.test", .pane = 5 }});
     var eb: [160]u8 = undefined;
     try std.testing.expect(emulation(293, &eb) == null);
     const cleared = emuFrames(&buf);
@@ -13005,7 +13010,7 @@ fn takeAnswerFor(id: u64) ?struct { ok: bool, json: []u8 } {
     return null;
 }
 
-test "W9e②: trace 차례 — start·recording 답·stop·조각·프레임·done → 거른 결과와 파일 읽기, 브라우저에 하나, 옛 세대 버림, 다른 pane 은 못 읽음" {
+test "W9e②: trace 차례 — start·recording 답·stop·조각·프레임·done → 거른 결과와 파일 읽기, 브라우저에 하나, 옛 세대 버림, 다른 pane 도 읽는다(2026-11-17 A2 — 결과는 탭에 하나)" {
     const gpa = std.testing.allocator;
     state = .running;
     test_record_sends = true;
@@ -13060,15 +13065,19 @@ test "W9e②: trace 차례 — start·recording 답·stop·조각·프레임·do
         },
         else => return error.TestUnexpectedResult,
     }
-    // 다른 pane 은 그 결과를 읽지도 멈춤 결과를 받지도 못한다.
+    // 다른 pane 도 그 탭의 결과를 읽고 멈춤 결과를 받는다(2026-11-17 A2 — 읽기는 주인을 옮기지 않는다: Grants 줄은 그대로 pane 5).
     switch (try browserTrace(gpa, 401, .{ .pane = 6, .params = &read, .async_id = 15 })) {
-        .fail => |f| try std.testing.expectEqualStrings("not_tracing", f.reason),
+        .ok => |json| gpa.free(json),
         else => return error.TestUnexpectedResult,
     }
     switch (try browserTrace(gpa, 401, .{ .pane = 6, .params = &stop_p, .async_id = 16 })) {
-        .fail => |f| try std.testing.expectEqualStrings("not_tracing", f.reason),
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"state\":\"done\"") != null);
+        },
         else => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqualStrings("ready", traceSummary(401, 5));
     // 끝났으니 다른 탭의 start 가 된다.
     try std.testing.expect((try browserTrace(gpa, 402, .{ .pane = 6, .params = &start_p, .async_id = 17 })) == .pending);
     // grant 를 잃으면(그 (pane, 탭) 이 목록에서 빠짐) 진행 중 trace 는 abort 를 보내고 버림, 남은 결과 칸도 지운다.
@@ -13312,7 +13321,7 @@ fn traceTestStatus(gpa: std.mem.Allocator, surface: u64, pane: u64) ![]u8 {
     };
 }
 
-test "W9e② 실앱 스모크: 끝난 trace 의 status 는 stop 이 답할 결과 그대로(요약·파일, 버림·실패면 이유) — 칸을 지우지 않는다, 진행 중이면 단계·경과, 칸이 없으면 idle, 다른 pane 은 못 본다" {
+test "W9e② 실앱 스모크: 끝난 trace 의 status 는 stop 이 답할 결과 그대로(요약·파일, 버림·실패면 이유) — 칸을 지우지 않는다, 진행 중이면 단계·경과, 칸이 없으면 idle, 다른 pane 도 본다(2026-11-17 A2)" {
     const gpa = std.testing.allocator;
     state = .running;
     test_record_sends = true;
@@ -13368,10 +13377,10 @@ test "W9e② 실앱 스모크: 끝난 trace 의 status 는 stop 이 답할 결�
         },
         else => return error.TestUnexpectedResult,
     }
-    // 다른 pane 은 그 결과를 status 로도 못 본다(stop 이 not_tracing 인 것과 같다).
+    // 다른 pane 도 그 탭의 결과를 status 로 본다(2026-11-17 A2 — stop 이 답하는 것과 같다).
     const other = try traceTestStatus(gpa, 405, 6);
     defer gpa.free(other);
-    try std.testing.expectEqualStrings("{\"state\":\"idle\"}", other);
+    try std.testing.expectEqualStrings(stopped, other);
     // 버림 — status 는 stop 과 같은 이유·글(빈 이유가 아니다).
     _ = try browserTrace(gpa, 405, .{ .pane = 5, .params = &start_p, .async_id = 84 });
     const g2 = lastTraceFrame().?.generation;

@@ -1,7 +1,9 @@
 //! Chromium 탭의 기기 흉내를 maru 가 쥐는 자리(W9e① — docs/plans/web-osr-backend.md 「W9e① 결정·실측」) — L2 순수.
 //!
-//! 흉내는 **탭에 하나**다(규칙 목록이 아니다 — 계획 §3). 처음 건 pane 이 주인이고 다른 pane 의 `set`·`clear` 는 `emulated_by_other_pane`(그
-//! pane 은 `get` 으로 상태만). `set` 은 **덧쓰기**다 — 준 무리만 바꾸고 `null` 은 그 무리를 지운다(Chrome DevTools MCP 의 「매번 전부」 와 다르게 —
+//! 흉내는 **탭에 하나**다(규칙 목록이 아니다 — 계획 §3). 어느 pane 이든 바꾸고 지운다(사용자 결정 2026-11-17 「에이전트는 사용자와 같은 힘」 A2 —
+//! 옛 `emulated_by_other_pane` 를 걷었다). **실제로 바꾼 `set` 의 pane 이 통째로 주인이 된다**(설정이나 묶인 사이트가 바뀔 때 — 같은 값이면 주인
+//! 그대로: 다시 건 pane 의 철회가 먼저 건 pane 의 흉내를 지우지 않게). 무리마다 주인을 두지 않는다 — 한 pane 의 철회가 viewport 는 남기고 UA 만 지운
+//! 반쪽 기기를 만들지 않게. 결과의 `other_pane` 이 주인이 다른 pane 임을 말한다. `set` 은 **덧쓰기**다 — 준 무리만 바꾸고 `null` 은 그 무리를 지운다(Chrome DevTools MCP 의 「매번 전부」 와 다르게 —
 //! 에이전트가 시간대만 바꾸다 viewport 를 잃지 않게, 작성자 선택 §17-3). 바뀔 때마다 세대(`gen`)가 오르고 web_osr 가 sidecar 에 **전체 상태**를
 //! 보낸다(`emulation` — 다시 보내도 같다, sidecar 가 다시 뜨면 재생 이동 앞에). 사용자 탭은 grant 호스트(사이트)에 묶이고(사용자 결정 Q1 — 그
 //! 사이트를 보이는 동안만), 에이전트 탭은 어느 호스트든이다(birth grant — 묻지 않는다). 주인의 emulation grant 가 사라지거나 다른 호스트로 바뀌면
@@ -859,14 +861,10 @@ pub const Tab = struct {
         return true;
     }
 
-    /// 한 번의 `set`·`clear`(get 은 부른 쪽이 결과만). 주인 아닌 pane → `emulated_by_other_pane`, 초당 10 번 → `resource_busy`.
+    /// 한 번의 `set`·`clear`(get 은 부른 쪽이 결과만) — 어느 pane 이든(2026-11-17 A2). 초당 10 번 → `resource_busy`.
     pub fn apply(self: *Tab, call: Call, why: *Failure) error{Rejected}!Outcome {
         const p = call.params;
         if (p.action == .get) return .{};
-        if (self.active() and self.owner != 0 and self.owner != call.pane) {
-            why.* = .{ .reason = "emulated_by_other_pane", .message = "another pane is emulating a device on this tab — it can change or clear it; you can read it with action get" };
-            return error.Rejected;
-        }
         // 사용자 탭의 `set` 은 지금 보이는 사이트에 묶인다 — 웹 페이지가 아니거나 이동 중이면 거절하지 않고 묶을 사이트 없이(아래 — 사용자 결정
         // 2026-11-17: 사람이 그 탭에서 할 수 있는 것은 에이전트도).
         const bind: ?Bind = if (p.action == .set) bindSite(call) else null;
@@ -903,7 +901,8 @@ pub const Tab = struct {
             };
         }
         out.changed = !std.meta.eql(next, self.settings) or p.reload;
-        if (!std.meta.eql(next, self.settings)) {
+        const settings_changed = !std.meta.eql(next, self.settings);
+        if (settings_changed) {
             self.settings = next;
             self.bump();
         }
@@ -922,10 +921,7 @@ pub const Tab = struct {
         }
         out.touch_added = !before_touch and if (self.settings.viewport) |v| v.touch else false;
         if (self.active()) {
-            if (self.owner == 0) {
-                self.owner = call.pane;
-                self.agent_tab = call.birth;
-            }
+            const site_before = self.site;
             // 묶음은 `set` 마다 부를 때의 사이트로 — 다른 사이트에서 다시 걸면 그리로 옮긴다(옛 사이트는 진짜 값). 지금 묶음이 이미 그 페이지를 덮으면
             // (같은 호스트·하위 도메인 — `siteCovers` 와 같은 셈) 그대로 둔다: `www.a.test` 에서 다시 걸어 `a.test` 묶음이 좁아지지 않게. 사이트만 바뀌어도
             // 세대를 올려 sidecar 가 새 사이트를 받게 한다.
@@ -942,6 +938,11 @@ pub const Tab = struct {
                     self.bump();
                     out.changed = true;
                 }
+            }
+            // 주인 — 처음 건 pane, 또는 설정·묶인 사이트를 실제로 바꾼 pane(2026-11-17 A2). 같은 값을 다시 건 다른 pane 은 주인이 되지 않는다.
+            if (self.owner == 0 or settings_changed or !site_before.eql(&self.site)) {
+                self.owner = call.pane;
+                self.agent_tab = call.birth;
             }
         } else {
             self.owner = 0;
@@ -1274,10 +1275,16 @@ pub const Tab = struct {
     /// 결과 JSON(계획 §4) — `set`·`clear`·`get` 모두. `pane_w`·`pane_h` 는 사용자가 보는 pane(DIP — 맞춤을 미리 보인다), `reloaded` 는 이번에
     /// 새로고침을 보냈는가.
     pub fn resultJson(self: *const Tab, out: std.mem.Allocator, pane_w: u32, pane_h: u32, reloaded: bool, touch_added: bool) std.mem.Allocator.Error![]u8 {
+        return self.resultJsonFor(out, 0, pane_w, pane_h, reloaded, touch_added);
+    }
+
+    /// `resultJson` 에 더해 부른 pane(`caller`, 0 은 모름) — 흉내의 주인이 다른 pane 이면 `other_pane:true`(2026-11-17 A2 — 바꿀 수 있고, 바꾸면 그
+    /// pane 이 주인이 된다).
+    pub fn resultJsonFor(self: *const Tab, out: std.mem.Allocator, caller: u64, pane_w: u32, pane_h: u32, reloaded: bool, touch_added: bool) std.mem.Allocator.Error![]u8 {
         var aw: std.Io.Writer.Allocating = .init(out);
         defer aw.deinit();
         var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-        self.writeResult(&s, pane_w, pane_h, reloaded, touch_added) catch return error.OutOfMemory;
+        self.writeResult(&s, caller, pane_w, pane_h, reloaded, touch_added) catch return error.OutOfMemory;
         return aw.toOwnedSlice();
     }
 
@@ -1287,7 +1294,7 @@ pub const Tab = struct {
         return emu_fields.fitScale(pane_w, pane_h, vp.width, vp.height);
     }
 
-    fn writeResult(self: *const Tab, s: *std.json.Stringify, pane_w: u32, pane_h: u32, reloaded: bool, touch_added: bool) !void {
+    fn writeResult(self: *const Tab, s: *std.json.Stringify, caller: u64, pane_w: u32, pane_h: u32, reloaded: bool, touch_added: bool) !void {
         const st = &self.settings;
         const f = self.fit(pane_w, pane_h);
         try s.beginObject();
@@ -1410,6 +1417,10 @@ pub const Tab = struct {
         }
         try s.objectField("site");
         if (self.site.len == 0) try s.write(null) else try s.write(self.site.slice());
+        if (caller != 0 and self.active() and self.owner != 0 and self.owner != caller) {
+            try s.objectField("other_pane");
+            try s.write(true);
+        }
         try s.objectField("active");
         try s.write(self.active() and self.onSite());
         try s.objectField("state");
@@ -1619,22 +1630,42 @@ test "W9e①: 덧쓰기 — 준 무리만 바꾸고 null 은 그 무리를 지�
     try testing.expect(!t.active() and t.owner == 0);
 }
 
-test "W9e①: 주인 pane — 다른 pane 의 set·clear 는 emulated_by_other_pane(get 은 된다), 초당 10 번 넘으면 resource_busy, 다 지우면 주인이 풀린다" {
+test "W9e①·2026-11-17 A2: 주인 pane — 다른 pane 의 set·clear 도 된다(바꾸면 그 pane 이 통째로 주인, 같은 값이면 그대로 — 그 pane 의 철회가 지우지 않는다), 초당 10 번 넘으면 resource_busy, 다 지우면 주인이 풀린다, 결과의 other_pane" {
     var t: Tab = .{};
     var why: Failure = undefined;
     var w: ?Why = null;
     const set = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
     _ = try t.apply(testCall(&set, 5, 0), &why);
-    try testing.expectError(error.Rejected, t.apply(testCall(&set, 6, 1), &why));
-    try testing.expectEqualStrings("emulated_by_other_pane", why.reason);
+    try testing.expectEqual(@as(u64, 5), t.owner);
+    // pane 6 이 같은 값을 다시 건다 — 바뀌지 않아 주인 그대로(pane 6 의 철회가 pane 5 의 흉내를 지우지 않는다).
+    const g0 = t.gen;
+    _ = try t.apply(testCall(&set, 6, 1), &why);
+    try testing.expect(t.owner == 5 and t.gen == g0);
+    try testing.expect(!t.sync(&.{.{ .pane = 5, .any_host = true }}));
+    const j6 = try t.resultJsonFor(testing.allocator, 6, 640, 400, false, false);
+    defer testing.allocator.free(j6);
+    try testing.expect(std.mem.indexOf(u8, j6, "\"other_pane\":true") != null);
+    const j5 = try t.resultJsonFor(testing.allocator, 5, 640, 400, false, false);
+    defer testing.allocator.free(j5);
+    try testing.expect(std.mem.indexOf(u8, j5, "other_pane") == null);
+    // pane 6 이 다른 무리(locale)를 바꾼다 — 흉내 통째로 pane 6 의 것: pane 5 가 grant 를 잃어도 남고, pane 6 이 잃으면 timezone 까지 사라진다.
+    const loc = try parse("{\"id\":1,\"action\":\"set\",\"locale\":\"fr-FR\"}", &w);
+    _ = try t.apply(testCall(&loc, 6, 2), &why);
+    try testing.expectEqual(@as(u64, 6), t.owner);
+    try testing.expect(!t.sync(&.{.{ .pane = 6, .any_host = true }}));
+    try testing.expect(t.settings.timezone != null and t.settings.locale != null);
+    try testing.expect(t.sync(&.{.{ .pane = 5, .any_host = true }}));
+    try testing.expect(!t.active() and t.owner == 0);
     const get = try parse("{\"id\":1,\"action\":\"get\"}", &w);
-    _ = try t.apply(testCall(&get, 6, 2), &why);
-    for (1..10) |i| _ = try t.apply(testCall(&set, 5, @intCast(10 + i)), &why);
-    try testing.expectError(error.Rejected, t.apply(testCall(&set, 5, 20), &why));
+    _ = try t.apply(testCall(&get, 6, 3), &why);
+    for (0..10) |i| _ = try t.apply(testCall(&set, 5, @intCast(1000 + i)), &why);
+    try testing.expectError(error.Rejected, t.apply(testCall(&set, 5, 1010), &why));
     try testing.expectEqualStrings("resource_busy", why.reason);
+    // pane 6 의 clear 도 된다.
     const clear = try parse("{\"id\":1,\"action\":\"clear\"}", &w);
-    _ = try t.apply(testCall(&clear, 5, 2000), &why);
-    _ = try t.apply(testCall(&set, 6, 2100), &why); // 이제 다른 pane 이 주인이 될 수 있다
+    _ = try t.apply(testCall(&clear, 6, 3000), &why);
+    try testing.expect(!t.active() and t.owner == 0);
+    _ = try t.apply(testCall(&set, 6, 3100), &why);
     try testing.expectEqual(@as(u64, 6), t.owner);
 }
 

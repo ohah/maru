@@ -24,7 +24,7 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 | You see | Meaning | Do |
 |---|---|---|
 | `error: Unauthorized (-32002)` with `hint: maru does not say why it refused …` | The request did not come from a Maru pane (another terminal, screen or ssh inside the pane, a background `&` job, a program outside Maru), **or** the id is closed or unknown. An older Maru also refuses tmux inside the pane and tabs the user declined. Maru does not say which, on purpose. | Do not repeat. Run `maru browser list` to check the id. If you are outside a Maru pane, say so. Otherwise ask the user. |
-| `-32002` with a hint that only tabs this pane opened can be closed | `close` on a tab you did not open | Leave the user's tab open. |
+| `-32603` with a hint that only tabs this pane opened can be closed | An older Maru: `close` on a tab you did not open | Leave the user's tab open. |
 | `-32002` saying the tab needs its network permission first | An older Maru: `network-record`, `network-block` or `network-mock` before `network` was allowed on that tab (it may also print the foreground hint under it — ignore that there) | Run `network` on that tab first. |
 | `-32002` saying a permission is gone, or that something works only on tabs the agent opened | The user revoked the tab in the Browser Grants menu (what you set there is gone), or the command needs a tab you opened | Do not retry in a loop. Ask the user, or `open` a tab of your own. |
 | `(-32603)` with `grants_full` | Maru keeps access for at most 64 pane-and-tab pairs | Close tabs you opened and no longer need; for the user's tabs, ask the user to close them or to choose Revoke All in the Browser Grants menu. Then retry once. |
@@ -44,7 +44,7 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 | `(-32006)` with `script error (kind): name: message` | Your `exec` expression threw | Fix the expression. |
 | `(-32008)` with `[not a browser tab]`, `[engine=webkit]` or `[param=…]` | A file view or markdown panel, a WebKit tab, or a flag that engine lacks; `trace` on a tab you did not open in an older Maru | Use a Chromium tab of your own (`open`). |
 | `(-32602)` with a `reason` | A bad value (for example `too_many_rules`, `no_site`, `unknown_rule`, an `emulate` value) | Fix the value. |
-| `(-32603)` with `emulated_by_other_pane`, `resource_busy` or `trace_busy` | Another pane owns that tab's emulation, more than 10 changes a second, or another trace is running | Wait a little and retry once, or ask. |
+| `(-32603)` with `emulated_by_other_pane`, `resource_busy` or `trace_busy` | An older Maru: another pane owns that tab's emulation; or more than 10 changes a second, or another trace is running | Wait a little and retry once, or ask. |
 | `(-32603)` with `human_input` | The user used the tab | Stop and ask. Do not fight the user. |
 | `(-32601)` | The app is older than this CLI | Ask the user to restart or update Maru. |
 

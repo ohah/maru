@@ -20,9 +20,12 @@ The first `open` does.
 - Your pane owns it: every command works there, on any site it goes to. Give long calls (`trace`, a large `upload`)
   a shell timeout of at least 3 minutes.
 - A pane holds at most 8 agent tabs, about 157 MB each. A ninth `open` fails until you `close` one.
-  Pages you open with real clicks in a tab you opened (`target=_blank`, `window.open`) also become agent tabs and count.
+  Pages a page opens after your real click (`target=_blank`, `window.open`) also become your agent tabs, behind the
+  user's, and count — in any tab, the user's too (an older Maru: only in a tab you opened; on a user's tab nothing
+  opened). With 8 agent tabs the page's new tab does not open.
 - Agent tabs are not remembered across an app restart, and become the user's tabs when your pane closes.
-  After that they are user tabs.
+  After that they are user tabs. When the user revokes in the Browser Grants menu, what you set there is removed
+  but the tab stays yours (◈); your next command gets full access again (an older Maru made it a user tab).
 
 **They use the user's real browser profile** — the same cookies and logins as the user's own tabs. This is
 Maru's design, not a bug, and it means:
@@ -37,7 +40,10 @@ Maru's design, not a bug, and it means:
 - Current Maru does not ask the user before your commands on their tabs: your pane gets every command there, on any
   site the tab moves to. Touch one only when the task is about that tab (SKILL.md section 5). An older Maru asks
   first — give that call a shell timeout of at least 3 minutes.
-- `close` refuses user tabs. Leave them as you found them (see "Leave nothing behind" in SKILL.md).
+- `close` works on any tab, the user's too, like the user's ⌘W (an older Maru closes only tabs you opened). Close a
+  user's tab only when the user asked. Leave the others as you found them (see "Leave nothing behind" in SKILL.md).
+- Another pane's blocking rules, mocks, emulation and trace on a tab can be changed or removed too; the pane that
+  changes something owns it from then on. Do not undo another agent's setup unless the task needs it.
 - WebKit tabs (`engine=webkit`) and file views support fewer commands; you get `-32008`. Open a tab of your own with `open`.
 
 ## Downloads

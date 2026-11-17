@@ -43,9 +43,9 @@ pub const result_too_large = "the DevTools result was too large";
 /// 1·2 회차). W9c②: 에이전트가 답해도 되는 것이면 `handle-dialog` 로 답한다 — 아니면 사용자가 그 탭에서 답한다. 두 글은 표지로 그대로
 /// 비교된다(`std.mem.eql`) — 고치면 상수만 고친다.
 /// W9a 적대 리뷰 4 회차: 같은 팝업 가족의 **다른** 탭이 대화상자를 띄웠다 — 그 탭의 스크립트는 멈춘 것이 아니다(다른 렌더러에서 돈다).
-pub const family_dialog_reason = "a tab in the same popup family is showing a dialog (alert, confirm or prompt) — the script was stopped; answer the dialog with maru browser handle-dialog if you may (otherwise the user answers it in that tab), then run it again";
+pub const family_dialog_reason = "a tab in the same popup family is showing a dialog (alert, confirm or prompt) — the script was stopped; answer the dialog with maru browser handle-dialog (see maru browser dialog), then run it again";
 
-pub const dialog_reason = "the page, or a tab it opened or that opened it, is showing a dialog (alert, confirm, prompt or leave-page question) — answer it with maru browser handle-dialog if you may (see maru browser dialog), otherwise the user answers it in that tab";
+pub const dialog_reason = "the page, or a tab it opened or that opened it, is showing a dialog (alert, confirm, prompt or leave-page question) — answer it with maru browser handle-dialog (see maru browser dialog)";
 
 /// 누르기 전 프레임(W9b③)의 인자 — **kick 과 바이트까지 같아야 한다**(`app_host_abi` 가 컴파일 때 본다). sidecar 는 kick 과 꼭 같은
 /// 호출만 짧은 시한(3 초)에 놓는다 — 다르면 이동하는 순간 답을 잃은 프레임이 35 초 자리를 쥐어 click 이 30 초 시한이 됐다(적대 리뷰
@@ -3879,10 +3879,10 @@ fn w9b3r4RoleDialog(method: []const u8, params: []const u8) Reply {
     return rolePage(method, params);
 }
 
-test "W9c②: 대화상자로 막힌 실패의 글은 maru browser handle-dialog 를 가리킨다 — 답해도 되면 에이전트가, 아니면 사용자가(표지 상수는 그대로 비교된다)" {
+test "W9c②: 대화상자로 막힌 실패의 글은 maru browser handle-dialog 를 가리킨다 — 2026-11-17 A4: 에이전트는 어느 대화상자든 답하니 「사용자가 정한다」 를 말하지 않는다(표지 상수는 그대로 비교된다)" {
     for ([_][]const u8{ dialog_reason, family_dialog_reason, web_cdp_page.leave_page_reason, web_cdp_exec.paused_at_dialog }) |r| {
         try testing.expect(std.mem.indexOf(u8, r, "maru browser handle-dialog") != null);
-        try testing.expect(std.mem.indexOf(u8, r, "otherwise the user") != null);
+        try testing.expect(std.mem.indexOf(u8, r, "otherwise the user") == null and std.mem.indexOf(u8, r, "if you may") == null);
     }
 }
 

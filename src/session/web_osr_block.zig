@@ -1,15 +1,19 @@
 //! Chromium 탭의 요청 막기 규칙과 엄격 모드를 maru 가 쥐는 자리(W9d③ — docs/plans/web-osr-backend.md 「W9d③ 결정·실측」) — L2 순수.
 //!
-//! 탭 하나에 규칙은 모두 32 개(pane 마다 주인이 다르다 — 다른 pane 의 규칙은 수만 보인다). 규칙은 정규형 패턴(`net_block`)·종류 마스크·**사이트**
+//! 탭 하나에 규칙은 모두 32 개(규칙마다 주인 pane 이 있다 — 사용자 결정 2026-11-17 「에이전트는 사용자와 같은 힘」 A2: 어느 pane 이든 남의 규칙을
+//! 보고(`other_pane`) 지우고 엄격을 끄거나 옮긴다. **실제로 바꾼 호출의 pane 이 주인이 된다** — 그대로 두는 호출(같은 규칙 다시 넣기·같은 사이트에서
+//! 다시 엄격 켬)은 주인을 옮기지 않는다: 다시 넣은 pane 의 철회가 먼저 세운 pane 의 것을 지우지 않게(20 회 검증 B DEF-3 의 뜻). 철회는 그 순간
+//! 주인인 것만 거둔다 — `sync`). 규칙은 정규형 패턴(`net_block`)·종류 마스크·**사이트**
 //! (추가한 때의 페이지 호스트 — 에이전트 탭, 또는 grant 호스트 — 사용자 탭: 그 사이트의 페이지에서만 일한다)를 쥔다. 엄격 모드(그 탭·그 사이트의
 //! 서비스 워커 우회)는 탭에 하나 — 켠 pane 이 주인이다. 바뀔 때마다 세대(`gen`)가 오르고 web_osr 가 sidecar 에 **통째로** 보낸다(`net_block` —
 //! 다시 보내도 같다, sidecar 가 다시 뜨면 재생 이동 앞에). 수(`hits`·`sw_hits`·`sw_not_applied`)는 sidecar 가 차이로 보내 여기서 누적한다(규칙을
 //! 지우면 함께 사라진다). 주인의 block grant 가 사라지거나 그 호스트가 규칙의 사이트를 더 덮지 않거나 주인의 네트워크 grant 가 사라지면 그 규칙·
 //! 엄격은 버린다(`sync` — 계획 §2·§10).
 //!
-//! 시험이 증명하는 것: add(정규형으로 같으면 already, 32 개 넘음은 too_many_rules — 몇 번째인지), remove(패턴·번호, 남의 규칙은 지우지 못한다 —
-//! unknown_rule), clear(제 규칙만 — 엄격은 그대로), 엄격 켬·끔(사이트에 묶임), 초당 10 번(resource_busy), sync 의 버림 표, sidecar 상태·수의 누적,
-//! wire 꼴(`net_block` 의 닫힌 칸을 지난다), 결과 JSON(다른 pane 은 수만, 설정이 꺼지면 서비스 워커 수를 숨긴다, 경고).
+//! 시험이 증명하는 것: add(정규형으로 같으면 누가 넣었든 already — 주인 그대로, 32 개 넘음은 too_many_rules — 몇 번째인지), remove(패턴·번호, 남의
+//! 규칙도 — 탭에 없는 번호만 unknown_rule), clear(탭의 모든 규칙 — 엄격은 그대로), 엄격 켬·끔(사이트에 묶임, 누구든 — 옮기면 주인이 바뀐다), 초당
+//! 10 번(resource_busy), sync 의 버림 표, sidecar 상태·수의 누적, wire 꼴(`net_block` 의 닫힌 칸을 지난다), 결과 JSON(모든 규칙 — 남의 것은
+//! `other_pane`, 설정이 꺼지면 서비스 워커 수를 숨긴다, 경고).
 
 const std = @import("std");
 const ws = @import("web_sidecar/root.zig");
@@ -184,8 +188,8 @@ pub const Tab = struct {
         self.change_next = (self.change_next + 1) % max_changes_per_s;
     }
 
-    fn findOwned(self: *Tab, owner: u64, id: u32) ?usize {
-        for (self.rules.items, 0..) |r, i| if (r.owner == owner and r.id == id) return i;
+    fn findId(self: *Tab, id: u32) ?usize {
+        for (self.rules.items, 0..) |r, i| if (r.id == id) return i;
         return null;
     }
 
@@ -206,7 +210,7 @@ pub const Tab = struct {
                 // 있는 탭에 `[p, p]` 가 둘로 세여 too_many_rules — 넣었으면 하나였다).
                 var new_count: usize = 0;
                 for (call.patterns, 0..) |p, i| {
-                    if (self.existing(call.owner, p, call.types, &site) != null) continue;
+                    if (self.existing(p, call.types, &site) != null) continue;
                     const earlier = for (call.patterns[0..i]) |q| {
                         if (std.mem.eql(u8, q, p)) break true;
                     } else false;
@@ -219,7 +223,7 @@ pub const Tab = struct {
                     }
                 }
                 for (call.patterns) |p| {
-                    if (self.existing(call.owner, p, call.types, &site)) |id| {
+                    if (self.existing(p, call.types, &site)) |id| {
                         // `already` 는 이 호출 전에 있던 것만, 한 번씩(2 차 검증 N-c: 같은 호출의 겹친 패턴이 방금 넣은 번호를 `already` 에 다시 실었다).
                         if (std.mem.indexOfScalar(u32, out.added.slice(), id) == null and std.mem.indexOfScalar(u32, out.already.slice(), id) == null) out.already.push(id);
                         continue;
@@ -236,8 +240,9 @@ pub const Tab = struct {
                 }
             },
             .remove => {
-                for (call.rules, 0..) |id, i| if (self.findOwned(call.owner, id) == null) {
-                    fail.* = .{ .reason = "unknown_rule", .message = "no such rule of yours on this tab — list them with maru browser network-block --list", .index = i };
+                // 남의 규칙도 지운다(2026-11-17 A2 — 지우기는 주인과 무관).
+                for (call.rules, 0..) |id, i| if (self.findId(id) == null) {
+                    fail.* = .{ .reason = "unknown_rule", .message = "no such rule on this tab — list them with maru browser network-block --list", .index = i };
                     return error.Rejected;
                 };
                 var i: usize = 0;
@@ -247,7 +252,7 @@ pub const Tab = struct {
                     const by_pattern = for (call.patterns) |p| {
                         if (std.mem.eql(u8, p, r.pattern())) break true;
                     } else false;
-                    if (r.owner == call.owner and (by_id or by_pattern)) {
+                    if (by_id or by_pattern) {
                         out.removed.push(r.id);
                         _ = self.rules.orderedRemove(i);
                         out.changed = true;
@@ -255,23 +260,16 @@ pub const Tab = struct {
                 }
             },
             .clear => {
-                var i: usize = 0;
-                while (i < self.rules.items.len) {
-                    if (self.rules.items[i].owner == call.owner) {
-                        out.removed.push(self.rules.items[i].id);
-                        _ = self.rules.orderedRemove(i);
-                        out.changed = true;
-                    } else i += 1;
-                }
+                // 탭의 모든 규칙(누가 넣었든 — 2026-11-17 A2). 엄격은 따로 끈다(그대로).
+                for (self.rules.items) |r| out.removed.push(r.id);
+                if (self.rules.items.len > 0) out.changed = true;
+                self.rules.clearRetainingCapacity();
             },
             .strict => {
                 const on = call.on orelse false;
-                // 엄격 모드도 규칙처럼 켠 pane 의 것이다 — 다른 pane 은 끄지도 가져가지도 못한다(20 회 검증 B DEF-3: 끔에 주인 확인이 없어 다른 pane 이
-                // 끄거나 다시 켜 주인이 됐고, 그 pane 이 grant 를 잃자 처음 pane 의 엄격이 사라졌다). 주인의 grant 가 사라지면 `sync` 가 거둔다.
-                if (self.strict_on and self.strict_owner != call.owner) {
-                    fail.* = .{ .reason = "other_pane", .message = "strict mode on this tab was turned on by another pane — only that pane can change it" };
-                    return error.Rejected;
-                }
+                // 엄격도 누구든 끄거나 옮긴다(사용자 결정 2026-11-17 A2 — 옛 `other_pane` 거절을 걷었다). 켜는 pane 이 주인이 되는 것은 **실제로 바뀔 때만**
+                // (꺼졌거나 다른 사이트) — 같은 사이트에서 다시 켜면 주인 그대로: 20 회 검증 B DEF-3(다른 pane 이 다시 켜 주인이 되고 그 pane 이 grant 를
+                // 잃자 처음 pane 의 엄격이 사라졌다)의 뜻을 이 꼴로 지킨다. 주인의 grant 가 사라지면 `sync` 가 거둔다.
                 if (on) {
                     const site = try siteOf(call.site, fail, "the tab is not showing an http(s) page — navigate first (strict mode is bound to the site it was turned on on)");
                     if (!self.strict_on or !self.strict_site.eql(&site)) {
@@ -321,8 +319,9 @@ pub const Tab = struct {
         return site;
     }
 
-    fn existing(self: *const Tab, owner: u64, pattern: []const u8, types: u32, site: *const cpg.GrantHost) ?u32 {
-        for (self.rules.items) |*r| if (r.owner == owner and r.types == types and r.site.eql(site) and std.mem.eql(u8, r.pattern(), pattern)) return r.id;
+    /// 같은 규칙(패턴·종류·사이트)이 있는가 — 누가 넣었든(2026-11-17 A2: 다시 넣기는 바꾸지 않으니 주인을 옮기지 않는다).
+    fn existing(self: *const Tab, pattern: []const u8, types: u32, site: *const cpg.GrantHost) ?u32 {
+        for (self.rules.items) |*r| if (r.types == types and r.site.eql(site) and std.mem.eql(u8, r.pattern(), pattern)) return r.id;
         return null;
     }
 
@@ -468,7 +467,7 @@ pub const Tab = struct {
         return out[0..n];
     }
 
-    /// 결과 JSON(`browser.networkBlock`) — 제 규칙은 모두, 다른 pane 의 규칙은 수만. 설정(`full`)이 꺼졌으면 서비스 워커 수를 숨기고 「규칙 없는
+    /// 결과 JSON(`browser.networkBlock`) — 탭의 모든 규칙(다른 pane 이 주인이면 `other_pane:true`, 그 수는 `other_rules` — 2026-11-17 A2). 설정(`full`)이 꺼졌으면 서비스 워커 수를 숨기고 「규칙 없는
     /// 탭과 나눔」 참·거짓만(§12 P1-8 — 수가 사용자 요청의 오라클이 된다). `shared` — 같은 출처를 보이는 다른 탭이 규칙이 없다(web_osr 가 탭 집합으로).
     pub fn resultJson(self: *const Tab, out: std.mem.Allocator, owner: u64, outcome: Outcome, page_site: []const u8, full: bool, shared: bool) std.mem.Allocator.Error![]u8 {
         var aw: std.Io.Writer.Allocating = .init(out);
@@ -487,15 +486,16 @@ pub const Tab = struct {
         try s.objectField("rules");
         try s.beginArray();
         for (self.rules.items) |*r| {
-            if (r.owner != owner) {
-                other += 1;
-                continue;
-            }
             try s.beginObject();
             try s.objectField("id");
             try s.write(r.id);
             try s.objectField("pattern");
             try s.write(r.pattern());
+            if (r.owner != owner) {
+                other += 1;
+                try s.objectField("other_pane");
+                try s.write(true);
+            }
             if (r.types != 0) {
                 var names: [24][]const u8 = undefined;
                 try s.objectField("types");
@@ -632,9 +632,13 @@ test "W9d③: add — 정규형으로 같으면 already, 32 개 넘으면 아무
     try testing.expectEqualSlices(u32, &.{1}, b.already.slice());
     try testing.expect(!b.changed);
     try testing.expectEqual(@as(u32, 1), t.gen);
-    // 다른 pane 의 같은 패턴은 따로다(그 pane 의 grant 에 묶인다).
-    _ = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/x"}, .now_ms = 2 }), &fail);
+    // 다른 pane 이 같은 패턴을 넣으면 그 규칙이다 — already, 주인 그대로(2026-11-17 A2: 다시 넣기는 바꾸지 않는다), 그다음 다른 패턴은 그 pane 의 것.
+    const c = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/x"}, .now_ms = 2 }), &fail);
+    try testing.expectEqualSlices(u32, &.{1}, c.already.slice());
+    try testing.expectEqual(@as(u64, 5), t.rules.items[0].owner);
+    _ = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/w"}, .now_ms = 2 }), &fail);
     try testing.expectEqual(@as(usize, 3), t.rules.items.len);
+    try testing.expectEqual(@as(u64, 6), t.rules.items[2].owner);
     try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{"https://b.test/"}, .site = "", .now_ms = 3 }), &fail));
     try testing.expectEqualStrings("no_site", fail.reason);
     var many: [30][]const u8 = undefined;
@@ -646,21 +650,26 @@ test "W9d③: add — 정규형으로 같으면 already, 32 개 넘으면 아무
     try testing.expect(t.active());
 }
 
-test "W9d③: remove·clear — 남의 규칙은 지우지 못하고(unknown_rule — 몇 번째), 패턴·번호로, clear 는 제 규칙만(엄격은 그대로)" {
+test "W9d③·2026-11-17 A2: remove·clear — 남의 규칙도 지운다(탭에 없는 번호만 unknown_rule — 몇 번째), 패턴·번호로, clear 는 탭의 모든 규칙(엄격은 그대로)" {
     var t: Tab = .{};
     defer t.deinit(testing.allocator);
     var fail: Failure = undefined;
     _ = try t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{ "https://a.test/x", "https://a.test/y" } }), &fail);
     _ = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/z"}, .now_ms = 1 }), &fail);
     _ = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = true, .now_ms = 2 }), &fail);
-    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(5, .remove, .{ .rules = &.{ 1, 3 }, .now_ms = 3 }), &fail));
+    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(5, .remove, .{ .rules = &.{ 1, 9 }, .now_ms = 3 }), &fail));
     try testing.expectEqualStrings("unknown_rule", fail.reason);
     try testing.expectEqual(@as(?usize, 1), fail.index);
-    const r = try t.apply(testing.allocator, mkCall(5, .remove, .{ .patterns = &.{"https://a.test/y"}, .now_ms = 4 }), &fail);
+    try testing.expectEqual(@as(usize, 3), t.rules.items.len); // 하나도 지우지 않았다
+    // pane 5 가 pane 6 의 규칙(3)을 번호로 지운다.
+    const r3 = try t.apply(testing.allocator, mkCall(5, .remove, .{ .rules = &.{3}, .now_ms = 3 }), &fail);
+    try testing.expectEqualSlices(u32, &.{3}, r3.removed.slice());
+    const r = try t.apply(testing.allocator, mkCall(6, .remove, .{ .patterns = &.{"https://a.test/y"}, .now_ms = 4 }), &fail);
     try testing.expectEqualSlices(u32, &.{2}, r.removed.slice());
-    const c = try t.apply(testing.allocator, mkCall(5, .clear, .{ .now_ms = 5 }), &fail);
-    try testing.expectEqualSlices(u32, &.{1}, c.removed.slice());
-    try testing.expectEqual(@as(usize, 1), t.rules.items.len); // pane 6 의 것은 남는다
+    _ = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/z"}, .now_ms = 4 }), &fail);
+    const c = try t.apply(testing.allocator, mkCall(6, .clear, .{ .now_ms = 5 }), &fail);
+    try testing.expectEqualSlices(u32, &.{ 1, 4 }, c.removed.slice()); // pane 5 의 것도
+    try testing.expectEqual(@as(usize, 0), t.rules.items.len);
     try testing.expect(t.strict_on); // clear 는 엄격을 끄지 않는다
 }
 
@@ -712,7 +721,7 @@ test "W9d③: sync — 주인의 block grant·네트워크 grant 가 사라지�
     try testing.expect(!t.active());
 }
 
-test "W9d③: 수는 sidecar 의 차이를 번호로 누적한다, 결과 JSON — 다른 pane 은 수만, 설정 끔이면 서비스 워커 수를 숨긴다, 경고, wire 꼴은 닫힌 칸을 지난다" {
+test "W9d③: 수는 sidecar 의 차이를 번호로 누적한다, 결과 JSON — 다른 pane 의 규칙도 보인다(other_pane — 2026-11-17 A2), 설정 끔이면 서비스 워커 수를 숨긴다, 경고, wire 꼴은 닫힌 칸을 지난다" {
     var t: Tab = .{};
     defer t.deinit(testing.allocator);
     var fail: Failure = undefined;
@@ -734,8 +743,10 @@ test "W9d③: 수는 sidecar 의 차이를 번호로 누적한다, 결과 JSON �
         const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
         defer p.deinit();
         const o = p.value.object;
-        try testing.expectEqual(@as(usize, 2), o.get("rules").?.array.items.len);
+        try testing.expectEqual(@as(usize, 3), o.get("rules").?.array.items.len);
         try testing.expectEqual(@as(i64, 1), o.get("other_rules").?.integer);
+        try testing.expect(o.get("rules").?.array.items[2].object.get("other_pane").?.bool);
+        try testing.expect(o.get("rules").?.array.items[0].object.get("other_pane") == null);
         try testing.expectEqual(@as(i64, 3), o.get("total").?.integer);
         try testing.expectEqualStrings("sent", o.get("state").?.string);
         const r0 = o.get("rules").?.array.items[0].object;
@@ -759,7 +770,7 @@ test "W9d③: 수는 sidecar 의 차이를 번호로 누적한다, 결과 JSON �
     try testing.expect(!t.wantsNotice()); // 세대마다 한 번
 }
 
-test "W9d③ 변이: 32 개째까지 받고 이미 있는 패턴은 자리를 세지 않는다, 패턴으로 지우기는 제 규칙만, 엄격을 다른 사이트에서 다시 켜면 그 사이트로, 패턴 목록은 주인 것만, 페이지를 모르면 잠듦 표시 없음, 적용 못 한 세대는 failed" {
+test "W9d③ 변이: 32 개째까지 받고 이미 있는 패턴은 자리를 세지 않는다, 패턴으로 지우기는 누구의 규칙이든(2026-11-17 A2), 엄격을 다른 사이트에서 다시 켜면 그 사이트로, 패턴 목록은 주인 것만, 페이지를 모르면 잠듦 표시 없음, 적용 못 한 세대는 failed" {
     var t: Tab = .{};
     defer t.deinit(testing.allocator);
     var fail: Failure = undefined;
@@ -773,13 +784,13 @@ test "W9d③ 변이: 32 개째까지 받고 이미 있는 패턴은 자리를 �
     try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{"https://a.test/new"}, .now_ms = 2000 }), &fail));
     try testing.expectEqualStrings("too_many_rules", fail.reason);
     _ = try t.apply(testing.allocator, mkCall(5, .clear, .{ .now_ms = 3000 }), &fail);
-    // 같은 패턴을 두 pane 이 두었다 — 패턴으로 지우면 제 것만.
+    // 같은 패턴을 두 pane 이 두었다(종류가 달라 둘) — 패턴으로 지우면 둘 다(지우기는 주인과 무관 — A2).
     _ = try t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{"https://a.test/x"}, .now_ms = 4000 }), &fail);
-    _ = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/x"}, .now_ms = 5000 }), &fail);
+    _ = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/x"}, .types = nb.typeBits("image").?, .now_ms = 5000 }), &fail);
     const rm = try t.apply(testing.allocator, mkCall(5, .remove, .{ .patterns = &.{"https://a.test/x"}, .now_ms = 6000 }), &fail);
-    try testing.expectEqual(@as(usize, 1), rm.removed.len);
-    try testing.expectEqual(@as(usize, 1), t.rules.items.len);
-    try testing.expectEqual(@as(u64, 6), t.rules.items[0].owner);
+    try testing.expectEqual(@as(usize, 2), rm.removed.len);
+    try testing.expectEqual(@as(usize, 0), t.rules.items.len);
+    _ = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/x"}, .now_ms = 6500 }), &fail);
     // 패턴 목록(`block_pattern`)은 그 pane 의 규칙만.
     var bp: [max_rules]ws_block_pattern = undefined;
     try testing.expectEqual(@as(usize, 0), t.ownerPatterns(5, &bp).len);
@@ -842,40 +853,38 @@ test "W9d③ v20b R14b N2: 초당 10 번 — 거절된 바꾸기(no_site·unknow
     try testing.expectEqualStrings("resource_busy", fail.reason);
 }
 
-test "W9d③ v20b R16a DEF-3: 엄격은 켠 pane 의 것 — 다른 pane 은 끄지도 가져가지도 못하고(other_pane), 그 pane 이 grant 를 잃어도 남는다, 주인이 잃으면 사라진다" {
+test "W9d③ v20b R16a DEF-3 → 2026-11-17 A2: 엄격은 누구든 끄고 옮긴다 — 같은 사이트에서 다시 켠 pane 은 주인이 되지 않아 그 pane 의 철회가 지우지 않는다, 옮긴 pane 이 주인, 철회는 그 순간의 주인 것만" {
     var t: Tab = .{};
     defer t.deinit(testing.allocator);
     var fail: Failure = undefined;
     _ = try t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{"https://a.test/x"} }), &fail);
     _ = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = true, .now_ms = 1 }), &fail);
-    // 대조: pane 6 의 clear 는 pane 5 의 규칙·엄격을 건드리지 않는다.
-    const c = try t.apply(testing.allocator, mkCall(6, .clear, .{ .now_ms = 2 }), &fail);
-    try testing.expect(!c.changed and t.rules.items.len == 1 and t.strict_on and t.strict_owner == 5);
     // pane 6 이 결과에서 other_pane 을 본다.
     const j = try t.resultJson(testing.allocator, 6, .{}, "a.test", true, false);
     defer testing.allocator.free(j);
     try testing.expect(std.mem.indexOf(u8, j, "\"other_pane\":true") != null);
-    // pane 6 의 strict off — 거절(other_pane), 그대로.
+    // pane 6 이 같은 사이트에서 다시 켠다 — 바뀌는 것이 없어 주인은 pane 5 그대로(DEF-3: 그 pane 의 철회가 pane 5 의 엄격을 지웠다).
     const g0 = t.gen;
-    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(6, .strict, .{ .on = false, .now_ms = 3 }), &fail));
-    try testing.expectEqualStrings("other_pane", fail.reason);
-    try testing.expect(t.strict_on and t.strict_owner == 5 and t.gen == g0);
-    // pane 6 이 켜서 주인을 가져가지 못한다.
-    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .now_ms = 5 }), &fail));
-    try testing.expect(t.strict_owner == 5);
-    // pane 6 이 grant 를 잃어도 pane 5 의 엄격은 남는다.
-    try testing.expect(!t.sync(&.{.{ .pane = 5, .any_host = true }}, &.{5}));
+    const same = try t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .now_ms = 3 }), &fail);
+    try testing.expect(!same.changed and t.strict_owner == 5 and t.gen == g0);
+    try testing.expect(!t.sync(&.{.{ .pane = 5, .any_host = true }}, &.{5})); // pane 6 이 grant 를 잃어도 남는다
     try testing.expect(t.strict_on and t.strict_owner == 5);
-    // 주인(pane 5)은 끌 수 있고, 꺼진 뒤에는 다른 pane 이 켤 수 있다(주인이 된다).
+    // pane 6 이 다른 사이트로 옮긴다 — 바뀌었다: pane 6 이 주인. pane 5 가 grant 를 잃어도 남는다.
+    const moved = try t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .site = "b.test", .now_ms = 5 }), &fail);
+    try testing.expect(moved.changed and t.strict_owner == 6);
+    try testing.expect(t.sync(&.{.{ .pane = 6, .any_host = true }}, &.{6})); // pane 5 의 규칙(1)은 pane 5 와 함께 사라진다
+    try testing.expect(t.strict_on and t.strict_owner == 6 and t.rules.items.len == 0);
+    // pane 5 가 끈다(남의 엄격 — 된다).
     _ = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = false, .now_ms = 6 }), &fail);
-    _ = try t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .now_ms = 7 }), &fail);
-    try testing.expect(t.strict_on and t.strict_owner == 6);
-    // 주인이 grant 를 잃으면 사라진다.
-    try testing.expect(t.sync(&.{.{ .pane = 5, .any_host = true }}, &.{5}));
+    try testing.expect(!t.strict_on);
+    // 다시 켠 pane 이 주인 — 그 주인이 grant 를 잃으면 사라진다.
+    _ = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = true, .now_ms = 7 }), &fail);
+    try testing.expect(t.strict_on and t.strict_owner == 5);
+    try testing.expect(t.sync(&.{.{ .pane = 6, .any_host = true }}, &.{6}));
     try testing.expect(!t.strict_on);
 }
 
-test "W9d③ v20b R16b: remove 에 제 번호와 남의 번호를 섞으면 아무것도 지우지 않는다(원자성), 패턴 지우기는 사이트·종류가 달라도 제 것 모두" {
+test "W9d③ v20b R16b → 2026-11-17 A2: remove 에 있는 번호와 없는 번호를 섞으면 아무것도 지우지 않는다(원자성), 패턴 지우기는 사이트·종류·주인이 달라도 모두" {
     var t: Tab = .{};
     defer t.deinit(testing.allocator);
     var fail: Failure = undefined;
@@ -884,14 +893,16 @@ test "W9d③ v20b R16b: remove 에 제 번호와 남의 번호를 섞으면 아�
     _ = try t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{"https://a.test/x"}, .types = nb.typeBits("image").?, .now_ms = 2 }), &fail); // 3 (같은 패턴, 종류 다름)
     _ = try t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{"https://a.test/x"}, .site = "b.test", .now_ms = 3 }), &fail); // 4 (같은 패턴, 사이트 다름)
     try testing.expectEqual(@as(usize, 4), t.rules.items.len);
-    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(5, .remove, .{ .rules = &.{ 1, 2 }, .now_ms = 4 }), &fail));
+    _ = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{"https://a.test/x"}, .types = nb.typeBits("script").?, .now_ms = 3 }), &fail); // 5 (같은 패턴, pane 6)
+    try testing.expectEqual(@as(usize, 5), t.rules.items.len);
+    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(5, .remove, .{ .rules = &.{ 2, 77 }, .now_ms = 4 }), &fail));
     try testing.expectEqualStrings("unknown_rule", fail.reason);
     try testing.expectEqual(@as(?usize, 1), fail.index);
-    try testing.expectEqual(@as(usize, 4), t.rules.items.len); // 하나도 지우지 않았다
+    try testing.expectEqual(@as(usize, 5), t.rules.items.len); // 하나도 지우지 않았다
     const r = try t.apply(testing.allocator, mkCall(5, .remove, .{ .patterns = &.{"https://a.test/x"}, .now_ms = 5 }), &fail);
-    try testing.expectEqualSlices(u32, &.{ 1, 3, 4 }, r.removed.slice());
+    try testing.expectEqualSlices(u32, &.{ 1, 3, 4, 5 }, r.removed.slice());
     try testing.expectEqual(@as(usize, 1), t.rules.items.len);
-    try testing.expectEqual(@as(u64, 6), t.rules.items[0].owner);
+    try testing.expectEqual(@as(u64, 6), t.rules.items[0].owner); // 패턴이 다른 pane 6 의 y
     // 없는 패턴 지우기 — 오류 없이 아무것도(번호와 다르다).
     const none = try t.apply(testing.allocator, mkCall(5, .remove, .{ .patterns = &.{"https://zzz.test/"}, .now_ms = 6 }), &fail);
     try testing.expect(!none.changed and none.removed.len == 0);
@@ -1034,25 +1045,24 @@ test "W9d③ v20b2 R14 DEF-1·N-b·N-c: 한 호출 안의 같은 패턴 — 이�
     // 대조: 꽉 찬 탭에 이미 있는 것만 둘 — already.
     const b = try t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{ "https://a.test/0", "https://a.test/0" }, .now_ms = 6000 }), &fail);
     try testing.expect(!b.changed and std.mem.eql(u32, b.already.slice(), &.{1})); // 한 번씩(N-c)
-    // 다른 pane 의 같은 패턴 둘 — 그 pane 에는 새 자리 하나(탭이 찼으니 거절).
-    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{ "https://a.test/0", "https://a.test/0" }, .now_ms = 8000 }), &fail));
-    try testing.expectEqualStrings("too_many_rules", fail.reason);
-    // 31 개에서 pane 6 의 같은 패턴 둘 — 하나만 들어간다.
+    // 다른 pane 의 같은 패턴 둘 — 이미 있는 규칙이다(2026-11-17 A2: 누가 넣었든 already, 주인 그대로), 꽉 찬 탭이어도 받는다.
+    const o = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{ "https://a.test/0", "https://a.test/0" }, .now_ms = 8000 }), &fail);
+    try testing.expect(!o.changed and std.mem.eql(u32, o.already.slice(), &.{1}) and t.rules.items[0].owner == 5);
+    // 31 개에서 pane 6 의 같은 새 패턴 둘 — 하나만 들어간다.
     _ = try t.apply(testing.allocator, mkCall(5, .remove, .{ .rules = &.{1}, .now_ms = 10_000 }), &fail);
     const c = try t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{ "https://a.test/0", "https://a.test/0" }, .now_ms = 12_000 }), &fail);
     try testing.expectEqual(@as(usize, 1), c.added.len);
     try testing.expectEqual(@as(usize, 32), t.rules.items.len);
 }
 
-test "W9d③ v20b2 R14 N2: 거절된 바꾸기(other_pane·page_host_too_long·page_host_invalid·too_many_rules·unknown_rule·no_site)는 1 초 10 번 자리를 쓰지 않는다, 받은 것은 이미 있던 add 도 센다" {
+test "W9d③ v20b2 R14 N2: 거절된 바꾸기(page_host_too_long·page_host_invalid·too_many_rules·unknown_rule·no_site)는 1 초 10 번 자리를 쓰지 않는다, 받은 것은 이미 있던 add 도 센다" {
     var t: Tab = .{};
     defer t.deinit(testing.allocator);
     var fail: Failure = undefined;
     const long = @import("array_repeat").repeat("a", 250) ++ ".test"; // 255 바이트
     _ = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = true, .now_ms = 0 }), &fail); // 받음 1
+    // 옛 other_pane(다른 pane 의 엄격 끔·켬)은 2026-11-17 A2 로 거절이 아니다 — 목록에서 뺐다.
     const rejects = [_]Call{
-        mkCall(6, .strict, .{ .on = false, .now_ms = 100 }),
-        mkCall(6, .strict, .{ .on = true, .now_ms = 100 }),
         mkCall(5, .add, .{ .patterns = &.{"https://a.test/"}, .site = long, .now_ms = 100 }),
         mkCall(5, .add, .{ .patterns = &.{"https://a.test/"}, .site = "a!b.test", .now_ms = 100 }),
         mkCall(5, .strict, .{ .on = true, .site = long, .now_ms = 100 }),
@@ -1233,6 +1243,7 @@ test "W9d③ v20b2 R14 DEF-2 모형: 무작위 6 만 걸음(add·remove·clear·
                 }
             } else |e| {
                 try testing.expect(e == error.Rejected);
+                if (std.mem.eql(u8, fail.reason, "other_pane")) return error.UnexpectedReason;
                 if (std.mem.eql(u8, fail.reason, "resource_busy")) {
                     counts[1] += 1;
                     try testing.expect(recent >= 10);
@@ -1256,41 +1267,36 @@ test "W9d③ v20b2 R14 DEF-2 모형: 무작위 6 만 걸음(add·remove·clear·
         _ = try ws.codec.decodeExact(wire_buf[0..n]);
         counts[6] += 1;
     }
-    try testing.expect(counts[1] > 0 and counts[2] > 0 and counts[3] > 0 and counts[5] > 0);
+    // 옛 other_pane(counts[5])은 2026-11-17 A2 로 걷었다 — 나오면 위의 UnexpectedReason 이 아니라 여기서도 0 이어야 한다.
+    try testing.expect(counts[1] > 0 and counts[2] > 0 and counts[3] > 0 and counts[5] == 0);
 }
 
-test "W9d③ v20b2 R16 DEF-3: 엄격의 주인 — 다른 pane 은 다른 사이트로도 켜지 못하고 끄지 못한다, clear·remove 는 엄격을 건드리지 않는다, 주인이 다른 사이트로 옮긴다, 꺼진 뒤에는 누구든, sync 로 주인이 사라지면 다른 pane 이 켠다" {
+test "W9d③ v20b2 R16 DEF-3 → 2026-11-17 A2: 엄격의 주인 — 다른 pane 이 같은 사이트에서 켜면 그대로(주인 5), 다른 사이트로 켜면 옮기고 주인이 된다, 끄기도 된다, clear·remove 는 엄격을 건드리지 않는다, sync 는 그 순간의 주인만" {
     var t: Tab = .{};
     defer t.deinit(testing.allocator);
     var fail: Failure = undefined;
     _ = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = true, .site = "a.test" }), &fail);
-    for ([_]Call{
-        mkCall(6, .strict, .{ .on = true, .site = "b.test", .now_ms = 1 }),
-        mkCall(6, .strict, .{ .on = true, .site = "a.test", .now_ms = 1 }),
-        mkCall(6, .strict, .{ .on = false, .now_ms = 1 }),
-    }) |c| {
-        try testing.expectError(error.Rejected, t.apply(testing.allocator, c, &fail));
-        try testing.expectEqualStrings("other_pane", fail.reason);
-        try testing.expect(t.strict_owner == 5);
-        try testing.expectEqualStrings("a.test", t.strict_site.slice());
-    }
+    const same = try t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .site = "a.test", .now_ms = 1 }), &fail);
+    try testing.expect(!same.changed and t.strict_owner == 5);
     _ = try t.apply(testing.allocator, mkCall(6, .clear, .{ .now_ms = 2 }), &fail);
     try testing.expect(t.strict_on);
-    // 주인이 다른 사이트로 옮긴다.
-    const moved = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = true, .site = "b.test", .now_ms = 3 }), &fail);
-    try testing.expect(moved.changed and t.strict_owner == 5);
-    // 결과 — pane 6 은 other_pane, pane 5 는 아니다; Grants 의 엄격은 주인 것.
-    const j6 = try t.resultJson(testing.allocator, 6, .{}, "b.test", true, false);
-    defer testing.allocator.free(j6);
-    try testing.expect(std.mem.indexOf(u8, j6, "\"other_pane\":true") != null);
+    // 다른 pane 이 다른 사이트로 옮긴다 — 주인이 된다.
+    const moved = try t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .site = "b.test", .now_ms = 3 }), &fail);
+    try testing.expect(moved.changed and t.strict_owner == 6);
+    try testing.expectEqualStrings("b.test", t.strict_site.slice());
+    // 결과 — pane 5 는 other_pane, pane 6 은 아니다; Grants 의 엄격은 주인 것.
     const j5 = try t.resultJson(testing.allocator, 5, .{}, "b.test", true, false);
     defer testing.allocator.free(j5);
-    try testing.expect(std.mem.indexOf(u8, j5, "other_pane") == null);
-    // 주인이 네트워크 grant 를 잃었다 — 엄격이 사라지고 pane 6 이 켤 수 있다.
-    try testing.expect(t.sync(&.{ .{ .pane = 5, .any_host = true }, .{ .pane = 6, .any_host = true } }, &.{6}));
-    try testing.expect(!t.strict_on);
-    _ = try t.apply(testing.allocator, mkCall(6, .strict, .{ .on = true, .site = "b.test", .now_ms = 4 }), &fail);
-    try testing.expect(t.strict_owner == 6);
+    try testing.expect(std.mem.indexOf(u8, j5, "\"other_pane\":true") != null);
+    const j6 = try t.resultJson(testing.allocator, 6, .{}, "b.test", true, false);
+    defer testing.allocator.free(j6);
+    try testing.expect(std.mem.indexOf(u8, j6, "other_pane") == null);
+    // 옛 주인(pane 5)이 네트워크 grant 를 잃어도 남는다 — 지금 주인은 6.
+    try testing.expect(!t.sync(&.{ .{ .pane = 5, .any_host = true }, .{ .pane = 6, .any_host = true } }, &.{6}));
+    try testing.expect(t.strict_on);
+    // pane 5 가 끈다 — 된다.
+    const off = try t.apply(testing.allocator, mkCall(5, .strict, .{ .on = false, .now_ms = 4 }), &fail);
+    try testing.expect(off.changed and !t.strict_on and t.strict_owner == 0);
 }
 
 test "W9d③ v20b2 R12 NEW-3: block grant 철회로 규칙이 모두 사라진(sync) 뒤의 수 — clearAll 길처럼 지우고 늦은 수를 버린다, 다음 pane 의 결과에 옛 수·경고가 없다" {
@@ -1537,7 +1543,7 @@ test "W9d③ 3 차 검증 N-A3-4: 세대가 u32 를 돌아도 늦은 수 거르�
     try testing.expectEqual(@as(u64, 1), u.strict_redirect_missed);
 }
 
-test "W9d③ v20c R14: too_many_rules index 는 넘치는 패턴의 자리(앞의 겹침·이미 있는 것을 건너뛰고), 다른 pane 의 같은 패턴은 새것, 종류가 다르면 새 규칙, 많은 이미 있는 패턴은 already 한 번씩" {
+test "W9d③ v20c R14: too_many_rules index 는 넘치는 패턴의 자리(앞의 겹침·이미 있는 것을 건너뛰고), 다른 pane 의 같은 패턴은 이미 있는 것(2026-11-17 A2), 종류가 다르면 새 규칙, 많은 이미 있는 패턴은 already 한 번씩" {
     var t: Tab = .{};
     defer t.deinit(testing.allocator);
     var fail: Failure = undefined;
@@ -1549,9 +1555,9 @@ test "W9d③ v20c R14: too_many_rules index 는 넘치는 패턴의 자리(앞�
     try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{ "https://a.test/n1", "https://a.test/n1", "https://a.test/0", "https://a.test/n2" }, .now_ms = 1000 }), &fail));
     try testing.expect(std.mem.eql(u8, fail.reason, "too_many_rules") and fail.index.? == 3);
     try testing.expectEqual(@as(usize, 31), t.rules.items.len);
-    // 다른 pane 의 같은 패턴 [0, 1] — pane 6 에는 둘 다 새것, 넘치는 것은 index 1.
-    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{ "https://a.test/0", "https://a.test/1" }, .now_ms = 2000 }), &fail));
-    try testing.expectEqual(@as(?usize, 1), fail.index);
+    // 다른 pane 의 같은 패턴 [0, 1] 과 새것 둘 — 이미 있는 둘은 자리를 세지 않는다, 넘치는 것은 새것의 두 번째(index 3).
+    try testing.expectError(error.Rejected, t.apply(testing.allocator, mkCall(6, .add, .{ .patterns = &.{ "https://a.test/0", "https://a.test/1", "https://a.test/n1", "https://a.test/n2" }, .now_ms = 2000 }), &fail));
+    try testing.expectEqual(@as(?usize, 3), fail.index);
     // 종류만 다른 같은 패턴 — 새 규칙(32 번째) — already 가 아니다.
     const typed = try t.apply(testing.allocator, mkCall(5, .add, .{ .patterns = &.{"https://a.test/0"}, .types = nb.typeBits("image").?, .now_ms = 3000 }), &fail);
     try testing.expect(typed.added.len == 1 and typed.already.len == 0);

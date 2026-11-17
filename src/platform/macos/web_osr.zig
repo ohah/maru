@@ -12713,9 +12713,10 @@ test "W9e①: 다른 pane 은 바꾸지 못하고(get 은 된다), grant 동기�
 }
 
 // 사용자 결정 2026-11-17 「건 사이트에만 다시 묶기」 — 배선: 전권(어느 호스트든, 탭과 함께 생기지 않은 grant)의 사용자 탭은 `browserEmulate` 가 넘긴 지금
-// 페이지의 호스트에 묶인다(sidecar frame 의 `site_bound`·`site`), 다른 사이트에서 다시 걸면 옮겨 다시 보낸다, 웹 페이지가 아니면 `no_site`, 동기화가
+// 페이지의 호스트에 묶인다(sidecar frame 의 `site_bound`·`site`), 다른 사이트에서 다시 걸면 옮겨 다시 보낸다, 웹 페이지가 아니면 거절하지 않고 묶음 그대로·
+// 묶이지 않았으면 탭 전체(사용자 결정 2026-11-17 「그냥 사용자가 하듯이」), 동기화가
 // 묶인 흉내를 지우지 않는다. 에이전트 탭(탭과 함께 생긴 grant)은 묶이지 않는다.
-test "건 사이트에만 다시 묶기: 전권 사용자 탭은 지금 페이지에 묶이고, 다른 사이트에서 다시 걸면 옮기고, 웹 페이지가 아니면 no_site, 동기화는 그대로 둔다" {
+test "건 사이트에만 다시 묶기: 전권 사용자 탭은 지금 페이지에 묶이고, 다른 사이트에서 다시 걸면 옮기고, 웹 페이지가 아니면 묶음 그대로·묶이지 않았으면 탭 전체, 동기화는 그대로 둔다" {
     const gpa = std.testing.allocator;
     state = .running;
     test_record_sends = true;
@@ -12755,15 +12756,32 @@ test "건 사이트에만 다시 묶기: 전권 사용자 탭은 지금 페이�
     const moved = emuFrames(&buf);
     try std.testing.expect(moved.len == 1 and moved[0].emulation.flags.site_bound);
     try std.testing.expectEqualStrings("b.test", moved[0].emulation.site);
-    // 웹 페이지가 아니다 — 거절(어디에도 안 걸린 채 성공처럼 보이거나 탭 전체로 걸리지 않게).
+    // 웹 페이지가 아니다 — 거절하지 않는다(사용자 결정 2026-11-17 「그냥 사용자가 하듯이」): 이미 b.test 에 묶였으면 그 묶음 그대로.
     apply(gpa, .{ .url_changed = .{ .browser = 296, .url = "about:blank" } }, 0);
-    switch (try browserEmulate(gpa, 296, .{ .pane = 5, .any_host = true, .params = &p })) {
-        .ok => |json| {
-            gpa.free(json);
-            return error.TestUnexpectedResult;
-        },
-        .fail => |f| try std.testing.expectEqualStrings("no_site", f.reason),
+    const tz2 = try emuParams("{\"action\":\"set\",\"timezone\":\"Asia/Tokyo\"}");
+    outbox_pending.clearRetainingCapacity();
+    switch (try browserEmulate(gpa, 296, .{ .pane = 5, .any_host = true, .params = &tz2 })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
     }
+    const kept = emuFrames(&buf);
+    try std.testing.expect(kept.len == 1 and kept[0].emulation.flags.site_bound);
+    try std.testing.expectEqualStrings("b.test", kept[0].emulation.site);
+    // 아직 묶이지 않은 사용자 탭이 웹 페이지가 아니면 탭 전체(#4742 전처럼).
+    try testSurfaces(gpa, &.{298});
+    surfaces.getPtr(298).?.created = true;
+    apply(gpa, .{ .url_changed = .{ .browser = 298, .url = "about:blank" } }, 0);
+    emulationSync(&.{ .{ .tab = 296, .who = 0, .any_host = true, .pane = 5 }, .{ .tab = 298, .who = 0, .any_host = true, .pane = 5 } });
+    outbox_pending.clearRetainingCapacity();
+    switch (try browserEmulate(gpa, 298, .{ .pane = 5, .any_host = true, .params = &p })) {
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"site\":null") != null);
+        },
+        .fail => return error.TestUnexpectedResult,
+    }
+    const whole = emuFrames(&buf);
+    try std.testing.expect(whole.len == 1 and !whole[0].emulation.flags.site_bound);
     // 에이전트 탭(탭과 함께 생긴 grant)은 어느 사이트에서든.
     try testSurfaces(gpa, &.{297});
     surfaces.getPtr(297).?.created = true;

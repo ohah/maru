@@ -14,7 +14,8 @@
 //! W9e②: CPU 줄이기(`cpu` 1–20 — 1 은 끔)와 네트워크 조건(`network` — 프리셋·수치·offline)을 더했다. 이 둘은 **주인 프로세스**의 수명을 따른다
 //! (사용자 결정 7 — `control_self_origin.Owner`: CLI 는 그 명령을 낸 에이전트 프로세스, MCP·REPL 은 그 프로세스와 에이전트, 15 분 기한 없음).
 //! 사람이 셸에서 직접 친 한 번짜리 CLI 는 그 명령을 띄운 셸이 주인이다(확인 결정 9 — 셸이 끝나거나 `clear` 하면 푼다, `owner.kind:"shell"`).
-//! 주인이 없으면(cap 인가·셸이 `exec` 로 그 명령이 됨) 걸지 않는다(`no_agent_process`). 사용자 탭은 네트워크 프리셋만·offline 없음(PLAN v2 §2.2).
+//! 주인이 없으면(cap 인가·셸이 `exec` 로 그 명령이 됨) 걸지 않는다(`no_agent_process`). 사용자 탭도 프리셋·수치·offline 을 모두 받는다 — 옛 「사용자
+//! 탭은 프리셋만·offline 없음」(PLAN v2 §2.2)은 걷었다(사용자 결정 2026-11-17 「허용으로 바꾸기」 — 에이전트는 브라우저에 사용자와 같은 힘).
 //! sidecar 가 혼자 푼 무리(`released` — 사람이 몸·CPU 를 나누는 남의 프레임)와 주인이 끝나 푼 무리는 지우고 세대를 올린다(풀림 회차 — §5.3).
 //!
 //! 시험이 증명하는 것: 인자 표(범위·NaN·64 Mpx·모르는 키·null 지움·덧쓰기 합치기·까닭 이름), client hints 추정(Chrome/N 있음·없음·Mobile 토큰·
@@ -781,7 +782,8 @@ pub const Bind = union(enum) {
     whole_tab,
     /// 그 호스트와 그 하위 도메인에서만(sidecar 의 `site_bound` — 다른 사이트는 진짜 값).
     site: []const u8,
-    /// 사용자 탭인데 지금 페이지의 호스트를 모른다(http(s) 가 아니다·이동 중) — 거절한다(어디에도 안 걸린 채 성공처럼 보이거나 탭 전체로 걸리지 않게).
+    /// 사용자 탭인데 지금 페이지의 호스트를 모른다(http(s) 가 아니다·이동 중) — 묶을 사이트가 없다: 아직 묶이지 않았으면 탭 전체, 이미 묶였으면 그
+    /// 묶음 그대로(`apply` — 사용자 결정 2026-11-17 「그냥 사용자가 하듯이 다 권한」; 넓히지 않는다 — 묶을 새 사이트가 없다).
     no_site,
 };
 
@@ -865,34 +867,20 @@ pub const Tab = struct {
             why.* = .{ .reason = "emulated_by_other_pane", .message = "another pane is emulating a device on this tab — it can change or clear it; you can read it with action get" };
             return error.Rejected;
         }
-        // 사용자 탭의 `set` 은 지금 보이는 사이트에 묶인다 — 모르면 거절(바꾸기 상한을 먹기 전에).
+        // 사용자 탭의 `set` 은 지금 보이는 사이트에 묶인다 — 웹 페이지가 아니거나 이동 중이면 거절하지 않고 묶을 사이트 없이(아래 — 사용자 결정
+        // 2026-11-17: 사람이 그 탭에서 할 수 있는 것은 에이전트도).
         const bind: ?Bind = if (p.action == .set) bindSite(call) else null;
-        if (bind) |b| if (b == .no_site) {
-            why.* = .{ .reason = "no_site", .message = "on the user's tab emulation applies only on the site the tab shows when you set it — this tab is not showing a web page (or is between pages); set it again once the page has loaded" };
-            return error.Rejected;
-        };
         if (!self.rateOk(call.now_ms)) {
             why.* = .{ .reason = "resource_busy", .message = "too many emulation changes on this tab — at most 10 per second" };
             return error.Rejected;
         }
-        // W9e②: CPU·네트워크는 주인 프로세스가 있어야 건다(사용자 결정 7 — 그 프로세스가 끝나면 푼다). 사용자 탭은 네트워크 프리셋만·offline 없음.
+        // W9e②: CPU·네트워크는 주인 프로세스가 있어야 건다(사용자 결정 7 — 그 프로세스가 끝나면 푼다). 사용자 탭도 프리셋·수치·offline 모두(사용자 결정
+        // 2026-11-17 「허용으로 바꾸기」 — 옛 `offline_user_tab`·`network_preset_only` 를 걷었다).
         const sets_cpu = p.cpu == .set;
         const sets_net = p.network == .set;
         if ((sets_cpu or sets_net) and call.owner == null) {
             why.* = .{ .reason = "no_agent_process", .message = "CPU and network conditions last while the process that set them runs (the calling agent, maru browser repl or maru mcp, or the shell you typed the command in) — no such process was found for this call" };
             return error.Rejected;
-        }
-        // 사용자 탭(탭과 함께 생긴 grant 가 아니다 — `any_host` 는 #4737 뒤 모든 grant 라 가르지 못했다: 이 제한이 꺼져 있었다).
-        if (sets_net and !call.birth) {
-            const n = p.network.set;
-            if (n.offline) {
-                why.* = .{ .reason = "offline_user_tab", .message = "offline is only for tabs you opened (browser open) — on the user's tab use a preset such as slow-3g" };
-                return error.Rejected;
-            }
-            if (n.preset == null) {
-                why.* = .{ .reason = "network_preset_only", .message = "on the user's tab, network takes a preset only (slow-3g, fast-3g, slow-4g, fast-4g)" };
-                return error.Rejected;
-            }
         }
         var out: Outcome = .{};
         const before_touch = if (self.settings.viewport) |v| v.touch else false;
@@ -943,7 +931,9 @@ pub const Tab = struct {
             // 세대를 올려 sidecar 가 새 사이트를 받게 한다.
             if (bind) |b| {
                 const site: []const u8 = switch (b) {
-                    .whole_tab, .no_site => "",
+                    .whole_tab => "",
+                    // 묶을 사이트가 없다 — 이미 묶였으면 그대로(넓히지 않는다), 아니면 탭 전체.
+                    .no_site => self.site.slice(),
                     .site => |h| if (call.any_host and self.site.len != 0 and ws.net_policy.hostCovers(self.site.slice(), h)) self.site.slice() else h,
                 };
                 const next_site = cpg.GrantHost.init(site);
@@ -1930,7 +1920,7 @@ test "W9e②: 인자 — cpu 1..20(1 은 지움), network 프리셋·수치·off
     try testing.expect(again2.holder and again2.network.set.preset.? == .slow_3g and again2.cpu.set == 4);
 }
 
-test "W9e②: 주인이 없으면 거절(no_agent_process), 사용자 탭은 네트워크 프리셋만·offline 없음, 무리마다 주인, 지우면 주인도" {
+test "W9e②: 주인이 없으면 거절(no_agent_process), 사용자 탭도 수치·offline 을 받는다(사용자 결정 2026-11-17), 무리마다 주인, 지우면 주인도" {
     var t: Tab = .{};
     var why: Failure = undefined;
     var w: ?Why = null;
@@ -1946,14 +1936,14 @@ test "W9e②: 주인이 없으면 거절(no_agent_process), 사용자 탭은 네
     _ = try t.apply(call, &why);
     try testing.expectEqual(@as(i32, 300), t.cpu_owner.?.job.pid);
     try testing.expect(t.net_owner == null);
-    // 사용자 탭(사이트에 묶임).
+    // 사용자 탭(사이트에 묶임) — 수치 지연·offline 도 받는다.
     var u: Tab = .{};
     const custom = try parse("{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":300}}", &w);
-    try testing.expectError(error.Rejected, u.apply(.{ .pane = 5, .params = &custom, .any_host = false, .grant_host = "a.test", .owner = agent_owner }, &why));
-    try testing.expectEqualStrings("network_preset_only", why.reason);
+    _ = try u.apply(.{ .pane = 5, .params = &custom, .any_host = false, .grant_host = "a.test", .owner = agent_owner }, &why);
+    try testing.expectEqual(@as(u32, 300), u.settings.network.?.latency_ms);
     const off = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"offline\"}", &w);
-    try testing.expectError(error.Rejected, u.apply(.{ .pane = 5, .params = &off, .any_host = false, .grant_host = "a.test", .owner = agent_owner }, &why));
-    try testing.expectEqualStrings("offline_user_tab", why.reason);
+    _ = try u.apply(.{ .pane = 5, .params = &off, .any_host = false, .grant_host = "a.test", .owner = agent_owner, .now_ms = 5 }, &why);
+    try testing.expect(u.settings.network.?.offline);
     const preset = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"slow-4g\"}", &w);
     _ = try u.apply(.{ .pane = 5, .params = &preset, .any_host = false, .grant_host = "a.test", .owner = mcp_owner, .now_ms = 10 }, &why);
     try testing.expectEqual(@as(i32, 301), u.net_owner.?.holder.?.pid);
@@ -2083,7 +2073,7 @@ fn userCall(params: *const Params, page: []const u8, now: i64) Call {
     return .{ .pane = 5, .params = params, .any_host = true, .birth = false, .page_host = page, .now_ms = now };
 }
 
-test "건 사이트에 묶기: bindSite — 에이전트 탭(탭과 함께 생긴 grant)은 탭 전체, 옛 호스트 grant 는 그 호스트, 전권의 사용자 탭은 지금 페이지, 모르면·너무 길면 no_site" {
+test "건 사이트에 묶기: bindSite — 에이전트 탭(탭과 함께 생긴 grant)은 탭 전체, 옛 호스트 grant 는 그 호스트, 전권의 사용자 탭은 지금 페이지, 모르면·너무 길면 묶을 사이트 없음" {
     var w: ?Why = null;
     const p = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
     try testing.expect(bindSite(.{ .pane = 1, .params = &p, .any_host = true, .birth = true, .page_host = "a.test" }) == .whole_tab);
@@ -2137,23 +2127,27 @@ test "건 사이트에 묶기: 다른 사이트에서 다시 set 하면 그리�
     try testing.expectEqualStrings("a.test", u.toWire(9).site);
 }
 
-test "건 사이트에 묶기: 페이지를 모르면 set 은 no_site(바꾸기 상한을 먹지 않는다), clear·get 은 어디서든 — clear 는 묶음도 푼다" {
+test "사용자와 같은 힘: 웹 페이지가 아닌 사용자 탭의 set 은 거절하지 않는다 — 묶이지 않았으면 탭 전체, 묶였으면 그대로, 웹 사이트에서 다시 걸면 묶인다; clear·get 은 어디서든" {
     var why: Failure = undefined;
     var w: ?Why = null;
     const p = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
     var u: Tab = .{};
-    var i: i64 = 0;
-    while (i < 12) : (i += 1) {
-        try testing.expectError(error.Rejected, u.apply(userCall(&p, "", i), &why));
-        try testing.expectEqualStrings("no_site", why.reason);
-    }
-    try testing.expect(!u.active());
-    _ = try u.apply(userCall(&p, "a.test", 20), &why); // 상한을 먹지 않았다 — 곧 된다
+    const out = try u.apply(userCall(&p, "", 0), &why); // about:blank·file:·이동 중
+    try testing.expect(out.changed and u.active() and u.site.len == 0 and !u.toWire(9).flags.site_bound); // 탭 전체(#4742 전처럼)
+    const loc = try parse("{\"id\":1,\"action\":\"set\",\"locale\":\"fr-FR\"}", &w);
+    _ = try u.apply(userCall(&loc, "a.test", 200), &why); // 웹 사이트가 있으면 묶는다
+    try testing.expect(u.toWire(9).flags.site_bound);
+    try testing.expectEqualStrings("a.test", u.site.slice());
+    const g0 = u.gen;
+    const tz2 = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"Asia/Tokyo\"}", &w);
+    _ = try u.apply(userCall(&tz2, "", 400), &why); // 묶인 뒤 빈 페이지에서 — 묶음은 그대로(넓히지 않는다), 설정은 바뀐다
+    try testing.expectEqualStrings("a.test", u.site.slice());
+    try testing.expect(u.gen != g0 and u.toWire(9).flags.site_bound);
     const g = try parse("{\"id\":1,\"action\":\"get\"}", &w);
-    _ = try u.apply(userCall(&g, "", 30), &why);
+    _ = try u.apply(userCall(&g, "", 600), &why);
     try testing.expectEqualStrings("a.test", u.site.slice());
     const c = try parse("{\"id\":1,\"action\":\"clear\"}", &w);
-    _ = try u.apply(userCall(&c, "", 40), &why); // 다른 사이트·빈 페이지에서도 지운다
+    _ = try u.apply(userCall(&c, "", 800), &why); // 다른 사이트·빈 페이지에서도 지운다
     try testing.expect(!u.active() and u.site.len == 0 and !u.toWire(9).flags.site_bound);
 }
 
@@ -2174,19 +2168,23 @@ test "건 사이트에 묶기: grant 동기화 — 어느 호스트든 grant 는
     try testing.expect(h.sync(&.{.{ .pane = 5, .host = "b.test" }}));
 }
 
-test "건 사이트에 묶기: 사용자 탭의 네트워크 제한은 탭과 함께 생긴 grant 로 가른다 — 전권(어느 호스트든)의 사용자 탭도 offline·수치 지연 거절, 에이전트 탭은 된다" {
+test "사용자와 같은 힘: 전권의 사용자 탭도 offline·수치 지연을 받는다(사용자 결정 2026-11-17 「허용으로 바꾸기」) — 사이트에 묶인 채, 에이전트 탭은 탭 전체" {
     var why: Failure = undefined;
     var w: ?Why = null;
     var u: Tab = .{};
     const off = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"offline\"}", &w);
     var call = userCall(&off, "a.test", 0);
     call.owner = agent_owner;
-    try testing.expectError(error.Rejected, u.apply(call, &why));
-    try testing.expectEqualStrings("offline_user_tab", why.reason);
+    _ = try u.apply(call, &why);
+    try testing.expect(u.settings.network.?.offline);
     const custom = try parse("{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":300}}", &w);
     call.params = &custom;
-    try testing.expectError(error.Rejected, u.apply(call, &why));
-    try testing.expectEqualStrings("network_preset_only", why.reason);
+    call.now_ms = 10;
+    _ = try u.apply(call, &why);
+    try testing.expect(!u.settings.network.?.offline and u.settings.network.?.latency_ms == 300);
+    const v = u.toWire(9);
+    try testing.expect(v.flags.site_bound and v.flags.network);
+    try testing.expectEqualStrings("a.test", v.site);
     var a: Tab = .{};
     var ac = testCall(&off, 5, 0);
     ac.owner = agent_owner;

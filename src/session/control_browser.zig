@@ -7556,7 +7556,7 @@ test "W9e①: browser.list 는 흉내가 설정된 탭에 emulation{summary, act
 // 시험이 증명하는 것: 메서드 번호(op_kind 34 — Swift·앱의 wire)·이름·엔진(Chromium 만)·scope(browser_network), 검사의 차례(WebKit -32008 →
 // browser grant 가 없으면 -32002 needs_browser_permission → 인자 -32602 + 까닭), 인가된 탭은 op(정규형 인자) — **사용자 탭도**(탭과 함께
 // 생긴 grant 가 아니어도 — 사용자 결정 2026-11-17 「사용자 탭 trace 열기」, 그 전의 -32008 trace_user_tab_unsupported 는 없다), 앱의 거절 까닭
-// (trace_busy 는 -32603 + retry_after_ms), emulate 의 W9e② 거절(no_agent_process·offline_user_tab·network_preset_only)은 -32602.
+// (trace_busy 는 -32603 + retry_after_ms), emulate 의 W9e② 거절(no_agent_process)은 -32602.
 
 fn traceReq(comptime params: []const u8) []const u8 {
     return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.trace\",\"params\":{\"id\":12," ++ params ++ "}}";
@@ -7641,13 +7641,13 @@ test "W9e②: trace 는 34 — Chromium 만, 사용자 탭도 op(2026-11-17), br
     }
 }
 
-test "W9e②: 앱의 거절 까닭 — trace_busy 는 -32603 + retry_after_ms, emulate 의 no_agent_process·offline_user_tab·network_preset_only·no_site 는 -32602" {
+test "W9e②: 앱의 거절 까닭 — trace_busy 는 -32603 + retry_after_ms, emulate 의 no_agent_process 는 -32602" {
     const busy = try serializeBrowserResponseStatus(testing.allocator, traceReq("\"action\":\"start\""), .failed, "{\"reason\":\"trace_busy\",\"message\":\"m\",\"retry_after_ms\":4000}");
     defer testing.allocator.free(busy);
     try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(busy));
     try testing.expect(std.mem.indexOf(u8, busy, "\"retry_after_ms\":4000") != null);
-    // no_site — 사용자 탭의 흉내는 걸 때 보이는 사이트에 묶인다(사용자 결정 2026-11-17): 웹 페이지가 아니거나 이동 중이면 다시 걸라는 인자 쪽 답이다.
-    for ([_][]const u8{ "no_agent_process", "offline_user_tab", "network_preset_only", "no_site" }) |r| {
+    // 사용자 탭의 옛 거절(offline_user_tab·network_preset_only·흉내의 no_site)은 걷었다(사용자 결정 2026-11-17 — 에이전트는 사용자와 같은 힘).
+    for ([_][]const u8{"no_agent_process"}) |r| {
         var pb: [128]u8 = undefined;
         const payload = try std.fmt.bufPrint(&pb, "{{\"reason\":\"{s}\",\"message\":\"m\"}}", .{r});
         const out = try serializeBrowserResponseStatus(testing.allocator, emuReq("\"action\":\"set\",\"cpu\":4"), .failed, payload);

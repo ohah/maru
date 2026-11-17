@@ -5203,9 +5203,11 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   봤다). 이제 사용자 탭은 grant 의 `any_host` 가 아니라 **탭과 함께 생긴 grant 인가**(`birth`)로 가르고(`web_osr_emulate.bindSite`), `set` 을 부를 때 그 탭이
   보이는 페이지의 호스트(`web_osr.browserEmulate` — 막기 규칙의 사이트와 같은 `netKnownUrl` → `hostOfUrl`)에 묶는다. 덜 놀라운 쪽으로 정한 것: 다른
   사이트에서 다시 `set` 하면 그 사이트로 옮긴다(덧쓰기 설정은 그대로, 지금 묶음이 그 페이지를 덮으면 그대로 — `www.` 에서 다시 걸어 좁아지지 않게), 웹 페이지가
-  아니거나 이동 중이면 `no_site`(-32602 — 탭 전체로 걸리거나 어디에도 안 걸린 채 성공처럼 보이지 않게), `clear` 는 어느 사이트에서든(묶음도 푼다), 결과의
+  아니거나 이동 중이면 처음엔 `no_site`(-32602)로 거절했다가 같은 날 사용자 결정(「그냥 사용자가 하듯이 다 권한 주면 안되요?」)으로 거절하지 않고 아직 묶이지
+  않았으면 탭 전체·이미 묶였으면 그 묶음 그대로(`fix/browser-user-tab-full`), `clear` 는 어느 사이트에서든(묶음도 푼다), 결과의
   `site` 는 묶인 호스트(에이전트 탭은 null), grant 동기화는 어느 호스트든 grant 면 묶음과 무관하게 둔다(그대로면 묶인 흉내가 다음 동기화에서 지워졌다). 같은
-  뿌리로 꺼져 있던 사용자 탭의 네트워크 조건 제한(프리셋만·offline 없음 — 도움말·MCP·플러그인은 그대로 말하고 있었다)도 `birth` 로 되살렸다. 에이전트가 연 탭
+  뿌리로 꺼져 있던 사용자 탭의 네트워크 조건 제한(프리셋만·offline 없음)을 `birth` 로 되살렸다가 같은 날 사용자 결정 「허용으로 바꾸기」로 걷었다(에이전트는
+  브라우저에 사용자와 같은 힘 — 사용자 탭도 offline·수치 지연; 남은 사용자 탭 제한의 목록은 `$S/user_tab_full/INVENTORY.md`). 에이전트가 연 탭
   (◈)은 탭 전체 그대로. 계획 기록 `$S/emu_pagenav/PLAN3.md`·`ATTACK3.md`.
 - 판정: `--emulation` 57 → **84**, 새 세션 `emq`(`emulation_pagenav_check.zig` 28 — 종류 열(에이전트 CDP 의 `Page.navigateToHistoryEntry` 포함)마다
   `EMQ_ITERS` 판(기본 3), `detach-order`·`set-reload`(처음 거는 흉내 곧 뒤의 새로고침 — 세션을 붙이는 동안 maru 의 이동은 붙을 때까지·시한 100 ms 기다린다:
@@ -5309,7 +5311,7 @@ pid 재사용은 (pid, 시작 µs), **무리마다 주인**(cpu·network 따로 
   출시 버그도 같은 길로 고쳤다), `blocking.zig`(ByRule 규칙 하나 `urlPattern:""` — kbps × 125 바이트/s, 0 은 -1(제한 없음); offline 은 규칙의 `offline:true` +
   `overrideNetworkState`), `devtools_table.forbiddenMethod` 에 `Tracing.`·`IO.`·`HeapProfiler.`·`Profiler.`·`Performance.`·`Memory.`·`SystemInfo.`.
 - maru: `session/web_osr_trace.zig`(순수 — 인자, F1–F4 두 번 읽기 거르기(gzip 을 풀며 원소 하나씩, 첫째 읽기에서 브라우저·GPU·주 프레임 렌더러 pid·워커 스레드·주
-  스레드), 요약 셈, 다시 압축 level 1), `session/web_osr_emulate.zig`(무리 `cpu`·`network`, 프리셋 표, 사용자 탭은 프리셋만·offline 거절, 주인 `Owner{job, holder}`
+  스레드), 요약 셈, 다시 압축 level 1), `session/web_osr_emulate.zig`(무리 `cpu`·`network`, 프리셋 표, 사용자 탭도 프리셋·수치·offline(2026-11-17 — 옛 「프리셋만·offline 거절」 을 걷었다), 주인 `Owner{job, holder}`
   무리마다, `reapOwners`, 풀림 회차, 결과의 `owner`·`released`·`process_shared`(+`cpu`·`navigator_online`)·`not_covered`(+`mocked_responses`·`websocket_unmeasured`)·
   `warnings`(+`hidden_tab_cpu_background`)), `session/control_self_origin.zig`(`jobTop`·`shellOf`(확인 결정 9)·`ownerOf`·`ownerAlive` — 출처에 job·peer·셸의 pid·시작 µs), `web_osr.zig`
   (trace 차례 하나 — 받은 gzip·프레임을 모아 **작업 스레드**에서 거르고, 결과를 pane 마다 10 분 쥔다; 조건의 주인을 앱 틱에서 0.5 s 마다 보고 끝났으면 그 무리를

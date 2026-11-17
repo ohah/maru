@@ -27,9 +27,10 @@ maru browser emulate --surface 12 --clear
 - Current Maru does not ask the user (an older build asks once per site on a user's tab).
 - **On a user's tab the emulation applies only on the site the tab shows when you set it**, and its subdomains
   (`site` in the result). Other sites see the real values. Setting it again while the tab shows another site moves
-  it there. A tab that shows no web page, or is between pages, answers `no_site` — set it again once the page has
-  loaded. On tabs you opened (◈) it applies on every site. `--clear` works from any site.
-- On a user's tab `--network` takes a preset only, and not `offline`.
+  it there. Set on a tab that shows no web page (about:blank, a file) or is between pages, it applies on every site
+  until you set it while a site is shown (a tab already bound keeps its site). On tabs you opened (◈) it applies on
+  every site. `--clear` works from any site.
+- `--network` takes the presets, `offline` and `--latency` on any tab, the user's too.
 - One pane owns a tab's emulation. Another pane gets `emulated_by_other_pane`.
 - **If the user clicks or types in the tab, Maru drops your `--cpu` and `--network` there** (`released: human_input`).
   The other settings stay: clear them unless the user wants them kept. Do not apply anything again — the user is

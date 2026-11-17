@@ -73403,6 +73403,46 @@ test "P0-2: 브라우저가 아직 없으면 보내지 않고 다시 그리기�
     try std.testing.expect(session.web_find_osr_request != before);
 }
 
+test "P0-2: 새 문서가 서면(page_started) 그 탭의 찾기를 비우고, 열린 오버레이면 지금 검색어로 다시 낸다 — 닫혀 있으면 다시 내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try p02Type(session, "ap");
+    const before = session.web_find_osr_request;
+    web_osr.testClearSent();
+    // 첫 문서로 옮겨 가는 사이의 찾기 — 마지막 부름의 답이 안 온다(실앱 실측). 새 문서가 서면 다시 낸다.
+    web_osr.testApply(allocator, .{ .page_started = t.browser });
+    try std.testing.expect(!web_osr.findLive(t.browser, before));
+    // 멈춤이 먼저 — 같은 글의 다시 냄을 CEF 가 「다음」으로 받지 않고 새 문서의 처음부터 찾게.
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).stops);
+    try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).finds);
+    _ = try session.tick();
+    const again = p02Sent(t.browser);
+    try std.testing.expectEqual(@as(usize, 1), again.finds);
+    try std.testing.expectEqualStrings("ap", again.last_text);
+    try std.testing.expect(session.web_find_osr_request != before);
+    // 옛 번호의 늦은 답(Chromium 이 앞 identifier 로 다시 찾은 것)은 싣지 않는다.
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = t.browser, .request = before, .count = 7, .active = 1, .final = true } });
+    _ = try session.tick();
+    try std.testing.expect(session.chrome_host.find.page_count == null);
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).finds); // 한 번만
+    // 찾기가 없는 탭의 새 문서는 아무것도 보내지 않는다.
+    web_osr.testClearSent();
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).stops); // 닫힘 가장자리
+    web_osr.testApply(allocator, .{ .page_started = t.browser });
+    _ = try session.tick();
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).finds); // 닫혀 있으면 다시 내지 않는다
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).stops); // 찾기가 없으니 멈춤도 없다
+}
+
 test "P0-2: 열어 둔 채 탭을 옮기면 앞 Chromium 탭을 멈추고 새 탭에 낸다 — WebKit 탭(파일 Term)은 예전처럼 Swift 질의로, 터미널에 갔다 오면 다시 낸다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

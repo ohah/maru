@@ -6850,6 +6850,16 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.block.newDocument(); // W9d③: 「적용 안 됨」 표시는 문서마다
             s.mock.newDocument(); // W9d④: 서비스 워커 다스림 표시도
             s.nav_uncommitted = false;
+            // P0-2 후속: 새 문서에는 앞 문서의 찾기가 없다 — 그 탭의 찾기를 비워 창이(오버레이가 열려 있으면) 지금 검색어로 다시 낸다(`findLive`
+            // 거짓 — `browser_created` 와 같은 길). 첫 문서로 옮겨 가는 사이에 부른 찾기는 Chromium 이 마지막 부름에 답하지 않고 앞 부름의 identifier
+            // 로 다시 찾아 답했다 — sidecar 가 그 답을 버려 상자가 끝내 빈칸이었다(실앱 실측, 여섯에 하나꼴). **멈춤도 함께 보낸다**: CEF 는 같은 글의
+            // 다시 냄을 「다음 일치」로 받아 새 문서의 첫 일치가 아니라 둘째·셋째에서 시작했다(실앱 실측 — 글을 치는 동안 문서가 섰다). 멈춘 뒤 같은
+            // 글은 처음부터 찾는다(판정자 `find-stop`), Chromium 이 앞 identifier 로 다시 찾던 것도 멈춘다.
+            if (s.find_request != 0) {
+                s.find_request = 0;
+                s.find_answer = null;
+                send(gpa, .{ .find_stop = .{ .browser = id } });
+            }
             // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
             if (s.agent_nav.active and !s.agent_nav.done and !s.initial_load_pending) s.agent_nav.saw_started = true;
             // (아래 `else` — 주차한 브라우저의 새 문서는 `parkedDocument` 가 본다.)

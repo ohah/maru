@@ -25,8 +25,9 @@ pub const browser_help =
     \\
     \\Specify --surface only once per invocation (repeated IDs are also rejected).
     \\Control a web surface (browser panel). First discover the target web surface_id with
-    \\`maru browser list`, then pass it to the other commands as --surface <id>. Without a
-    \\capability the request opens a confirmation dialog; allowing it runs the command (§9.2 Model B).
+    \\`maru browser list`, then pass it to the other commands as --surface <id>. From a maru pane (its
+    \\foreground job and the job's children, or tmux inside the pane) every command works on every tab without
+    \\asking the user; from anywhere else every command except list is refused.
     \\
     \\--out f (exec, screenshot, network-request, trace) writes a new 0600 file only, never over anything already there,
     \\in the current folder or the temp folder ($TMPDIR or /tmp) or below them, and not through a hidden name (one
@@ -59,17 +60,17 @@ pub const browser_help =
     \\  reload  --surface <id>                     reload the page (Chromium tabs)
     \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
     \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
-    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the first open in a pane asks the user once — the tab uses their logged-in sites)
+    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites)
     \\  close   --surface <id>                     close a tab this pane opened (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog)
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
-    \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
-    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
+    \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
+    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
     \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a new file under the temp folder only; a binary body needs --out; Chromium tabs)
-    \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on the user's tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
-    \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on the user's tabs, not on tabs the agent opened; the tab title shows ⊘)
-    \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site; requests made by iframes or workers of a site your permission does not cover are never mocked); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; needs the network and control permissions first; asks once per site on the user's tabs, not on tabs the agent opened; the tab title shows ▣)
-    \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; asks once per site on the user's tabs and works only while that site is shown; not on tabs the agent opened; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on the user's tabs --network takes a preset and no offline)
+    \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; the tab title shows ◉ while recording)
+    \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; the tab title shows ⊘)
+    \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; the tab title shows ▣)
+    \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on the user's tabs --network takes a preset and no offline)
     \\  trace (start [--reload] [--duration 5s] [--no-screenshots] | stop [--out <file.json.gz>] [--json] | status | abort) --surface <id>   record a performance trace of a tab this pane opened (Chromium; 1-30 s, default 5 s; a hidden tab is kept rendering while it records); stop prints a summary, --out also writes the filtered trace (gzip JSON — open it in Chrome DevTools' Performance panel); never overwrites a file. `trace --surface <id> [--duration 5s] [--out f]` does start, wait and stop in one go. (`maru trace` is maru's own terminal trace tool — this is the page's.)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
@@ -2503,13 +2504,13 @@ const script_error_code: i64 = -32006;
 const timeout_code: i64 = -32004;
 const close_hint = "hint: only tabs this pane opened with `browser open` can be closed\n";
 /// 균일 거절(`data` 없음 + 기본 글)의 안내 — 서버가 일부러 까닭을 숨기는 자리(§8.3 존재 oracle 금지)라 **고정 글**이고 응답의 무엇에도
-/// 기대지 않는다. 그 자리의 까닭은 둘 중 하나다: pane 의 foreground job 이 아니다, 또는 그 탭에서 이 명령에 필요한 권한이 없다(확인 창을
-/// 거부했다·묻지 않고 거절하는 명령 — `network-block --list` 처럼 아직 그 권한이 없으면 묻지 않는다). M7·D4b: 전에는 앞의 것만 말했다.
+/// 기대지 않는다. 사용자 결정 2026-11-16(「AI 가 모든 접근」) 뒤로 그 자리의 까닭은 거의 하나다: maru pane(그 foreground job 과 자손, pane
+/// 안 tmux)에서 부르지 않았다 — 확인 창·권한은 없다. 닫힌 탭·없는 id 도 같은 글이다.
 const unauthorized_hint =
-    \\hint: maru does not say why it refused. Either this did not run from a maru pane's foreground job (another
-    \\      terminal, tmux/screen, a background job), or this tab lacks a permission the command needs: the dialog was
-    \\      declined, or the command never asks (like network-block --list or emulate --get before that permission).
-    \\      A closed tab or an id that is not in `browser list` is refused the same way.
+    \\hint: maru does not say why it refused. Most likely this did not run in a maru pane: run it from the pane's
+    \\      foreground job or that job's children, or tmux inside the pane (another terminal, screen, ssh, a background
+    \\      job while something else holds the pane, or a program outside maru is refused). maru does not ask the user —
+    \\      a pane's commands work on every tab. A closed tab or an id that is not in `browser list` is refused the same way.
     \\
 ;
 
@@ -4440,7 +4441,7 @@ fn renderedError(json: []const u8, kind: ResponseKind, buf: []u8) ![]const u8 {
     return w.buffered();
 }
 
-test "M7: 까닭이 붙은 -32002 에는 안내가 없고, 균일 거절에만 두 가능성을 말하는 안내가 붙는다" {
+test "M7: 까닭이 붙은 -32002 에는 안내가 없고, 균일 거절에만 pane 밖을 말하는 안내가 붙는다" {
     var buf: [4096]u8 = undefined;
     const reasoned = [_][]const u8{
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"recording response bodies needs this tab's network permission first — run maru browser network on this tab\",\"data\":{\"reason\":\"needs_network_permission\"}}}",
@@ -4448,9 +4449,7 @@ test "M7: 까닭이 붙은 -32002 에는 안내가 없고, 균일 거절에만 �
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the permission to block requests on this tab is gone — ask again\",\"data\":{\"reason\":\"needs_grant\"}}}",
         // 까닭이 붙었으면 메시지가 기본 글이어도 안내하지 않는다(서버가 까닭을 이미 말했다).
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\",\"data\":{\"reason\":\"needs_grant\"}}}",
-        // 업로드의 거절 글(사용자의 답·물을 창 없음·부른 쪽이 떠남) — 기본 글이 아니다.
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the user declined the upload — nothing was uploaded\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"no maru window is open to ask the user — nothing was uploaded\"}}",
+        // 업로드의 거절 글(부른 쪽이 떠남 — 확인 모달은 2026-11-16 걷혔다) — 기본 글이 아니다.
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the program that asked is no longer in the foreground of its pane — nothing was uploaded\"}}",
     };
     for (reasoned) |json| for ([_]ResponseKind{ .network_record, .network_block, .network_mock, .emulate, .trace, .upload, .ok }) |kind| {
@@ -4470,9 +4469,11 @@ test "M7: 까닭이 붙은 -32002 에는 안내가 없고, 균일 거절에만 �
         }
         try testing.expectEqualStrings("error: Unauthorized (-32002)\n" ++ close_hint, try renderedError(json, .close, &buf));
     }
-    // 두 가능성을 함께 말한다 — pane 밖과 권한 없음(묻지 않는 명령 포함). 서버의 무엇에도 기대지 않는 고정 글이다.
+    // 까닭은 pane 밖이다(사용자 결정 2026-11-16 — 확인 창·권한이 없다), pane 안 tmux 는 된다고 말한다. 서버의 무엇에도 기대지 않는 고정 글이다.
     try testing.expect(std.mem.indexOf(u8, unauthorized_hint, "foreground") != null);
-    try testing.expect(std.mem.indexOf(u8, unauthorized_hint, "permission") != null);
+    try testing.expect(std.mem.indexOf(u8, unauthorized_hint, "or tmux inside the pane") != null);
+    try testing.expect(std.mem.indexOf(u8, unauthorized_hint, "maru does not ask the user") != null);
+    try testing.expect(std.mem.indexOf(u8, unauthorized_hint, "declined") == null and std.mem.indexOf(u8, unauthorized_hint, "permission") == null);
     // 다른 코드는 안내가 없다.
     const other = try renderedError("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32003,\"message\":\"Unauthorized\"}}", .navigate, &buf);
     try testing.expect(std.mem.indexOf(u8, other, "hint:") == null);
@@ -5170,8 +5171,9 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\
         \\Specify --surface only once per invocation (repeated IDs are also rejected).
         \\Control a web surface (browser panel). First discover the target web surface_id with
-        \\`maru browser list`, then pass it to the other commands as --surface <id>. Without a
-        \\capability the request opens a confirmation dialog; allowing it runs the command (§9.2 Model B).
+        \\`maru browser list`, then pass it to the other commands as --surface <id>. From a maru pane (its
+        \\foreground job and the job's children, or tmux inside the pane) every command works on every tab without
+        \\asking the user; from anywhere else every command except list is refused.
         \\
         \\--out f (exec, screenshot, network-request, trace) writes a new 0600 file only, never over anything already there,
         \\in the current folder or the temp folder ($TMPDIR or /tmp) or below them, and not through a hidden name (one
@@ -5204,17 +5206,17 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  reload  --surface <id>                     reload the page (Chromium tabs)
         \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
         \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
-        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the first open in a pane asks the user once — the tab uses their logged-in sites)
+        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites)
         \\  close   --surface <id>                     close a tab this pane opened (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog)
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
-        \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
-        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
+        \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
+        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
         \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a new file under the temp folder only; a binary body needs --out; Chromium tabs)
-        \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on the user's tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
-        \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on the user's tabs, not on tabs the agent opened; the tab title shows ⊘)
-        \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site; requests made by iframes or workers of a site your permission does not cover are never mocked); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; needs the network and control permissions first; asks once per site on the user's tabs, not on tabs the agent opened; the tab title shows ▣)
-        \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; asks once per site on the user's tabs and works only while that site is shown; not on tabs the agent opened; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on the user's tabs --network takes a preset and no offline)
+        \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; the tab title shows ◉ while recording)
+        \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; the tab title shows ⊘)
+        \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; the tab title shows ▣)
+        \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on the user's tabs --network takes a preset and no offline)
         \\  trace (start [--reload] [--duration 5s] [--no-screenshots] | stop [--out <file.json.gz>] [--json] | status | abort) --surface <id>   record a performance trace of a tab this pane opened (Chromium; 1-30 s, default 5 s; a hidden tab is kept rendering while it records); stop prints a summary, --out also writes the filtered trace (gzip JSON — open it in Chrome DevTools' Performance panel); never overwrites a file. `trace --surface <id> [--duration 5s] [--out f]` does start, wait and stop in one go. (`maru trace` is maru's own terminal trace tool — this is the page's.)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
@@ -6126,16 +6128,16 @@ test "W9c③: upload 요청은 browser.upload {id, 로케이터, files} — 상�
     try testing.expectEqual(ResponseKind.upload, (Request{ .upload = abs }).kind());
 }
 
-test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 표시 안전하게), 거부·물을 창 없음은 그 글만(인가 안내 없이), 다른 -32002 는 안내를 붙인다" {
+test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 표시 안전하게), 부른 쪽이 떠난 거절은 그 글만(인가 안내 없이), 다른 -32002 는 안내를 붙인다" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     const ok = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"in\u{202e}voice.exe\",\"size\":5}],\"kept\":true,\"navigated\":false,\"dialog\":false}}";
     try testing.expect(try renderResponse(testing.allocator, ok, .upload, &out.writer));
     try testing.expectEqualStrings("uploaded 2 files to https://a.test\n  \"a.txt\" (3 bytes)\n  \"invoice.exe\" (5 bytes)\n", out.written());
     out.clearRetainingCapacity();
-    const declined = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the user declined the upload — nothing was uploaded\"}}";
-    try testing.expect(!try renderResponse(testing.allocator, declined, .upload, &out.writer));
-    try testing.expectEqualStrings("error: the user declined the upload — nothing was uploaded (-32002)\n", out.written());
+    const gone = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the program that asked is no longer in the foreground of its pane — nothing was uploaded\"}}";
+    try testing.expect(!try renderResponse(testing.allocator, gone, .upload, &out.writer));
+    try testing.expectEqualStrings("error: the program that asked is no longer in the foreground of its pane — nothing was uploaded (-32002)\n", out.written());
     out.clearRetainingCapacity();
     const plain = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}";
     try testing.expect(!try renderResponse(testing.allocator, plain, .upload, &out.writer));

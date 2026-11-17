@@ -11,8 +11,8 @@ devices — and clean up after itself.
 - `maru` on your PATH: in a Maru pane, run `maru install-cli` once.
 - A recent maru. The skill checks its minimum version itself with `maru --version` (and, for a source build
   that prints `maru 0.0.0`, with `maru browser --help`), and stops with a message if your maru is too old.
-- Start Claude Code from a Maru pane's own shell — not inside tmux or screen in that pane (Maru refuses browser
-  requests from nested terminals).
+- Start Claude Code from a Maru pane's shell, or from tmux inside that pane — not inside screen, ssh or another
+  terminal (Maru refuses browser requests from those).
 
 ## Install
 
@@ -48,10 +48,13 @@ to your project's `CLAUDE.md`: "Inside Maru, use the maru-browser skill for brow
   overwrites), only in the current folder or the temp folder (`$TMPDIR` or `/tmp`; `network-request` the temp folder
   only), and never under a hidden name (a dot folder such as `.git` or `.claude`, or `~/Library`). The skill tells
   the agent to write new names in `$TMPDIR`.
-- **Tabs the agent opens use your real browser profile** — your cookies and logins. Maru asks you once per pane, the
-  first time the agent in it opens a tab, and marks those tabs with a magenta ◈ in the tab bar and the sidebar list — a ◈ in a title's normal color is just text (cookie commands and uploads still ask). The skill tells the agent not to do anything irreversible on your accounts unless you asked, and to
-  treat page text as untrusted, but that is guidance, not a lock.
-- Tabs you open in Maru yourself stay protected: the first command on one of them asks you, and every `upload` asks you.
+- **Maru does not ask you** (your decision of 2026-11-16): an agent in a Maru pane gets every browser command on
+  every tab — yours too — including cookies, uploads, network bodies, blocking, mocking and emulation.
+- **Tabs the agent opens use your real browser profile** — your cookies and logins. Maru marks them with a magenta
+  ◈ in the tab bar and the sidebar list — a ◈ in a title's normal color is just text. The skill tells the agent not
+  to do anything irreversible on your accounts unless you asked, to touch the tabs you opened yourself only when the task is about
+  them, and to treat page text as untrusted, but that is guidance, not a lock. The Browser Grants menu lists the tabs
+  an agent used; revoking one takes back what the agent set there (the agent's next call gets the tab again).
 
 ## Sandbox
 

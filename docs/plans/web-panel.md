@@ -146,3 +146,5 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane plan](control-pla
 
 - **슬라이스**: ① Zig 라우팅(**완료**) → ② ABI+Swift 배선 + 찾음/없음 표시 + Enter/⌘G 양방향(**완료**).
   ③(닫을 때 하이라이트 정리)은 **필요 없어 취소**했다 — 위 확인 결과.
+  ④ Chromium 탭(**완료** — 2026-11-17, [OSR 백엔드 계획](web-osr-backend.md) P0-2): CEF 찾기로 수·차례(`cur/total`), 닫힘·열림 가장자리에서 멈춤,
+  Swift 「전달 못함」 다시 그리기 고리 제거. WebKit 탭·파일 패널의 ①②는 그대로.

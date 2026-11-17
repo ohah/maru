@@ -5692,3 +5692,38 @@ Swift `webPanels`(WKWebView)로만 navigate 하는데 OSR 탭에는 WKWebView �
 `pending_url`, 엔진이 멈췄으면(래치) 새 탭 없이 시스템, WebKit 이면 예전 길. 보이는 브라우저가 에이전트 탭(◈)이어도 재사용한다(사용자 결정 2026-11-17 —
 처음 판은 #4731 동의를 이유로 건너뛰었으나, 에이전트에게 브라우저 전체 접근을 주기로 한 결정과 함께 바꿨다). 계약은 [링크 감지](../link-detection.md) §링크를 어디에 여는가. 남은 틈: 새 탭의 첫 이동은 `navigate`(사용자 이동 아님 —
 끌어 놓은 새 탭과 같다), 탭마다의 GPU 거절(D9) 탭에도 실린다, 새 탭을 첫 주소가 가기 전에 저장하면 주소를 잃는다(P0-4 의 캡처 폴백).
+
+### P0-2 — ⌘F 를 Chromium 탭에서(2026-11-17, 완료)
+
+WebKit 걷어내기를 준비하는 Chromium 쪽 PR 의 둘째(사용자 결정 2026-11-17 — 「찾기 기능 붙이기」: 최소판(「아직 못 한다」 안내)이 아니라 CEF 찾기, 새 브라우저
+기능은 Chromium 에만, WebKit·파일 패널 ⌘F 는 그대로). **실앱 재현**(격리 HOME, 시험 대본 `frames`·`osr-test find …` 보고): Chromium 탭에서 ⌘F 를 열고 글을 치면
+하이라이트도 오버레이 표시도 없고, 오버레이가 열린 동안 **tick 마다 같은 질의를 다시 제출**했다(3.4 초에 776 번 — Swift 가 WKWebView 가 없어 「전달 못함」,
+`reportWebFindUndeliverable` 가 표지를 내리고 tick 이 다시 내며 `metal_dirty`) — 창 전체를 화면 주사율(≈ 62 fps)로 계속 다시 그렸다. WebKit 탭·파일 패널은
+제출 9·답 8 로 정상. 고침: `submitWebFind` 가 엔진으로 가른다(`isOsrTerm`) — Chromium 탭이면 `web_osr.find` 로 sidecar 에 곧바로(Swift·ABI 무변경), WebKit 탭·
+파일 Term 은 예전 길. 계약은 [웹 패널 빠진 기능](../web-panel-features.md) 의 「⌘F 분기」.
+
+- **wire 27**: `find`(142 → sidecar — maru 가 매긴 request·forward·글 `max_find_text_bytes` 512 = 오버레이 질의 사본과 같은 값, comptime 이 맞춘다), `find_stop`
+  (143 — `keep_selection`), `find_result`(86 → maru — count·active(1 부터, 없으면 0)·final). 닫힌 칸: request 0·빈 글·상한 초과·제어 문자(탭 포함)·`active > count`·
+  `count == 0` 인데 `active != 0`·bool 0/1 밖.
+- **CEF 의 찾기(실측 — 판정자를 만들며 sidecar 에 임시 줄을 달아 쟀다, CEF 154.0.23)**: `findNext=0` 은 일치를 칠하기만 하고 지금 일치를 고르지 않는다(차례 0) →
+  sidecar 는 늘 `findNext=1`(글이 바뀌었거나 멈춘 뒤면 CEF 가 새로 찾아 첫 일치, 같은 글이면 다음·이전) — 그래서 wire 에 「새 찾기/다음」 칸이 없다. 답의
+  `identifier` 는 **프로세스 전체에서 늘어나는** 수이고 우리의 `find` 부름마다 하나씩 오르지만 **브라우저를 만들 때도** 오른다(멈춤·닫기·이동·숨김은 아니다) —
+  부른 차례로 정확히 맞추면 탭을 하나 더 연 뒤의 답을 모두 버렸다(`find-two-tabs`). 그래서 L2 `session/web_sidecar/find.zig` 가 「부른 차례 + 배운 틈」을 아래
+  끝으로 첫 답에서 그 부름의 identifier 를 배우고 그 뒤로 그것만 받는다(앞 질의의 늦은 답이 새 질의 자리에 붙지 않게). 새 찾기 둘을 잇달아 부르면 앞 것의 답은
+  오지 않았다. 이동하면 Chromium 이 같은 identifier 로 새 문서를 다시 찾아 답한다(수가 0 을 거쳐 다시 — `find-reload`). `stop_finding(clearSelection=0)` 은
+  탭이 키 포커스를 가진 때 지금 일치를 선택으로 남기고, 같은 글의 다음 찾기가 그 뒤에서 이어진다(`find-keep`).
+- **maru**: `web_osr.find`(만들어진 브라우저에만 — 아니면 `not_ready`, 창의 tick 이 다음에 다시 내되 표지·seq·`metal_dirty` 를 건드리지 않는다)·`findStop`(그 탭의
+  지금 번호가 부른 창의 것일 때만 — 번호는 앱 전역이라 탭을 다른 창으로 옮긴 뒤 옛 창이 새 창의 찾기를 지우지 않는다)·`findLive`(`browser_created` — 처음이거나 sidecar
+  가 다시 떴다 — 가 찾기를 비우면 거짓 → 창이 다시 낸다)·`findAnswer`(세대). app(`web.zig`): `submitOsrFind`(seq 도 올린다 — WebKit 탭의 늦은 답이 Chromium
+  오버레이에 붙지 않게)·`reconcileOsrFind`(오버레이 열림·닫힘 **가장자리**에서 멈춤 — 닫는 길과 무관하게)·`settleClosedOsrFind`(닫힌 채 ⌘G 는 마지막 답에서
+  `keep_selection` 멈춤 — 노란 칠이 찾기 상자 없이 남지 않게, 실앱에서 본 것)·`pollOsrFindResult`(열린 오버레이·보이는 그 탭·이 창의 번호·새 세대만)·
+  `osrFindCurrent`(tick 의 「이미 보냈나」 — Chromium 은 그 찾기가 살아 있어야). 대상이 바뀌면(웹 ↔ 터미널) Chromium 찾기를 멈춰 돌아올 때 다시 낸다.
+- **오버레이**: `find.State.page_count` — 있으면 페이지 카운터가 스크롤백과 같은 `cur/total`, 없으면 WebKit 의 found/none(그대로). 열 때·대상이 바뀔 때 비운다.
+- **사람이 쓴 것(W9e② `human_use`)**: 찾기는 넣지 않았다 — 에이전트 trace 를 버리거나 CPU·네트워크 조건을 풀지 않는다(사용자 결정 후보).
+- **검증**: L2 codec·`find.zig` 시험(왕복·골든·닫힌 칸·한 바이트 망가뜨림·identifier 가림·틈 배우기·되풀이), 앱 시험 6(고리 없음 — 열어 둔 채 tick 30 번에 제출·
+  `metal_dirty` 0, 답 반영 규칙, 가장자리·⌘G·빈 글, 만들기 전·sidecar 재시작, 탭 옮김과 WebKit 대조, 늦은 WebKit 답·다른 창·보낼 수 없는 글), 판정자
+  `web-sidecar-judge --find` 12(identifier·첫 찾기 1/7·다음·wrap·한글·없음 0/0·늦은 답·멈춤·두 탭·선택 남기기·이동 뒤 다시·모르는 브라우저 — 전체 판정에도),
+  실앱(after: 입력 끝 → 3 초 쉼 프레임 +13 — WebKit 과 같은 caret 깜빡임, 오버레이 `3/7`·Esc 뒤 칠 없음·닫힌 ⌘G 뒤 선택만, WebKit·파일 패널 넷은 제출 9·답 8 그대로).
+- 남은 틈: 페이지가 이동하면 Chromium 이 다시 찾으므로 수는 따라오지만 그 사이 잠깐 `0/n` 이 보일 수 있다, 빠르게 글을 바꾸면 Chromium 이 앞 일치 자리에서
+  새 찾기를 시작해 차례가 1 이 아닐 수 있다(Chrome 과 같다), 닫힌 ⌘G 의 선택 남기기는 그 탭이 키 포커스를 가질 때만(아니면 칠만 거둔다), identifier 가 int 끝에서
+  돌면(2^31 번) 답이 버려진다.

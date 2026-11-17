@@ -3954,7 +3954,10 @@ pub fn browserEmulate(out: std.mem.Allocator, surface_id: u64, req: EmulateReque
     const s = surfaces.getPtr(surface_id) orelse return .{ .fail = .{ .reason = "needs_grant", .message = "this tab is not a Chromium tab" } };
     const gpa = gpa_ref orelse return .{ .fail = .{ .reason = "needs_grant", .message = "the Chromium engine is not running" } };
     var why: emu_mod.Failure = undefined;
-    const outcome = s.emu.apply(.{ .pane = req.pane, .params = req.params, .any_host = req.any_host, .grant_host = req.grant_host, .birth = req.birth, .now_ms = monotonicNow(), .owner = req.owner }, &why) catch return .{ .fail = why };
+    // 사용자 탭의 흉내는 부를 때 보이는 페이지의 사이트에 묶인다(사용자 결정 2026-11-17 「건 사이트에만 다시 묶기」 — `emu_mod.bindSite`). 막기 규칙의 사이트와
+    // 같은 셈 — 이동 중이라 주소가 낡았으면 모른다(빈 글 → `no_site`).
+    const page_host: []const u8 = if (netKnownUrl(s)) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else "";
+    const outcome = s.emu.apply(.{ .pane = req.pane, .params = req.params, .any_host = req.any_host, .grant_host = req.grant_host, .birth = req.birth, .page_host = page_host, .now_ms = monotonicNow(), .owner = req.owner }, &why) catch return .{ .fail = why };
     s.emu.tab_hidden = s.record.hidden; // W9e②: 숨은 탭의 CPU 경고(배경 우선순위)
     if (outcome.changed) sendEmulation(gpa, surface_id, s);
     // `reload:true` — 걸고 나서 새로고침(첫 문서의 머리·터치 이벤트까지 — 실측 E5·E6). 에이전트의 새로고침이다(사용자 이동이 아니다 — D2 예외 없음).
@@ -12697,6 +12700,71 @@ test "W9e①: 다른 pane 은 바꾸지 못하고(get 은 된다), grant 동기�
     try std.testing.expect(emulation(293, &eb) == null);
     const cleared = emuFrames(&buf);
     try std.testing.expect(cleared.len == 1 and @as(u16, @bitCast(cleared[0].emulation.flags)) == 0);
+}
+
+// 사용자 결정 2026-11-17 「건 사이트에만 다시 묶기」 — 배선: 전권(어느 호스트든, 탭과 함께 생기지 않은 grant)의 사용자 탭은 `browserEmulate` 가 넘긴 지금
+// 페이지의 호스트에 묶인다(sidecar frame 의 `site_bound`·`site`), 다른 사이트에서 다시 걸면 옮겨 다시 보낸다, 웹 페이지가 아니면 `no_site`, 동기화가
+// 묶인 흉내를 지우지 않는다. 에이전트 탭(탭과 함께 생긴 grant)은 묶이지 않는다.
+test "건 사이트에만 다시 묶기: 전권 사용자 탭은 지금 페이지에 묶이고, 다른 사이트에서 다시 걸면 옮기고, 웹 페이지가 아니면 no_site, 동기화는 그대로 둔다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{296});
+    const s = surfaces.getPtr(296).?;
+    s.created = true;
+    apply(gpa, .{ .url_changed = .{ .browser = 296, .url = "https://a.test/x" } }, 0);
+    emulationSync(&.{.{ .tab = 296, .who = 0, .any_host = true, .pane = 5 }});
+    const p = try emuParams("{\"action\":\"set\",\"timezone\":\"UTC\"}");
+    outbox_pending.clearRetainingCapacity();
+    switch (try browserEmulate(gpa, 296, .{ .pane = 5, .any_host = true, .params = &p })) {
+        .ok => |json| {
+            defer gpa.free(json);
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"site\":\"a.test\"") != null);
+        },
+        .fail => return error.TestUnexpectedResult,
+    }
+    var buf: [16]Message = undefined;
+    const sent = emuFrames(&buf);
+    try std.testing.expect(sent.len == 1 and sent[0].emulation.flags.site_bound);
+    try std.testing.expectEqualStrings("a.test", sent[0].emulation.site);
+    // 다음 grant 동기화(거의 모든 요청 뒤)가 묶인 흉내를 지우지 않는다.
+    outbox_pending.clearRetainingCapacity();
+    emulationSync(&.{.{ .tab = 296, .who = 0, .any_host = true, .pane = 5 }});
+    var eb: [160]u8 = undefined;
+    try std.testing.expect(emulation(296, &eb) != null);
+    try std.testing.expectEqual(@as(usize, 0), emuFrames(&buf).len);
+    // 다른 사이트에서 다시 건다 — 그리로 옮겨 다시 보낸다.
+    apply(gpa, .{ .url_changed = .{ .browser = 296, .url = "https://b.test/y" } }, 0);
+    outbox_pending.clearRetainingCapacity();
+    switch (try browserEmulate(gpa, 296, .{ .pane = 5, .any_host = true, .params = &p })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    const moved = emuFrames(&buf);
+    try std.testing.expect(moved.len == 1 and moved[0].emulation.flags.site_bound);
+    try std.testing.expectEqualStrings("b.test", moved[0].emulation.site);
+    // 웹 페이지가 아니다 — 거절(어디에도 안 걸린 채 성공처럼 보이거나 탭 전체로 걸리지 않게).
+    apply(gpa, .{ .url_changed = .{ .browser = 296, .url = "about:blank" } }, 0);
+    switch (try browserEmulate(gpa, 296, .{ .pane = 5, .any_host = true, .params = &p })) {
+        .ok => |json| {
+            gpa.free(json);
+            return error.TestUnexpectedResult;
+        },
+        .fail => |f| try std.testing.expectEqualStrings("no_site", f.reason),
+    }
+    // 에이전트 탭(탭과 함께 생긴 grant)은 어느 사이트에서든.
+    try testSurfaces(gpa, &.{297});
+    surfaces.getPtr(297).?.created = true;
+    apply(gpa, .{ .url_changed = .{ .browser = 297, .url = "https://a.test/" } }, 0);
+    outbox_pending.clearRetainingCapacity();
+    switch (try browserEmulate(gpa, 297, .{ .pane = 5, .any_host = true, .birth = true, .params = &p })) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    const agent = emuFrames(&buf);
+    try std.testing.expect(agent.len == 1 and !agent[0].emulation.flags.site_bound);
 }
 
 // W9e① 변이 시험: 브라우저가 아직 없으면 흉내 frame 도 새로고침도 보내지 않는다(결과도 reloaded 를 말하지 않는다), 사용자가 흉내 중인

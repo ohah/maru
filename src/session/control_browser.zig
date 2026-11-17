@@ -7641,12 +7641,13 @@ test "W9e②: trace 는 34 — Chromium 만, 사용자 탭도 op(2026-11-17), br
     }
 }
 
-test "W9e②: 앱의 거절 까닭 — trace_busy 는 -32603 + retry_after_ms, emulate 의 no_agent_process·offline_user_tab·network_preset_only 는 -32602" {
+test "W9e②: 앱의 거절 까닭 — trace_busy 는 -32603 + retry_after_ms, emulate 의 no_agent_process·offline_user_tab·network_preset_only·no_site 는 -32602" {
     const busy = try serializeBrowserResponseStatus(testing.allocator, traceReq("\"action\":\"start\""), .failed, "{\"reason\":\"trace_busy\",\"message\":\"m\",\"retry_after_ms\":4000}");
     defer testing.allocator.free(busy);
     try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(busy));
     try testing.expect(std.mem.indexOf(u8, busy, "\"retry_after_ms\":4000") != null);
-    for ([_][]const u8{ "no_agent_process", "offline_user_tab", "network_preset_only" }) |r| {
+    // no_site — 사용자 탭의 흉내는 걸 때 보이는 사이트에 묶인다(사용자 결정 2026-11-17): 웹 페이지가 아니거나 이동 중이면 다시 걸라는 인자 쪽 답이다.
+    for ([_][]const u8{ "no_agent_process", "offline_user_tab", "network_preset_only", "no_site" }) |r| {
         var pb: [128]u8 = undefined;
         const payload = try std.fmt.bufPrint(&pb, "{{\"reason\":\"{s}\",\"message\":\"m\"}}", .{r});
         const out = try serializeBrowserResponseStatus(testing.allocator, emuReq("\"action\":\"set\",\"cpu\":4"), .failed, payload);

@@ -760,17 +760,41 @@ const emu_fields_origin_bytes = ws.fields.max_origin_bytes;
 pub const Call = struct {
     pane: u64,
     params: *const Params,
-    /// 그 pane 의 emulation grant(어느 호스트든 = 에이전트 탭, 아니면 grant 호스트 = 사이트).
+    /// 그 pane 의 emulation grant 가 어느 호스트든인가(#4737 전권 뒤로는 거의 늘 참 — 사용자 탭·에이전트 탭을 가르지 못한다: `birth` 로 가른다),
+    /// 아니면 grant 호스트(옛 사이트마다의 확인 grant).
     any_host: bool,
     grant_host: []const u8 = "",
-    /// 그 grant 가 탭과 함께 생겼다(에이전트 탭 — 처음 몰 때 알림).
+    /// 그 grant 가 탭과 함께 생겼다(에이전트가 연 탭 ◈ — 처음 몰 때 알림, 흉내는 탭 전체). 아니면 사용자 탭(또는 다른 pane 이 몬 탭).
     birth: bool = false,
+    /// 부를 때 그 탭이 보이는 페이지의 호스트(http(s) — 아니거나 이동 중이라 모르면 빈 글). 사용자 탭의 `set` 은 여기에 묶인다(`bindSite`).
+    page_host: []const u8 = "",
     now_ms: i64 = 0,
     /// W9e②: CPU·네트워크 조건의 주인(`control_self_origin.ownerOf` — 없으면 그 둘은 걸지 않는다).
     owner: ?self_origin.Owner = null,
 };
 
 pub const Outcome = struct { changed: bool = false, touch_added: bool = false };
+
+/// `set` 이 흉내를 묶을 곳(사용자 결정 2026-11-17 「건 사이트에만 다시 묶기」).
+pub const Bind = union(enum) {
+    /// 에이전트가 연 탭(◈ — grant 가 탭과 함께 생겼다): 어느 사이트에서든.
+    whole_tab,
+    /// 그 호스트와 그 하위 도메인에서만(sidecar 의 `site_bound` — 다른 사이트는 진짜 값).
+    site: []const u8,
+    /// 사용자 탭인데 지금 페이지의 호스트를 모른다(http(s) 가 아니다·이동 중) — 거절한다(어디에도 안 걸린 채 성공처럼 보이거나 탭 전체로 걸리지 않게).
+    no_site,
+};
+
+/// 누가 어디에 묶이나 — 탭과 함께 생긴 grant(에이전트 탭)면 탭 전체, 옛 호스트 grant 면 그 호스트, 그 밖(전권 뒤의 사용자 탭·다른 pane 이 몬
+/// 에이전트 탭)은 부를 때 보이는 페이지의 호스트. #4737 전권은 모든 grant 를 어느 호스트든으로 넣으므로 `any_host` 로는 사용자 탭을 가를 수 없다
+/// (그렇게 갈라 사용자 탭 흉내가 모든 사이트에 걸렸다 — 실측 2026-11-17).
+pub fn bindSite(call: Call) Bind {
+    if (call.birth) return .whole_tab;
+    if (!call.any_host) return .{ .site = call.grant_host };
+    // 담을 수 없는 호스트(상한 넘음)도 모름이다 — 빈 사이트는 탭 전체가 된다.
+    if (call.page_host.len == 0 or call.page_host.len > cpg.max_host_bytes) return .no_site;
+    return .{ .site = call.page_host };
+}
 
 /// 덧쓰기 한 무리 — 그대로·지움·바꿈.
 fn merge(comptime T: type, ch: Change(T), slot: *?T) void {
@@ -841,6 +865,12 @@ pub const Tab = struct {
             why.* = .{ .reason = "emulated_by_other_pane", .message = "another pane is emulating a device on this tab — it can change or clear it; you can read it with action get" };
             return error.Rejected;
         }
+        // 사용자 탭의 `set` 은 지금 보이는 사이트에 묶인다 — 모르면 거절(바꾸기 상한을 먹기 전에).
+        const bind: ?Bind = if (p.action == .set) bindSite(call) else null;
+        if (bind) |b| if (b == .no_site) {
+            why.* = .{ .reason = "no_site", .message = "on the user's tab emulation applies only on the site the tab shows when you set it — this tab is not showing a web page (or is between pages); set it again once the page has loaded" };
+            return error.Rejected;
+        };
         if (!self.rateOk(call.now_ms)) {
             why.* = .{ .reason = "resource_busy", .message = "too many emulation changes on this tab — at most 10 per second" };
             return error.Rejected;
@@ -852,7 +882,8 @@ pub const Tab = struct {
             why.* = .{ .reason = "no_agent_process", .message = "CPU and network conditions last while the process that set them runs (the calling agent, maru browser repl or maru mcp, or the shell you typed the command in) — no such process was found for this call" };
             return error.Rejected;
         }
-        if (sets_net and !call.any_host) {
+        // 사용자 탭(탭과 함께 생긴 grant 가 아니다 — `any_host` 는 #4737 뒤 모든 grant 라 가르지 못했다: 이 제한이 꺼져 있었다).
+        if (sets_net and !call.birth) {
             const n = p.network.set;
             if (n.offline) {
                 why.* = .{ .reason = "offline_user_tab", .message = "offline is only for tabs you opened (browser open) — on the user's tab use a preset such as slow-3g" };
@@ -905,8 +936,22 @@ pub const Tab = struct {
         if (self.active()) {
             if (self.owner == 0) {
                 self.owner = call.pane;
-                self.site = if (call.any_host) .{} else cpg.GrantHost.init(call.grant_host);
                 self.agent_tab = call.birth;
+            }
+            // 묶음은 `set` 마다 부를 때의 사이트로 — 다른 사이트에서 다시 걸면 그리로 옮긴다(옛 사이트는 진짜 값). 지금 묶음이 이미 그 페이지를 덮으면
+            // (같은 호스트·하위 도메인 — `siteCovers` 와 같은 셈) 그대로 둔다: `www.a.test` 에서 다시 걸어 `a.test` 묶음이 좁아지지 않게. 사이트만 바뀌어도
+            // 세대를 올려 sidecar 가 새 사이트를 받게 한다.
+            if (bind) |b| {
+                const site: []const u8 = switch (b) {
+                    .whole_tab, .no_site => "",
+                    .site => |h| if (call.any_host and self.site.len != 0 and ws.net_policy.hostCovers(self.site.slice(), h)) self.site.slice() else h,
+                };
+                const next_site = cpg.GrantHost.init(site);
+                if (!next_site.eql(&self.site)) {
+                    self.site = next_site;
+                    self.bump();
+                    out.changed = true;
+                }
             }
         } else {
             self.owner = 0;
@@ -916,12 +961,13 @@ pub const Tab = struct {
         return out;
     }
 
-    /// 주인의 emulation grant 가 사라졌거나 다른 호스트로 바뀌었으면(사이트에 묶인 흉내 — 새 동의) 모두 지운다. 바꿨으면 참.
+    /// 주인의 emulation grant 가 사라졌거나(철회) 옛 호스트 grant 가 다른 호스트로 바뀌었으면(새 동의) 모두 지운다. 어느 호스트든 grant 면 묶음과 무관하게
+    /// 둔다 — 사용자 탭의 묶음은 grant 가 아니라 `set` 을 부를 때의 사이트다(그렇지 않으면 다음 동기화가 묶인 흉내를 곧 지웠다). 바꿨으면 참.
     pub fn sync(self: *Tab, grants: []const OwnerGrant) bool {
         if (!self.active()) return false;
         for (grants) |g| if (g.pane == self.owner) {
-            if (g.any_host and self.site.len == 0) return false;
-            if (!g.any_host and self.site.len != 0 and std.mem.eql(u8, g.host, self.site.slice())) return false;
+            if (g.any_host) return false;
+            if (self.site.len != 0 and std.mem.eql(u8, g.host, self.site.slice())) return false;
             break;
         };
         self.clearAll();
@@ -1916,7 +1962,7 @@ test "W9e②: 주인이 없으면 거절(no_agent_process), 사용자 탭은 네
     try testing.expect(u.net_owner.?.holder == null);
     // 지우면 주인도 없다.
     const clear = try parse("{\"id\":1,\"action\":\"set\",\"cpu\":null}", &w);
-    _ = try t.apply(.{ .pane = 5, .params = &clear, .any_host = true, .now_ms = 30 }, &why); // 지움은 주인 없이도 된다
+    _ = try t.apply(.{ .pane = 5, .params = &clear, .any_host = true, .birth = true, .now_ms = 30 }, &why); // 지움은 주인 없이도 된다
     try testing.expect(t.cpu_owner == null and t.settings.cpu == null);
 }
 
@@ -1935,7 +1981,7 @@ test "W9e② 확인 결정 9: 사람이 친 CLI — 주인은 셸(kind shell), �
     try testing.expect(std.mem.indexOf(u8, json, "\"owner\":{\"cpu\":{\"kind\":\"shell\",\"pid\":400},\"network\":{\"kind\":\"shell\",\"pid\":400}}") != null);
     // 에이전트가 network 를 다시 걸면 그 무리는 에이전트 주인(마지막으로 건 호출의 것), cpu 는 셸에 남는다.
     const net = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"fast-4g\"}", &w);
-    _ = try t.apply(.{ .pane = 5, .params = &net, .any_host = true, .owner = agent_owner, .now_ms = 10 }, &why);
+    _ = try t.apply(.{ .pane = 5, .params = &net, .any_host = true, .birth = true, .owner = agent_owner, .now_ms = 10 }, &why);
     try testing.expect(t.cpu_owner.?.shell and !t.net_owner.?.shell);
     // 셸이 끝났다(목록에 없다) — cpu 만 풀린다.
     var procs: FakeProcs = .{ .procs = &.{procInfo(300, 7)} };
@@ -1943,7 +1989,7 @@ test "W9e② 확인 결정 9: 사람이 친 CLI — 주인은 셸(kind shell), �
     try testing.expect(t.settings.cpu == null and t.settings.network != null);
     try testing.expectEqualStrings("owner_exited", t.cpu_release.?);
     // clear 는 주인 없이도(사람이 셸에서 친 --clear 도) 모두 지운다.
-    _ = try t.apply(.{ .pane = 5, .params = &(try parse("{\"id\":1,\"action\":\"clear\"}", &w)), .any_host = true, .now_ms = 20 }, &why);
+    _ = try t.apply(.{ .pane = 5, .params = &(try parse("{\"id\":1,\"action\":\"clear\"}", &w)), .any_host = true, .birth = true, .now_ms = 20 }, &why);
     try testing.expect(!t.active() and !t.hasOwners());
 }
 
@@ -2023,9 +2069,127 @@ test "W9e②: wire 꼴(닫힌 칸을 지난다)·결과 JSON(cpu·network·owner
     var buf: [160]u8 = undefined;
     try testing.expectEqualStrings("CPU \u{00D7}4, offline", t.summary(&buf));
     const q = try parse("{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":250,\"download_kbps\":800}}", &w);
-    _ = try t.apply(.{ .pane = 5, .params = &q, .any_host = true, .now_ms = 100, .owner = agent_owner }, &why);
+    _ = try t.apply(.{ .pane = 5, .params = &q, .any_host = true, .birth = true, .now_ms = 100, .owner = agent_owner }, &why);
     const v2 = t.toWire(9);
     try emu_fields.checkEmulation(v2);
     try testing.expect(!v2.flags.offline and v2.latency_ms == 250 and v2.download_kbps == 800 and v2.upload_kbps == 0);
     try testing.expectEqualStrings("CPU \u{00D7}4, latency 250 ms", t.summary(&buf));
+}
+
+// ── 사용자 결정 2026-11-17 「건 사이트에만 다시 묶기」 ─────────────────────────────────────────────────────────────────
+
+fn userCall(params: *const Params, page: []const u8, now: i64) Call {
+    // #4737 전권 뒤의 사용자 탭 — grant 는 어느 호스트든, 탭과 함께 생긴 것이 아니다.
+    return .{ .pane = 5, .params = params, .any_host = true, .birth = false, .page_host = page, .now_ms = now };
+}
+
+test "건 사이트에 묶기: bindSite — 에이전트 탭(탭과 함께 생긴 grant)은 탭 전체, 옛 호스트 grant 는 그 호스트, 전권의 사용자 탭은 지금 페이지, 모르면·너무 길면 no_site" {
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
+    try testing.expect(bindSite(.{ .pane = 1, .params = &p, .any_host = true, .birth = true, .page_host = "a.test" }) == .whole_tab);
+    try testing.expectEqualStrings("g.test", bindSite(.{ .pane = 1, .params = &p, .any_host = false, .grant_host = "g.test", .page_host = "a.test" }).site);
+    try testing.expectEqualStrings("a.test", bindSite(userCall(&p, "a.test", 0)).site);
+    try testing.expect(bindSite(userCall(&p, "", 0)) == .no_site);
+    const long: [cpg.max_host_bytes + 1]u8 = @splat('a');
+    try testing.expect(bindSite(userCall(&p, &long, 0)) == .no_site);
+}
+
+test "건 사이트에 묶기: 사용자 탭의 set 은 지금 사이트에 묶여 wire 가 site_bound — 결과의 site, 에이전트 탭은 묶지 않는다" {
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
+    var u: Tab = .{};
+    const out = try u.apply(userCall(&p, "a.test", 0), &why);
+    try testing.expect(out.changed);
+    const v = u.toWire(9);
+    try testing.expect(v.flags.site_bound);
+    try testing.expectEqualStrings("a.test", v.site);
+    const json = try u.resultJson(testing.allocator, 640, 400, false, false);
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.indexOf(u8, json, "\"site\":\"a.test\"") != null);
+    var a: Tab = .{};
+    _ = try a.apply(.{ .pane = 5, .params = &p, .any_host = true, .birth = true, .page_host = "a.test" }, &why);
+    try testing.expect(!a.toWire(9).flags.site_bound);
+    const ja = try a.resultJson(testing.allocator, 640, 400, false, false);
+    defer testing.allocator.free(ja);
+    try testing.expect(std.mem.indexOf(u8, ja, "\"site\":null") != null);
+}
+
+test "건 사이트에 묶기: 다른 사이트에서 다시 set 하면 그리로 옮기고 세대를 올린다(설정이 같아도), 덮는 하위 도메인에서는 그대로, 덧쓰기는 남는다" {
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
+    var u: Tab = .{};
+    _ = try u.apply(userCall(&p, "a.test", 0), &why);
+    const g0 = u.gen;
+    const sub = try u.apply(userCall(&p, "www.a.test", 200), &why);
+    try testing.expect(!sub.changed and u.gen == g0);
+    try testing.expectEqualStrings("a.test", u.site.slice());
+    const loc = try parse("{\"id\":1,\"action\":\"set\",\"locale\":\"fr-FR\"}", &w);
+    const moved = try u.apply(userCall(&loc, "b.test", 400), &why);
+    try testing.expect(moved.changed and u.gen != g0);
+    try testing.expectEqualStrings("b.test", u.site.slice());
+    try testing.expect(u.settings.timezone != null and u.settings.locale != null); // 덧쓰기 그대로
+    const g1 = u.gen;
+    const same = try parse("{\"id\":1,\"action\":\"set\"}", &w);
+    const back = try u.apply(userCall(&same, "a.test", 600), &why); // 아무 무리도 바꾸지 않는 set — 묶음만 옮긴다
+    try testing.expect(back.changed and u.gen != g1);
+    try testing.expectEqualStrings("a.test", u.toWire(9).site);
+}
+
+test "건 사이트에 묶기: 페이지를 모르면 set 은 no_site(바꾸기 상한을 먹지 않는다), clear·get 은 어디서든 — clear 는 묶음도 푼다" {
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
+    var u: Tab = .{};
+    var i: i64 = 0;
+    while (i < 12) : (i += 1) {
+        try testing.expectError(error.Rejected, u.apply(userCall(&p, "", i), &why));
+        try testing.expectEqualStrings("no_site", why.reason);
+    }
+    try testing.expect(!u.active());
+    _ = try u.apply(userCall(&p, "a.test", 20), &why); // 상한을 먹지 않았다 — 곧 된다
+    const g = try parse("{\"id\":1,\"action\":\"get\"}", &w);
+    _ = try u.apply(userCall(&g, "", 30), &why);
+    try testing.expectEqualStrings("a.test", u.site.slice());
+    const c = try parse("{\"id\":1,\"action\":\"clear\"}", &w);
+    _ = try u.apply(userCall(&c, "", 40), &why); // 다른 사이트·빈 페이지에서도 지운다
+    try testing.expect(!u.active() and u.site.len == 0 and !u.toWire(9).flags.site_bound);
+}
+
+test "건 사이트에 묶기: grant 동기화 — 어느 호스트든 grant 는 묶인 흉내를 그대로 두고, 주인의 grant 가 없으면 지우고, 옛 호스트 grant 는 같은 호스트일 때만" {
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    const p = try parse("{\"id\":1,\"action\":\"set\",\"timezone\":\"UTC\"}", &w);
+    var u: Tab = .{};
+    _ = try u.apply(userCall(&p, "a.test", 0), &why);
+    try testing.expect(!u.sync(&.{.{ .pane = 5, .any_host = true }}));
+    try testing.expect(u.active());
+    try testing.expect(u.sync(&.{.{ .pane = 6, .any_host = true }}));
+    try testing.expect(!u.active());
+    var h: Tab = .{};
+    _ = try h.apply(.{ .pane = 5, .params = &p, .any_host = false, .grant_host = "a.test", .page_host = "zz.test" }, &why);
+    try testing.expectEqualStrings("a.test", h.site.slice()); // 옛 호스트 grant 는 grant 호스트(지금 페이지가 아니다)
+    try testing.expect(!h.sync(&.{.{ .pane = 5, .host = "a.test" }}));
+    try testing.expect(h.sync(&.{.{ .pane = 5, .host = "b.test" }}));
+}
+
+test "건 사이트에 묶기: 사용자 탭의 네트워크 제한은 탭과 함께 생긴 grant 로 가른다 — 전권(어느 호스트든)의 사용자 탭도 offline·수치 지연 거절, 에이전트 탭은 된다" {
+    var why: Failure = undefined;
+    var w: ?Why = null;
+    var u: Tab = .{};
+    const off = try parse("{\"id\":1,\"action\":\"set\",\"network\":\"offline\"}", &w);
+    var call = userCall(&off, "a.test", 0);
+    call.owner = agent_owner;
+    try testing.expectError(error.Rejected, u.apply(call, &why));
+    try testing.expectEqualStrings("offline_user_tab", why.reason);
+    const custom = try parse("{\"id\":1,\"action\":\"set\",\"network\":{\"latency_ms\":300}}", &w);
+    call.params = &custom;
+    try testing.expectError(error.Rejected, u.apply(call, &why));
+    try testing.expectEqualStrings("network_preset_only", why.reason);
+    var a: Tab = .{};
+    var ac = testCall(&off, 5, 0);
+    ac.owner = agent_owner;
+    _ = try a.apply(ac, &why);
+    try testing.expect(a.settings.network != null);
 }

@@ -102810,7 +102810,10 @@ test "browser.show 키 받는 pane: 앞 탭을 바꾸고 키는 막는다 — �
     try std.testing.expectEqual(bg, session.osr_key_hold);
     try std.testing.expect(web_ops.osrKeyTarget(session) == null); // 키·조합·팝업 키의 관문이 닫혔다
     try std.testing.expectEqual(@as(u64, 0), session.osr_key_target); // 포커스를 주지 않았다(hasFocus 거짓)
-    try std.testing.expect(web_ops.takeDownloadAsk(session) == null); // 저장 창도 맡지 않는다(이름 칸이 사람의 키를 받는다)
+    // 저장 창도 맡지 않는다(이름 칸이 사람의 키를 받는다) — 그 탭에 묻는 다운로드가 있어도. 끝에서 풀린 뒤에는 맡는다(대조).
+    defer web_osr.downloads.testReset();
+    try web_osr.downloads.testAddRow(77, bg, .asking);
+    try std.testing.expect(web_ops.takeDownloadAsk(session) == null);
     // 창이 키를 잃었다 돌아와도 막음은 그대로(자리는 바뀌지 않았다).
     session.window_focused = false;
     web_ops.syncOsrKeyTarget(session);
@@ -102851,6 +102854,7 @@ test "browser.show 키 받는 pane: 앞 탭을 바꾸고 키는 막는다 — �
     try std.testing.expectEqual(@as(u64, 0), session.osr_key_hold);
     try std.testing.expectEqual(bg, session.osr_key_target);
     session.finishPointerGesture();
+    try std.testing.expect(web_ops.takeDownloadAsk(session) != null); // 풀린 탭은 저장 창을 맡는다
 }
 
 test "browser.show 다른 pane·다른 워크스페이스: 그 pane 의 앞 탭만 — 포커스·워크스페이스는 그대로, 키를 막지 않는다, 화면 밖이면 visible 거짓" {
@@ -102864,6 +102868,16 @@ test "browser.show 다른 pane·다른 워크스페이스: 그 pane 의 앞 탭�
     const shell = left.activeTerm().surfaceId();
     const bg = try showTestTab(session, allocator, shell);
     const bg2 = try showTestTab(session, allocator, shell);
+    // 다른 워크스페이스로 간 뒤 — 그 pane(첫 워크스페이스의 활성 pane)의 앞 탭만 바꾸고 화면은 그대로, 워크스페이스 대표도 맞춘다.
+    session.dispatchAppAction(.new_tab);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    const off = web_ops.agentShowTab(session, bg2).shown;
+    try std.testing.expect(!off.visible and off.changed and !off.key_held);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(bg2, left.activeTerm().surfaceId());
+    try std.testing.expectEqual(left.activeTerm().surface, session.surface_ptrs.items[0]);
+    try std.testing.expect(session.runAction("previous_tab"));
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
     session.dispatchAppAction(.split_horizontal); // 오른쪽 pane 이 키를 받는다
     const right = pane_ops.activePane(session);
     try std.testing.expect(right != left);
@@ -102872,15 +102886,6 @@ test "browser.show 다른 pane·다른 워크스페이스: 그 pane 의 앞 탭�
     try std.testing.expectEqual(bg, left.activeTerm().surfaceId());
     try std.testing.expectEqual(right, pane_ops.activePane(session)); // 포커스는 그대로
     try std.testing.expectEqual(@as(u64, 0), session.osr_key_hold);
-    // 다른 워크스페이스로 간 뒤 — 그 pane 의 앞 탭만 바꾸고 화면은 그대로.
-    session.dispatchAppAction(.new_tab);
-    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
-    const off = web_ops.agentShowTab(session, bg2).shown;
-    try std.testing.expect(!off.visible and off.changed and !off.key_held);
-    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
-    try std.testing.expectEqual(bg2, left.activeTerm().surfaceId());
-    // 워크스페이스 대표(탭의 활성 pane 의 앞 Term)는 그대로 맞다.
-    try std.testing.expectEqual(session.tabs.items[0].activeTerm().surface, session.surface_ptrs.items[0]);
 }
 
 test "browser.show 거절: 모달·sheet·그 pane 의 탭 끌기·키 받는 pane 의 주소창 편집·탭 줄 숨김·모르는 탭·터미널 — 앞 탭은 그대로" {
@@ -102900,6 +102905,13 @@ test "browser.show 거절: 모달·sheet·그 pane 의 탭 끌기·키 받는 pa
     session.osr_dialog = .{ .surface_id = bg, .token = 1 };
     try std.testing.expectEqual(Refusal.sheet, web_ops.agentShowTab(session, bg).refused);
     session.osr_dialog = null;
+    {
+        // 이 창의 탭에 다운로드 저장 창이 떠 있다(맡은 묻기).
+        defer web_osr.downloads.testReset();
+        try web_osr.downloads.testAddRow(78, bg, .asking);
+        try std.testing.expect(web_osr.downloads.claimAskFor(bg) != null);
+        try std.testing.expectEqual(Refusal.sheet, web_ops.agentShowTab(session, bg).refused);
+    }
     session.pointer_gesture_owner = .{ .terminal_tab = .{ .pane = pane, .index = 0 } };
     try std.testing.expectEqual(Refusal.dragging, web_ops.agentShowTab(session, bg).refused);
     session.pointer_gesture_owner = .{ .pane = .{ .pane = pane, .x = 0, .y = 0 } };

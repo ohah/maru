@@ -14109,6 +14109,11 @@ test "browser.show: 키 받는 pane 의 뒤쪽 탭을 앞으로 — 배치가 �
     try expectPendingFailureText(&gone, "the tab was closed");
 }
 
+test "browser.show 는 탭 op — 두 디스패치 자리가 같은 판정(isTabOp)으로 탭 op 목록에 보낸다" {
+    try std.testing.expect(isTabOp(.show) and isTabOp(.open) and isTabOp(.close));
+    try std.testing.expect(!isTabOp(.click) and !isTabOp(.navigate) and !isTabOp(.dialog));
+}
+
 test "browser.show 뒤의 DevTools 거절 글: 기록 없는 탭은 「show 로 내라」, 기록은 있는데 만드는 중이면 「기다려라」(첫 몇 초의 틀린 안내 — 2026-11-17 실측)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const ta = std.testing.allocator;

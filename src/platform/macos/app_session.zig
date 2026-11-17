@@ -73676,6 +73676,173 @@ test "P0-2: WebKit 탭의 늦은 찾음/없음은 Chromium 탭 오버레이에 �
     try std.testing.expect(session.chrome_host.find.page_count == null);
 }
 
+// ── P0-3: Chromium 탭의 이동은 Zig tick 이 보낸다 ─────────────────────────────────────────────────────────────────────────
+// 주소창 Enter·주소 띠에 놓은 링크·←→⟳ 단추·새 탭의 첫 주소(`pending_url`)는 예전에 Swift 가 tick 뒤에 부르는 take(`take_web_addr_navigate`·
+// `take_web_nav_action`) **안에서** sidecar 로 나갔다. WebKit 을 걷어내며 그 take 를 지우면 Chromium 탭의 이동이 함께 죽는다 — 그래서 tick 의
+// `tickWebOsr` 끝에서 보내고, take 는 WebKit 탭 몫만 돌려준다. 이 시험들은 take 를 부르지 않고 tick 만 돌려 보낸 frame 을 본다.
+
+/// 쌓인 frame 가운데 그 탭의 이동(`navigate`)·단추(`nav_action`)를 보낸 차례대로.
+const P03Nav = struct { action: ?maru.session.web_sidecar.message.NavActionKind = null, url: []const u8 = "", user: bool = false };
+fn p03Navs(browser: u64, out: []P03Nav) usize {
+    var buf: [64]maru.session.web_sidecar.message.Message = undefined;
+    const n = web_osr.testSent(&buf);
+    var k: usize = 0;
+    for (buf[0..n]) |m| {
+        if (k == out.len) break;
+        switch (m) {
+            .navigate => |v| if (v.browser == browser) {
+                out[k] = .{ .url = v.url, .user = v.user };
+                k += 1;
+            },
+            .nav_action => |v| if (v.browser == browser) {
+                out[k] = .{ .action = v.action, .user = v.user };
+                k += 1;
+            },
+            else => {},
+        }
+    }
+    return k;
+}
+
+fn p03TypeUrl(session: *AppSession, browser: u64, url: []const u8) void {
+    web_ops.enterAddrEdit(session, browser, "https://old.test/");
+    while (web_ops.addrEditText(session).len > 0) web_ops.addrEditBackspace(session);
+    for (url) |c| web_ops.addrEditAppend(session, c);
+}
+
+test "P0-3: Chromium 탭의 주소창 Enter·←→⟳·첫 주소는 Swift take 없이 tick 이 sidecar 로 보낸다 — 예전 drain 과 같은 차례, take 는 걷을 것이 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    web_ops.setWebNavState(session, t.browser, true, true, "https://old.test/"); // 뒤로·앞으로가 살아 있다
+    const term = pane_ops.activePane(session).activeTerm();
+    var navs: [8]P03Nav = undefined;
+
+    // ① 하나씩 — 주소창 Enter(사람의 이동), 뒤로·앞으로·다시 읽기(사람의 단추), 첫 주소(사람이 아닌 이동 — 놓는다).
+    p03TypeUrl(session, t.browser, "http://a.test/typed");
+    web_ops.commitAddrEdit(session);
+    web_osr.testClearSent();
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p03Navs(t.browser, &navs));
+    try std.testing.expectEqualStrings("http://a.test/typed", navs[0].url);
+    try std.testing.expect(navs[0].user and navs[0].action == null);
+    try std.testing.expect(session.addr_navigate_pending == null);
+    for ([_]NavButton{ .back, .forward, .reload }, [_]maru.session.web_sidecar.message.NavActionKind{ .back, .forward, .reload }) |btn, want| {
+        web_ops.setBrowserNavAction(session, t.browser, btn);
+        web_osr.testClearSent();
+        _ = try session.tick();
+        try std.testing.expectEqual(@as(usize, 1), p03Navs(t.browser, &navs));
+        try std.testing.expectEqual(@as(?maru.session.web_sidecar.message.NavActionKind, want), navs[0].action);
+        try std.testing.expect(navs[0].user);
+        try std.testing.expect(session.web_nav_action_pending == null);
+    }
+    term.pending_url = try allocator.dupe(u8, "https://e.test/first");
+    web_osr.testClearSent();
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p03Navs(t.browser, &navs));
+    try std.testing.expectEqualStrings("https://e.test/first", navs[0].url);
+    try std.testing.expect(!navs[0].user);
+    try std.testing.expect(term.pending_url == null);
+    // wire 상한을 넘는 첫 주소는 보내지 않고 놓는다(예전 take 의 방어 그대로 — sidecar 가 frame 을 거절해 끊기지 않게).
+    const over = try allocator.alloc(u8, maru.session.web_sidecar.wire.max_url_bytes + 1);
+    @memset(over, 'x');
+    term.pending_url = over;
+    web_osr.testClearSent();
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), p03Navs(t.browser, &navs));
+    try std.testing.expect(term.pending_url == null);
+    try std.testing.expectEqualStrings("https://e.test/first", web_osr.testLastUrl(t.browser).?); // 다시 뜰 때 되풀이할 주소로도 적지 않는다
+
+    // ② 한 tick 에 셋 — 예전 drain 의 차례(주소창 → 첫 주소 → 단추) 그대로. Swift take 는 걷을 것이 없다.
+    p03TypeUrl(session, t.browser, "http://a.test/two");
+    web_ops.commitAddrEdit(session);
+    term.pending_url = try allocator.dupe(u8, "https://e.test/second");
+    web_ops.setBrowserNavAction(session, t.browser, .reload);
+    web_osr.testClearSent();
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 3), p03Navs(t.browser, &navs));
+    try std.testing.expectEqualStrings("http://a.test/two", navs[0].url);
+    try std.testing.expectEqualStrings("https://e.test/second", navs[1].url);
+    try std.testing.expectEqual(@as(?maru.session.web_sidecar.message.NavActionKind, .reload), navs[2].action);
+    try std.testing.expect(web_ops.takeWebAddrNavigate(session) == null);
+    try std.testing.expect(session.takeWebNavAction() == null);
+}
+
+test "P0-3: take 가 tick 보다 먼저 불려도 Chromium 탭의 대기는 걷지 않고 보내지도 않는다 — 다음 tick 이 보낸다, 배치 전 탭의 첫 주소는 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    web_ops.setWebNavState(session, t.browser, true, false, "https://old.test/");
+    const term = pane_ops.activePane(session).activeTerm();
+    var navs: [8]P03Nav = undefined;
+
+    // tick 뒤 drain 전에 세워진 대기(그런 자리는 지금 없지만 take 가 Swift 에 넘기면 WKWebView 가 없어 잃는다).
+    p03TypeUrl(session, t.browser, "http://a.test/late");
+    web_ops.commitAddrEdit(session);
+    web_ops.setBrowserNavAction(session, t.browser, .back);
+    term.pending_url = try allocator.dupe(u8, "https://e.test/late-first");
+    web_osr.testClearSent();
+    try std.testing.expect(web_ops.takeWebAddrNavigate(session) == null);
+    try std.testing.expect(session.takeWebNavAction() == null);
+    try std.testing.expectEqual(@as(usize, 0), p03Navs(t.browser, &navs)); // take 는 보내지 않는다
+    try std.testing.expectEqual(@as(?u64, t.browser), session.addr_navigate_pending);
+    try std.testing.expectEqual(@as(?u64, t.browser), session.web_nav_action_pending);
+    try std.testing.expect(term.pending_url != null);
+    try std.testing.expectEqualStrings("http://a.test/late", session.addr_navigate_url_buf[0..session.addr_navigate_url_len]); // 버퍼도 그대로
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 3), p03Navs(t.browser, &navs));
+    try std.testing.expectEqualStrings("http://a.test/late", navs[0].url);
+    try std.testing.expectEqualStrings("https://e.test/late-first", navs[1].url);
+    try std.testing.expectEqual(@as(?maru.session.web_sidecar.message.NavActionKind, .back), navs[2].action);
+
+    // 아직 배치되지 않은 Chromium 탭(sidecar 표에 없다)의 첫 주소는 tick 도 take 도 건드리지 않는다 — 배치되면 그 tick 에 간다. 주소는 WebKit
+    // 상한(4 KiB)보다 길게(W6e — 페이지가 연 새 탭의 긴 링크): take 가 Chromium 탭을 WebKit 가지로 보면 그 상한에서 버려 빈 탭이 된다.
+    const later = try pane_ops.appendWebTermInActivePane(session, .browser);
+    const later_term = pane_ops.activePane(session).activeTerm();
+    const long_url = try allocator.alloc(u8, 5000);
+    defer allocator.free(long_url);
+    @memcpy(long_url[0..15], "https://e.test/");
+    @memset(long_url[15..], 'x');
+    later_term.pending_url = try allocator.dupe(u8, long_url);
+    web_osr.testClearSent();
+    _ = try session.tick();
+    try std.testing.expect(web_ops.takeWebAddrNavigate(session) == null);
+    try std.testing.expect(later_term.pending_url != null);
+    try web_osr.testHold(allocator, later);
+    web_osr.testRunning(later);
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p03Navs(later, &navs));
+    try std.testing.expectEqualStrings(long_url, navs[0].url);
+    try std.testing.expect(later_term.pending_url == null);
+}
+
+test "P0-3: 같은 tick 에 페이지가 닫은 Chromium 탭의 대기는 보내지 않는다 — 이동은 tickWebOsr 의 끝, 닫기 뒤" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    // 닫혀도 창에 탭이 남게 하나 더(유일한 탭이면 빈 탭으로 새로 연다).
+    const other = try pane_ops.appendWebTermInActivePane(session, .browser);
+    _ = other;
+    term_ops.focusTerm(session, 1); // 닫힐 탭으로
+    p03TypeUrl(session, t.browser, "http://a.test/closing");
+    web_ops.commitAddrEdit(session);
+    web_ops.setBrowserNavAction(session, t.browser, .reload);
+    web_osr.testApply(allocator, .{ .browser_closed = t.browser }); // 페이지가 스스로 닫았다(window.close)
+    web_osr.testRunning(t.browser); // 「만들어졌다」 로 되돌려 web_osr 의 막음이 아니라 차례가 보내지 않음을 보게 한다
+    web_osr.testClearSent();
+    _ = try session.tick();
+    var navs: [8]P03Nav = undefined;
+    try std.testing.expectEqual(@as(usize, 0), p03Navs(t.browser, &navs));
+    try std.testing.expect(session.addr_navigate_pending == null);
+    try std.testing.expect(session.web_nav_action_pending == null);
+}
+
 test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지로 나간다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

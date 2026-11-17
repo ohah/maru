@@ -1758,23 +1758,24 @@ echo "PASS w9c-upload: one file reaches the page as a trusted change with its co
 grep -q '^rc=0$' "$out/nw-agent" && grep -q ' xhr http://127.0.0.1:[0-9]*/netapi.json?a' "$out/nw-agent" && grep -q 'http://127.0.0.1:[0-9]*/setck' "$out/nw-agent" \
     && grep -q 'netf-api.json.*\[cross-site iframe\]' "$out/nw-agent" \
     || fail "the agent's tab did not record its requests from birth with the cross-site iframe mark ($(tr '\n' ' ' < "$out/nw-agent"))"
-grep -q "^  Cookie: (hidden — needs this site's cookie permission" "$out/nw-api" && grep -q "^  Authorization: (hidden — needs this site's cookie permission" "$out/nw-api" \
-    && ! grep -q 'cookie-secret' "$out/nw-api" && ! grep -q 'smoke-token' "$out/nw-api" && grep -q '^body: not recorded$' "$out/nw-api" \
-    || fail "before the cookie permission the agent's own tab showed Cookie or Authorization values (W9d① round 3 D1) ($(tr '\n' ' ' < "$out/nw-api"))"
+# 사용자 결정 2026-11-16(전권): 쿠키 권한을 따로 묻지 않는다 — 첫 자세히부터 Cookie·Authorization 값이 보인다(설정 켬).
+grep -q '^  Cookie: smk=cookie-secret$' "$out/nw-api" && grep -q '^  Authorization: Bearer smoke-token$' "$out/nw-api" && grep -q '^body: not recorded$' "$out/nw-api" \
+    || fail "with full access the agent's own tab did not show the Cookie and Authorization values at once ($(tr '\n' ' ' < "$out/nw-api"))"
 grep -q '^rc=0$' "$out/nw-ck" && grep -q '^  Cookie: smk=cookie-secret$' "$out/nw-api2" && grep -q '^  Authorization: Bearer smoke-token$' "$out/nw-api2" \
-    || fail "after get-cookies allowed the site the request detail did not show the Cookie and Authorization values ($(tr '\n' ' ' < "$out/nw-ck") · $(tr '\n' ' ' < "$out/nw-api2"))"
+    || fail "after get-cookies the request detail did not still show the Cookie and Authorization values ($(tr '\n' ' ' < "$out/nw-ck") · $(tr '\n' ' ' < "$out/nw-api2"))"
 grep -q 'nsw/data.json.*\[service worker of http://127.0.0.1:[0-9]*\]' "$out/nw-sw" || fail "a fetch of a service-worker page was not labelled as the service worker's ($(tr '\n' ' ' < "$out/nw-sw"))"
 grep -qx 'ok' "$out/nw-u-nav2" || fail "the tab for the second reader did not move ($(tr '\n' ' ' < "$out/nw-u-nav2"))"
 grep -q '^rc=0$' "$out/nw-u-first" && ! grep -q 'net-before' "$out/nw-u-first" && grep -q '^([0-9]* earlier requests\{0,1\} hidden' "$out/nw-u-first" \
     || fail "the second reader's first read showed a request from before its permission, or no hidden count ($(tr '\n' ' ' < "$out/nw-u-first"))"
 grep -q 'net-after.html' "$out/nw-u-second" && ! grep -q 'net-before' "$out/nw-u-second" || fail "the second reader did not see the request after its permission ($(tr '\n' ' ' < "$out/nw-u-second"))"
 grep -qx 'ok' "$out/nw-u-away-nav" && grep -qx 'ok' "$out/nw-u-back-nav" || fail "the tab for the second reader did not go to the other site and back ($(tr '\n' ' ' < "$out/nw-u-away-nav") · $(tr '\n' ' ' < "$out/nw-u-back-nav"))"
-grep -q '^rc=0$' "$out/nw-u-away" && grep -q 'net-back.html' "$out/nw-u-away" && ! grep -q 'away' "$out/nw-u-away" \
-    && grep -q '^([0-9]* requests\{0,1\} hidden — made while the tab showed a site your permission does not cover)$' "$out/nw-u-away" \
-    || fail "after the tab went to another site and back, the second reader saw that site's requests or no hidden count ($(tr '\n' ' ' < "$out/nw-u-away"))"
+# 전권(2026-11-16): 둘째 pane 의 grant 도 어느 호스트든 — 다른 사이트에 간 동안의 요청도 보인다.
+grep -q '^rc=0$' "$out/nw-u-away" && grep -q 'net-back.html' "$out/nw-u-away" && grep -q 'net-away.html' "$out/nw-u-away" \
+    && ! grep -q 'site your permission does not cover' "$out/nw-u-away" \
+    || fail "with full access the second reader did not see the other site's requests after the tab went there and back ($(tr '\n' ' ' < "$out/nw-u-away"))"
 grep -qx 'ok' "$out/nw-u-redir-nav" && grep -q 'GET /netredir' "$root/http.log" || fail "the tab for the second reader did not take the other site's redirect back ($(tr '\n' ' ' < "$out/nw-u-redir-nav"))"
-! grep -q 'netredir' "$out/nw-u-away" && ! grep -q 'net-cb' "$out/nw-u-away" \
-    || fail "a navigation that started on another site and was redirected back was shown to the second reader ($(tr '\n' ' ' < "$out/nw-u-away"))"
+grep -q 'netredir' "$out/nw-u-away" \
+    || fail "with full access a navigation that started on another site and was redirected back was not shown to the second reader ($(tr '\n' ' ' < "$out/nw-u-away"))"
 grep -q '^rc=0$' "$out/nw-u-revoked" && ! grep -q 'net-after' "$out/nw-u-revoked" || fail "after revoking the grants the record was not wiped ($(tr '\n' ' ' < "$out/nw-u-revoked"))"
 # W9d② — 본문 단계는 실패를 모아 한 번에 알린다(한 판에 여러 갈래를 본다).
 body_bad=""
@@ -1789,11 +1790,12 @@ grep -q '^body: not_text$' "$out/bd-pic" || bbad "a PNG body was not not_text ($
 grep -q '^rc=1$' "$out/bd-bin" && grep -q 'binary body — write it with --out' "$out/bd-bin" || bbad "a binary body was printed without --out ($(tr '\n' ' ' < "$out/bd-bin"))"
 grep -q '^rc=0$' "$out/bd-binout" && [ "$(cat "$out/bd-bin-head")" = 7b2262696e223a228081fe227d ] || bbad "the binary body was not written with --out ($(tr '\n' ' ' < "$out/bd-binout") · head $(cat "$out/bd-bin-head"))"
 grep -q '^rc=0$' "$out/bd-cout" && [ "$(cat "$out/bd-cout-mode")" = 600 ] && [ "$(cat "$out/bd-c.json")" = '{"chunked":["one","two"]}' ] || bbad "--out did not write the body to a 0600 file ($(tr '\n' ' ' < "$out/bd-cout") · mode $(cat "$out/bd-cout-mode"))"
-grep -q '^body: hidden — this response carried another site' "$out/bd-cred" && ! grep -q 'body-secret' "$out/bd-cred" || bbad "a script body sent with another site's cookies was shown without that site's cookie permission (UB1) ($(tr '\n' ' ' < "$out/bd-cred"))"
+grep -q '^body: captured' "$out/bd-cred" && grep -q 'body-secret' "$out/bd-cred" || bbad "with full access a script body sent with another site's cookies was not shown (UB1 needs no separate cookie permission now) ($(tr '\n' ' ' < "$out/bd-cred"))"
 grep -q '^rc=0$' "$out/bd-ck" && grep -q '^body: captured' "$out/bd-cred2" && grep -q 'body-secret' "$out/bd-cred2" || bbad "after get-cookies allowed the other site its credentialed body was not shown ($(tr '\n' ' ' < "$out/bd-ck") · $(tr '\n' ' ' < "$out/bd-cred2"))"
 [ -f "$out/p2-body-done" ] || bbad "the second pane did not finish its body reads ($(ls "$out" | grep -E '^(bd2-|p2-body)' | tr '\n' ' '))"
-grep -q '^body: hidden — needs the permission to record this tab' "$out/bd2-nobody" && ! grep -qF '"one","two"' "$out/bd2-nobody" || bbad "a pane without the body permission saw the body ($(tr '\n' ' ' < "$out/bd2-nobody"))"
-grep -q '^rc=0$' "$out/bd2-rec" && grep -q '^body: hidden — made before your permission to record bodies' "$out/bd2-before" || bbad "after the second pane's body permission a body from before it was shown ($(tr '\n' ' ' < "$out/bd2-rec") · $(tr '\n' ' ' < "$out/bd2-before"))"
+# 전권(2026-11-16): 둘째 pane 은 첫 `network` 에서 본문 권한까지 받았다 — 그 뒤의 요청(p2a)의 본문은 곧 보인다.
+grep -q '^body: captured' "$out/bd2-nobody" && grep -qF '"one","two"' "$out/bd2-nobody" || bbad "with full access the second pane did not see the body of a request made after its first read ($(tr '\n' ' ' < "$out/bd2-nobody"))"
+grep -q '^rc=0$' "$out/bd2-rec" && grep -q '^body: captured' "$out/bd2-before" || bbad "the second pane's body read changed after it turned recording on ($(tr '\n' ' ' < "$out/bd2-rec") · $(tr '\n' ' ' < "$out/bd2-before"))"
 grep -q '^body: captured' "$out/bd2-after" && grep -qxF 'body text: {"chunked":["one","two"]}' "$out/bd2-after" || bbad "the second pane did not see the body of a request after its permission ($(tr '\n' ' ' < "$out/bd2-after"))"
 ! grep -q '◉ recording' "$out/bd-blist2" || bbad "after revoking all grants the tab was still marked recording ($(tr '\n' ' ' < "$out/bd-blist2" | cut -c1-400))"
 grep -q '^rc=0$' "$out/bd-revoked" && ! grep -q 'bodyc.json' "$out/bd-revoked" && ! grep -q 'recording response bodies' "$out/bd-revoked" && ! grep -qF '"one","two"' "$out/bd-revoked-req" \

@@ -365,6 +365,24 @@ pub const State = struct {
         self.input_focused = true;
     }
 
+    /// 닫힌 오버레이를 **검색어를 둔 채** 다시 연다(P0-2 후속 — Chromium 탭의 ⌘G·⇧⌘G, Chrome 처럼). `show()` 와 같이 IME·바꾸기 줄·결과(찾음/없음·수)·
+    /// 고른 열을 비운다 — 바꿀 문자열을 남기면 보이지 않는 상태가 파괴적 편집을 하는 자리가 되는 것은 `show()` 와 같은 이유다. 검색어만 둔다(그것으로
+    /// 다음 일치를 찾는다). 결과는 host 가 곧 새로 싣는다.
+    pub fn reopen(self: *State) void {
+        self.ime_epoch +|= 1;
+        self.ime_input.invalidate();
+        self.ime_replace.invalidate();
+        self.replace.clear();
+        self.replace_open = false;
+        self.focus = .find;
+        self.page_found = null;
+        self.page_count = null;
+        self.regex_error = null;
+        self.diff_side = null;
+        self.open = true;
+        self.input_focused = true;
+    }
+
     pub fn hide(self: *State) void {
         self.ime_epoch +|= 1;
         self.open = false;
@@ -1195,6 +1213,27 @@ test "P0-2 페이지 카운터: Chromium 수가 있으면 cur/total(0/0 포함),
     s.target = .scrollback;
     s.setMatchCount(4);
     try std.testing.expectEqual(@as(u32, 3), counterCols(&s)); // "1/4"
+}
+
+test "P0-2 후속: reopen 은 검색어를 두고 연다 — 결과·바꾸기 줄·바꿀 글·고른 열은 show 처럼 비운다" {
+    const allocator = std.testing.allocator;
+    var s: State = .{};
+    defer s.deinit(allocator);
+    s.show();
+    try s.input.query.appendSlice(allocator, "apple");
+    try s.replace.query.appendSlice(allocator, "pear");
+    s.replace_open = true;
+    s.page_found = true;
+    s.page_count = .{ .active = 3, .total = 7 };
+    s.diff_side = .right;
+    s.hide();
+    s.reopen();
+    try std.testing.expect(s.open and s.input_focused);
+    try std.testing.expectEqualStrings("apple", s.input.query.items);
+    try std.testing.expectEqual(@as(usize, 0), s.replace.query.items.len);
+    try std.testing.expect(!s.replace_open);
+    try std.testing.expect(s.page_found == null and s.page_count == null and s.diff_side == null);
+    try std.testing.expectEqual(Focus.find, s.focus);
 }
 
 test "P0-2 페이지 카운터는 view 가 그린 글로 나온다 — 입력 칸이 그 자리를 비워 둔다" {

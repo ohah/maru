@@ -526,6 +526,18 @@ fn refilterAfterRuleChange(self: *AppSession) void {
 
 /// ⌘F: 비교 뷰는 활성 열을 열거나 포커스하고, 일반 Find는 토글한다. 일반 Find가 열려 있으면 닫고,
 /// 닫혀 있으면 다른 배타 오버레이(notice·palette)를 먼저 닫고 연다(검색어 초기화는 컴포넌트의 show가).
+/// 닫힌 찾기를 **검색어를 둔 채** 다시 연다(P0-2 후속 — Chromium 탭의 ⌘G·⇧⌘G). 여는 쪽의 배타 처리는 `toggleFind` 와 같다(알림·팔레트·이름 상자를 내리고
+/// 매치 목록을 비운다) — 다른 것은 검색어를 비우지 않는 것뿐이다. 부르는 쪽(`web.reopenOsrFind`)이 대상·조건을 정했다.
+pub fn reopenFindKeepingQuery(self: *AppSession) void {
+    syncDiffFind(self);
+    self.find_selection_at_open = null;
+    self.chrome_host.notice.dismiss();
+    self.chrome_host.palette.hide();
+    settings_ops.closePopupRename(self);
+    self.chrome_host.find.reopen();
+    clearAllFindMatches(self);
+}
+
 pub fn toggleFind(self: *AppSession) void {
     syncDiffFind(self);
     if (activeEditorTerm(self)) |term| {

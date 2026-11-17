@@ -46,8 +46,8 @@ Maru's design, not a bug, and it means:
   terminal is then behind the page: tell the user why you showed it, and that clicking the terminal's tab brings
   it back.
 - Show a user's tab only when the task is about that tab, and a tab you opened only when the user should look at it.
-- It fails (`-32603`) while a dialog, menu or save panel is open in that window, or while the user drags tabs or
-  edits the address bar or a tab name in that pane. Wait for the user, then try once more.
+- It fails (`-32603`) while a dialog, menu or save panel is open in that window, or while the user drags in that pane or
+  edits the address bar or a tab name there. Wait for the user, then try once more.
 
 ## The user's tabs
 

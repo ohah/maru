@@ -102836,6 +102836,12 @@ test "browser.show 키 받는 pane: 앞 탭을 바꾸고 키는 막는다 — �
     web_ops.releaseKeyHold(session, bg);
     web_ops.syncOsrKeyTarget(session);
     try std.testing.expectEqual(bg, session.osr_key_target);
+    // 다시 보인다 → 사람이 그 탭의 주소창을 누른다(편집 시작) — 주소를 치고 Enter 한 뒤의 글이 페이지로 가야 한다.
+    try std.testing.expect(session.runAction("previous_term"));
+    try std.testing.expect(web_ops.agentShowTab(session, bg).shown.key_held);
+    web_ops.enterAddrEdit(session, bg, "https://e.test/");
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_hold);
+    web_ops.cancelAddrEdit(session, false);
     // 다시 보인다 → 사람이 그 페이지를 누른다(본문 누름).
     try std.testing.expect(session.runAction("previous_term"));
     try std.testing.expect(web_ops.agentShowTab(session, bg).shown.key_held);
@@ -102895,6 +102901,10 @@ test "browser.show 거절: 모달·sheet·그 pane 의 탭 끌기·키 받는 pa
     try std.testing.expectEqual(Refusal.sheet, web_ops.agentShowTab(session, bg).refused);
     session.osr_dialog = null;
     session.pointer_gesture_owner = .{ .terminal_tab = .{ .pane = pane, .index = 0 } };
+    try std.testing.expectEqual(Refusal.dragging, web_ops.agentShowTab(session, bg).refused);
+    session.pointer_gesture_owner = .{ .pane = .{ .pane = pane, .x = 0, .y = 0 } };
+    try std.testing.expectEqual(Refusal.dragging, web_ops.agentShowTab(session, bg).refused);
+    session.pointer_gesture_owner = .{ .web_osr = .{ .surface_id = bg, .first = .left, .held = maru.session.web_osr_input.Held.one(.left), .click_count = 1 } };
     try std.testing.expectEqual(Refusal.dragging, web_ops.agentShowTab(session, bg).refused);
     session.pointer_gesture_owner = .none;
     session.addr_edit = shell;

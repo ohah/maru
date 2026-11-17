@@ -1960,7 +1960,7 @@ pub const ShowRefusal = enum {
     modal,
     /// 이 창에 sheet(JS 대화상자·권한·파일 선택·다운로드 저장 창)가 떠 있다 — 창-모달이다.
     sheet,
-    /// 사람이 그 pane 의 탭을 끌고 있다(미리 보기 순서 중 앞 탭이 바뀌면 놓는 자리가 어긋난다).
+    /// 사람이 그 pane 에서 끌고 있다 — 탭(미리 보기 순서 중 앞 탭이 바뀌면 놓는 자리가 어긋난다)·pane·그 pane 의 페이지 위(capture 를 잃는다).
     dragging,
     /// 사람이 그 pane(키 받는 pane)의 주소창·탭 이름을 편집하고 있다 — 치던 글이 숨은 탭으로 간다.
     editing,
@@ -1992,8 +1992,14 @@ pub fn agentShowTab(self: *AppSession, surface_id: u64) AgentShow {
     if (self.tabsBlocked()) return .{ .refused = .tabs_hidden };
     if (self.anyModalOverlayOpen()) return .{ .refused = .modal };
     if (self.osr_dialog != null or downloadSheetIn(self)) return .{ .refused = .sheet };
+    // 사람이 그 pane 에서 누른 채 끌고 있다 — 탭 끌기·pane 끌기·그 pane 의 페이지 위 끌기(선택·드래그). 앞 탭이 바뀌면 놓는 자리가 어긋나거나
+    // 페이지가 쥔 capture 를 잃는다(적대 리뷰 1 회차 — 처음엔 탭 끌기만 봤다).
     switch (self.pointer_gesture_owner) {
         .terminal_tab => |drag| if (drag.pane == loc.pane) return .{ .refused = .dragging },
+        .pane => |drag| if (drag.pane == loc.pane) return .{ .refused = .dragging },
+        .web_osr => |g| for (loc.pane.terms.items) |t| {
+            if (t.surfaceId() == g.surface_id) return .{ .refused = .dragging };
+        },
         else => {},
     }
     const tab = self.tabs.items[loc.tab_index];
@@ -3079,6 +3085,9 @@ pub fn enterAddrEdit(self: *AppSession, surface_id: u64, current_url: []const u8
     self.addr_field.setText(self.allocator, current_url) catch self.addr_field.clear(); // 현재 URL 시드(caret=끝)·OOM이면 빈 편집
     self.addr_edit = surface_id;
     self.addr_focus_pull_pending = surface_id;
+    // 사람이 그 탭의 주소창을 눌렀다 — 그 탭을 스스로 쓰기 시작했다. 에이전트가 보이며 막아 둔 키를 푼다(주소를 치고 Enter 한 뒤 페이지에 치는 글이
+    // 사라지지 않게 — 적대 리뷰 1 회차).
+    releaseKeyHold(self, surface_id);
 }
 
 /// 편집 대상 surface_id(없으면 null) — 렌더/라우팅이 편집 활성 판정에 쓴다(파일 내부 전용, ABI export는

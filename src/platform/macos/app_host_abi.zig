@@ -8875,7 +8875,7 @@ fn agentShowRefusal(why: session_mod.web_ops.ShowRefusal) []const u8 {
         .tabs_hidden => "this window hides its tab bar — the tab could not be brought to the front",
         .modal => "a dialog or menu is open in that window (the user is answering it) — try again after it closes",
         .sheet => "a page dialog or save panel is open in that window (the user is answering it) — try again after it closes",
-        .dragging => "the user is dragging tabs in that pane — try again in a moment",
+        .dragging => "the user is dragging in that pane (a tab, the pane or something on the page) — try again in a moment",
         .editing => "the user is editing the address bar or a tab name in that pane — try again after they finish",
         .composing => "the user's text input in that pane could not be committed — try again in a moment",
     };

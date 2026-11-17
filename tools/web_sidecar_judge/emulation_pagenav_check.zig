@@ -14,7 +14,8 @@
 //! - emu-page-nav-redirect: 사이트 안 주소가 302 로 밖에 보낸다 — 첫 스크립트·첫 요청은 진짜(단언), 그 홉의 문서 요청 머리는 E12(관측).
 //! - emu-page-nav-slow-wait: 밖으로 가는 느린 응답(1.5 초)을 기다리는 동안 묶인 문서는 흉내를 그대로 본다(떼기는 응답에서 — 홉에서 떼면 진짜를
 //!   본다), 도착한 밖 문서는 진짜.
-//! - emu-page-nav-aborted: 밖 주소의 204(응답 뒤 문서 없음) — 응답에서 뗀 뒤 남은 묶인 문서에 새 세션으로 다시 건다.
+//! - emu-page-nav-aborted·-download: 밖 주소의 204·다운로드(응답 뒤 문서 없음) — 응답에서 뗀 뒤 남은 묶인 문서에 새 세션으로 다시 건다.
+//! - emu-page-nav-bounce: 밖 문서가 첫 스크립트에서 곧 돌아온다 — 밖 문서는 진짜, 돌아온 묶인 문서는 결국 모든 흉내, 세션을 잃지 않는다.
 //! - emu-page-nav-watch·-mock: 지켜보기(`net_watch` — 기록 처리기)·가짜(밖 문서를 가짜로 — 가짜 처리기) 처리기가 그 요청을 가져가도 같은 단언.
 //! - emu-page-nav-body-record: 본문 기록(W9d② — 그 관찰자가 남의 page 세션 붙음을 떼던 자리)이 켜진 탭에서도 흉내가 걸리고 세션을 잃지 않는다.
 //! - emu-page-nav-dead: 렌더러가 죽은 묶인 탭 — host 가 살고, maru 의 밖 이동 문서는 진짜, 돌아오면 다시 흉내.
@@ -104,6 +105,18 @@ pub fn serve(conn: c_int, path: []const u8, target: []const u8, host_hdr: []cons
     }
     if (std.mem.eql(u8, path, "/qnc")) {
         emu.reply(conn, "204 No Content", "text/plain", "", "");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/qdl")) {
+        // 응답 뒤에야 문서가 아님이 드러나는 이동(다운로드) — 주 프레임 이동이 끊기고 옛 문서가 남는다.
+        emu.reply(conn, "200 OK", "application/octet-stream", "Content-Disposition: attachment; filename=\"q.bin\"\r\n", "qdl");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/qbk")) {
+        // 밖 문서가 첫 스크립트에서 곧 묶인 사이트로 되돌아간다(떼고 다시 붙이는 사이에 돌아옴).
+        const q = target[(std.mem.indexOfScalar(u8, target, '?') orelse target.len)..];
+        const body = std.fmt.bufPrint(&bb, "<!doctype html><title>qbk</title><script>{s}\nwindow.T0=SG();fetch('/qbf'+location.search+'&e='+T0).catch(function(){{}});location.replace('http://127.0.0.1:{d}/qi{s}b&w=1')</script>", .{ emu.sg_js, emu.port, q }) catch return true;
+        emu.reply(conn, "200 OK", emu.html, "", body);
         return true;
     }
     if (std.mem.eql(u8, path, "/qslow")) {
@@ -364,6 +377,41 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         const ready = emu.countIn(lg, "emu: session b=1 ready");
         const ok = std.mem.eql(u8, before, full_emu) and contains(after, "127.0.0.1") and contains(after, full_emu) and st != null and st.?.on_site and !st.?.pending and resp == 1 and ready >= 1;
         report(ok, "emu-page-nav-aborted", std.fmt.bufPrint(&d, "전 {s} · 204 뒤 {s} on_site={} pending={} · 응답으로 뗌 {d} · 새 세션 ready {d}", .{ before, after, if (st) |x| x.on_site else false, if (st) |x| x.pending else true, resp, ready }) catch "");
+    }
+
+    // (4b) 응답 뒤 다운로드 — 응답에서 뗀 뒤 끊긴 이동, 남은 묶인 문서에 새 세션으로 다시 건다(그 사이 몇 ms 는 흉내 없이 — 받아들임 U4).
+    {
+        try r.nav(1, uLoop(&u, "/qi?x=dl&w=1"));
+        r.pump(300);
+        const m4 = emu.logLen(root, "emq");
+        var js: [300]u8 = undefined;
+        var o1: [200]u8 = undefined;
+        _ = r.ev(1, std.fmt.bufPrint(&js, "NAV('loc','{s}')", .{uLocal(&u, "/qdl?x=dlq")}) catch unreachable, &o1);
+        r.pump(1200);
+        var ab: [200]u8 = undefined;
+        const after = r.ev(1, "JSON.stringify([location.host,SG()])", &ab);
+        const lg = emu.logFrom(root, "emq", m4);
+        const resp = emu.countIn(lg, "emu: session b=1 detach resp dt=");
+        report(contains(after, "127.0.0.1") and contains(after, full_emu) and resp == 1, "emu-page-nav-download", std.fmt.bufPrint(&d, "다운로드 뒤 {s} · 응답으로 뗌 {d}", .{ after, resp }) catch "");
+    }
+
+    // (4c) 빠른 되돌아옴 — 밖 문서가 첫 스크립트에서 곧 묶인 사이트로(새 세션이 붙기 전일 수 있다): 밖 문서는 진짜, 돌아온 묶인 문서는 결국 모든 흉내.
+    {
+        try r.nav(1, uLoop(&u, "/qi?x=bk&w=1"));
+        r.pump(300);
+        const m4 = emu.logLen(root, "emq");
+        var js: [300]u8 = undefined;
+        var o1: [200]u8 = undefined;
+        _ = r.ev(1, std.fmt.bufPrint(&js, "NAV('loc','{s}')", .{uLocal(&u, "/qbk?x=bkq")}) catch unreachable, &o1);
+        _ = r.until(Run.loadsAt, 1, r.loads[1] + 2, 5000);
+        r.pump(800);
+        var ab: [200]u8 = undefined;
+        const back = r.ev(1, "JSON.stringify([location.host,SG()])", &ab);
+        var lb: emu.Leaks = undefined;
+        emu.leaksOn("/qbf?x=bkq", "localhost", &lb);
+        const lg = emu.logFrom(root, "emq", m4);
+        const lost = emu.countIn(lg, "emu: session b=1 lost");
+        report(lb.total >= 1 and lb.seen == 0 and lb.header == 0 and contains(back, "127.0.0.1") and contains(back, full_emu) and lost == 0, "emu-page-nav-bounce", std.fmt.bufPrint(&d, "밖 문서 첫 요청 {d}개(흉내 {d}·머리 {d}) · 돌아온 문서 {s} · 세션 잃음 {d}", .{ lb.total, lb.seen, lb.header, back, lost }) catch "");
     }
 
     // (5) 지켜보기(기록 처리기)·가짜(기록 안 함·함) — 다른 처리기가 그 요청을 가져가도 응답 콜백이 떼기를 부른다.

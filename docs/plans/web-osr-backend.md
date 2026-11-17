@@ -5200,10 +5200,15 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
 - **#4737(전권, 2026-11-16) 뒤 제품 길**: 사용자 탭의 흉내 grant 는 어느 호스트든(`any_host`)으로 들어가(`control_pane_grant.fullAccessPlan` — `narrowAnyHost`
   는 흉내를 좁히지 않는다) `web_osr_emulate.Tab.site` 가 비고 `site_bound` 가 서지 않는다 — **지금 사용자 탭의 흉내는 탭 전체**이고 이 고침은 sidecar 의
   사이트 묶기 계약(판정자·호스트에 묶인 grant)에서 쓰인다. 되살리지 않았다(사용자 결정 대기 — 사이트 묶기를 전권과 어떻게 맞출지).
-- 판정: `--emulation` 새 세션 `emq`(`emulation_pagenav_check.zig` — 종류마다 `EMQ_ITERS` 판(기본 3), `detach-order`·`redirect`·`slow-wait`·`aborted`·`watch`·
-  `mock`·`body-record`·`dead`, 관측 `sw`·`prefetch`·`block`; 손잡이 `EMQ_ONLY=1` 은 그 세션만), `emu-site-bound-bfcache-page` 를 관측에서 단언으로.
-  고치기 전 sidecar(main 의 `maru-web-host`)로 같은 판정을 돌리면 `emq` 11 FAIL(`detach-order` 0/27 을 포함 — 3 판짜리 종류 판정은 운이 좋으면 지나므로
-  떼기 수의 단언이 고정한다). 순수 sidecar **581**(emu_plan 세션 시험 7).
+- 판정: `--emulation` 57 → **83**, 새 세션 `emq`(`emulation_pagenav_check.zig` 27 — 종류 열(에이전트 CDP 의 `Page.navigateToHistoryEntry` 포함)마다
+  `EMQ_ITERS` 판(기본 3), `detach-order`·`two-tabs`·`redirect`·`slow-wait`·`aborted`·`download`·`bounce`·`watch`·`mock`·`body-record`·`route-switch`·`sw-late`·
+  `dead`, 관측 `sw`·`prefetch`·`block`; 손잡이 `EMQ_ONLY=1` 은 그 세션만), `emu-site-bound-bfcache-page` 를 관측에서 단언으로. 고치기 전 sidecar(main 의
+  `maru-web-host`)로 같은 판정을 돌리면 `emq` 11 FAIL(`detach-order` 「응답으로 뗌 0」 을 포함 — 3 판짜리 종류 판정은 운이 좋으면 지나므로 떼기 수의 단언이
+  고정한다). 순수 sidecar **581**(emu_plan 세션 시험 7). 변이(판정 FAIL 수 — `ROUNDS.md`): 떼지 않음 13·홉에서 뗌 5·우리 처리기의 응답 콜백 빼기 11·
+  `network.onResourceResponse` 에서 빼기 3·본문 기록 관찰자가 page 세션을 뗌 2·원시 답 가르기 끔 1·떠남 판단 빼기 1·멈춤 끔 1·늦은 떼기 끔 1·root 지움 끔 2·
+  붙기가 늘 실패 14(흉내는 root 로 그대로 걸린다 — 되돌림 확인); 산 것: 미리 붙이기 끔(다음 커밋의 붙기가 대신한다 — 늦음만), 끊김 뒤 다시 돌리기 끔(새
+  세션의 ready 가 다시 건다 — 같은 동작), 홉에서만 무장(302 에서도 응답 콜백이 왔다 — dirty 무장은 겹), 세션 잃음 뒤 다시 붙기 끔(판정이 잃음을 만들지 못한다),
+  로그 글 바꿈(대조).
 
 ### W9e② 결정·실측 — 성능 trace 와 CPU·네트워크 조건(`browser.trace`·`browser.emulate` 의 `cpu`·`network`, wire 26, 2026-10-29)
 

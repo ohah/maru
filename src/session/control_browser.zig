@@ -192,10 +192,10 @@ pub const BrowserMethod = enum {
     /// 다른 pane 의 `set`·`clear` 는 `-32603 emulated_by_other_pane`. 곧 답한다(op 줄 없음). op.arg=정규형 인자 JSON. **op_kind=33 고정**(W9e② 34–36).
     /// W9e②: `cpu`(1–20)·`network`(프리셋·수치·offline)·`holder` 를 더 받는다 — 그 둘은 주인 프로세스의 수명을 따른다(사용자 결정 7).
     emulate,
-    /// `browser.trace {id, action:"start"|"stop"|"status"|"abort"|"read", reload?, duration_ms?, screenshots?, offset?}`(W9e② — Chromium 전용,
-    /// **에이전트가 연 탭만** — 사용자 탭은 모달 전에 `-32008 trace_user_tab_unsupported`, 사용자 결정 4). 그 탭의 `browser_network` grant(탭과
-    /// 함께 생긴 것)와 `browser` grant 가 있어야 한다. `start` 는 기록이 시작되면, `stop` 은 거른 결과(요약)가 나오면 답한다(op 줄 없음 — 앱이
-    /// 나중에 끝낸다), `read` 는 거른 gzip 의 한 조각(256 KiB — 파일은 CLI·MCP 가 준 경로에 쓴다, 사용자 결정 1). 다른 trace 중이면 `-32603
+    /// `browser.trace {id, action:"start"|"stop"|"status"|"abort"|"read", reload?, duration_ms?, screenshots?, offset?}`(W9e② — Chromium 전용).
+    /// 그 탭의 `browser_network` grant 와 `browser` grant 가 있어야 한다 — **사용자 탭도**(사용자 결정 2026-11-17 「사용자 탭 trace 열기」: 전권이
+    /// 그 둘을 넣는다. 그 전에는 에이전트가 연 탭만이었다 — 사용자 결정 4 의 `-32008 trace_user_tab_unsupported`). `start` 는 기록이 시작되면,
+    /// `stop` 은 거른 결과(요약)가 나오면 답한다(op 줄 없음 — 앱이 나중에 끝낸다), `read` 는 거른 gzip 의 한 조각(256 KiB — 파일은 CLI·MCP 가 준 경로에 쓴다, 사용자 결정 1). 다른 trace 중이면 `-32603
     /// trace_busy`(이유와 `retry_after_ms`). op.arg=정규형 인자 JSON. **op_kind=34 고정**(35·36 은 W9e③ 몫).
     trace,
 };
@@ -1221,19 +1221,11 @@ fn traceParamError(gpa: std.mem.Allocator, id: cp.Id, why: ?web_osr_trace.Why) s
     return cp.serializeError(gpa, id, .invalid_params, web_osr_trace.whyMessage(w), .{ .object = data });
 }
 
-/// 사용자 탭(또는 다른 pane 이 연 탭)의 trace — 이번에는 하지 않는다(사용자 결정 4). `-32008` + `data.reason`(모달 없이).
-fn traceUserTabUnsupported(gpa: std.mem.Allocator, id: cp.Id) std.mem.Allocator.Error![]u8 {
-    var data: std.json.ObjectMap = .empty;
-    defer data.deinit(gpa);
-    try data.put(gpa, "reason", .{ .string = "trace_user_tab_unsupported" });
-    return cp.serializeError(gpa, id, .unsupported_by_engine, "performance traces are only for tabs this pane opened (maru browser open) — the user's tabs are not traced", .{ .object = data });
-}
-
 fn needsBrowserPermissionForTrace(gpa: std.mem.Allocator, id: cp.Id) std.mem.Allocator.Error![]u8 {
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = "needs_browser_permission" });
-    return cp.serializeError(gpa, id, .unauthorized, "a trace records this page's scripts and timing — it needs this tab's control permission (it was taken back; open a new tab with maru browser open)", .{ .object = data });
+    return cp.serializeError(gpa, id, .unauthorized, "a trace records this page's scripts and timing — it needs this tab's control permission (it was taken back — call again)", .{ .object = data });
 }
 
 // ── W9d④: browser.networkMock ──────────────────────────────────────────────────────────────────────────────
@@ -3606,14 +3598,13 @@ pub fn browserOpFromRequest(
             if (!authorized and p.action != .set) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
         }
     }
-    // W9e②: trace 는 그 pane 이 연 탭만(사용자 결정 4 — 사용자 탭은 모달 전에 `-32008`). 에이전트 탭은 탭과 함께 생긴 `browser_network` grant 로
-    // 인가되고, 그 탭의 `browser` grant 도 있어야 한다(trace 에 그 페이지의 스크립트 표본·입력 시각이 든다 — 그 탭을 다루는 권한 위에 선다). 인자는
-    // 인가된 뒤 아래에서 본다.
+    // W9e②: trace 는 그 탭의 `browser_network` grant(아래 `authorized` — 이 메서드의 scope)로 인가되고, 그 탭의 `browser` grant 도 있어야 한다
+    // (trace 에 그 페이지의 스크립트 표본·입력 시각이 든다 — 그 탭을 다루는 권한 위에 선다). 사용자 결정 2026-11-17 「사용자 탭 trace 열기」:
+    // 그 grant 가 탭과 함께 생긴 것(에이전트가 연 탭)인지는 더 보지 않는다 — 전권이 사용자 탭·다른 pane 이 연 탭에도 둘을 넣는다. 인가되지 않았으면
+    // 다른 메서드처럼 아래 `ungrantedResult`(전권이 넣지 못한 것 — 표가 꽉 찼다). 인자는 인가된 뒤 아래에서 본다.
     if (bmethod == .trace) {
         const pane = pane_selector orelse return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
-        const birth = if (grants.get(pane, target_id, .browser_network)) |g| g.birth else false;
-        if (!birth) return .{ .err = try traceUserTabUnsupported(gpa, req.id) };
-        if (!grants.authorizes(pane, target_id, .browser, targetHost(snapshot, target_id))) return .{ .err = try needsBrowserPermissionForTrace(gpa, req.id) };
+        if (authorized and !grants.authorizes(pane, target_id, .browser, targetHost(snapshot, target_id))) return .{ .err = try needsBrowserPermissionForTrace(gpa, req.id) };
     }
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
 
@@ -7562,28 +7553,54 @@ test "W9e①: browser.list 는 흉내가 설정된 탭에 emulation{summary, act
 }
 
 // ── W9e②: browser.trace ──
-// 시험이 증명하는 것: 메서드 번호(op_kind 34 — Swift·앱의 wire)·이름·엔진(Chromium 만)·scope(browser_network), 모달 전 검사의 차례(WebKit -32008 →
-// 사용자 탭(탭과 함께 생긴 네트워크 grant 가 없다 — 모달로 받은 것이어도)은 -32008 trace_user_tab_unsupported → browser grant 가 없으면 -32002
-// needs_browser_permission → 인자 -32602 + 까닭), 에이전트 탭은 op(정규형 인자), 앱의 거절 까닭(trace_busy 는 -32603 + retry_after_ms), emulate 의
-// W9e② 거절(no_agent_process·offline_user_tab·network_preset_only)은 -32602.
+// 시험이 증명하는 것: 메서드 번호(op_kind 34 — Swift·앱의 wire)·이름·엔진(Chromium 만)·scope(browser_network), 검사의 차례(WebKit -32008 →
+// browser grant 가 없으면 -32002 needs_browser_permission → 인자 -32602 + 까닭), 인가된 탭은 op(정규형 인자) — **사용자 탭도**(탭과 함께
+// 생긴 grant 가 아니어도 — 사용자 결정 2026-11-17 「사용자 탭 trace 열기」, 그 전의 -32008 trace_user_tab_unsupported 는 없다), 앱의 거절 까닭
+// (trace_busy 는 -32603 + retry_after_ms), emulate 의 W9e② 거절(no_agent_process·offline_user_tab·network_preset_only)은 -32602.
 
 fn traceReq(comptime params: []const u8) []const u8 {
     return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.trace\",\"params\":{\"id\":12," ++ params ++ "}}";
 }
 
-test "W9e②: trace 는 34 — Chromium 만, 사용자 탭은 모달 전 -32008, browser grant 없으면 -32002, 인자 까닭, 에이전트 탭은 op" {
+fn expectTraceOp(bytes: []const u8, grants: *const cpg.PaneGrantStore) !void {
+    switch (try dispatchEngine(bytes, grants)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.trace, op.method);
+            try testing.expectEqual(capmod.ScopeClass.browser_network, op.pane_grant.?.scope);
+            try testing.expectEqual(@as(u64, 10), op.pane_grant.?.pane);
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+}
+
+test "W9e②: trace 는 34 — Chromium 만, 사용자 탭도 op(2026-11-17), browser grant 없으면 -32002, 인자 까닭, grant 가 없으면 needs_grant" {
     try testing.expectEqual(@as(u8, 34), @as(u8, @backingInt(BrowserMethod.trace)));
     try testing.expectEqual(BrowserMethod.trace, parseBrowserMethod("trace").?);
     try testing.expect(!engineSupports(.webkit, .trace) and engineSupports(.chromium, .trace));
     try testing.expectEqual(capmod.ScopeClass.browser_network, capmod.methodRequiredScope("browser.trace").?);
-    var grants: cpg.PaneGrantStore = .{};
-    // 아무 grant 도 없다 — 사용자 탭으로 본다(모달 없이 -32008).
-    try expectEmuErr(traceReq("\"action\":\"start\""), &grants, .unsupported_by_engine, "trace_user_tab_unsupported");
-    // 모달로 받은 네트워크 grant(사용자 탭) — 여전히 -32008.
-    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
-    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
-    try expectEmuErr(traceReq("\"action\":\"start\""), &grants, .unsupported_by_engine, "trace_user_tab_unsupported");
-    // 에이전트 탭(탭과 함께 생긴 grant)인데 browser grant 가 없다.
+    // 아무 grant 도 없다 — 다른 메서드처럼 needs_grant(앱은 전권을 넣지 못한 것 — 표가 꽉 찼다 — 으로 끝낸다). -32008 이 아니다.
+    var none: cpg.PaneGrantStore = .{};
+    try expectEngineNeedsGrant(traceReq("\"action\":\"start\""), &none, .browser_network);
+    // 사용자 탭 — 전권이 넣은 grant 둘(탭과 함께 생긴 것이 아니다): 이제 trace 가 된다.
+    var user: cpg.PaneGrantStore = .{};
+    try user.grant(.{ .pane = 10, .target = 12, .scope = .browser, .any_host = true });
+    try user.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .any_host = true });
+    try expectTraceOp(traceReq("\"action\":\"start\""), &user);
+    try expectTraceOp(traceReq("\"action\":\"status\""), &user);
+    // 사이트에 묶인 grant 도 지금 문서의 호스트를 덮으면 된다(예전 모달이 준 꼴).
+    var host_bound: cpg.PaneGrantStore = .{};
+    try host_bound.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    try host_bound.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try expectTraceOp(traceReq("\"action\":\"start\""), &host_bound);
+    // 네트워크 grant 는 있는데 browser grant 가 없다(사용자 탭이든 에이전트 탭이든) — -32002 needs_browser_permission.
+    var no_browser: cpg.PaneGrantStore = .{};
+    try no_browser.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .any_host = true });
+    try expectEmuErr(traceReq("\"action\":\"start\""), &no_browser, .unauthorized, "needs_browser_permission");
     var agent: cpg.PaneGrantStore = .{};
     try agent.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .any_host = true, .birth = true });
     try expectEmuErr(traceReq("\"action\":\"start\""), &agent, .unauthorized, "needs_browser_permission");
@@ -7604,12 +7621,16 @@ test "W9e②: trace 는 34 — Chromium 만, 사용자 탭은 모달 전 -32008,
         },
         else => return error.ExpectedOp,
     }
-    // 다른 pane 이 연 탭 — 이 pane 의 것이 아니다(-32008, 그 pane 의 grant 를 타지 않는다).
+    // 다른 pane 이 연 탭 — 그 pane 의 grant 는 이 pane 을 인가하지 않는다(needs_grant — 전권이 이 pane 에 넣으면 된다).
     var other_pane: cpg.PaneGrantStore = .{};
     try other_pane.grant(.{ .pane = 99, .target = 12, .scope = .browser_network, .any_host = true, .birth = true });
     try other_pane.grant(.{ .pane = 99, .target = 12, .scope = .browser });
-    try expectEmuErr(traceReq("\"action\":\"status\""), &other_pane, .unsupported_by_engine, "trace_user_tab_unsupported");
-    // WebKit 탭은 엔진이 먼저.
+    try expectEngineNeedsGrant(traceReq("\"action\":\"status\""), &other_pane, .browser_network);
+    // …전권이 이 pane 에 넣은 뒤에는 된다(다른 pane 이 연 에이전트 탭도 이 pane 에게는 「자기가 열지 않은 탭」).
+    try other_pane.grant(.{ .pane = 10, .target = 12, .scope = .browser, .any_host = true });
+    try other_pane.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .any_host = true });
+    try expectTraceOp(traceReq("\"action\":\"status\""), &other_pane);
+    // WebKit 탭은 엔진이 먼저(-32008 — 엔진 까닭이고 사용자 탭 까닭은 어디에도 없다).
     switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.trace\",\"params\":{\"id\":11,\"action\":\"start\"}}", fx_engine, &.{}, 10, &agent, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);

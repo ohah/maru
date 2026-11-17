@@ -16518,7 +16518,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  control    relay control-plane messages over stdio
         \\  agent-events stream remote agent events over stdio
         \\  agent-hooks manage provider hooks and record native events (`agent-hooks --help`)
-        \\  browser    control web surfaces, storage, input and captures (asks for confirmation; `browser --help`)
+        \\  browser    control web surfaces, storage, input and captures (maru does not ask the user; `browser --help`)
         \\  mcp        serve the browser commands as MCP tools over stdio (for agents: `claude mcp add maru -- maru mcp`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\  --version  print this build's version as one line, `maru <version>` (also `maru version`; no app needed)

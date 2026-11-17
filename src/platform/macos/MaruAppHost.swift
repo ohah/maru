@@ -8100,7 +8100,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if pumpAction != 0 && ProcessInfo.processInfo.environment["MARU_TEST_BROWSER_CAP"] != nil {
             browserResultPumpSamplesMs.append((ProcessInfo.processInfo.systemUptime - pumpStarted) * 1000.0)
         }
-        drainBrowserOps() // 5e-2b-2: 인가된 browser op을 WKWebView로 실행 + 완료 콜백(reap 포함, 매 tick).
+        // P0-3: 브라우저 제어의 시각 일(잠든 Chromium op 깨우기·시한·거두기) — WKWebView op 꺼내기(`drainBrowserOps`)와 따로 부른다. WebKit 을
+        // 걷어내 그 drain 이 사라져도 에이전트의 wait·navigate·시한은 이 한 줄로 돈다.
+        if controlServerStarted { maru_macos_control_tick() }
+        drainBrowserOps() // 5e-2b-2: 인가된 browser op을 WKWebView로 실행 + 완료 콜백(매 tick).
         drainConsoleBuffers() // §9.5.9: capture-active 패널의 page ring을 throttled로 서버 버퍼에 옮김(네비 넘어 보존).
         maybeRunBrowserControlSmoke() // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 1회 kick(무설정=무동작).
         // Mermaid native hot path는 allocation-free Zig gate 뒤에서만 helper completion 최대 8개와 action 하나를

@@ -204,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 262), abi_version);
+    try std.testing.expectEqual(@as(u32, 263), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -9715,11 +9715,30 @@ fn browserExecutionAuthorized(execution: *const ActiveBrowserExecution, now: u64
     };
 }
 
-/// 5e-2b: Swift가 매 tick 호출 — (1) `reapExpiredInFlight`(hung browser op timeout), (2) browser op 큐에서 하나 pop해
-/// out으로 넘긴다. 반환 1=op 있음(Swift가 surface_id로 webView 찾아 `BrowserControl`[op_kind] 실행 → 완료 시
+/// P0-3: 앱 tick 마다 한 번(Swift `tickAppSession` — `drainBrowserOps` 앞, 컨트롤 서버가 떴을 때). 브라우저 제어의 시각 일:
+/// 잠든 Chromium op(wait·navigate 의 확인 간격)을 깨우고(서버가 멈췄어도 — 깨운 op 이 재허가에서 끝난다), 시한이 지난 실행을 `timeout`
+/// 으로 끝내고(method 별 오류 응답 — 거두기보다 **먼저**: 거꾸로면 실행 중 op 이 오류 없이 끊긴다), 남은 지난 in-flight 를 거두고, 끝난
+/// wait 표를 비운다. 예전에는 `take_browser_op`(WKWebView op 꺼내기) 맨 앞에 있어 WebKit 을 걷어내면 함께 사라질 일이었다.
+/// **메인 스레드 전용.**
+pub export fn maru_macos_control_tick() void {
+    // W9b①b: 잠든 Chromium op(wait 의 확인 간격)을 깨운다 — 서버가 멈췄어도(깨운 op 이 재허가에서 끝난다).
+    wakeCdpSleepers();
+    if (!control_server_active) return;
+    const server = &control_server_storage;
+    // §5-async reap: 매 tick hung op timeout(evaluateJavaScript/navigation/wait가 안 끝나는 op가 accept를 영구 붙잡는 것 방어).
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    expireActiveBrowserExecutions(server, now_ns);
+    var reaped_ids: [8]u64 = undefined;
+    const reaped = server.reapExpiredInFlightIds(now_ns, &reaped_ids);
+    for (reaped_ids[0..@min(reaped, reaped_ids.len)]) |id| active_browser_executions.abandon(id);
+    pruneInactiveBrowserWaits(server);
+}
+
+/// 5e-2b: Swift가 매 tick 호출 — browser op 큐(WKWebView 가 실행할 op)에서 하나 pop해 out으로 넘긴다(시각 일 — 깨우기·시한·거두기 —
+/// 은 그 앞의 `maru_macos_control_tick`, P0-3). 반환 1=op 있음(Swift가 surface_id로 webView 찾아 `BrowserControl`[op_kind] 실행 → 완료 시
 /// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript·4=getCookies(5f-4c)·5=screenshot(5f-1)·6=setCookie·7=deleteCookie·8=getLocalStorage·9=setLocalStorage·10=removeLocalStorage·11=clearStorage·12=click·13=type·14=scroll·15=wait·16=snapshot(§9.5.4)·17=console(§9.5.9). `arg_ptr`는 안정 슬롯
 /// (`browser_op_take_buf`)을 가리켜 **이 호출 중 동기 읽기**만 유효(다음 take가 덮어씀 — Swift가 즉시 복사). 서버
-/// 미시작이면 0. **메인 스레드 전용**(reap·pop·in-flight 레지스트리는 메인).
+/// 미시작이면 0. **메인 스레드 전용**(pop·in-flight 레지스트리는 메인).
 pub export fn maru_macos_control_take_browser_op(
     out_async_id: ?*u64,
     out_surface_id: ?*u64,
@@ -9727,18 +9746,10 @@ pub export fn maru_macos_control_take_browser_op(
     out_arg_ptr: ?*?[*]const u8,
     out_arg_len: ?*usize,
 ) u32 {
-    // W9b①b: 잠든 Chromium op(wait 의 확인 간격)을 깨운다 — 서버가 멈췄어도(깨운 op 이 재허가에서 끝난다).
-    wakeCdpSleepers();
     if (!control_server_active) return 0;
     const server = &control_server_storage;
-    // §5-async reap: 매 tick hung op timeout(evaluateJavaScript/navigation/wait가 안 끝나는 op가 accept를 영구 붙잡는 것 방어).
     const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
-    expireActiveBrowserExecutions(server, now_ns);
-    var reaped_ids: [8]u64 = undefined;
-    const reaped = server.reapExpiredInFlightIds(now_ns, &reaped_ids);
-    for (reaped_ids[0..@min(reaped, reaped_ids.len)]) |id| active_browser_executions.abandon(id);
-    pruneInactiveBrowserWaits(server);
     const e: BrowserOpEntry = while (browser_op_queue.take()) |candidate| {
         // revoke/close/reap가 Swift drain 전에 wait를 끝냈다면 큐의 늦은 엔트리를 실행하지 않는다.
         if (candidate.op_kind == @backingInt(control_browser.BrowserMethod.wait) and !activeBrowserWait(candidate.async_id)) {
@@ -14183,6 +14194,109 @@ test "W9a: navigate 는 이동을 보내고 첫 불러오기를 기다려 loaded
     startCdpOp(try w9aRequest(&p3, nav_req, 71, .navigate), 71, .navigate, "https://b.test/");
     try expectPendingErrorCode(&p3, .internal_error);
     try std.testing.expectEqualStrings("https://a.test/b", session_mod.web_osr.testLastUrl(71).?);
+}
+
+// ── P0-3: 브라우저 제어의 시각 일은 `maru_macos_control_tick` 이 한다 ─────────────────────────────────────────────────────────────
+// 예전에는 Swift 가 WKWebView op 을 꺼내는 `take_browser_op` 맨 앞에서 잠든 Chromium op 을 깨우고 시한·거두기를 했다. WebKit 을 걷어내면
+// 그 drain 이 사라진다 — 이 시험은 take 를 부르지 않고 control tick 만으로 에이전트의 navigate 기다림·시한·거두기가 도는지 본다.
+
+test "P0-3: take_browser_op 없이 control tick 만으로 잠든 navigate 가 깨어 loaded 로 끝나고, 서버가 멈춰도 깨운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 76);
+    defer {
+        session_mod.web_osr.destroy(ta, 76);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(76);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 76, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const nav_req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.navigate\",\"params\":{\"id\":76,\"url\":\"https://a.test/\"}}";
+
+    var p1: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p1, nav_req, 76, .navigate), 76, .navigate, "https://a.test/");
+    try std.testing.expectEqual(@as(usize, 1), cdp_sleepers.items.len);
+    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = 76, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    session_mod.web_osr.testApply(ta, .{ .page_started = 76 });
+    session_mod.web_osr.testApply(ta, .{ .load_finished = .{ .browser = 76, .http_status = 200 } });
+    maru_macos_control_tick(); // 시각 전 — 자는 채
+    try std.testing.expect(p1.response == null);
+    try std.testing.expectEqual(@as(usize, 1), cdp_sleepers.items.len);
+    for (cdp_sleepers.items) |*e| e.wake_ms = 0;
+    maru_macos_control_tick();
+    {
+        const r = try w9b3Result(&p1);
+        defer r.deinit();
+        try std.testing.expect(r.value.object.get("result").?.object.get("loaded").?.bool);
+    }
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+
+    // 서버가 멈췄다 — 그래도 깨운다(깨운 op 이 재허가에서 끝난다 — 줄을 영영 쥐지 않는다).
+    var p2: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p2, nav_req, 76, .navigate), 76, .navigate, "https://a.test/b");
+    try std.testing.expectEqual(@as(usize, 1), cdp_sleepers.items.len);
+    for (cdp_sleepers.items) |*e| e.wake_ms = 0;
+    control_server_active = false;
+    maru_macos_control_tick();
+    control_server_active = true;
+    try std.testing.expectEqual(@as(usize, 0), cdp_sleepers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    if (p2.response) |r| allocator.free(r);
+}
+
+test "P0-3: control tick 은 시한이 지난 실행을 timeout 으로 답한 **뒤** 남은 지난 요청을 거두고 끝난 wait 표를 비운다 — take_browser_op 은 시각 일을 하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.getUrl\",\"params\":{\"id\":77}}";
+    // 실행 중인 op — 시한(awake 1 ns)이 이미 지났다. 거두기가 먼저면 오류 없이(null) 끊긴다.
+    var p1: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id1 = try control_server_storage.deferRequest(&p1, 1);
+    try active_browser_executions.admit(allocator, .{ .async_id = id1, .surface_id = 77, .method = .get_url, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 77, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(id1));
+    // 실행이 없는 지난 요청 — 거둔다.
+    var p2: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id2 = try control_server_storage.deferRequest(&p2, 1);
+    // 끝난 wait(요청이 이미 없다) — 표에서 뺀다.
+    try active_browser_waits.append(allocator, .{ .async_id = 999_001, .surface_id = 77, .pane_grant = null });
+    defer active_browser_waits.clearRetainingCapacity();
+
+    // take 는 시각 일을 하지 않는다(큐가 비어 0) — 셋 다 그대로.
+    var async_id: u64 = 0;
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_take_browser_op(&async_id, null, null, null, null));
+    try std.testing.expect(p1.response == null);
+    try std.testing.expect(control_server_storage.inFlightPending(id2) != null);
+    try std.testing.expectEqual(@as(usize, 1), active_browser_waits.items.len);
+
+    maru_macos_control_tick();
+    try expectPendingErrorCode(&p1, .timeout);
+    try std.testing.expect(active_browser_executions.get(id1).?.phase == .abandoned); // 실행 중이던 것은 backend 끝까지 표지로 남는다
+    try std.testing.expect(control_server_storage.inFlightPending(id2) == null);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_waits.items.len);
+}
+
+test "P0-3: Swift 는 앱 tick 마다 control tick 을 WKWebView op drain 과 따로 부른다 — 결과 펌프 뒤·drainBrowserOps 앞, 컨트롤 서버가 떴을 때" {
+    const source = try swiftCodeWithoutComments(std.testing.allocator, @embedFile("MaruAppHost.swift"));
+    defer std.testing.allocator.free(source);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "maru_macos_control_tick()"));
+    const tick_at = std.mem.indexOf(u8, source, "private func tickAppSession() {") orelse return error.MissingTick;
+    const tick_end = std.mem.indexOfPos(u8, source, tick_at, "\n    private func drainControlServer()") orelse return error.MissingTick;
+    const tick = source[tick_at..tick_end];
+    const call = std.mem.indexOf(u8, tick, "if controlServerStarted { maru_macos_control_tick() }") orelse return error.MissingControlTick;
+    const pump = std.mem.indexOf(u8, tick, "maru_macos_control_pump_browser_result()") orelse return error.MissingPump;
+    const drain = std.mem.indexOf(u8, tick, "drainBrowserOps()") orelse return error.MissingDrain;
+    try std.testing.expect(pump < call and call < drain);
+    // WKWebView op drain 의 몸에는 없다(P1 이 그 함수를 지운다).
+    const ops = try swiftFunctionBody(source, "private func drainBrowserOps() {");
+    try std.testing.expect(std.mem.indexOf(u8, ops, "maru_macos_control_tick") == null);
 }
 
 test "W9a: getUrl 은 maru 가 아는 주소, 한 번도 보이지 않은 탭은 실패 — 같은 탭의 앞선 op 뒤에 답한다" {

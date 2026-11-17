@@ -8595,6 +8595,10 @@ fn isAgentTab(tab: u64) bool {
 /// 그 탭(또는 그 pane — 에이전트가 끝났다)의 항목을 뺀다. pane 이 닫히면 그 탭들은 사람의 탭처럼 다룬다 — 장·상한·자리를 그 pane
 /// 이름으로 쥐지 않는다(W9b③ 적대 리뷰 2 회차).
 fn forgetAgentTab(surface_id: u64) void {
+    if (std.mem.indexOfScalar(u64, credit_panes[0..credit_panes_len], surface_id)) |k| {
+        std.mem.copyForwards(u64, credit_panes[k .. credit_panes_len - 1], credit_panes[k + 1 .. credit_panes_len]);
+        credit_panes_len -= 1;
+    }
     var i: usize = 0;
     while (i < agent_tabs.items.len) {
         if (agent_tabs.items[i].tab == surface_id or agent_tabs.items[i].pane == surface_id) _ = agent_tabs.swapRemove(i) else i += 1;
@@ -8613,9 +8617,26 @@ fn agentNetworkBirth(pane: u64, tab: u64, grant_id: u64) bool {
     return false;
 }
 
-/// 그 pane 이 아직 에이전트 탭을 가졌는가(`AppSession.agent_pane_known_callback` — 창을 가리지 않는 생존 판정, W9b③ 적대 리뷰 4 회차).
+/// 그 pane 이 아직 살아 있다고 아는가(`AppSession.agent_pane_known_callback` — 창을 가리지 않는 생존 판정, W9b③ 적대 리뷰 4 회차): 에이전트 탭을
+/// 가졌거나, 사용자 탭에 새 탭 장을 준 뒤 닫히지 않았다(2026-11-17 A3 — 에이전트 탭이 하나도 없는 pane 이 사용자 탭에서 누른 새 탭도 그 pane 의
+/// 에이전트 탭이 되게; 실측: 그 판정이 없어 사람의 탭으로 열렸다).
 fn onAgentPaneKnown(pane: u64) bool {
-    return agentTabCount(pane) > 0;
+    return agentTabCount(pane) > 0 or std.mem.indexOfScalar(u64, credit_panes[0..credit_panes_len], pane) != null;
+}
+
+/// 사용자 탭에 새 탭 장을 준 pane(2026-11-17 A3) — 그 pane 이 닫히면 `forgetAgentTab` 이 뺀다. 고정 크기, 차면 가장 오래된 것을 민다(밀린 pane 의 늦은
+/// 새 탭은 사람의 탭으로 열린다 — 뒤쪽 그대로).
+var credit_panes: [16]u64 = undefined;
+var credit_panes_len: usize = 0;
+
+fn noteCreditPane(pane: u64) void {
+    if (std.mem.indexOfScalar(u64, credit_panes[0..credit_panes_len], pane) != null) return;
+    if (credit_panes_len == credit_panes.len) {
+        std.mem.copyForwards(u64, credit_panes[0 .. credit_panes.len - 1], credit_panes[1..]);
+        credit_panes_len -= 1;
+    }
+    credit_panes[credit_panes_len] = pane;
+    credit_panes_len += 1;
 }
 
 /// 그 탭이 지금 에이전트 탭인가(`AppSession.agent_tab_known_callback` — 탭 줄의 ◈, 사용자 결정 2026-11-16). 표가 출처다 — pane 이 닫히면
@@ -8846,7 +8867,9 @@ fn grantAgentNewTabCredit(tab: u64, caller: ?u64, method: []const u8, params: []
     } else caller orelse return;
     // 그 pane 이 에이전트 탭을 더 가질 자리가 없으면 장을 주지 않는다 — 팝업으로 상한이 뚫렸다(적대 리뷰 1 회차).
     if (!agentTabRoom(pane)) return;
-    if (session_mod.web_osr.devtoolsInputActivates(method, params)) session_mod.web_osr.grantNewTabCredit(allocator, tab, pane);
+    if (!session_mod.web_osr.devtoolsInputActivates(method, params)) return;
+    noteCreditPane(pane);
+    session_mod.web_osr.grantNewTabCredit(allocator, tab, pane);
 }
 
 /// 그 op 을 부른 pane(신원 판정 — 1g). cap 으로 온 요청·끝난 요청은 null.
@@ -13933,7 +13956,9 @@ test "W9b③·2026-11-17 A3: 에이전트의 누름·키 누름이 새 탭 장�
     defer {
         agent_tabs.clearAndFree(allocator);
         control_pane_grant_store.clearAll();
+        credit_panes_len = 0;
     }
+    try std.testing.expect(!onAgentPaneKnown(6)); // 에이전트 탭도 장도 없는 pane
     for ([_]u64{ 41, 42 }) |sid| try session_mod.web_osr.testHold(ta, sid);
     defer {
         session_mod.web_osr.destroy(ta, 41);
@@ -13965,6 +13990,10 @@ test "W9b③·2026-11-17 A3: 에이전트의 누름·키 누름이 새 탭 장�
             try std.testing.expectEqual(case.owner, n.agent_pane);
         }
     }
+    // 사용자 탭에 장을 준 pane 6 은 에이전트 탭이 없어도 살아 있다고 안다(그 장의 새 탭을 그 pane 의 에이전트 탭으로 — 실측 고침), 닫히면 잊는다.
+    try std.testing.expect(onAgentPaneKnown(6));
+    forgetAgentTab(6);
+    try std.testing.expect(!onAgentPaneKnown(6));
     // 탭이 닫히면 표·grant 에서 빠진다.
     onAppSessionSurfaceClosed(null, 41);
     try std.testing.expect(!isAgentTab(41));

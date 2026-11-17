@@ -18,6 +18,8 @@
 //! - emu-page-nav-watch·-mock: 지켜보기(`net_watch` — 기록 처리기)·가짜(밖 문서를 가짜로 — 가짜 처리기) 처리기가 그 요청을 가져가도 같은 단언.
 //! - emu-page-nav-body-record: 본문 기록(W9d② — 그 관찰자가 남의 page 세션 붙음을 떼던 자리)이 켜진 탭에서도 흉내가 걸리고 세션을 잃지 않는다.
 //! - emu-page-nav-dead: 렌더러가 죽은 묶인 탭 — host 가 살고, maru 의 밖 이동 문서는 진짜, 돌아오면 다시 흉내.
+//! - emu-page-nav-route-switch: 사이트에 묶이지 않은 흉내(root)에서 곧 묶인 흉내로 바뀌면 root 에 건 것을 먼저 지운다.
+//! - emu-page-nav-sw-late: 서비스 워커가 답한 밖 문서(응답 콜백 없음)는 커밋에서 뗀다(늦은 길).
 //! - emu-page-nav-sw(obs)·-prefetch(obs)·-block(obs): 응답 콜백이 없을 수 있는 이동(서비스 워커가 답한 밖 문서·speculation prefetch 된 밖 문서·막힌
 //!   밖 문서의 오류 페이지) — 어느 길(응답·늦은 떼기)로 갔는지와 샌 수를 적는다(U4 — 지금과 같은 경주로 떨어지는지).
 
@@ -445,7 +447,10 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
             try oneNav(r, "loc", std.fmt.bufPrint(&tg, "sw{d}q", .{i}) catch unreachable, "/qsw", &t);
         }
         const lg = emu.logFrom(root, "emq", m7);
-        report(true, "emu-page-nav-sw(obs)", std.fmt.bufPrint(&d, "등록 {s} · {s} · 응답으로 뗌 {d} · 늦은 떼기 {d} · 떼기 전에 커밋 {d}", .{ reg, t.text(&tb), emu.countIn(lg, "detach resp dt="), emu.countIn(lg, "detach late"), emu.countIn(lg, "before detach") }) catch "");
+        const late = emu.countIn(lg, "emu: session b=1 detach late commit");
+        report(true, "emu-page-nav-sw(obs)", std.fmt.bufPrint(&d, "등록 {s} · {s} · 응답으로 뗌 {d} · 늦은 떼기 {d} · 떼기 전에 커밋 {d}", .{ reg, t.text(&tb), emu.countIn(lg, "detach resp dt="), late, emu.countIn(lg, "before detach") }) catch "");
+        // 응답 콜백이 없는 이동은 늦은 길이 커밋에서 뗀다 — 그 세션이 밖 문서에 남지 않는다(샘 수는 지금과 같은 경주라 관측만).
+        report(std.mem.eql(u8, reg, "ready") and late == n, "emu-page-nav-sw-late", std.fmt.bufPrint(&d, "서비스 워커가 답한 밖 문서 {d} 판 · 커밋에서 뗌 {d}", .{ n, late }) catch "");
     }
     {
         var t: Tally = .{};
@@ -492,6 +497,19 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         try r.host.send(.{ .net_block = .{ .browser = 1, .generation = 2, .count = 0 } });
         r.pump(200);
         report(true, "emu-page-nav-block(obs)", std.fmt.bufPrint(&d, "막힌 밖 문서 뒤 {s} · host 생존 {} · 응답으로 뗌 {d} · 늦은 떼기 {d}", .{ o, os.alive(r.host.pid), emu.countIn(lg, "detach resp dt="), emu.countIn(lg, "detach late") }) catch "");
+    }
+
+    // (7b) 길 바꿈 — 사이트에 묶이지 않은 흉내(root)에서 곧 묶인 흉내로(maru 는 마지막 상태만 보낸다): root 에 건 것을 먼저 지운다(그대로면 세션을 떼도
+    // root 의 시간대가 밖 문서에 남는다).
+    {
+        try r.nav(1, uLoop(&u, "/qi?x=rs&w=1"));
+        _ = try r.emulate(1, .{ .browser = 0, .flags = .{ .timezone = true }, .timezone = "Asia/Tokyo" });
+        var sgb0: [80]u8 = undefined;
+        const root_only = r.ev(1, "SG()", &sgb0);
+        _ = try r.emulate(1, emu.bound_all);
+        var t: Tally = .{};
+        try oneNav(r, "loc", "rsq", "/qn", &t);
+        report(std.mem.eql(u8, root_only, "tz") and t.clean(), "emu-page-nav-route-switch", std.fmt.bufPrint(&d, "root 흉내 {s} → 묶인 흉내 · {s}", .{ root_only, t.text(&tb) }) catch "");
     }
 
     // (8) 렌더러가 죽은 묶인 탭 — host 가 살고, maru 의 밖 이동 문서는 진짜, 돌아오면 다시 흉내.

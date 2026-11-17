@@ -134,6 +134,9 @@ const soi_family_at: usize = 184;
 const unsi_conn_pcb_at: usize = 272;
 const af_unix: i32 = 1;
 
+/// `unixSockets` 의 fd 목록 자리(4096 개 — 그보다 많으면 앞 4096 개만 본다; 잇기가 실패로 닫힐 뿐 열리지는 않는다).
+var fd_list_buf: [4096]ProcFdInfo = undefined;
+
 /// 살아 있는 pid 들(`buf` 를 채운다). 실패하면 빈 것.
 pub fn listPids(buf: []i32) []const i32 {
     const n = proc_listallpids(buf.ptr, @intCast(@min(buf.len, std.math.maxInt(c_int) / @sizeOf(i32)) * @sizeOf(i32)));
@@ -144,8 +147,10 @@ pub fn listPids(buf: []i32) []const i32 {
 /// 그 프로세스의 unix 소켓들(pcb 와 상대 pcb). 못 읽으면(끝났다·남의 것) 빈 것.
 pub fn unixSockets(pid: i32, buf: []so.UnixSock) []const so.UnixSock {
     if (pid <= 0 or buf.len == 0) return buf[0..0];
-    var fds: [256]ProcFdInfo = undefined;
-    const bytes = proc_pidinfo(pid, proc_pidlistfds, 0, &fds, @sizeOf(@TypeOf(fds)));
+    // fd 목록 — 창이 많은 tmux 서버는 pty·소켓 fd 가 수백이다. 앞 256 개만 보던 판은 뒤쪽(나중에 받은 클라이언트 연결)을 놓쳤다(적대 검증 R1).
+    // 메인 스레드만 부른다(`resolveSelfOrigin`·시험) — 32 KiB 라 스택에 두지 않는다.
+    const fds = &fd_list_buf;
+    const bytes = proc_pidinfo(pid, proc_pidlistfds, 0, fds, @sizeOf(@TypeOf(fd_list_buf)));
     if (bytes <= 0) return buf[0..0];
     const count = @min(@as(usize, @intCast(bytes)) / @sizeOf(ProcFdInfo), fds.len);
     var n: usize = 0;
@@ -219,6 +224,31 @@ test "socketpair 의 peer pid 는 그 소켓에 쓴 자기 자신이다" {
     defer _ = c.close(fds[1]);
     _ = c.write(fds[1], "x", 1);
     try std.testing.expectEqual(c.getpid(), peerPid(fds[0]).?);
+}
+
+test "tmux 잇기의 소켓 고리 — fd 가 수백 개인 프로세스(창이 많은 tmux 서버)에서도 높은 번호의 소켓을 본다(적대 검증 R1)" {
+    // 앞 fd 를 600 개 채운 뒤 socketpair — 고리가 fd 목록의 뒤쪽에 있다. 목록을 앞 256 개만 보던 판은 이것을 놓쳐 거절로 닫혔다.
+    var fillers: [600]c.fd_t = undefined;
+    var n: usize = 0;
+    defer for (fillers[0..n]) |fd| {
+        _ = c.close(fd);
+    };
+    while (n < fillers.len) : (n += 1) {
+        const fd = c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(c.mode_t, 0));
+        if (fd < 0) break;
+        fillers[n] = fd;
+    }
+    if (n < 400) return error.SkipZigTest; // fd 상한이 낮은 환경
+    var fds: [2]c.fd_t = undefined;
+    if (c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &fds) != 0) return error.SkipZigTest;
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    var buf: [64]so.UnixSock = undefined;
+    var paired = false;
+    for (unixSockets(c.getpid(), &buf)) |a| for (unixSockets(c.getpid(), &buf)) |b| {
+        if (a.pcb != 0 and a.pcb != b.pcb and a.conn_pcb == b.pcb and b.conn_pcb == a.pcb) paired = true;
+    };
+    try std.testing.expect(paired);
 }
 
 test "tmux 잇기의 소켓 고리 — socketpair 의 두 끝은 서로의 pcb 를 상대로 갖는다(칸 자리가 SDK 와 맞는지), 자기 pid 는 목록에 있다" {

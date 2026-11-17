@@ -7387,7 +7387,7 @@ fn handleControlRequest(
         // 5f-0b-3b: 인가·유효한 browser.subscribe — 메인에서 SubscriberRegistry에 **동기 등록** + `{subscriber_id}` 응답.
         .subscribe => |s| handleSubscribe(server, pending, s),
         // 미grant valid 요청 — 확인 모달은 없다(사용자 결정 2026-11-16). 전권 grant 를 넣고도 남은 것은 표가 찼거나(`grants_full`) cap 만 든 연결이다.
-        .needs_grant => |g| answerNeedsGrant(server, pending, g),
+        .needs_grant => answerNeedsGrant(server, pending),
         // WT4b: lsp.trust.* — 앱 전역 신뢰 표로 즉시 답한다(창이 없어도 — 표는 창의 것이 아니다).
         .lsp_trust => {
             // 감사 기록의 상대(계획 workspace-trust-audit TA2) — 이 요청 프레임을 쓴 프로세스(`LOCAL_PEERPID` 는 그 소켓을 마지막으로 다룬
@@ -7430,9 +7430,8 @@ fn grantFullAccess(server: *control_server_mod.ControlServer, pending: *control_
 
 /// 전권 grant 를 넣고도 인가되지 않은 요청(`needs_grant`) — 확인 모달 없이 곧 답한다. 표가 찼으면 `grants_full`(무엇을 하면 되는지 말한다), 아니면
 /// 균일 unauthorized(좁혀진 자리에서 http 가 아닌 문서처럼 덮을 호스트가 없는 경우 — `fullAccessPlan` 이 넣지 않았다).
-fn answerNeedsGrant(server: *control_server_mod.ControlServer, pending: *control_server_mod.PendingRequest, g: control_browser.GrantRequest) void {
+fn answerNeedsGrant(server: *control_server_mod.ControlServer, pending: *control_server_mod.PendingRequest) void {
     const gpa = server.cross_gpa;
-    _ = g;
     const resp = if (!control_pane_grant_store.normalRoom(1))
         control_browser.serializeGrantsFull(gpa, pending.request_bytes) catch null
     else

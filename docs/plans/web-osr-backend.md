@@ -5874,9 +5874,9 @@ take 안에서** 나갔다 — P1 이 그 take·drain 을 지우면 함께 사�
   워크스페이스 모두 숨긴 채 만들어지고 복원 주소를 불러 op 이 된다(FP16c 가 화면 밖 워크스페이스의 web Term 도 배치하고 `web_osr_plan.reconcile` 이 숨긴 배치도
   만든다). 그 몇 초의 「show it once first」 는 틀린 안내라 「기다려라」(기록은 있고 브라우저가 없다)와 「show 로 내라」(기록이 없다)로 갈랐다(`cdpUnavailableReason`).
   같은 실측이 찾은 「불러오지 못한 복원 탭이 다음 실행에 사라짐」 은 따로 고쳤다(#4745).
-- **구현**: L2 `control_browser` 의 `show`(op_kind 35, `{id}`, 결과 넷 검사), 앱 `web_ops.agentShowTab`(거절 일곱 — 모달·sheet·끌기·편집·탭 줄 숨김·없음·터미널,
+- **구현**: L2 `control_browser` 의 `show`(op_kind 35, `{id}`, 결과 넷 검사), 앱 `web_ops.agentShowTab`(거절 일곱 — 모달·sheet·그 pane 에서 끌기(탭·pane·페이지 위)·편집·탭 줄 숨김·없음·터미널,
   다른 pane 은 `selectTermInPane`, 키 받는 pane 은 사람의 탭 전환 `tryFocusTerm` 뒤 `osr_key_hold`), 막음은 `osrKeyTarget` 한 관문(키·조합·팝업 키·sheet·포커스가 모두
-  그것을 본다)과 저장 창 맡기(`takeDownloadAsk`)에서, 풀림은 `syncOsrKeyTarget`(키 자리가 떠남)·`osrMouseDown`(본문 누름)·탭 줄 누름. ABI 는 탭 op 목록(`isTabOp` —
+  그것을 본다)과 저장 창 맡기(`takeDownloadAsk`)에서, 풀림은 `syncOsrKeyTarget`(키 자리가 떠남)·`osrMouseDown`(본문 누름)·탭 줄 누름·주소창 누름(`enterAddrEdit`). ABI 는 탭 op 목록(`isTabOp` —
   배치가 sidecar 로 간 뒤 답한다). CLI `browser show`·MCP `browser_show`·플러그인(0.1.10).
 - **남은 틈**: 막는 동안 친 키는 말없이 버려진다(WebKit 탭을 고른 뒤와 같은 길 — 알림은 두지 않았다), 화면 밖 워크스페이스의 pane 은 탭 줄 스크롤을 맞추지 않는다
   (그 배치가 없다), 다른 창의 `visible:true` 는 창이 가려졌는지 모른다.

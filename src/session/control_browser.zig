@@ -201,7 +201,7 @@ pub const BrowserMethod = enum {
     /// `browser.show {id}`(Chromium 전용 — 사용자 결정 2026-11-17·18) → `{shown:true, visible, changed, key_held}`. 사람이 그 pane 의 탭 머리를
     /// 누르듯 그 탭을 **그 pane 의 앞 탭**으로 — pane 포커스·워크스페이스·창 순서는 건드리지 않는다. 그 pane 이 사람의 키를 받는 pane 이면
     /// 페이지는 보이되 사람이 그 페이지를 누를 때까지 키·포커스를 주지 않는다(`key_held`). `visible` = maru 가 그 탭을 숨기지 않는가(화면 밖
-    /// 워크스페이스면 거짓). 모달·sheet·탭 끌기·탭 줄 숨김·사람이 그 pane 에서 편집 중이면 실패. base `browser` scope. op.arg 빈 것. **op_kind=35**.
+    /// 워크스페이스면 거짓). 모달·sheet·그 pane 에서 끌기·탭 줄 숨김·사람이 그 pane 에서 편집 중이면 실패. base `browser` scope. op.arg 빈 것. **op_kind=35**.
     show,
 };
 

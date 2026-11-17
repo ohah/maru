@@ -5207,8 +5207,9 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   `site` 는 묶인 호스트(에이전트 탭은 null), grant 동기화는 어느 호스트든 grant 면 묶음과 무관하게 둔다(그대로면 묶인 흉내가 다음 동기화에서 지워졌다). 같은
   뿌리로 꺼져 있던 사용자 탭의 네트워크 조건 제한(프리셋만·offline 없음 — 도움말·MCP·플러그인은 그대로 말하고 있었다)도 `birth` 로 되살렸다. 에이전트가 연 탭
   (◈)은 탭 전체 그대로. 계획 기록 `$S/emu_pagenav/PLAN3.md`·`ATTACK3.md`.
-- 판정: `--emulation` 57 → **83**, 새 세션 `emq`(`emulation_pagenav_check.zig` 27 — 종류 열(에이전트 CDP 의 `Page.navigateToHistoryEntry` 포함)마다
-  `EMQ_ITERS` 판(기본 3), `detach-order`·`two-tabs`·`redirect`·`slow-wait`·`aborted`·`download`·`bounce`·`watch`·`mock`·`body-record`·`route-switch`·`sw-late`·
+- 판정: `--emulation` 57 → **84**, 새 세션 `emq`(`emulation_pagenav_check.zig` 28 — 종류 열(에이전트 CDP 의 `Page.navigateToHistoryEntry` 포함)마다
+  `EMQ_ITERS` 판(기본 3), `detach-order`·`set-reload`(처음 거는 흉내 곧 뒤의 새로고침 — 세션을 붙이는 동안 maru 의 이동은 붙을 때까지·시한 100 ms 기다린다:
+  격리 앱에서 `--reload` 문서가 흉내 없이 왔다)·`two-tabs`·`redirect`·`slow-wait`·`aborted`·`download`·`bounce`·`watch`·`mock`·`body-record`·`route-switch`·`sw-late`·
   `dead`, 관측 `sw`·`prefetch`·`block`; 손잡이 `EMQ_ONLY=1` 은 그 세션만), `emu-site-bound-bfcache-page` 를 관측에서 단언으로. 고치기 전 sidecar(main 의
   `maru-web-host`)로 같은 판정을 돌리면 `emq` 11 FAIL(`detach-order` 「응답으로 뗌 0」 을 포함 — 3 판짜리 종류 판정은 운이 좋으면 지나므로 떼기 수의 단언이
   고정한다). 순수 sidecar **581**(emu_plan 세션 시험 7). 변이(판정 FAIL 수 — `ROUNDS.md`): 떼지 않음 13·홉에서 뗌 5·우리 처리기의 응답 콜백 빼기 11·

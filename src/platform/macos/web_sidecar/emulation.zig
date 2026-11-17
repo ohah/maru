@@ -767,6 +767,7 @@ fn sessSweep(_: [*c]c.cef_task_t) callconv(.c) void {
         e.sess_run = false;
         run(e, reg);
         sendState(e, false);
+        if (e.gate.active) postGate(0); // 세션을 기다리던 maru 의 이동 — 흉내를 낸 뒤 연다
     };
 }
 
@@ -1154,7 +1155,10 @@ fn gateSweep(_: [*c]c.cef_task_t) callconv(.c) void {
     var next: i64 = std.math.maxInt(i64);
     for (&entries) |*slot| if (slot.*) |*e| {
         if (e.gate.active) {
-            const why: ?[]const u8 = if (gateLeft(e.cef_id) == 0)
+            // 세션을 기다리는 줄은 세션이 붙어 흉내를 낼 때까지(시한까지) 열지 않는다.
+            const why: ?[]const u8 = if (e.tab.parked and !e.gate.due(now))
+                null
+            else if (gateLeft(e.cef_id) == 0)
                 (if (e.gate_replies >= e.gate_clears) "replies" else "gone")
             else if (navInProgress(e))
                 "in_progress"
@@ -1221,6 +1225,22 @@ fn armGate(e: *Entry, reg: *const registry_mod.Entry, t: *const Target) u32 {
 pub fn gateNav(reg: *const registry_mod.Entry, step: emu_plan.GateStep, url: []const u8) bool {
     const e = entryOf(reg.cef_id) orelse return false;
     if (e.gate.active) return enqueue(e, step, url);
+    // (g) 흉내 전용 세션을 붙이는 동안(흉내가 아직 걸리지 않았다 — `Tab.parked`) maru 의 이동은 세션이 붙어 흉내를 낼 때까지(시한 안) 기다린다: 사용자 탭을
+    // 건 사이트에 묶은 뒤로는 첫 걸기가 세션을 붙이는데, 곧 뒤의 `--reload` 가 흉내 없이 문서를 받았다(격리 앱 실측 2026-11-17 — 문서 요청 UA·첫 스크립트
+    // 모두 진짜). 새로고침도 — 그 이동이 흉내를 기다리는 까닭이다. 열 때 행동마다 게이트를 다시 본다(밖으로 가면 지움의 답을 기다린다).
+    if (e.tab.parked and e.tab.alive and !reg.closing) {
+        e.gate.start(nowMs());
+        if (!enqueue(e, step, url)) {
+            e.gate = .{};
+            return false;
+        }
+        e.gate_clears = 0;
+        e.gate_replies = 0;
+        e.gate_t0_us = nowUs();
+        if (logOn()) std.debug.print("emu: gate b={d} wait-session {s}\n", .{ e.browser, @tagName(step.action) });
+        postGate(emu_plan.gate_deadline_ms);
+        return true;
+    }
     if (step.action == .reload or reg.closing) return false;
     const w = e.tab.wanted() orelse return false;
     if (!w.flags.site_bound or !e.tab.on_site or e.tab.hold or !e.tab.alive) return false;

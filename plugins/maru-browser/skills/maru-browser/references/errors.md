@@ -27,7 +27,7 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 | `-32002` with a hint that only tabs this pane opened can be closed | `close` on a tab you did not open | Leave the user's tab open. |
 | `-32002` saying the tab needs its network permission first | An older Maru: `network-record`, `network-block` or `network-mock` before `network` was allowed on that tab (it may also print the foreground hint under it — ignore that there) | Run `network` on that tab first. |
 | `-32002` saying a permission is gone, or that something works only on tabs the agent opened | The user revoked the tab in the Browser Grants menu (what you set there is gone), or the command needs a tab you opened | Do not retry in a loop. Ask the user, or `open` a tab of your own. |
-| `(-32603)` with `grants_full` | Maru keeps access for at most 64 pane-and-tab pairs | Close tabs you no longer need, then retry once. |
+| `(-32603)` with `grants_full` | Maru keeps access for at most 64 pane-and-tab pairs | Close tabs you opened and no longer need; for the user's tabs, ask the user to close them or to choose Revoke All in the Browser Grants menu. Then retry once. |
 | `error: the user declined the upload — nothing was uploaded (-32002)` | An older Maru: the user said no | Do not retry. Ask what they want. |
 | `error: the user declined browser tabs for this pane … (-32002)` from `open` | An older Maru: the user said no to tabs that use their logged-in sites | Do not retry. Tell the user what you needed the browser for. |
 | `error: maru closed the connection without answering …` | Too many connections, Maru quit, or (an older Maru) no answer to a dialog in time | Ask the user whether Maru is still running. Retry at most once. |

@@ -3821,7 +3821,7 @@ pub fn serializeGrantsFull(gpa: std.mem.Allocator, request_bytes: []const u8) st
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = "grants_full" });
-    return cp.serializeError(gpa, req.id, .internal_error, "maru keeps browser access for at most 64 pane-and-tab pairs and they are all in use — close tabs that are no longer needed, then retry", .{ .object = data });
+    return cp.serializeError(gpa, req.id, .internal_error, "maru keeps browser access for at most 64 pane-and-tab pairs and they are all in use — ask the user to close tabs that are no longer needed or to choose Revoke All in the Browser Grants menu, then retry", .{ .object = data });
 }
 
 /// W9d②: 본문 기록 전에 네트워크 권한이 없다 — `-32002` 에 `data.reason:"needs_network_permission"`(확인 모달 없이).
@@ -5946,6 +5946,7 @@ test "전권: 표가 차면 -32603 grants_full — 무엇을 하면 되는지 �
     try testing.expectEqual(@as(i64, 9), p.value.object.get("id").?.integer);
     try testing.expectEqualStrings("grants_full", e.get("data").?.object.get("reason").?.string);
     try testing.expect(std.mem.indexOf(u8, e.get("message").?.string, "close tabs") != null);
+    try testing.expect(std.mem.indexOf(u8, e.get("message").?.string, "Revoke All") != null); // 에이전트는 사용자 탭을 닫지 못한다 — 사람의 탈출구를 말한다(적대 검증 R2)
 }
 
 test "W9b③: browser.open 은 부른 pane(1g)이 대상 — pane 이 없으면 unauthorized, 주소·키·시한이 틀리면 invalid_params, pane 이 있으면 곧 op" {

@@ -1187,9 +1187,27 @@ test "에이전트가 몬 실행 파일 다운로드는 받는다 — 에이전�
     web_downloads.agent_tab_known = Known.f;
     try std.testing.expectEqual(web_downloads.State.preparing, Begin.on(gpa, 8, "e.command"));
     try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 9, "f.command"));
-    // 묻기를 켰으면 지금 그대로 — 에이전트 탭의 것도 저장 창을 띄우지 않고 보류한다(사용자 확인 대기 결정).
+    // 묻기를 켰으면 에이전트가 몬 것도 사람의 것처럼 묻는다(사용자 결정 2026-11-17 「저장 창 띄우기」) — 같은 탭의 둘째는 보류(한 탭에 하나씩),
+    // 아무도 몰지 않은 탭은 보류. 묻는 행은 곧바로 목록 창을 내지 않고, 그 탭을 보이는 창이 맡지 않으면 1 초 뒤 `nudgeAsking` 이 낸다(숨은 에이전트
+    // 탭의 길 — 목록의 「저장할 곳 고르기」). 그 탭을 보이는 창은 `claimAskFor` 로 맡아 저장 창을 띄운다.
     web_downloads.setAsk(true);
-    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 8, "g.command"));
+    const before_ask = web_downloads.showRequest(&shown_surface);
+    try std.testing.expectEqual(web_downloads.State.asking, Begin.on(gpa, 8, "g.command"));
+    const asking_key = web_downloads.at(web_downloads.count() - 1).?.key;
+    try std.testing.expectEqual(before_ask, web_downloads.showRequest(&shown_surface)); // 곧바로는 내지 않는다
+    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 8, "g2.command"));
+    try std.testing.expectEqual(web_downloads.State.held, Begin.on(gpa, 9, "g3.command"));
+    const t_ask = monotonicNow();
+    web_downloads.nudgeAsking(t_ask); // 묻기 시작 시각을 적는다
+    const after_held = web_downloads.showRequest(&shown_surface);
+    web_downloads.nudgeAsking(t_ask + 999);
+    try std.testing.expectEqual(after_held, web_downloads.showRequest(&shown_surface));
+    web_downloads.nudgeAsking(t_ask + 1000); // 아무 창도 맡지 않았다 — 목록 창
+    try std.testing.expectEqual(after_held +% 1, web_downloads.showRequest(&shown_surface));
+    try std.testing.expectEqual(@as(u64, 8), shown_surface);
+    const claimed = web_downloads.claimAskFor(8) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(asking_key, claimed.key);
+    try std.testing.expect(web_downloads.claimAskFor(8) == null); // 한 번만 맡는다
     web_downloads.setAsk(false);
     // 에이전트의 누름이 연 팝업 — 연 탭의 **유효한** 에이전트 시각을 물려받는다(표에 붙기 전에 다운로드가 와도).
     noteAgentInput(9);

@@ -856,6 +856,10 @@ test "tmux 잇기: pid 를 물려받은 서버(리더보다 늦게 시작)·다�
     var f4 = tmuxFake(&.{ login, shell(110), tmux_client, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
     try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f4.provider(), 131, uid, &pid_buf, &out).len); // 131 은 리더가 아니다
     try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(f4.provider(), 1, uid, &pid_buf, &out).len);
+    // 공급자가 리더 자리에 다른 pid 의 정보를 돌려준다(커널 버퍼가 엉뚱한 프로세스로 찼다) — 그 부모를 서버로 믿지 않는다(변이 M7).
+    var lying = tmuxFake(&.{ login, shell(110), tmux_client, tmux_server, tmux_shell, tmux_agent }, &tmux_socks, &.{ 110, 120 });
+    lying.base.lie_about = 130;
+    try std.testing.expectEqual(@as(usize, 0), tmuxClientSessions(lying.provider(), 130, uid, &pid_buf, &out).len);
 }
 
 test "tmux 잇기: 한 서버에 Maru pane 둘의 클라이언트가 붙으면 둘 다 — pid 가 작은 클라이언트부터, 같은 세션은 한 번" {

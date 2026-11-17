@@ -3794,6 +3794,7 @@ test "전권 대상: 제어할 수 있는 web 탭을 가리키는 browser.* 만 
     for ([_][]const u8{
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.list\",\"params\":{\"id\":12}}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"https://e.test/\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"id\":12}}", // 틀린 open(dispatch 가 invalid_params) — 남의 탭에 grant 를 넣지 않는다
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":10,\"selector\":\"h1\"}}", // 터미널
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":13,\"selector\":\"h1\"}}", // markdown
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":14,\"selector\":\"h1\"}}", // 파일 HTML 뷰

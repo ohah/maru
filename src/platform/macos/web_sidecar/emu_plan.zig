@@ -142,6 +142,9 @@ pub const Tab = struct {
     /// 문서 요청에만 머리를 넣는다(`injection`). 상태는 사이트 밖으로 알린다(maru 의 입력 줄임·테두리는 옛 문서에 걸리지 않는다). 커밋·끊김·오류
     /// 페이지(`navigate`)가 끈다.
     hold: bool = false,
+    /// 사이트에 묶인 흉내를 실을 자식 DevTools 세션(`Session`)이 아직 붙지 않았다 — 계획은 빈 열이고 상태는 `pending`(쌓인 차이 — `held`). 세션이
+    /// ready 가 되면 부른 쪽(`emulation.zig`)이 내리고 계획을 다시 돌린다. root 로 낸 흉내는 그 세션을 떼어도 지워지지 않으므로 섞어 내지 않는다.
+    parked: bool = false,
     pane_w: u32 = 0,
     pane_h: u32 = 0,
     /// 마지막으로 보낸 metrics 의 fit(상태가 싣는다).
@@ -190,11 +193,12 @@ pub const Tab = struct {
         return self.want.get();
     }
 
-    /// 사이트에 묶였으면 그 호스트를 덮는가(묶이지 않았으면 늘 참). 호스트를 모르면(http(s) 가 아니다) 밖이다.
+    /// 사이트에 묶였으면 그 호스트를 덮는가(묶이지 않았으면 늘 참). 호스트를 모르면(http(s) 가 아니다) 밖이다. IO 스레드의 응답 판단과 같은 셈
+    /// (`leaving` — 홉과 떼기가 어긋나지 않게 한 함수).
     pub fn siteCovers(self: *const Tab, host: ?[]const u8) bool {
         const w = self.want.get() orelse return true;
         if (!w.flags.site_bound) return true;
-        return net_policy.hostCovers(w.site, host orelse return false);
+        return !leaving(w.site, host);
     }
 
     /// 지금 걸려야 하는 상태(사이트 밖이면 빈 상태, 풀린 무리는 뺀다). 네트워크 조건은 `blocking.zig` 가 이것을 보고 건다.
@@ -230,10 +234,11 @@ pub const Tab = struct {
         return self.target();
     }
 
-    /// 무엇을 보낼지 — 바뀐 종류만. 렌더러가 없으면 빈 열(E11). 보낸다고 정한 종류는 `sent` 를 그 값으로 두고 `pending` 이다.
+    /// 무엇을 보낼지 — 바뀐 종류만. 렌더러가 없으면 빈 열(E11), 흉내 세션을 붙이는 동안(`parked`)도 빈 열. 보낸다고 정한 종류는 `sent` 를 그
+    /// 값으로 두고 `pending` 이다.
     pub fn plan(self: *Tab, out: *Cmds) void {
         out.* = .{};
-        if (!self.alive) return;
+        if (!self.alive or self.parked) return;
         const tm = self.targetFor(.metrics);
         self.fit = if (tm.flags.viewport) fitScale(self.pane_w, self.pane_h, tm.width, tm.height) else 1;
         inline for (@import("type_info_fields").fields(Kind)) |f| {
@@ -316,6 +321,30 @@ pub const Tab = struct {
         self.detached();
     }
 
+    /// 흉내를 실은 자식 세션을 뗐다·잃었다 — Chromium 은 그 세션이 건 흉내를 세션과 함께 지운다(`Target.detachFromTarget` — 브라우저 쪽 머리와
+    /// 렌더러 쪽 덮어쓰기 모두). 그래서 세션에 실린 종류(위치 빼고 — 위치는 `permissions.zig` 가 root 에서 건다)는 지운 것(`sent` 0)이고 답을 더
+    /// 기다리지 않는다(뗀 세션의 답은 세션과 함께 버려질 수 있다 — 기다리면 `pending` 이 계속 참이었다, ATTACK2 A2-2). 다음 계획이 사이트 안이면 새
+    /// 세션으로 모두 다시 건다.
+    pub fn sessionGone(self: *Tab) void {
+        for (&self.status, &self.sent, 0..) |*st, *s, i| {
+            if (i == @backingInt(Kind.geo)) continue;
+            s.* = 0;
+            if (st.* != .failed) st.* = .idle;
+        }
+    }
+
+    /// 길(root ↔ 세션)을 바꾸기 전에 옛 길에 건 것을 모두 지울 명령(위치 빼고). 지움을 낸다고 정한 종류는 `sent` 0 이다(ATTACK2 A2-1 — maru 는
+    /// 마지막 상태만 보내므로 묶이지 않은 흉내에서 묶인 흉내로 곧 바뀔 수 있다: root 에 건 것은 세션을 떼도 남는다).
+    pub fn planClear(self: *Tab, out: *Cmds) void {
+        out.* = .{};
+        if (!self.alive) return; // 죽은 렌더러에는 내지 않는다(E11) — 되살아난 뒤 그 길의 계획이 정한다
+        const empty: msg.Emulation = .{ .browser = if (self.want.get()) |w| w.browser else 0 };
+        inline for (@import("type_info_fields").fields(Kind)) |f| {
+            const kind: Kind = @fromBackingInt(@intCast(f.value));
+            if (kind != .geo) self.planKind(kind, empty, out);
+        }
+    }
+
     /// 새 렌더러(주 프레임 `on_load_start`) — 참이면 부른 쪽이 계획을 다시 돌린다.
     pub fn rendererBack(self: *Tab) bool {
         if (self.alive) return false;
@@ -386,11 +415,13 @@ pub const Tab = struct {
         return false;
     }
 
-    /// 죽은 동안 쌓인 바뀜이 있는가(상태 `waiting_renderer`) — 계획을 돌려 보지 않고, 바라는 것과 건 것이 다른 종류가 있는지만.
+    /// 죽은 동안(상태 `waiting_renderer`)·흉내 세션을 붙이는 동안(`parked` — 상태는 그냥 `pending`) 쌓인 바뀜이 있는가 — 계획을 돌려 보지 않고,
+    /// 바라는 것과 건 것이 다른 종류가 있는지만.
     pub fn held(self: *const Tab) bool {
-        if (self.alive) return false;
+        if (self.alive and !self.parked) return false;
         var copy = self.*;
         copy.alive = true;
+        copy.parked = false;
         var cmds: Cmds = .{};
         copy.plan(&cmds);
         return cmds.len > 0;
@@ -524,6 +555,144 @@ pub fn docChanging(url: []const u8) bool {
         k += 1;
     }
     return k < want.len;
+}
+
+// ── 흉내 전용 자식 세션(사용자 결정 2026-11-17 「틈 막기」 — 계획 (g)) ─────────────────────────────────────────────────────
+//
+// 사이트에 묶인 흉내를 탭의 기본(root) DevTools 연결이 아니라 그 탭 자신의 page 타깃에 붙인 자식 세션(`Target.attachToTarget{flatten}`)으로 낸다.
+// 페이지가 사이트 밖으로 가면 홉에서 지금처럼 지움을 내고(브라우저 쪽 머리가 곧 꺼진다), 떠나는 이동의 주 프레임 문서 **응답**에서 그 세션을 통째로
+// 뗀다 — 뗀 세션은 새 문서의 렌더러에 붙지 않아, 홉에서 낸 지움이 이동 동안 붙잡혀 새 렌더러에 옛 흉내가 선 뒤에야 닿던 경주(데워진 렌더러에서 보통
+// 부하 39/100·무거운 부하 50/50 — 재실측 2026-11-17)가 없다. 떼고 곧 빈 세션을 다시 붙여 다음 사이트 안 커밋에서 다시 건다. 응답이 오지 않는 이동은
+// 커밋에서 뗀다(늦은 길 — 지금과 같은 경주). 이 표는 단계만 정한다 — 보내기·답 가르기·IO 의 응답은 `emulation.zig`·`emu_inject.zig`.
+
+/// CDP sessionId·targetId 의 상한(Chromium 은 32 자 16 진 — 넉넉히; `net_body_sw.max_sid_bytes` 와 같다).
+pub const max_session_bytes: usize = 64;
+
+/// 흉내 명령이 갈 길. `root` 는 지금 동작(사이트에 묶이지 않은 흉내·붙기 실패), `session` 은 자식 세션, `wait` 은 세션을 붙이는 동안(계획을 멈춘다 —
+/// `Tab.parked`).
+pub const Route = enum { root, session, wait };
+
+pub const SessionPhase = enum { none, info, attaching, ready };
+
+/// 지금 낼 Target 호출.
+pub const SessionStep = enum { none, info, attach };
+
+pub const Session = struct {
+    phase: SessionPhase = .none,
+    /// root 로 되돌아갔다(붙기가 두 번 실패) — 그 탭이 닫힐 때까지 지금 동작(로그 `fallback root`).
+    root: bool = false,
+    /// 이 세션으로 걸기를 냈다 — 떼면 그 흉내가 함께 사라진다. 이 동안 IO 가 그 탭의 주 프레임 문서 응답을 본다(무장 — 처리기는 요청이 시작될 때 한
+    /// 번 고르므로 「밖으로 가는 홉」 이 아니라 이것으로 무장한다: 사이트 안 주소가 302 로 밖에 보내는 꼴 — ATTACK2 A1-3).
+    dirty: bool = false,
+    /// 붙기가 한 번 실패해 targetId 를 다시 읽는 중.
+    retried: bool = false,
+    /// 기다리는 Target 호출의 번호(0 = 없음).
+    call: i32 = 0,
+    sid_buf: [max_session_bytes]u8 = undefined,
+    sid_len: usize = 0,
+    target_buf: [max_session_bytes]u8 = undefined,
+    target_len: usize = 0,
+
+    pub fn sid(self: *const Session) ?[]const u8 {
+        return if (self.phase == .ready and self.sid_len != 0) self.sid_buf[0..self.sid_len] else null;
+    }
+
+    pub fn target(self: *const Session) ?[]const u8 {
+        return if (self.target_len == 0) null else self.target_buf[0..self.target_len];
+    }
+
+    /// 그 탭의 흉내(바람이 사이트에 묶였는가)가 갈 길.
+    pub fn route(self: *const Session, site_bound: bool) Route {
+        if (!site_bound or self.root) return .root;
+        return if (self.phase == .ready) .session else .wait;
+    }
+
+    /// 지금 낼 Target 호출 — 묶인 바람이 있고 세션이 없고(호출을 기다리지 않고) 렌더러가 살아 있을 때(죽은 탭에는 내지 않는다 — E11 의 같은 조심).
+    /// targetId 를 알면 곧 붙는다(탭의 page 타깃은 이동해도 같다).
+    pub fn next(self: *const Session, site_bound: bool, alive: bool) SessionStep {
+        if (!site_bound or self.root or !alive or self.phase != .none) return .none;
+        return if (self.target_len == 0) .info else .attach;
+    }
+
+    /// 그 호출을 냈다(번호 `id`).
+    pub fn sent(self: *Session, step: SessionStep, id: i32) void {
+        switch (step) {
+            .none => return,
+            .info => self.phase = .info,
+            .attach => self.phase = .attaching,
+        }
+        self.call = id;
+    }
+
+    /// 호출을 내지 못했다 — 붙기 실패와 같다.
+    pub fn sendFailed(self: *Session) Outcome {
+        self.call = 0;
+        return self.failed();
+    }
+
+    pub const Outcome = enum { none, attach, ready, root };
+
+    /// `Target.getTargetInfo` 의 답 — targetId 를 쥐고 붙기로(`attach`), 못 읽었으면 실패(`root` 또는 다시).
+    pub fn infoAnswered(self: *Session, id: i32, target_id: ?[]const u8) Outcome {
+        if (self.phase != .info or id != self.call) return .none;
+        self.call = 0;
+        const t = target_id orelse return self.failed();
+        if (t.len == 0 or t.len > max_session_bytes) return self.failed();
+        @memcpy(self.target_buf[0..t.len], t);
+        self.target_len = t.len;
+        self.phase = .none;
+        return .attach;
+    }
+
+    /// `Target.attachToTarget` 의 답 — sessionId 를 쥐고 ready(빈 세션), 못 읽었으면 실패.
+    pub fn attachAnswered(self: *Session, id: i32, session_id: ?[]const u8) Outcome {
+        if (self.phase != .attaching or id != self.call) return .none;
+        self.call = 0;
+        const s = session_id orelse return self.failed();
+        if (s.len == 0 or s.len > max_session_bytes) return self.failed();
+        @memcpy(self.sid_buf[0..s.len], s);
+        self.sid_len = s.len;
+        self.phase = .ready;
+        self.dirty = false;
+        self.retried = false;
+        return .ready;
+    }
+
+    /// 실패 — 처음이면 targetId 를 버리고 다시 읽는다(prerender 활성화 등으로 바뀌었을 수 있다 — ATTACK2 A2-7), 두 번째면 root.
+    fn failed(self: *Session) Outcome {
+        self.phase = .none;
+        self.sid_len = 0;
+        if (!self.retried) {
+            self.retried = true;
+            self.target_len = 0;
+            return .attach; // 부른 쪽이 `next` 로 다시(이제 `info`)
+        }
+        self.root = true;
+        return .root;
+    }
+
+    /// 이 세션으로 걸기를 냈다.
+    pub fn applied(self: *Session) void {
+        if (self.phase == .ready) self.dirty = true;
+    }
+
+    /// 무장 — IO 가 그 탭의 주 프레임 문서 응답을 보고 사이트 밖이면 뗀다.
+    pub fn armed(self: *const Session) bool {
+        return self.phase == .ready and self.dirty;
+    }
+
+    /// 뗐다(응답·커밋·길 바꿈) 또는 잃었다(세션을 찾을 수 없다·root 관찰자 떨어짐) — 새 세션을 붙일 수 있다(targetId 는 쥔다).
+    pub fn gone(self: *Session) void {
+        self.phase = .none;
+        self.call = 0;
+        self.sid_len = 0;
+        self.dirty = false;
+    }
+};
+
+/// 사이트 `site`(grant 호스트) 밖인가 — 호스트를 모르면(http(s) 가 아니다) 밖. 홉(`Tab.siteCovers`)과 IO 의 응답 판단이 같은 셈을 쓴다.
+pub fn leaving(site: []const u8, host: ?[]const u8) bool {
+    return !net_policy.hostCovers(site, host orelse return true);
 }
 
 // ── 인자 JSON ───────────────────────────────────────────────────────────────────────────────────────────
@@ -1640,4 +1809,176 @@ test "W9e① 게이트: javascript: 주소는 문서를 바꾸지 않는다 — 
     try testing.expect(!docChanging("javascript:alert(1)"));
     try testing.expect(!docChanging("  JavaScript:void(0)"));
     try testing.expect(!docChanging("\x01\x1f java\tscr\nipt\r:x"));
+}
+
+// ── (g) 흉내 전용 자식 세션(사용자 결정 2026-11-17 「틈 막기」) ───────────────────────────────────────────────────────────────
+
+test "W9e① (g) 세션: 묶인 바람이면 info → attach → ready(빈 세션), 묶이지 않으면 root, 죽은 렌더러에는 붙지 않고, targetId 를 쥐면 다시 붙기는 곧 attach" {
+    var s: Session = .{};
+    try testing.expectEqual(Route.root, s.route(false)); // 묶이지 않은 흉내(에이전트 탭·#4737 뒤 사용자 탭) — 지금 동작
+    try testing.expectEqual(SessionStep.none, s.next(false, true));
+    try testing.expectEqual(Route.wait, s.route(true));
+    try testing.expectEqual(SessionStep.none, s.next(true, false)); // 죽은 렌더러(E11 의 같은 조심)
+    try testing.expectEqual(SessionStep.info, s.next(true, true));
+    s.sent(.info, 10);
+    try testing.expectEqual(SessionStep.none, s.next(true, true)); // 답을 기다린다 — 두 번 내지 않는다
+    try testing.expectEqual(Session.Outcome.none, s.infoAnswered(11, "T1")); // 다른 번호
+    try testing.expectEqual(Session.Outcome.attach, s.infoAnswered(10, "T1"));
+    try testing.expectEqual(SessionStep.attach, s.next(true, true));
+    s.sent(.attach, 12);
+    try testing.expectEqual(Route.wait, s.route(true));
+    try testing.expect(s.sid() == null);
+    try testing.expectEqual(Session.Outcome.ready, s.attachAnswered(12, "S1"));
+    try testing.expectEqual(Route.session, s.route(true));
+    try testing.expectEqualStrings("S1", s.sid().?);
+    try testing.expect(!s.armed()); // 빈 세션 — 걸기를 내기 전에는 무장하지 않는다
+    try testing.expectEqual(Session.Outcome.none, s.attachAnswered(12, "S9")); // 늦은 같은 답
+    try testing.expectEqualStrings("S1", s.sid().?);
+    s.gone();
+    try testing.expectEqual(SessionStep.attach, s.next(true, true)); // 탭의 page 타깃은 이동해도 같다 — 다시 읽지 않는다
+    try testing.expectEqualStrings("T1", s.target().?);
+}
+
+test "W9e① (g) 세션 실패: 처음 실패는 targetId 를 다시 읽고 두 번째면 root(그 뒤 붙지 않는다), 못 읽은 답·빈 id·너무 긴 id 도 실패" {
+    var s: Session = .{};
+    s.sent(.info, 1);
+    try testing.expectEqual(Session.Outcome.attach, s.infoAnswered(1, "T1"));
+    s.sent(.attach, 2);
+    try testing.expectEqual(Session.Outcome.attach, s.attachAnswered(2, null)); // 첫 실패 — 다시
+    try testing.expect(s.target() == null);
+    try testing.expectEqual(SessionStep.info, s.next(true, true));
+    s.sent(.info, 3);
+    try testing.expectEqual(Session.Outcome.root, s.infoAnswered(3, "")); // 두 번째 실패
+    try testing.expectEqual(Route.root, s.route(true));
+    try testing.expectEqual(SessionStep.none, s.next(true, true));
+    var long: Session = .{};
+    long.sent(.info, 1);
+    try testing.expectEqual(Session.Outcome.attach, long.infoAnswered(1, "T"));
+    long.sent(.attach, 2);
+    const too_long: [max_session_bytes + 1]u8 = @splat('x');
+    try testing.expectEqual(Session.Outcome.attach, long.attachAnswered(2, &too_long));
+    var unsent: Session = .{};
+    try testing.expectEqual(Session.Outcome.attach, unsent.sendFailed()); // 내지 못함도 실패
+    try testing.expectEqual(Session.Outcome.root, unsent.sendFailed());
+    // 다시 붙은 뒤에는 실패를 새로 센다.
+    var again: Session = .{};
+    again.sent(.info, 1);
+    _ = again.infoAnswered(1, "T");
+    again.sent(.attach, 2);
+    _ = again.attachAnswered(2, null);
+    again.sent(.info, 3);
+    _ = again.infoAnswered(3, "T");
+    again.sent(.attach, 4);
+    try testing.expectEqual(Session.Outcome.ready, again.attachAnswered(4, "S"));
+    again.gone();
+    again.sent(.attach, 5);
+    try testing.expectEqual(Session.Outcome.attach, again.attachAnswered(5, null)); // root 가 아니다
+}
+
+test "W9e① (g) 무장: ready 세션으로 걸기를 내면 무장, 지움만으로는 풀리지 않고(떠나는 응답이 뗀다), 떼면 풀리고 다시 붙은 세션은 깨끗하다" {
+    var s: Session = .{};
+    s.applied();
+    try testing.expect(!s.armed()); // 세션이 없다
+    s.sent(.info, 1);
+    _ = s.infoAnswered(1, "T");
+    s.sent(.attach, 2);
+    _ = s.attachAnswered(2, "S");
+    s.applied();
+    try testing.expect(s.armed());
+    s.gone();
+    try testing.expect(!s.armed() and s.sid() == null and s.phase == .none);
+    s.sent(.attach, 3);
+    _ = s.attachAnswered(3, "S2");
+    try testing.expect(!s.armed());
+}
+
+test "W9e① (g) 멈춘 계획: 세션을 붙이는 동안 빈 열·상태 pending(차이가 있을 때만), 풀면 모두 건다, 사이트 밖이면 멈춰도 pending 이 아니다" {
+    var t: Tab = .{ .pane_w = 640, .pane_h = 400 };
+    try t.setWant(boundTz(1));
+    _ = t.navigate("a.test");
+    t.parked = true;
+    var c: Cmds = .{};
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 0), c.len);
+    try testing.expect(t.state(1).pending and t.state(1).alive); // maru 는 「sent」(죽은 렌더러의 waiting_renderer 가 아니다)
+    t.parked = false;
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 1), c.len);
+    try testing.expect(find(&c, .timezone).?.set);
+    var off: Tab = .{};
+    try off.setWant(boundTz(1));
+    _ = off.navigate("bank.test");
+    off.parked = true;
+    try testing.expect(!off.state(1).pending);
+}
+
+test "W9e① (g) 세션을 뗐다: 위치 빼고 모두 지운 것으로(실패 까닭은 남김), 사이트 안이면 다음 계획이 새 세션으로 모두 다시 건다 — 위치는 다시 내지 않는다" {
+    var t: Tab = .{ .pane_w = 640, .pane_h = 400 };
+    var v = phone();
+    v.flags.site_bound = true;
+    v.site = "a.test";
+    v.flags.timezone = true;
+    v.timezone = "UTC";
+    v.flags.geo = true;
+    v.latitude = 1;
+    try t.setWant(v);
+    _ = t.navigate("a.test");
+    var c: Cmds = .{};
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 4), c.len); // 화면·터치·시간대·위치
+    t.answered(.timezone, false, "{\"message\":\"Invalid timezone\"}");
+    t.sessionGone();
+    try testing.expect(!t.waiting());
+    try testing.expectEqual(Status.failed, t.status[@backingInt(Kind.timezone)]);
+    try testing.expect(t.sent[@backingInt(Kind.geo)] != 0);
+    t.plan(&c);
+    try testing.expectEqual(@as(usize, 3), c.len);
+    try testing.expect(find(&c, .geo) == null and find(&c, .metrics).?.set and find(&c, .timezone).?.set);
+    // 사이트 밖에서 뗐으면(응답 떼기 — 홉이 이미 지웠다) 다시 낼 것이 없다.
+    var off = t;
+    try testing.expect(off.navigate("bank.test"));
+    off.plan(&c);
+    off.sessionGone();
+    off.plan(&c);
+    try testing.expectEqual(@as(usize, 0), c.len);
+}
+
+test "W9e① (g) 길 바꿈의 지움: root 에 건 것(위치 빼고)을 모두 지우고 sent 0, 이미 지웠으면 빈 열, 죽은 렌더러에는 내지 않는다" {
+    var t: Tab = .{ .pane_w = 640, .pane_h = 400 };
+    var v = phone();
+    v.flags.timezone = true;
+    v.timezone = "UTC";
+    v.flags.geo = true;
+    v.latitude = 1;
+    try t.setWant(v);
+    var c: Cmds = .{};
+    t.plan(&c);
+    t.planClear(&c);
+    try testing.expectEqual(@as(usize, 3), c.len);
+    for (c.slice()) |x| try testing.expect(!x.set and x.kind != .geo);
+    try testing.expectEqualStrings("Emulation.clearDeviceMetricsOverride", find(&c, .metrics).?.method);
+    t.planClear(&c);
+    try testing.expectEqual(@as(usize, 0), c.len);
+    try testing.expect(t.sent[@backingInt(Kind.geo)] != 0);
+    var dead: Tab = .{};
+    try dead.setWant(boundTz(1));
+    dead.plan(&c);
+    dead.rendererGone();
+    dead.planClear(&c);
+    try testing.expectEqual(@as(usize, 0), c.len);
+}
+
+test "W9e① (g) 같은 표에서 「응답이 떠남이다(leaving)」 ⇔ 「홉이 사이트 밖으로 본다(!siteCovers)」 — IO 의 떼기와 UI 의 홉이 어긋나지 않는다" {
+    const hosts = [_]?[]const u8{ "a.test", "www.a.test", "A.TEST", "x.y.a.test", "bank.test", "evila.test", "a.test.evil", "test", "", null, "a.test." };
+    var t: Tab = .{};
+    try t.setWant(boundTz(1));
+    for (hosts) |h| {
+        try testing.expectEqual(!t.siteCovers(h), leaving("a.test", h));
+        var g = t;
+        _ = g.navigate("a.test");
+        const was_on = g.on_site;
+        _ = g.hop(h, "a.test");
+        try testing.expectEqual(was_on and !g.on_site, leaving("a.test", h));
+    }
+    try testing.expect(leaving("a.test", null) and !leaving("a.test", "a.test") and leaving("a.test", "bank.test"));
 }

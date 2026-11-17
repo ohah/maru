@@ -452,7 +452,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         emulation_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "emulation", "{s}", .{@errorName(err)});
-        perf_check.runConditions(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "emulation-conditions", "{s}", .{@errorName(err)});
+        if (std.c.getenv("EMQ_ONLY") == null) perf_check.runConditions(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "emulation-conditions", "{s}", .{@errorName(err)});
         // W9e① 거꾸로 경주 게이트: 관찰자 콜백 안에서 이동·명령을 내지 않았다(마지막 지움의 답은 task 로 연다 — 공격 A13) — 이 판의 모든 host 로그.
         @import("probe_select.zig").noReentrancy(&reportText, std.mem.span(argv[3]), "emu-no-observer-reentrancy");
         return if (failures == 0) 0 else 1;

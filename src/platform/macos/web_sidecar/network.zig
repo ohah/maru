@@ -283,7 +283,8 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
     if (browser == null or request == null or is_download != 0) return null;
     const handler = selectTab(browser, frame, request, is_navigation, initiator);
     // W9e①: 밖→안 홉을 기다리는 탭의 주 프레임 문서 요청 — 다른 처리기가 없어도 흉내 머리를 넣을 처리기를 준다(다른 처리기는 `onBeforeResourceLoad`
-    // 에서 넣는다). 기다리는 탭이 없으면 원자 하나만 본다.
+    // 에서 넣는다). 흉내를 자식 세션에 건(무장한) 탭의 주 프레임 이동도 — 떠나는 응답을 본다(다른 처리기는 `onResourceResponse` 에서 본다). 기다리는·
+    // 무장한 탭이 없으면 원자 하나만 본다.
     if (handler == null and emu_inject.wants(browser, frame, request, is_navigation)) return &emu_inject.rrh;
     return handler;
 }
@@ -892,6 +893,9 @@ fn onResourceResponse(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     defer object.releaseArg(frame);
     defer object.releaseArg(request);
     defer object.releaseArg(response);
+    // W9e① (g): 흉내를 자식 세션에 건 탭의 떠나는 문서 응답 — 지켜보기·막기·가짜(기록)·풀의 처리기가 그 요청을 가져가도 본다(먼저 — 아래 기록이
+    // 그 요청을 모르면 곧 돌아간다).
+    emu_inject.respond(browser, frame, request);
     var e: Event = .{ .kind = .response, .request = 0 };
     var sb: [msg.max_net_host_bytes]u8 = undefined;
     var site_len: usize = 0;

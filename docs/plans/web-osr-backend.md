@@ -5110,11 +5110,11 @@ FAIL 했다(위 「FULL 상한 조이기」 의 부하 판에서도 보인 것 �
 `--emulation` **55/0** 세 판(1 분 부하 1.8–8.4 — 그중 마지막 판만 「50 ms 안」 을 더한 판정자; 앞 둘은 그 단언 없이 같은 차례·같은 수).
 
 **남는 틈**(문서화 — 고치지 않음):
-- **페이지가 시작한 이동**(`history.back()`·`history.forward()`·`location`·링크·폼): 같은 부하에서 페이지의 뒤로 **35/40** 이 샜다(보통 부하에서는 보지
-  못했다 — 판정 `-page(obs)`). 사용자 결정 2026-11-14 로 덮지 않는다. 닫는 길로 알려진 것은 위 「첫 스크립트 경주」 의 **디버거 문**뿐이다(요청 붙잡기는
-  위 탐침으로 반증 — 이동이 시작된 뒤에는 답이 오지 않는다).
-- **에이전트의 `browser.back`·`browser.forward`**(CDP `Page.navigateToHistoryEntry` — wire 를 지나지 않는다)와 `browser.exec` 의 `history.back()`: 범위 밖
-  (사용자 결정 2026-11-14 — CDP 몇 개를 막아도 `Runtime.evaluate` 가 남는다).
+- ~~**페이지가 시작한 이동**(`history.back()`·`history.forward()`·`location`·링크·폼): 같은 부하에서 페이지의 뒤로 **35/40** 이 샜다(보통 부하에서는 보지
+  못했다 — 판정 `-page(obs)`). 사용자 결정 2026-11-14 로 덮지 않는다.~~ — **2026-11-17 닫힘**: 아래 「흉내 전용 세션」(사용자 결정 「틈 막기」). 재실측으로
+  틈은 문서보다 넓었다(그 사이트의 렌더러가 이미 떠 있으면 보통 부하에서도 샌다).
+- ~~**에이전트의 `browser.back`·`browser.forward`**(CDP `Page.navigateToHistoryEntry` — wire 를 지나지 않는다)와 `browser.exec` 의 `history.back()`: 범위 밖
+  (사용자 결정 2026-11-14 — CDP 몇 개를 막아도 `Runtime.evaluate` 가 남는다).~~ — 2026-11-17 같은 고침으로 함께 닫힘(시작한 쪽을 가리지 않는다 — U2 받아들임).
 - 다른 주 프레임 이동이 진행 중일 때의 maru 이동(A4 — 지금 동작), 시한을 넘긴 바쁜 문서(100 ms 뒤 지금 동작 — 경주가 남는다), 기다리는 중 렌더러 죽음
   (새 렌더러는 Chromium 이 옛 흉내를 다시 건다 — A9), 몸짓 없이 생긴 기록 항목을 Chromium 이 건너뛰는 개입(옆 항목이 사이트 안이면 게이트하지 않지만 실제
   대상은 밖일 수 있다 — CEF 가 알리지 않는다, A3), 사이트 안 주소에서 밖으로 가는 리다이렉트(E12 의 자리 — A7), 연 뒤 1 초 넘게 이동이 시작되지 않으면
@@ -5163,6 +5163,47 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
 실제 CEF(한 번씩): `--emulation` **32/0**, `--network-mock` 73/0(`mock-no-store-bfcache` 포함), `--network-block` 60/0, `--network` 173/0,
 `--network-body` 92/0, `--devtools` 19/0, `--dialogs` 12/0, `--popup` 8/0, `--input` 19/0; `--permissions` 25/2(`perm-dismiss`·`perm-remembered` — 로컬 글꼴
 허용 뒤 목록이 오지 않음, 다시 돌려도 같다; bfcache 스위치를 뺀 판에서도 같아 이 고침 탓이 아니다 — 그때 이 기계는 Spotlight 가 부하 28 이었다, 옮긴 판에서는 27/0).
+
+**흉내 전용 세션 — 페이지가 시작한 이동도 닫는다(W9e 후속 2026-11-17, 사용자 결정 「틈 막기」 = 계획 (g))**: 위 게이트는 maru 가 시작한 이동만 막았다.
+재실측(main `fe7b8ab5c`, 판정자 탐침 — 묶인 문서가 밖 사이트의 iframe 을 품어 **그 사이트의 렌더러가 이미 떠 있는** 꼴: 광고·임베드·로그인 위젯)에서
+페이지의 `location.href=` 7/20·`a.click()` 2/20·`<meta refresh>` 4/20·`history.back()` 7/20·`history.go(-2)` 19/20(보통 부하 1 분 1.3–1.4 — **39/100**), 내
+`yes` 22 개 부하에서 **50/50** 이 샜다(밖 문서의 첫 스크립트·pageshow·그 요청이 흉내; 문서 요청 머리·400 ms 뒤 요청은 진짜 — 커밋 뒤 몇 ms 의 창). maru 의
+주소 이동(게이트)은 0/20·0/10. 그 사이트의 렌더러가 없으면 무거운 부하에서도 0(앞 판 「무거운 부하에서 보였다」 는 조건을 잘못 짚었다 — 계획 기록
+`$S/emu_pagenav/PLAN2.md`·`MEASURE.md`).
+
+- **기제**: 사이트에 묶인 흉내(`site_bound`)는 탭의 root DevTools 연결이 아니라 그 탭 자신의 page 타깃에 붙인 **자식 세션**(`Target.getTargetInfo` →
+  `Target.attachToTarget{targetId, flatten}` — `emu_plan.Session`)으로 낸다. 사이트 밖으로 가는 홉은 지금처럼 지움을 그 세션으로 내고(브라우저 쪽 머리가 곧
+  꺼져 밖 문서 요청이 진짜다 — 응답에서만 떼면 문서 요청이 20/20 흉내였다), 떠나는 이동의 **주 프레임 문서 응답**(IO `on_resource_response` — CEF 는
+  콜백이 끝날 때까지 응답을 이동 로더로 넘기지 않는다)의 주소가 사이트 밖이면 UI task 로 그 세션을 **통째로 뗀다**(`Target.detachFromTarget`) — 뗀 세션은
+  새 문서의 렌더러에 붙지 않는다. 곧 빈 세션을 다시 붙여 다음 사이트 안 커밋에서 다시 건다. 응답을 보는 처리기는 그 세션에 흉내가 걸린 동안(무장 —
+  `Session.armed`) 그 탭의 모든 주 프레임 이동에 준다: 처리기는 요청이 시작될 때 한 번 고르므로 사이트 안 주소가 302 로 밖에 보내는 꼴도 덮는다. 지켜보기·
+  막기·가짜·풀의 처리기가 그 요청을 가져가도 같은 함수(`emu_inject.respond` — `network.onResourceResponse`·`mocking.Slot`)를 부른다. 떠남의 판단은 홉과 같은
+  셈(`emu_plan.leaving` — `siteCovers` 와 일치 표 시험). 응답 없이 밖 문서가 서면(커밋·오류 페이지) 그때 뗀다(늦은 길 — 지금과 같은 경주, 로그 `detach late`).
+- **고친 판에서 알게 된 것**(적대 공격 `ATTACK2.md`): 자식 세션의 답은 `on_dev_tools_method_result` 로 오지 않는다(CEF 파서는 sessionId 메시지를 넘기지
+  않는다 — 흉내 관찰자가 `on_dev_tools_message` 로 제 세션 id 로 끝나는 답만 가른다, `net_body_sw.sessionTail`), 브라우저 쪽 Target 명령의 답은
+  `send_dev_tools_message` 안에서 곧 올 수 있다(번호를 보내기 전에 적는다 — 첫 판은 답을 모두 놓쳐 흉내가 걸리지 않았다), W9d② 본문 기록의 관찰자는 page
+  타깃의 붙음까지 떼고 있었다(`net_body.onTarget` 은 이제 멈추지 않은 page 붙음을 건드리지 않는다 — 그대로면 본문 기록을 켠 탭에서 세션이 붙자마자 떨어졌다).
+  세션을 붙이는 동안은 계획을 멈춘다(`Tab.parked` — 상태 `pending`; root 에 건 것은 세션을 떼도 남으므로 섞지 않는다 — 길이 바뀌면 옛 길을 먼저 지운다),
+  붙기가 두 번 실패하면 root 로(지금 동작 — 로그 `fallback root`, 상태 까닭은 wire 를 바꾸지 않으려 싣지 않았다), 세션을 잃으면(`Session with given id not found`·
+  root 관찰자 떨어짐) 다시 붙여 다시 건다.
+- **차례(U5)**: CEF 는 우리 콜백 뒤에 응답을 넘기지만 Chromium 은 주 프레임 이동 응답을 UI 의 가장 높은 줄(`kMainFrameNavigationNetworkResponse`)에서 받는다 —
+  먼저 올린 우리 보통 task 를 앞지를 수 있어 **소스가 차례를 보장하지 않는다**(세션은 `ReadyToCommitNavigation` 에서 새 RFH 로 옮는다). 근거는 실측과 판정의
+  계속 단언이다(사용자 결정 U5): host 로그에서 응답 → 떼기 중앙 14–15 µs(최대 1.5 ms), 떼기 → 커밋 **최소 1.1 ms**·중앙 2.4–2.6 ms(보통 239 판·무거움 100 판),
+  「떼기 전에 커밋」 0. 지면 그 이동은 지금과 같은 경주로 떨어질 뿐이다.
+- **실측(고친 판, 같은 탐침)**: 보통 부하에서 `location`·`a.click()`·사람의 누름·`<meta refresh>`·폼 POST·`location.replace`·`history.back()`·`go(-2)`·
+  maru 의 주소 이동 **0/180**, 302 로 떠남의 첫 스크립트 0/20(문서 요청 머리는 20/20 흉내 — E12 그대로), 1.5 초 느린 밖 응답을 기다리는 동안 묶인 문서는 흉내
+  그대로(요청 15/15 — JS·머리), 밖→안 첫 스크립트 20/20 모든 흉내(앞 방향 나빠지지 않음); 내 `yes` 22 개 부하(1 분 19→32) **0/90**(302 첫 스크립트 0/10).
+- **남는 틈(받아들임 — U4)**: 리다이렉트로 떠나는 홉의 문서 요청 하나(E12); **서비스 워커가 답한 밖 문서**는 응답 콜백이 오지 않아 커밋에서 뗀다 — 지금과
+  같은 경주(판정 `emu-page-nav-sw(obs)` — 고친 판·고치기 전 판 모두 3/3 샘, 데워진 렌더러); speculation **prefetch 된 밖 문서**의 prefetch 요청 머리(B 의 요청 —
+  고친 판에서 활성화 뒤 JS 는 0/3, 고치기 전 3/3); 응답 뒤 다운로드·204 에서 B 가 새 세션이 붙을 때까지(~1–3 ms) 흉내 없이 보인다(허락한 사이트가 진짜를
+  잠깐 보는 쪽); 밀려난 옛 이동의 늦은 응답이 새 사이트 안 이동 뒤에 와 떼면 그 문서가 같은 꼴로 잠깐 진짜. bfcache 는 꺼진 채다(복원은 응답·홉이 없다).
+- **#4737(전권, 2026-11-16) 뒤 제품 길**: 사용자 탭의 흉내 grant 는 어느 호스트든(`any_host`)으로 들어가(`control_pane_grant.fullAccessPlan` — `narrowAnyHost`
+  는 흉내를 좁히지 않는다) `web_osr_emulate.Tab.site` 가 비고 `site_bound` 가 서지 않는다 — **지금 사용자 탭의 흉내는 탭 전체**이고 이 고침은 sidecar 의
+  사이트 묶기 계약(판정자·호스트에 묶인 grant)에서 쓰인다. 되살리지 않았다(사용자 결정 대기 — 사이트 묶기를 전권과 어떻게 맞출지).
+- 판정: `--emulation` 새 세션 `emq`(`emulation_pagenav_check.zig` — 종류마다 `EMQ_ITERS` 판(기본 3), `detach-order`·`redirect`·`slow-wait`·`aborted`·`watch`·
+  `mock`·`body-record`·`dead`, 관측 `sw`·`prefetch`·`block`; 손잡이 `EMQ_ONLY=1` 은 그 세션만), `emu-site-bound-bfcache-page` 를 관측에서 단언으로.
+  고치기 전 sidecar(main 의 `maru-web-host`)로 같은 판정을 돌리면 `emq` 11 FAIL(`detach-order` 0/27 을 포함 — 3 판짜리 종류 판정은 운이 좋으면 지나므로
+  떼기 수의 단언이 고정한다). 순수 sidecar **581**(emu_plan 세션 시험 7).
 
 ### W9e② 결정·실측 — 성능 trace 와 CPU·네트워크 조건(`browser.trace`·`browser.emulate` 의 `cpu`·`network`, wire 26, 2026-10-29)
 

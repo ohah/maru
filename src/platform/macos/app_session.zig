@@ -3042,8 +3042,6 @@ const PendingConfirm = union(enum) {
     quit,
     paste: u64,
     file_conflict_reload: u64,
-    /// W9c③: 에이전트의 파일 올리기 확인(`browser.upload` — 부를 때마다). 값은 그 요청의 async_id. 파일 줄은 `upload_notes` 가 든다.
-    upload: u64,
     file_panel_close,
     editor_save_close,
     file_tree_delete,
@@ -3080,10 +3078,6 @@ const QuitDecision = enum(u32) {
     accepted = 1, // 사용자가 "종료" 확정 — host가 NSApp.reply(true)
     cancelled = 2, // 사용자가 "취소" — host가 NSApp.reply(false)
 };
-
-/// W9c③: 업로드 확인 모달의 결정 latch. named 타입이라 field·`takeUploadDecision` 이 같은 타입을 공유한다(익명 struct 는 매 리터럴이 별개
-/// 타입이라 불가). browser grant 확인 모달(§9.2 Model B)은 사용자 결정 2026-11-16(「AI 가 모든 접근」)으로 걷혔다.
-const GrantConfirmDecision = struct { async_id: u64, approved: bool };
 
 /// surface teardown 관찰 훅. AppSession은 컨트롤 서버를 import하지 않고 surface 수명만 알리며, macOS ABI 계층이
 /// pane-bound browser grant/wait 취소에 연결한다. null이면 순수/헤드리스 세션 동작은 기존과 동일하다.
@@ -6371,11 +6365,6 @@ pub const AppSession = struct {
     paste_preview_lines: [paste_preview_max_lines + 1][]const u8 = undefined,
     // Cmd+Q 종료 확인의 결정 latch. tick epilogue가 FrameSummary.quit_decision에 실어 host로 한 번 전달한 뒤 .none으로 리셋한다.
     quit_decision: QuitDecision = .none,
-    /// W9c③: 업로드 확인 모달의 결정 latch({async_id, approved}) — app_host_abi 가 `takeUploadDecision` 으로 한 번 읽고 비운다.
-    upload_confirm_decision: ?GrantConfirmDecision = null,
-    /// W9c③: 업로드 확인 모달의 파일 줄(소유)과 그것을 빌린 안내 줄 — 모달이 열려 있는 동안 confirm 의 `notes` 가 빌린다.
-    upload_note_lines: std.ArrayList([]u8) = .empty,
-    upload_notes: std.ArrayList(chrome.components.confirm.Note) = .empty,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -6600,8 +6589,6 @@ pub const AppSession = struct {
     osr_key_target: u64 = 0,
     /// maru 가 곧 키 대상을 옮긴다는 표시(그 이동·단조 ms) — 그 바뀜만 사용자 시각을 찍지 않는다(W9c② 적대 리뷰 4·5 회차, `web_ops.markFocusByApp`).
     osr_focus_by_app: ?web_ops.AppFocusMark = null,
-    /// 권한 확인 모달이 키를 가져갈 때 키를 쥐고 있던 탭 — 모달이 닫히면 그리로 돌아가는 이동을 maru 것으로 표시한다(5 회차).
-    osr_grant_return: u64 = 0,
     /// W10b: 이 세션이 다운로드 목록(앱 전역)에 마지막으로 알린 「매번 묻기」 — 이 세션의 값이 바뀔 때만 다시 알린다(관계없는 재적용·
     /// 외관 전환이 다른 창의 옛 값으로 되돌렸다 — 5 회차).
     download_ask_applied: ?bool = null,
@@ -10880,12 +10867,6 @@ pub const AppSession = struct {
         if (self.pending_confirm == .editor_save_close) @import("app_session/editor/save/close.zig").cancel(self);
         switch (self.pending_confirm) {
             .quit => self.quit_decision = .cancelled,
-            // W9c③: 다른 상자가 업로드 확인을 밀어내면(사용자가 닫기 등을 불렀다) 거부로 친다 — 묻지 않은 채 올리지 않는다.
-            .upload => |async_id| {
-                self.upload_confirm_decision = .{ .async_id = async_id, .approved = false };
-                if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return);
-                self.osr_grant_return = 0;
-            },
             .paste => self.pending_paste_confirm.clearRetainingCapacity(),
             .file_panel_close => file_panel_ops.cancelFilePanelClose(self),
             .file_tree_delete => self.pending_file_tree_delete = null,
@@ -10974,61 +10955,6 @@ pub const AppSession = struct {
     /// 확인 전용이라 호출자가 문장을 지어낼 이유가 없다.
     pub fn showConfirm(self: *AppSession, message: maru.i18n.Key, target: PendingClose) void {
         self.showConfirmButtons(.{ .close = target }, maru.i18n.t(message), .{ .confirm = maru.i18n.t(.btn_close), .cancel = maru.i18n.t(.common_cancel) });
-    }
-
-    /// W9c③: 에이전트의 파일 올리기 확인 모달(라벨 「허용」/「거부」). `lines` 는 파일마다 두 줄(`session.web_upload_display.fileLines`) —
-    /// 복사해 둔다. grant 모달과 같은 규칙: 다른 오버레이·확인이 열려 있으면 띄우지 않고 false(app_host_abi 가 다음 tick 에 다시), 이미 이
-    /// async_id 를 보이는 중이면 true. 비동기로 뜨므로 `guardAsync`(거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더), 모달이 키를 가져가는
-    /// 이동은 maru 것으로 표시(`markFocusByApp`). **목록이 다 보여야 허용된다**(`notes_must_fit` — 보이지 않는 파일에 동의시키지 않는다).
-    /// 부를 때마다 띄운다 — 결정은 기억하지 않는다(grant 처럼 접는 dedup 이 없다).
-    pub fn showUploadConfirm(self: *AppSession, message: []const u8, lines: []const []const u8, async_id: u64) error{OutOfMemory}!bool {
-        if (self.pending_confirm == .upload) return self.pending_confirm.upload == async_id;
-        if (self.anyOverlayOpen() or self.pending_confirm != .none) return false;
-        self.freeUploadNotes();
-        for (lines) |l| {
-            const owned = try self.allocator.dupe(u8, l);
-            self.upload_note_lines.append(self.allocator, owned) catch |e| {
-                self.allocator.free(owned);
-                return e;
-            };
-        }
-        for (self.upload_note_lines.items) |l| try self.upload_notes.append(self.allocator, .{ .text = l, .fit = .wrap });
-        self.showConfirmButtons(.{ .upload = async_id }, message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
-        self.chrome_host.confirm.notes = self.upload_notes.items;
-        self.chrome_host.confirm.notes_must_fit = true;
-        self.osr_grant_return = self.osr_key_target;
-        if (self.osr_key_target != 0) web_ops.markFocusByApp(self, self.osr_key_target, 0);
-        self.chrome_host.confirm.guardAsync(maru.i18n.t(.grant_recheck));
-        return true;
-    }
-
-    /// W9c③: 그 요청(async_id)의 결정이 래치돼 있으면 한 번 읽고 비운다(승인이면 true). 다른 요청의 결정은 건드리지 않는다 — 여러 탭의 업로드가
-    /// 같은 창을 본다(먼저 읽은 쪽이 남의 답을 지우지 않게).
-    pub fn takeUploadDecision(self: *AppSession, async_id: u64) ?bool {
-        const d = self.upload_confirm_decision orelse return null;
-        if (d.async_id != async_id) return null;
-        self.upload_confirm_decision = null;
-        return d.approved;
-    }
-
-    /// W9c③: 답을 기다리던 요청이 끝났거나(시한·철회·탭 닫힘) 다른 창에서 답이 났다 — 그 모달을 결정 없이 거둔다(다른 모달이면 그대로). 이 창에
-    /// 래치된 그 요청의 답도 버린다(두 창에서 답했으면 남은 쪽이 쓰이지 않고 남았다 — 적대 리뷰 1 회차).
-    pub fn dismissUploadConfirm(self: *AppSession, async_id: u64) void {
-        if (self.upload_confirm_decision) |d| if (d.async_id == async_id) {
-            self.upload_confirm_decision = null;
-        };
-        if (self.pending_confirm != .upload or self.pending_confirm.upload != async_id) return;
-        self.pending_confirm = .none;
-        self.chrome_host.confirm.dismiss();
-        if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return);
-        self.osr_grant_return = 0;
-        self.metal_dirty = true;
-    }
-
-    fn freeUploadNotes(self: *AppSession) void {
-        for (self.upload_note_lines.items) |l| self.allocator.free(l);
-        self.upload_note_lines.clearRetainingCapacity();
-        self.upload_notes.clearRetainingCapacity();
     }
 
     /// "Reset All Settings to Defaults"(메뉴 reset_defaults·팝업 reset_settings) 확인 모달을 연다. config 파일을 기본
@@ -13607,20 +13533,6 @@ pub const AppSession = struct {
                     .remote_file_tree_delete => file_panel_ops.confirmRemoteFileTreeDelete(self),
                     .lsp_trust => editor_ops.lsp_client.answerTrust(self, true),
                     .lsp_trust_manage => editor_ops.lsp_client.answerManage(self, .primary),
-                    .upload => |async_id| {
-                        // 목록이 다 보이지 않으면 허용하지 않는다 — 키보드 확정도(⌘⏎). 상자를 다시 열어 둔다(창을 넓히거나 거부).
-                        const tk = self.buildChromeTokens();
-                        if (!chrome.components.confirm.confirmAllowed(&self.chrome_host.confirm, self.buildChromeProps(), &tk)) {
-                            self.pending_confirm = owner;
-                            self.chrome_host.confirm.open = true;
-                            self.chrome_host.confirm.focused = .cancel;
-                            self.chrome_host.confirm.rechecking = false;
-                        } else {
-                            self.upload_confirm_decision = .{ .async_id = async_id, .approved = true };
-                            if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return);
-                            self.osr_grant_return = 0;
-                        }
-                    },
                     .quit => {
                         self.quit_decision = .accepted;
                         app_quit_keep_alive = appKeepAlivePolicyValue();
@@ -13682,7 +13594,7 @@ pub const AppSession = struct {
                 if (owner == .save_conflict) editor_conflict_ops.confirmReload(self, owner.save_conflict);
                 self.metal_dirty = true;
             },
-            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/업로드)을 버린다.
+            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기)을 버린다.
                 // 신뢰 프롬프트는 **사용자의 취소만** 거부로 기억한다(§8.2a) — 다른 모달이 덮거나 앱이 끝나며 닫히는 것은 답이 아니다.
                 if (self.pending_confirm == .lsp_trust) editor_ops.lsp_client.answerTrust(self, false);
                 self.cancelPendingConfirm();
@@ -25153,9 +25065,6 @@ pub const AppSession = struct {
             self.pending_pastes.deinit(self.allocator);
         }
         self.pending_paste_confirm.deinit(self.allocator);
-        self.freeUploadNotes();
-        self.upload_note_lines.deinit(self.allocator);
-        self.upload_notes.deinit(self.allocator);
         self.user_action_queue.close();
         for (&self.user_actions) |*slot| {
             if (slot.*) |*action| action.deinit(self.allocator);

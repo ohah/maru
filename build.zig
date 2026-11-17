@@ -2025,22 +2025,16 @@ pub fn build(b: *std.Build) void {
     // @import("build_options").version으로 읽어 인앱 새 버전 안내에 쓴다(distribution.md). app host lib과
     // 그 계약 테스트 모듈 양쪽에 같은 모듈을 주입한다. 값은 위 `maru_version_mod` 와 같은 zon 값이다(코어의
     // XTVERSION 은 그쪽 모듈을 읽는다).
-    // W9c③: 에이전트 업로드의 확인 모달을 환경변수(`MARU_TEST_UPLOAD_DECISION`)로 대신 답하는 길 — **시험 빌드에만** 들어간다(cdp 스모크가
-    // `-Dweb-upload-test-decision=true` 로 앱을 만든다). 기본(배포본)은 거짓이라 그 환경변수를 읽는 코드가 comptime 으로 빠진다 — 모달이
-    // 업로드의 유일한 관문이다(docs/plans/web-osr-backend.md 「W9c③ 결정」).
-    const web_upload_test_decision = b.option(bool, "web-upload-test-decision", "Build the app so MARU_TEST_UPLOAD_DECISION answers the browser.upload confirmation (test builds only — never for distribution)") orelse false;
     const build_options_mod = blk: {
         const opts = b.addOptions();
         opts.addOption([]const u8, "version", build_zig_zon.version);
         opts.addOption(bool, "mermaid_test_api", false);
-        opts.addOption(bool, "web_upload_test_decision", web_upload_test_decision);
         break :blk opts.createModule();
     };
     const build_options_test_mod = blk: {
         const opts = b.addOptions();
         opts.addOption([]const u8, "version", build_zig_zon.version);
         opts.addOption(bool, "mermaid_test_api", true);
-        opts.addOption(bool, "web_upload_test_decision", true);
         break :blk opts.createModule();
     };
 
@@ -3093,14 +3087,6 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c", "if nm -gU \"$1\" | /usr/bin/grep -q 'maru_macos_mermaid_test_reset'; then echo 'error: smoke reset leaked into product ABI' >&2; exit 1; fi", "sh",
         });
         macos_mermaid_product_symbol_check.addFileArg(macos_app_host_abi_lib.getEmittedBin());
-        // W9c③(적대 리뷰 1 회차 — 약속한 배포본 판정자): 기본 빌드(`-Dweb-upload-test-decision` 없이)의 제품 라이브러리에는 업로드 모달을
-        // 환경변수로 대신 답하는 길이 없어야 한다 — 그 이름의 글자가 남아 있으면 comptime 으로 빠지지 않은 것이다. 모달이 업로드의 유일한 관문이다.
-        const macos_upload_decision_absent_check = b.addSystemCommand(&.{
-            "sh", "-eu", "-c",
-            "if /usr/bin/grep -a -q 'MARU_TEST_UPLOAD_DECISION' \"$1\"; then echo 'error: the upload test decision (MARU_TEST_UPLOAD_DECISION) leaked into the product ABI — build without -Dweb-upload-test-decision' >&2; exit 1; fi",
-            "sh",
-        });
-        macos_upload_decision_absent_check.addFileArg(macos_app_host_abi_lib.getEmittedBin());
 
         // Swift 제품 host는 Zig compiler가 직접 만들 수 없으므로 xcrun swiftc를 build graph의
         // system command로 둔다. 대신 입력은 C header와 Zig static library로 제한해서
@@ -3188,7 +3174,6 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.setCwd(b.path("."));
         macos_app_compile.step.dependOn(&macos_app_mkdir.step);
         macos_app_compile.step.dependOn(&install_macos_app_host_abi_lib.step);
-        if (!web_upload_test_decision) macos_app_compile.step.dependOn(&macos_upload_decision_absent_check.step);
 
         // CR6d가 SIGKILL/timeout으로 AppKit teardown을 건너뛰어도 system-global input source를
         // 원래 값으로 되돌리는 최소 실행파일이다. 일반 앱에는 진입점이 없고 opt-in harness만 호출한다.

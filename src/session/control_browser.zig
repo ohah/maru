@@ -1602,8 +1602,7 @@ pub const UploadParams = struct {
 };
 
 /// 앱에 넘겨도 되는 경로인가 — 절대 경로(`/` 로 시작 — 상대 경로는 Chromium 이 다음 이동에서 렌더러를 죽였다, 계획 실측 k3), PATH_MAX 안,
-/// 올바른 UTF-8, 제어 문자(C0·DEL·C1) 없음(확인 모달에 줄바꿈 같은 글자로 다른 파일처럼 보이게 하지 못하게 — `file_dialog_path` 와 같은 규칙).
-/// 양방향·폭 없는 글자는 받되 모달이 코드로 보인다(`web_upload_display`).
+/// 올바른 UTF-8, 제어 문자(C0·DEL·C1) 없음(앱 로그·오류 글에 줄바꿈 같은 글자로 다른 파일처럼 보이게 하지 못하게 — `file_dialog_path` 와 같은 규칙).
 pub fn uploadPathOk(path: []const u8) bool {
     return uploadPathProblem(path) == null;
 }

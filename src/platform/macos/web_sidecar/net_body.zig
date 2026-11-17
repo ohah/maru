@@ -919,6 +919,13 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
         dbg("sw-rescued b={d} sid={s} target={s} keep={} release={} paused={}", .{ browser, sid, target_id, x.keep, x.release, paused });
         waiting = true;
     }
+    // W9e① (g — 2026-11-17): 멈추지 않은 page 타깃의 붙음은 다른 주인의 세션이다 — 흉내가 그 탭 자신의 page 타깃에 붙인 자식 세션(`emulation.zig`)이
+    // 이 사건을 낸다. 떼면 흉내가 곧 풀리고 다시 붙고 다시 떼이는 고리가 됐다(ATTACK2 A1-2). 우리 auto-attach(`filter`)·건지기는 page 를 붙이지 않는다
+    // (filter 를 끈 시험 손잡이 `MARU_WEB_SW_WAIT_FILTER=none` 의 멈춰 붙은 타깃은 아래 지금 길이 놓고 뗀다).
+    if (std.mem.eql(u8, kind, "page") and !waiting and rescued == null) {
+        dbg("sw-attached b={d} sid={s} type=page not ours", .{ browser, sid });
+        return;
+    }
     // 기록하는 탭이고 걸어 둔 auto-attach 의 서비스 워커면 둔다 — 아니면(밸브로 멈춤·떼는 중·옛 세대·다른 꼴) 곧 뗀다(공격 2 A1).
     // 재검증 7 차(N13): 몫을 넘으면 세워 둔다(`.park` — enable 하지 않고 시한 뒤 뗀다; 곧 떼면 Chromium 이 같은 워커를 곧 다시 붙였다).
     const now = machUs();

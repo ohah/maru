@@ -17,7 +17,16 @@
 //! - **거꾸로(안→밖) — maru 가 시작한 이동은 지움의 답 뒤에**(사용자 결정 2026-11-14 「maru 가 시작한 이동만 막기」 — `gateNav`): 사이트 안 문서에서 밖으로
 //!   가는 HTTP 캐시의 뒤로(bfcache 가 아니다 — `pageshow` 의 `persisted` 거짓)는 홉에서 커밋까지가 짧아 홉에서 낸 지움이 새 렌더러에 옛 상태가 선 뒤
 //!   닿았다 — 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 봤다. maru 의 주소·뒤로·앞으로·우클릭 메뉴의 뒤로·앞으로는 지움을 먼저 내고 그 답이
-//!   다 오거나 100 ms 가 지나면 낸다. 페이지·에이전트 CDP 가 시작한 이동은 덮지 않는다(남는 틈 — 계획 문서).
+//!   다 오거나 100 ms 가 지나면 낸다.
+//! - **거꾸로(안→밖) — 페이지·에이전트 CDP 가 시작한 이동은 흉내 전용 세션을 떼어**(사용자 결정 2026-11-17 「틈 막기」 — 계획 (g)): 사이트에 묶인
+//!   흉내는 root 연결이 아니라 그 탭 자신의 page 타깃에 붙인 자식 세션(`Target.attachToTarget{flatten}`)으로 낸다. 사이트 밖으로 가는 홉은 지금처럼
+//!   지움을 내고(브라우저 쪽 머리가 곧 꺼진다), 떠나는 이동의 주 프레임 문서 **응답**(IO — `emu_inject.respond`)에서 UI task 로 그 세션을 통째로
+//!   떼고 곧 빈 세션을 다시 붙인다 — 뗀 세션은 새 문서의 렌더러에 붙지 않아 밖 문서의 첫 스크립트·pageshow·첫 요청이 흉내를 보지 않는다(데워진
+//!   렌더러 꼴에서 보통 부하 39/100·무거운 부하 50/50 이 샜다 — 재실측 2026-11-17). 응답이 오지 않는 이동(서비스 워커가 답한 문서 등)은 커밋에서
+//!   뗀다(늦은 길 — 지금과 같은 경주). 응답이 커밋보다 먼저 UI 에 닿는 차례는 실측뿐이다(Chromium 은 주 프레임 이동 응답을 가장 높은 UI 줄에서 받는다 —
+//!   판정이 「떼기 전에 커밋」 0 을 단언한다). 자식 세션의 답은 원시 메시지(`on_dev_tools_message`)로만 온다(CEF 파서는 sessionId 메시지를 넘기지
+//!   않는다 — net_body 실측 p1). 세션을 붙이는 동안은 계획을 멈추고(`Tab.parked` — 상태 `pending`), 붙기가 두 번 실패하면 root 로(지금 동작).
+//!   사이트에 묶이지 않은 흉내(에이전트 탭)·위치·네트워크 조건은 root 그대로.
 //! - **화면은 pane 에 맞춰 줄인다**(사용자 결정 Q3 — `scale`): pane 크기가 바뀌면 다시 셈해 다시 낸다(E2).
 //! - **위치는 W5b2 와 한 칸**(사용자 결정 Q2): `permissions.zig` 가 건다 — 그 탭의 위치만 묻는 프롬프트에는 묻지 않고 허용, 대신 허용한 출처는
 //!   흉내가 끝나면 되돌린다.
@@ -47,6 +56,7 @@ const emu_inject = @import("emu_inject.zig");
 const table_mod = @import("net_block_table.zig"); // 주소의 정규 해시(막기의 끊긴 이동 짝짓기와 같은 셈 — `canonHash`)
 const blocking = @import("blocking.zig"); // W9e②: 네트워크 조건은 Network 도메인의 주인이 낸다
 const proc_share = @import("proc_share.zig"); // W9e②: CPU 줄이기의 프로세스 나눔
+const sw_raw = @import("net_body_sw.zig"); // (g): 자식 세션의 원시 메시지 가르기(끝의 sessionId·머리의 id) — W9d② 와 같은 꼴
 
 const msg = protocol.message;
 const BrowserId = msg.BrowserId;
@@ -87,6 +97,15 @@ const Entry = struct {
     gate_clears: u32 = 0,
     gate_replies: u32 = 0,
     gate_t0_us: u64 = 0,
+    /// (g) 사이트에 묶인 흉내를 실을 자식 세션.
+    sess: emu_plan.Session = .{},
+    /// 지금 `tab.sent` 가 root 에 걸린 것인가(아니면 세션) — 길이 바뀌면 옛 길을 먼저 지운다(ATTACK2 A2-1).
+    on_root: bool = true,
+    /// 세션 task 가 이 탭을 볼 일이 있다(다음 Target 호출·ready 뒤 계획).
+    sess_kick: bool = false,
+    sess_run: bool = false,
+    /// 로그·판정: 응답으로 뗀 시각(단조 µs) — 그 뒤 커밋까지를 적는다. 0 = 없음.
+    detach_us: u64 = 0,
 
     fn hop(self: *const Entry) ?[]const u8 {
         return if (self.hop_len == 0) null else self.hop_host[0..self.hop_len];
@@ -99,7 +118,8 @@ var observer_ready = false;
 var next_id: i32 = emu_plan.id_base;
 /// 답을 기다리는 흉내 호출(탭 32 × 종류 9 이면 288 — 넘치면 답을 기다리지 않고 「모름」 으로 둔다). `clear` 는 게이트가 낸 지움(`gate_arming`
 /// 동안 — 상태(`Tab.status`)는 건드리지 않고 게이트의 남은 수만 센다: 평소 홉의 지움은 지금처럼 쫓지 않는다 — `emulation_state.pending` 의 뜻 그대로).
-var pending_ids: [320]struct { id: i32 = 0, cef_id: c_int = 0, kind: emu_plan.Kind = .metrics, clear: bool = false } = @splat(.{});
+/// `session` 은 자식 세션으로 낸 것(그 세션을 찾을 수 없다는 답이면 세션을 잃은 것이다).
+var pending_ids: [320]struct { id: i32 = 0, cef_id: c_int = 0, kind: emu_plan.Kind = .metrics, clear: bool = false, session: bool = false } = @splat(.{});
 /// 게이트가 지움을 내는 동안(`armGate` 의 `run` — UI 스레드).
 var gate_arming = false;
 
@@ -114,6 +134,8 @@ fn initObserver() void {
     object.staticRefCounted(&observer.base);
     observer.on_dev_tools_method_result = &onResult;
     observer.on_dev_tools_agent_detached = &onDetached;
+    observer.on_dev_tools_message = &onRaw; // (g) 자식 세션의 답
+    emu_inject.onLeave(&leaveSweep);
 }
 
 fn entryOf(cef_id: c_int) ?*Entry {
@@ -189,6 +211,8 @@ fn syncInject(e: *Entry) void {
 }
 
 fn run(e: *Entry, reg: *const registry_mod.Entry) void {
+    route(e, reg);
+    defer syncArm(e);
     var cmds: emu_plan.Cmds = .{};
     e.tab.plan(&cmds);
     for (cmds.slice()) |cmd| {
@@ -409,6 +433,8 @@ fn takeId() i32 {
 }
 
 fn sendCmd(e: *Entry, reg: *const registry_mod.Entry, cmd: emu_plan.Cmd) void {
+    // (g) 길: root 가 아니면 자식 세션으로(ready 가 아니면 계획이 멈춰 여기 오지 않는다 — 오면 보내지 않고 실패로 드러낸다).
+    const sid: ?[]const u8 = if (e.on_root) null else (e.sess.sid() orelse return e.tab.sendFailed(cmd.kind));
     const b = browserOf(reg);
     const host = b.*.get_host.?(b);
     if (host == null) return e.tab.sendFailed(cmd.kind);
@@ -417,7 +443,10 @@ fn sendCmd(e: *Entry, reg: *const registry_mod.Entry, cmd: emu_plan.Cmd) void {
     if (e.reg == null) e.reg = host.*.add_dev_tools_message_observer.?(host, &observer);
     const id = takeId();
     var jb: [8 * 1024]u8 = undefined;
-    const json = std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}", .{ id, cmd.method, cmd.params }) catch return e.tab.sendFailed(cmd.kind);
+    const json = (if (sid) |s|
+        std.fmt.bufPrint(&jb, "{{\"id\":{d},\"sessionId\":\"{s}\",\"method\":\"{s}\",\"params\":{s}}}", .{ id, s, cmd.method, cmd.params })
+    else
+        std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}", .{ id, cmd.method, cmd.params })) catch return e.tab.sendFailed(cmd.kind);
     // 같은 종류의 옛 호출은 더 기다리지 않는다 — 그 답이 이 호출의 답으로 잡히면 실패한 걸기를 걸린 것으로 보였다(적대 리뷰).
     for (&pending_ids) |*p| if (p.id != 0 and p.cef_id == e.cef_id and p.kind == cmd.kind) {
         p.* = .{};
@@ -425,12 +454,12 @@ fn sendCmd(e: *Entry, reg: *const registry_mod.Entry, cmd: emu_plan.Cmd) void {
     var tracked = false;
     if (cmd.set or gate_arming) {
         for (&pending_ids) |*p| if (p.id == 0) {
-            p.* = .{ .id = id, .cef_id = e.cef_id, .kind = cmd.kind, .clear = !cmd.set };
+            p.* = .{ .id = id, .cef_id = e.cef_id, .kind = cmd.kind, .clear = !cmd.set, .session = sid != null };
             tracked = true;
             break;
         };
     }
-    if (logOn()) std.debug.print("emu: cdp b={d} {s} {s}\n", .{ e.browser, cmd.method, cmd.params });
+    if (logOn()) std.debug.print("emu: cdp b={d} {s} {s}{s}\n", .{ e.browser, cmd.method, cmd.params, if (sid != null) " (session)" else "" });
     if (host.*.send_dev_tools_message.?(host, json.ptr, json.len) == 0) {
         if (tracked) for (&pending_ids) |*p| if (p.id == id) {
             p.* = .{};
@@ -438,6 +467,7 @@ fn sendCmd(e: *Entry, reg: *const registry_mod.Entry, cmd: emu_plan.Cmd) void {
         if (cmd.set) e.tab.sendFailed(cmd.kind);
         return;
     }
+    if (cmd.set and sid != null) e.sess.applied(); // 떼면 함께 사라질 흉내가 이 세션에 섰다 — 무장(`syncArm`)
     // 자리가 없어 기다리지 못한 걸기는 걸린 것으로 친다(답은 버린다 — 실패는 다음 바뀜에 드러난다).
     if (cmd.set and !tracked) e.tab.answered(cmd.kind, true, "");
 }
@@ -445,23 +475,49 @@ fn sendCmd(e: *Entry, reg: *const registry_mod.Entry, cmd: emu_plan.Cmd) void {
 fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t, id: c_int, success: c_int, result: ?*const anyopaque, size: usize) callconv(.c) void {
     defer object.releaseArg(browser);
     if (id < emu_plan.id_base or id >= emu_plan.id_end) return; // 다른 사용처의 결과
+    const bytes: []const u8 = if (result != null and size > 0) @as([*]const u8, @ptrCast(result.?))[0..@min(size, 4096)] else "";
+    // (g) 세션을 붙이는 Target 호출의 답(root — sessionId 가 없다).
+    for (&entries) |*slot| if (slot.*) |*e| if (e.sess.call != 0 and e.sess.call == id) return targetAnswered(e, id, success != 0, bytes);
+    handleResult(id, success != 0, bytes);
+}
+
+/// (g) 원시 메시지 — 끝이 우리 자식 세션의 sessionId 인 답만 가른다(CEF 파서는 sessionId 메시지를 `on_dev_tools_method_result` 로 넘기지 않는다 —
+/// net_body 실측 p1 0/285). 우리 것이면 1(삼킨다), 아니면 0(CEF 에 맡긴다 — root 의 답은 `onResult` 로 온다).
+fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t, message: ?*const anyopaque, size: usize) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    if (browser == null or message == null) return 0;
+    const m = @as([*]const u8, @ptrCast(message.?))[0..size];
+    const sid = sw_raw.sessionTail(m) orelse return 0;
+    const e = entryOf(browser.*.get_identifier.?(browser)) orelse return 0;
+    const ours = e.sess.sid() orelse return 0;
+    if (!std.mem.eql(u8, sid, ours)) return 0;
+    const rid = sw_raw.resultId(m) orelse return 1; // 그 세션의 사건 — 켠 도메인이 없어 오지 않는다
+    if (rid < emu_plan.id_base or rid >= emu_plan.id_end) return 1;
+    handleResult(@intCast(rid), sw_raw.resultOk(m), m[0..@min(m.len, 4096)]);
+    return 1;
+}
+
+/// 흉내 호출 하나의 답(root 의 `onResult`·세션의 `onRaw` 가 함께 부른다). 관찰자 콜백 안이다 — 명령·이동은 task 로.
+fn handleResult(id: c_int, ok: bool, bytes: []const u8) void {
     for (&pending_ids) |*p| if (p.id == id) {
         const cef_id = p.cef_id;
         const kind = p.kind;
         const clear = p.clear;
+        const in_session = p.session;
         p.* = .{};
         const e = entryOf(cef_id) orelse return;
+        // (g) 세션이 사라졌다(Chromium 이 뗐다 — 타깃이 바뀜 등): 그 세션의 흉내도 없다 — 다시 붙여 다시 건다.
+        if (in_session and !ok and std.mem.indexOf(u8, bytes, "ession with given id not found") != null) return sessionLost(e, "not_found");
         if (clear) {
             // 게이트의 지움 — 실패 답도 답이다(렌더러가 처리했다). 마지막 답이면 열기를 task 로 미룬다: 관찰자 콜백 안에서 이동·명령을 내지 않는다
             // (`Check failed: !check_reentrancy` — W9d②·W9e② 의 같은 사고, 공격 A13).
             e.gate_replies += 1;
-            if (logOn()) std.debug.print("emu: result b={d} {s} clear ok={}\n", .{ e.browser, @tagName(kind), success != 0 });
+            if (logOn()) std.debug.print("emu: result b={d} {s} clear ok={}\n", .{ e.browser, @tagName(kind), ok });
             if (e.gate.active and gateLeft(cef_id) == 0) postGate(0);
             return;
         }
-        const bytes: []const u8 = if (result != null and size > 0) @as([*]const u8, @ptrCast(result.?))[0..@min(size, 4096)] else "";
-        e.tab.answered(kind, success != 0, bytes);
-        if (logOn()) std.debug.print("emu: result b={d} {s} ok={} {s}\n", .{ e.browser, @tagName(kind), success != 0, if (success != 0) "" else bytes });
+        e.tab.answered(kind, ok, bytes);
+        if (logOn()) std.debug.print("emu: result b={d} {s} ok={} {s}\n", .{ e.browser, @tagName(kind), ok, if (ok) "" else bytes });
         if (!e.tab.waiting()) sendState(e, false);
         return;
     };
@@ -481,6 +537,8 @@ fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_brow
     const e = entryOf(cef_id) orelse return;
     // 답을 기다리던 것은 걸렸는지 모른다 — 다음 계획(되살아난 뒤)이 다시 낸다.
     e.tab.detached();
+    // (g) root 연결이 떨어지면 그 위의 자식 세션도 함께 사라진다(flatten 세션은 그 연결에 산다) — 다시 붙여 다시 건다.
+    if (e.sess.phase != .none) sessionLost(e, "agent_detached");
     sendState(e, false);
     if (e.gate.active) postGate(0); // 게이트의 지움은 더 답이 오지 않는다 — 연다(관찰자 콜백 밖에서)
 }
@@ -548,6 +606,7 @@ pub fn loadStart(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, transit
     emu_inject.clear(e.cef_id); // 그 이동은 끝났다
     if (logOn() and back) std.debug.print("emu: renderer back b={d}\n", .{e.browser});
     if (logOn()) std.debug.print("emu: commit b={d} host={s} on_site={}\n", .{ e.browser, host, e.tab.on_site });
+    lateDetach(e, reg, if (host.len == 0) null else host, "commit");
     // 새 렌더러(쌓인 차이)·사이트 안팎·DevTools 가 떨어져 모르게 된 종류 — 살아 있는 문서가 막 시작했으니 차이를 낸다(바뀐 것이 없으면 빈 열).
     run(e, reg);
     sendState(e, false);
@@ -587,6 +646,7 @@ pub fn loadFailed(browser: [*c]c.cef_browser_t, failed_url: [*c]const c.cef_stri
     emu_inject.clear(e.cef_id);
     var hb: [msg.max_net_host_bytes]u8 = undefined;
     const host = protocol.net_policy.hostOfUrl16(units(failed_url), &hb);
+    lateDetach(e, reg, if (host.len == 0) null else host, "error");
     if (!e.tab.navigate(if (host.len == 0) null else host)) return;
     if (logOn()) std.debug.print("emu: error page b={d} host={s} on_site={}\n", .{ e.browser, host, e.tab.on_site });
     run(e, reg);
@@ -626,11 +686,207 @@ pub fn autoAllowedChanged(id: BrowserId) void {
 pub fn browserClosed(cef_id: c_int) void {
     dropPending(cef_id);
     emu_inject.clear(cef_id);
+    emu_inject.disarm(cef_id); // (g) 세션은 탭과 함께 사라진다 — 떼기를 내지 않는다
     for (&entries) |*e| if (e.*) |v| if (v.cef_id == cef_id) {
         if (v.reg != null) object.release(v.reg);
         if (v.gate_url) |u| std.heap.c_allocator.free(u); // 줄은 버린다(이동 없음)
         e.* = null;
     };
+}
+
+// ── (g) 흉내 전용 자식 세션(사용자 결정 2026-11-17 「틈 막기」) ─────────────────────────────────────────────────────────
+
+/// 흉내 명령의 길을 정한다(`run` 앞) — root ↔ 세션이 바뀌면 옛 길에 건 것을 먼저 지우고(root 에 건 것은 세션을 떼도 남는다 — ATTACK2 A2-1), 세션이
+/// 아직 없으면 붙이기를 걸고 계획을 멈춘다(`Tab.parked`).
+fn route(e: *Entry, reg: *const registry_mod.Entry) void {
+    const bound = if (e.tab.wanted()) |w| w.flags.site_bound else false;
+    const r = e.sess.route(bound);
+    if (r == .root) {
+        if (!e.on_root) {
+            // 세션 → root: 세션에 건 것은 떼면 함께 사라진다(붙기를 다시 걸지 않는다).
+            if (e.sess.phase == .ready) detachSession(e, reg, "route", false);
+            e.tab.sessionGone();
+            e.on_root = true;
+        }
+        e.tab.parked = false;
+        return;
+    }
+    if (e.on_root) {
+        // root → 세션: 죽은 렌더러에는 지움을 내지 않는다(E11) — 되살아난 뒤 다시 본다(그동안 계획도 빈 열이다).
+        if (!e.tab.alive) {
+            e.tab.parked = false;
+            return;
+        }
+        var cmds: emu_plan.Cmds = .{};
+        e.tab.planClear(&cmds);
+        for (cmds.slice()) |cmd| sendCmd(e, reg, cmd);
+        if (logOn() and cmds.len > 0) std.debug.print("emu: session b={d} drain root {d}\n", .{ e.browser, cmds.len });
+        e.on_root = false;
+    }
+    const was = e.tab.parked;
+    e.tab.parked = r == .wait;
+    if (logOn() and was != e.tab.parked) std.debug.print("emu: session b={d} {s}\n", .{ e.browser, if (e.tab.parked) "park" else "unpark" });
+    if (r == .wait) kickSession(e, false);
+}
+
+/// IO 의 무장(`emu_inject.arm`)을 세션의 상태에 맞춘다 — 흉내를 세션에 건 동안만 그 탭의 주 프레임 문서 응답을 본다.
+fn syncArm(e: *Entry) void {
+    const w = e.tab.wanted() orelse return emu_inject.disarm(e.cef_id);
+    if (!e.on_root and e.sess.armed() and w.flags.site_bound) emu_inject.arm(e.cef_id, w.site) else emu_inject.disarm(e.cef_id);
+}
+
+var sess_task: c.cef_task_t = undefined;
+var sess_task_ready = false;
+
+/// 세션 task 를 건다 — 관찰자 콜백 안에서는 명령을 내지 않는다(`check_reentrancy`). `then_run` 이면 다음 Target 호출이 없을 때 계획을 다시 돌린다.
+fn kickSession(e: *Entry, then_run: bool) void {
+    e.sess_kick = true;
+    if (then_run) e.sess_run = true;
+    if (!sess_task_ready) {
+        sess_task = object.zeroed(c.cef_task_t);
+        object.staticRefCounted(&sess_task.base);
+        sess_task.execute = &sessSweep;
+        sess_task_ready = true;
+    }
+    _ = browsers.state.api.post_task(c.TID_UI, &sess_task);
+}
+
+fn sessSweep(_: [*c]c.cef_task_t) callconv(.c) void {
+    for (&entries) |*slot| if (slot.*) |*e| {
+        if (!e.sess_kick) continue;
+        e.sess_kick = false;
+        const reg = browsers.state.registry.byCefId(e.cef_id) orelse continue;
+        if (reg.closing or browsers.state.shutting_down) continue;
+        const bound = if (e.tab.wanted()) |w| w.flags.site_bound else false;
+        const step = e.sess.next(bound, e.tab.alive);
+        if (step != .none) {
+            sendTarget(e, reg, step);
+            continue;
+        }
+        if (!e.sess_run) continue;
+        e.sess_run = false;
+        run(e, reg);
+        sendState(e, false);
+    };
+}
+
+/// `Target.getTargetInfo`(그 탭 자신의 page 타깃)·`Target.attachToTarget{targetId, flatten}` 을 root 로 낸다. 번호를 **보내기 전에** 적는다 — 브라우저
+/// 쪽 명령의 답은 `send_dev_tools_message` 안에서 곧 관찰자로 올 수 있다(첫 판은 뒤에 적어 답을 모두 놓쳤다 — 판정 1 회차).
+fn sendTarget(e: *Entry, reg: *const registry_mod.Entry, step: emu_plan.SessionStep) void {
+    var pb: [160]u8 = undefined;
+    const id = takeId();
+    e.sess.sent(step, id);
+    if (logOn()) std.debug.print("emu: session b={d} {s}\n", .{ e.browser, if (step == .info) "info" else "attach" });
+    const ok = switch (step) {
+        .none => return,
+        .info => sendRoot(e, reg, id, "Target.getTargetInfo", "{}"),
+        .attach => blk: {
+            const params = std.fmt.bufPrint(&pb, "{{\"targetId\":\"{s}\",\"flatten\":true}}", .{e.sess.target() orelse ""}) catch break :blk false;
+            break :blk sendRoot(e, reg, id, "Target.attachToTarget", params);
+        },
+    };
+    // 답이 이미 왔으면(곧 온 답) 번호가 지워졌다 — 실패로 치지 않는다.
+    if (!ok and e.sess.call == id) outcome(e, e.sess.sendFailed(), "send");
+}
+
+/// root 로 한 호출을 낸다(번호 `id` — 부른 쪽이 먼저 적는다). 답은 `onResult` 가 받는다.
+fn sendRoot(e: *Entry, reg: *const registry_mod.Entry, id: i32, method: []const u8, params: []const u8) bool {
+    const b = browserOf(reg);
+    const host = b.*.get_host.?(b);
+    if (host == null) return false;
+    defer object.release(host);
+    if (e.reg == null) e.reg = host.*.add_dev_tools_message_observer.?(host, &observer);
+    var jb: [512]u8 = undefined;
+    const json = std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}", .{ id, method, params }) catch return false;
+    return host.*.send_dev_tools_message.?(host, json.ptr, json.len) != 0;
+}
+
+/// 답의 JSON 에서 `"<key>":"…"` 의 값(16 진 id — 따옴표까지).
+fn stringField(bytes: []const u8, comptime key: []const u8) ?[]const u8 {
+    const k = "\"" ++ key ++ "\":\"";
+    const at = std.mem.indexOf(u8, bytes, k) orelse return null;
+    const rest = bytes[at + k.len ..];
+    return rest[0 .. std.mem.indexOfScalar(u8, rest, '"') orelse return null];
+}
+
+/// Target 호출의 답(관찰자 콜백 안 — 다음 일은 task 로).
+fn targetAnswered(e: *Entry, id: c_int, ok: bool, bytes: []const u8) void {
+    const o = switch (e.sess.phase) {
+        .info => e.sess.infoAnswered(id, if (ok) stringField(bytes, "targetId") else null),
+        .attaching => e.sess.attachAnswered(id, if (ok) stringField(bytes, "sessionId") else null),
+        else => return,
+    };
+    if (o == .ready and logOn()) if (e.sess.sid()) |sid| std.debug.print("emu: session b={d} ready sid={s}\n", .{ e.browser, sid[0..@min(8, sid.len)] });
+    outcome(e, o, if (ok) "answer" else bytes[0..@min(bytes.len, 120)]);
+}
+
+fn outcome(e: *Entry, o: emu_plan.Session.Outcome, why: []const u8) void {
+    switch (o) {
+        .none => {},
+        .attach => kickSession(e, false), // 다음 호출(붙기 또는 다시 읽기)
+        .ready => kickSession(e, true), // 멈춘 계획을 낸다
+        .root => {
+            if (logOn()) std.debug.print("emu: session b={d} fallback root why={s}\n", .{ e.browser, why });
+            kickSession(e, true); // 길이 root 로 — 지금 동작
+        },
+    }
+}
+
+/// 세션을 잃었다(그 세션을 찾을 수 없다는 답·root 관찰자 떨어짐) — 그 세션의 흉내도 없다. 관찰자 콜백 안일 수 있다 — 다시 붙기·다시 걸기는 task.
+fn sessionLost(e: *Entry, why: []const u8) void {
+    if (logOn()) std.debug.print("emu: session b={d} lost {s}\n", .{ e.browser, why });
+    e.sess.gone();
+    emu_inject.disarm(e.cef_id);
+    if (!e.on_root) {
+        dropPending(e.cef_id);
+        e.tab.sessionGone();
+    }
+    kickSession(e, true);
+}
+
+/// 세션을 뗀다(UI — 관찰자 콜백 밖) — 그 세션이 건 흉내는 Chromium 이 함께 지운다. `again` 이면 곧 빈 세션을 다시 붙인다(다음 사이트 안 커밋에서
+/// 다시 건다).
+fn detachSession(e: *Entry, reg: *const registry_mod.Entry, why: []const u8, again: bool) void {
+    const sid = e.sess.sid() orelse return;
+    var pb: [160]u8 = undefined;
+    const params = std.fmt.bufPrint(&pb, "{{\"sessionId\":\"{s}\"}}", .{sid}) catch return;
+    _ = sendRoot(e, reg, takeId(), "Target.detachFromTarget", params);
+    if (logOn()) std.debug.print("emu: session b={d} detach {s}\n", .{ e.browser, why });
+    e.sess.gone();
+    emu_inject.disarm(e.cef_id);
+    dropPending(e.cef_id); // 뗀 세션의 답은 세션과 함께 버려질 수 있다(ATTACK2 A2-2)
+    e.tab.sessionGone();
+    if (again) kickSession(e, true);
+}
+
+/// IO 가 떠나는 응답을 봤다(`emu_inject` 의 task — UI): 그 탭의 세션을 뗀다. 응답이 이동 로더로 넘어가기 전에 올린 task 다 — 커밋보다 먼저 도는
+/// 차례는 실측뿐이다(판정이 `commit before detach` 0 을 단언 — 늦으면 그 이동은 지금과 같은 경주).
+fn leaveSweep() void {
+    for (&entries) |*slot| if (slot.*) |*e| {
+        const hit_us = emu_inject.takeHit(e.cef_id) orelse continue;
+        if (!e.sess.armed()) continue;
+        const reg = browsers.state.registry.byCefId(e.cef_id) orelse continue;
+        const now = nowUs();
+        detachSession(e, reg, "resp", true);
+        e.detach_us = now;
+        if (logOn()) std.debug.print("emu: session b={d} detach resp dt={d}us\n", .{ e.browser, now -| hit_us });
+    };
+}
+
+/// 늦은 길 — 세션에 흉내가 걸린 채 사이트 밖 문서가 섰다(커밋·오류 페이지): 응답이 오지 않은 이동(서비스 워커가 답한 문서·prefetch 활성화 등)이거나
+/// 응답 task 가 커밋보다 늦었다. 지금 뗀다(그 이동은 지금과 같은 경주). 응답으로 뗀 뒤의 커밋이면 그 사이를 적는다.
+fn lateDetach(e: *Entry, reg: *const registry_mod.Entry, host: ?[]const u8, why: []const u8) void {
+    if (e.detach_us != 0) {
+        if (logOn()) std.debug.print("emu: session b={d} {s} after detach dt={d}us\n", .{ e.browser, why, nowUs() -| e.detach_us });
+        e.detach_us = 0;
+    }
+    if (!e.sess.armed()) return;
+    const w = e.tab.wanted() orelse return;
+    if (!w.flags.site_bound or !emu_plan.leaving(w.site, host)) return;
+    // 응답을 봤는데 task 가 아직 돌지 않았다 — 차례가 뒤집혔다(판정이 0 을 단언).
+    if (emu_inject.takeHit(e.cef_id) != null and logOn()) std.debug.print("emu: session b={d} {s} before detach\n", .{ e.browser, why });
+    if (logOn()) std.debug.print("emu: session b={d} detach late {s}\n", .{ e.browser, why });
+    detachSession(e, reg, "late", true);
 }
 
 // ── 상태 ─────────────────────────────────────────────────────────────────────────────────────────────────

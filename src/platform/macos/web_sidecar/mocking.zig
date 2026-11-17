@@ -286,6 +286,8 @@ fn newSlot(cef_id: c_int, a: *const table_mod.Acquired, rule: *table_mod.Rule, h
     s.rrh.base.has_at_least_one_ref = &rrhHasAtLeastOne;
     s.rrh.get_resource_handler = &slotResourceHandler;
     s.rrh.get_cookie_access_filter = &getCookieFilter;
+    // W9e① (g): 가짜가 답한 사이트 밖 문서도 떠나는 응답이다 — 흉내 세션을 뗀다(기록하는 처리기는 `network.setRecording` 이 덮고 그 콜백도 부른다).
+    s.rrh.on_resource_response = &@import("emu_inject.zig").responseOnly;
     s.h.base.add_ref = &hAddRef;
     s.h.base.release = &hRelease;
     s.h.base.has_one_ref = &hHasOne;

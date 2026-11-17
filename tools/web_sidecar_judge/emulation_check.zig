@@ -26,8 +26,8 @@
 //!   걸지 않고, 묶인 사이트의 문서에서 밖으로 가는 204 가 흉내를 풀어 두지 않는다).
 //! 넘나듦(`emh`): emu-site-bound-bfcache(maru 의 뒤로로 돌아간 밖의 문서가 첫 스크립트·pageshow 에서 흉내를 보지 않고 그 요청이 흉내 머리를 싣지
 //!   않는다 — 이름은 bfcache 지만 maru 의 Chromium 은 bfcache 를 끄고, 샌 것은 HTTP 캐시의 뒤로(`persisted` 거짓 — `N:`)였다: 게이트가 지움의 답을
-//!   다 받은 뒤 이동을 냈는지 host 로그의 차례로 단언한다 — 부하와 상관없다)·emu-site-bound-bfcache-page(obs)(페이지의 `history.forward()` 는 게이트
-//!   밖 — 사용자 결정 2026-11-14, 적기만)·emu-site-bound-slow-hop(밖의 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안 흉내를
+//!   다 받은 뒤 이동을 냈는지 host 로그의 차례로 단언한다 — 부하와 상관없다)·emu-site-bound-bfcache-page(페이지의 `history.forward()` 는 게이트
+//!   밖이지만 흉내 전용 세션을 떠나는 응답에서 뗀다 — 사용자 결정 2026-11-17, 밖 문서가 흉내를 보지 않는다)·emu-site-bound-slow-hop(밖의 문서가 묶인 사이트의 느린 주소로 가는 이동을 기다리는 동안 흉내를
 //!   보지 않고, 그동안 그 문서가 만든 iframe 셋·Worker 의 요청은 진짜 머리다 — 탭 전체의 흉내는 모두 커밋 뒤에 걸고, 그 홉의 문서 요청 하나에만
 //!   흉내 머리를 넣는다: 커밋 뒤 요청과 같은 꼴, 새 문서의 흉내 명령은 커밋 알림 안에서 나가고(`page_started` 보다 먼저 온 `pending` 상태 — 차례라
 //!   부하에 흔들리지 않는다) 첫 스크립트로부터 25 ms 안에 모든 흉내)·emu-site-bound-slow-hop-first-script(obs)(새 문서의 첫 스크립트가 본 것·모든
@@ -43,6 +43,7 @@
 //!   emu-site-bound-gate-target(이동을 시작하지 않는 뒤로·Chromium 이 버리는 주소는 연 뒤 곧 되돌린다·`\` 주소는 Chromium 처럼 밖)·emu-site-bound-gate-safety(1 초
 //!   안에 홉이 없으면 안전망이 되돌린다 — 바쁜 떠나기 처리기, 뒤로와 주소 이동).
 //!   판 끝에 emu-no-observer-reentrancy(모든 host 로그 — 관찰자 콜백 안에서 이동·명령을 내지 않았다, `main.zig`).
+//! 페이지가 시작한 이동(`emq` — 사용자 결정 2026-11-17 「틈 막기」, 흉내 전용 자식 세션을 떠나는 응답에서 뗀다): `emulation_pagenav_check.zig`.
 //! 팝업(`emp`): emu-popup-shared(같은 프로세스의 팝업은 시간대·locale 이 따라오고 제 흉내는 process_shared_conflict — E13).
 //! 재시작(`emr`): emu-restart(about:blank → 흉내 → 이동이면 문서 요청부터, 옛 sidecar 가 대신 허용한 출처는 새 sidecar 가 되돌린다 — P2-6).
 
@@ -159,7 +160,7 @@ fn acceptLoop(fd: c_int) void {
     }
 }
 
-fn reply(conn: c_int, status: []const u8, ctype: []const u8, extra: []const u8, body: []const u8) void {
+pub fn reply(conn: c_int, status: []const u8, ctype: []const u8, extra: []const u8, body: []const u8) void {
     var hb: [2048]u8 = undefined;
     const head = std.fmt.bufPrint(&hb, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nCache-Control: no-store\r\n{s}Connection: close\r\n\r\n", .{ status, ctype, body.len, extra }) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
@@ -190,7 +191,7 @@ fn headerOf(r: []const u8, comptime name: []const u8) []const u8 {
     return "";
 }
 
-const html = "text/html; charset=utf-8";
+pub const html = "text/html; charset=utf-8";
 /// 첫 요청부터 client hints 를 다 받게(문서 요청이 그 사이트의 Accept-CH 를 기억한다).
 const accept_ch = "Accept-CH: Sec-CH-UA-Platform-Version, Sec-CH-UA-Model, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Arch\r\n";
 
@@ -259,7 +260,7 @@ const mx_tail = "'></iframe><script>" ++ mx_js ++
 ;
 
 /// 사이트 밖 문서가 흉내를 보는가(사이트 묶기의 오감 — `bound_all` 의 값만 고른다): 보인 것의 이름을 쉼표로, 없으면 `-`.
-const sg_js =
+pub const sg_js =
     \\function SG(){var l=[];try{var r=Intl.DateTimeFormat().resolvedOptions();if(r.timeZone==='Asia/Tokyo')l.push('tz');if(String(r.locale).indexOf('fr')===0)l.push('il');if(navigator.userAgent.indexOf('BoundUA')===0)l.push('ua');if(String(navigator.language).indexOf('fr')===0)l.push('lang');if(innerWidth===390)l.push('iw');if(devicePixelRatio===3)l.push('dpr');if(navigator.maxTouchPoints===5)l.push('mtp');if(matchMedia('print').matches)l.push('print');if(matchMedia('(forced-colors:active)').matches)l.push('fc')}catch(x){l.push('err')}return l.join('.')||'-'}
 ;
 /// 느린 이동을 기다리는 옛 문서: 100 ms 마다 제가 보는 것을 서버로(요청 머리도 서버가 적는다). `KID()` 는 기다리는 동안 브라우저 쪽에서 요청을
@@ -309,7 +310,7 @@ const bu_html = "<!doctype html><title>bu</title><script>" ++ sg_js ++
 ;
 
 /// `reply` 와 같되 `Cache-Control: no-store` 없이(bfcache 에 들 수 있게).
-fn replyCacheable(conn: c_int, body: []const u8) void {
+pub fn replyCacheable(conn: c_int, body: []const u8) void {
     var hb: [512]u8 = undefined;
     const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nCache-Control: max-age=0\r\nConnection: close\r\n\r\n", .{ html, body.len }) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
@@ -353,6 +354,7 @@ fn serveParsed(conn: c_int, r: []const u8) void {
     if (@import("w9e2_probe_a.zig").serve(conn, path, target, host_hdr)) return; // v20a 탐침 페이지
     if (@import("w9e2_probe_b.zig").serve(conn, path, target, host_hdr)) return; // v20b 탐침 페이지
     if (@import("w9e2_probe_c.zig").serve(conn, path, target, host_hdr)) return; // v20c 탐침 페이지
+    if (@import("emulation_pagenav_check.zig").serve(conn, path, target, host_hdr)) return; // W9e① (g) 페이지가 시작한 이동
     var bb: [16384]u8 = undefined;
     if (std.mem.eql(u8, path, "/vp")) return reply(conn, "200 OK", html, accept_ch, vp_html);
     if (std.mem.eql(u8, path, "/pp")) {
@@ -937,6 +939,8 @@ fn stop(host: *Host) void {
 
 pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     try startServer();
+    // 판정자 손잡이 `EMQ_ONLY=1`: 페이지가 시작한 이동(`emq`)만 — 변이·부하 판(`EMQ_ITERS` 와 함께).
+    if (std.c.getenv("EMQ_ONLY") != null) return @import("emulation_pagenav_check.zig").run(report, host_path, root);
     viewport(report, host_path, root) catch |err| report(false, "emu-viewport", @errorName(err));
     identity(report, host_path, root) catch |err| report(false, "emu-identity", @errorName(err));
     deadTab(report, host_path, root) catch |err| report(false, "emu-dead-tab-no-crash", @errorName(err));
@@ -945,6 +949,7 @@ pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     siteBound(report, host_path, root) catch |err| report(false, "emu-site-bound", @errorName(err));
     siteBoundHistory(report, host_path, root) catch |err| report(false, "emu-site-bound-history", @errorName(err));
     siteBoundGate(report, host_path, root) catch |err| report(false, "emu-site-bound-gate", @errorName(err));
+    @import("emulation_pagenav_check.zig").run(report, host_path, root) catch |err| report(false, "emu-page-nav", @errorName(err));
     popup(report, host_path, root) catch |err| report(false, "emu-popup-shared", @errorName(err));
     restart(report, host_path, root) catch |err| report(false, "emu-restart", @errorName(err));
 }
@@ -1424,12 +1429,12 @@ fn siteBound(report: Report, host_path: [:0]const u8, root: []const u8) !void {
 }
 
 /// 사이트 묶기의 넘나듦 판정에 거는 흉내 — 옛 문서에 닿으면 `SG()` 가 이름으로 알린다.
-const bound_all: msg.Emulation = .{ .browser = 0, .flags = .{ .site_bound = true, .viewport = true, .touch = true, .ua = true, .locale = true, .timezone = true, .media = true }, .site = "127.0.0.1", .width = 390, .height = 844, .dsf = 3, .ua = "BoundUA/1", .accept_language = "fr-FR,fr", .icu_locale = "fr_FR", .timezone = "Asia/Tokyo", .media = .{ .type = .print, .forced_colors = .active } };
+pub const bound_all: msg.Emulation = .{ .browser = 0, .flags = .{ .site_bound = true, .viewport = true, .touch = true, .ua = true, .locale = true, .timezone = true, .media = true }, .site = "127.0.0.1", .width = 390, .height = 844, .dsf = 3, .ua = "BoundUA/1", .accept_language = "fr-FR,fr", .icu_locale = "fr_FR", .timezone = "Asia/Tokyo", .media = .{ .type = .print, .forced_colors = .active } };
 
 /// 서버가 받은 요청 중 그 글로 시작하고 그 호스트에서 온 것 — 수, 흉내를 본(`e=` 가 `-` 가 아닌)·흉내 머리(UA·Accept-Language)를 실은 수, 처음 몇 개.
-const Leaks = struct { total: u32 = 0, seen: u32 = 0, header: u32 = 0, buf: [700]u8 = undefined, len: usize = 0 };
+pub const Leaks = struct { total: u32 = 0, seen: u32 = 0, header: u32 = 0, buf: [700]u8 = undefined, len: usize = 0 };
 
-fn leaksOn(prefix: []const u8, host_prefix: []const u8, out: *Leaks) void {
+pub fn leaksOn(prefix: []const u8, host_prefix: []const u8, out: *Leaks) void {
     out.* = .{};
     var w: std.Io.Writer = .fixed(&out.buf);
     _ = std.c.pthread_mutex_lock(&srv_lock);
@@ -1448,7 +1453,7 @@ fn leaksOn(prefix: []const u8, host_prefix: []const u8, out: *Leaks) void {
 }
 
 /// 이동을 보내고(사람의 뒤로·앞으로 또는 페이지 스크립트) 문서가 서거나(새로 불러옴) 잠깐 지나기를(bfcache 복원 — 불러옴이 없을 수 있다) 기다린다.
-fn settleNav(r: *Run, b: u64) void {
+pub fn settleNav(r: *Run, b: u64) void {
     _ = r.until(Run.loadsAt, b, r.loads[b] + 1, 3000);
     r.pump(700);
 }
@@ -1464,7 +1469,7 @@ fn openLog(root: []const u8, name: []const u8) c_int {
 }
 
 /// 그 세션 host 로그의 지금 길이(읽지 못하면 0) — 이 뒤에 적힌 줄만 보려고 표시한다.
-fn logLen(root: []const u8, name: []const u8) usize {
+pub fn logLen(root: []const u8, name: []const u8) usize {
     const fd = openLog(root, name);
     if (fd < 0) return 0;
     defer _ = std.c.close(fd);
@@ -1473,7 +1478,7 @@ fn logLen(root: []const u8, name: []const u8) usize {
 }
 
 /// 표시(`logLen`) 뒤로 적힌 것(공용 버퍼 — 다음 부름이 덮는다; 넘치면 앞부분).
-fn logFrom(root: []const u8, name: []const u8, from: usize) []const u8 {
+pub fn logFrom(root: []const u8, name: []const u8, from: usize) []const u8 {
     const fd = openLog(root, name);
     if (fd < 0) return "";
     defer _ = std.c.close(fd);
@@ -1486,7 +1491,7 @@ fn logFrom(root: []const u8, name: []const u8, from: usize) []const u8 {
     return host_log_buf[0..len];
 }
 
-fn countIn(log: []const u8, needle: []const u8) u32 {
+pub fn countIn(log: []const u8, needle: []const u8) u32 {
     var n: u32 = 0;
     var it = std.mem.splitScalar(u8, log, '\n');
     while (it.next()) |line| {
@@ -1496,7 +1501,7 @@ fn countIn(log: []const u8, needle: []const u8) u32 {
 }
 
 /// `key` 뒤의 낱말(빈칸·줄 끝까지).
-fn wordAfter(line: []const u8, key: []const u8) []const u8 {
+pub fn wordAfter(line: []const u8, key: []const u8) []const u8 {
     const at = std.mem.indexOf(u8, line, key) orelse return "";
     const rest = line[at + key.len ..];
     return rest[0 .. std.mem.indexOfAny(u8, rest, " \r") orelse rest.len];
@@ -1634,8 +1639,9 @@ fn siteBoundHistory(report: Report, host_path: [:0]const u8, root: []const u8) !
     var ob: [200]u8 = undefined;
     // (가) maru 의 뒤로: 게이트가 지움의 답을 다 받은 뒤 이동을 냈다 — host 로그(한 UI 스레드의 stderr)의 차례라 부하와 상관없다.
     report(st0 != null and in_ok and clean_a and req_a and order_a.ok(6), "emu-site-bound-bfcache", std.fmt.bufPrint(&d, "안 {s} | 뒤로(maru) 밖 {s} · 차례 {s} | pageshow 요청 a {d}개(흉내 {d}·머리 {d}) {s}", .{ on_b[0..@min(on_b.len, 120)], back_a, order_a.text(&ob), la.total, la.seen, la.header, la.buf[0..la.len] }) catch "");
-    // (나) 페이지가 시작한 앞으로(`history.forward()`)는 게이트 밖이다(사용자 결정 2026-11-14 — 남는 틈, 부하 22 에서 35/40 샌다): 단언하지 않고 적는다.
-    report(true, "emu-site-bound-bfcache-page(obs)", std.fmt.bufPrint(&d, "안 {s} | 앞으로(페이지) 밖 {s} on_site={} 샘={} | pageshow 요청 c {d}개(흉내 {d}·머리 {d}) {s}", .{ back_b[0..@min(back_b.len, 120)], fwd_c, if (st4) |x| x.on_site else true, !(clean_c and req_c), lc.total, lc.seen, lc.header, lc.buf[0..lc.len] }) catch "");
+    // (나) 페이지가 시작한 앞으로(`history.forward()`)는 게이트 밖이다(사용자 결정 2026-11-14) — 흉내 전용 세션을 떠나는 응답에서 떼어 닫는다(사용자 결정
+    // 2026-11-17 「틈 막기」 — 그 전에는 부하 22 에서 35/40 샜다): 이제 단언한다.
+    report(clean_c and req_c, "emu-site-bound-bfcache-page", std.fmt.bufPrint(&d, "안 {s} | 앞으로(페이지) 밖 {s} on_site={} 샘={} | pageshow 요청 c {d}개(흉내 {d}·머리 {d}) {s}", .{ back_b[0..@min(back_b.len, 120)], fwd_c, if (st4) |x| x.on_site else true, !(clean_c and req_c), lc.total, lc.seen, lc.header, lc.buf[0..lc.len] }) catch "");
 
     // 느린 이동: 밖 문서(localhost /ob)가 묶인 사이트의 /slow?ms=3500 으로(페이지 스크립트 — 밖의 페이지가 기다림을 늘릴 수 있다). 기다리는 동안
     // 옛 문서가 iframe 셋(같은 사이트·다른 사이트·form 대상)과 Worker 를 만든다 — 그 요청들은 진짜 UA·Accept-Language 여야 한다.
@@ -2135,7 +2141,7 @@ fn closedPort() u16 {
 }
 
 /// `ps_js` 의 답에 흉내를 본 표지가 있는가(`SG()` 의 이름 — `-` 가 아닌 것).
-fn leakText(s: []const u8) bool {
+pub fn leakText(s: []const u8) bool {
     const names = [_][]const u8{ "tz", "il", "ua", "lang", "iw", "dpr", "mtp", "print", "fc", "err" };
     // 이름은 `"` 또는 `:`·`.` 뒤에 와서 `.`·`"` 로 끝난다 — 호스트 글자와 섞이지 않게 앞뒤를 본다.
     for (names) |n| {

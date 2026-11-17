@@ -3343,6 +3343,13 @@ pub fn submitWebFind(self: *AppSession, backwards: bool) void {
     self.web_find_last_surface = sid;
     self.web_find_pending = .{ .seq = self.web_find_seq, .surface_id = sid, .backwards = backwards };
     self.metal_dirty = true;
+    findTestReport("submit route=webkit sid={d} seq={d}", .{ sid, self.web_find_seq });
+}
+
+/// 시험 앱(`MARU_WEB_OSR_TEST_INPUT`)에서만 찾기의 제출·답을 stderr 에 한 줄씩 적는다(P0-2 — 다시 제출하는 고리를 세는 실앱 판정).
+fn findTestReport(comptime fmt: []const u8, args: anytype) void {
+    if (builtin.is_test or std.c.getenv("MARU_WEB_OSR_TEST_INPUT") == null) return;
+    std.debug.print("osr-test find " ++ fmt ++ "\n", args);
 }
 
 /// 소비하지 않고 길이만 본다 — ABI가 out 용량을 **소비 전에** 검사하려고 쓴다(못 담을 질의를 삼키면
@@ -3374,6 +3381,7 @@ pub fn takeWebFindQuery(self: *AppSession) ?WebFindRequest {
 pub fn reportWebFindUndeliverable(self: *AppSession, seq: u64) void {
     if (seq == 0 or seq != self.web_find_seq) return; // 늦은 신고는 무시(그 사이 새 질의가 나갔다)
     self.web_find_last_surface = 0;
+    findTestReport("undeliverable seq={d}", .{seq});
 }
 
 pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
@@ -3388,6 +3396,7 @@ pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
     // 진짜인지 흐려진다. 초안은 `web_find_result`도 들었는데 아무도 읽지 않는 죽은 상태였다.
     self.chrome_host.find.page_found = found;
     self.metal_dirty = true;
+    findTestReport("result route=webkit seq={d} found={}", .{ seq, found });
 }
 
 // --- 익명 struct 반환에 이름을 준 뒤 옮겨 온 함수 ---

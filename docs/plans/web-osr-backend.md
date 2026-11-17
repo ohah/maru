@@ -5863,3 +5863,20 @@ take 안에서** 나갔다 — P1 이 그 take·drain 을 지우면 함께 사�
 - **검증**: 앱 시험(take 없이 tick 만으로 주소창·단추·첫 주소가 차례대로 나간다, take 가 먼저 불려도 걷지 않고 다음 tick 이 보낸다, 배치 전 탭의 첫 주소는 남는다,
   같은 tick 에 닫힌 탭엔 보내지 않는다), ABI 시험(take 없이 control tick 만으로 잠든 navigate 가 loaded 로 끝난다·서버가 멈춰도 깨운다·시한 응답이 거두기보다
   먼저·take 는 시각 일을 하지 않는다), Swift 원본 판정자(부르는 자리), 격리 실앱 전·후.
+
+### 탭 보이기 — `browser.show`(2026-11-18, 완료)
+
+사용자 결정(2026-11-17 「에이전트 op 셋 더하기」의 첫째, 갈래는 11-17·18): 에이전트가 탭을 그 pane 의 앞 탭으로 — 「바꾸되 키는 막기」(사람의 키를 받는 pane 이면
+사람이 그 페이지를 누를 때까지 키·조합·포커스를 주지 않는다), 「그 pane 안에서만 바꾸기」(워크스페이스·창은 그대로, 화면 밖이면 `visible:false`). 계약은
+[`browser.*` 코어](../control-plane-browser.md) `browser.show` 행이 소유한다.
+
+- **재실측(착수 전, 격리 앱)**: 「복원된 뒤 한 번도 보이지 않은 탭은 못 쓴다」 는 첫 3~6 초(엔진이 뜨는 동안)만 참이었다 — 그 뒤에는 한 pane·다른 창·다른
+  워크스페이스 모두 숨긴 채 만들어지고 복원 주소를 불러 op 이 된다(FP16c 가 화면 밖 워크스페이스의 web Term 도 배치하고 `web_osr_plan.reconcile` 이 숨긴 배치도
+  만든다). 그 몇 초의 「show it once first」 는 틀린 안내라 「기다려라」(기록은 있고 브라우저가 없다)와 「show 로 내라」(기록이 없다)로 갈랐다(`cdpUnavailableReason`).
+  같은 실측이 찾은 「불러오지 못한 복원 탭이 다음 실행에 사라짐」 은 따로 고쳤다(#4745).
+- **구현**: L2 `control_browser` 의 `show`(op_kind 35, `{id}`, 결과 넷 검사), 앱 `web_ops.agentShowTab`(거절 일곱 — 모달·sheet·끌기·편집·탭 줄 숨김·없음·터미널,
+  다른 pane 은 `selectTermInPane`, 키 받는 pane 은 사람의 탭 전환 `tryFocusTerm` 뒤 `osr_key_hold`), 막음은 `osrKeyTarget` 한 관문(키·조합·팝업 키·sheet·포커스가 모두
+  그것을 본다)과 저장 창 맡기(`takeDownloadAsk`)에서, 풀림은 `syncOsrKeyTarget`(키 자리가 떠남)·`osrMouseDown`(본문 누름)·탭 줄 누름. ABI 는 탭 op 목록(`isTabOp` —
+  배치가 sidecar 로 간 뒤 답한다). CLI `browser show`·MCP `browser_show`·플러그인(0.1.10).
+- **남은 틈**: 막는 동안 친 키는 말없이 버려진다(WebKit 탭을 고른 뒤와 같은 길 — 알림은 두지 않았다), 화면 밖 워크스페이스의 pane 은 탭 줄 스크롤을 맞추지 않는다
+  (그 배치가 없다), 다른 창의 `visible:true` 는 창이 가려졌는지 모른다.

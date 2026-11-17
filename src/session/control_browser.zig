@@ -196,8 +196,13 @@ pub const BrowserMethod = enum {
     /// 그 탭의 `browser_network` grant 와 `browser` grant 가 있어야 한다 — **사용자 탭도**(사용자 결정 2026-11-17 「사용자 탭 trace 열기」: 전권이
     /// 그 둘을 넣는다. 그 전에는 에이전트가 연 탭만이었다 — 사용자 결정 4 의 `-32008 trace_user_tab_unsupported`). `start` 는 기록이 시작되면,
     /// `stop` 은 거른 결과(요약)가 나오면 답한다(op 줄 없음 — 앱이 나중에 끝낸다), `read` 는 거른 gzip 의 한 조각(256 KiB — 파일은 CLI·MCP 가 준 경로에 쓴다, 사용자 결정 1). 다른 trace 중이면 `-32603
-    /// trace_busy`(이유와 `retry_after_ms`). op.arg=정규형 인자 JSON. **op_kind=34 고정**(35·36 은 W9e③ 몫).
+    /// trace_busy`(이유와 `retry_after_ms`). op.arg=정규형 인자 JSON. **op_kind=34 고정**(W9e③ 은 show 뒤로).
     trace,
+    /// `browser.show {id}`(Chromium 전용 — 사용자 결정 2026-11-17·18) → `{shown:true, visible, changed, key_held}`. 사람이 그 pane 의 탭 머리를
+    /// 누르듯 그 탭을 **그 pane 의 앞 탭**으로 — pane 포커스·워크스페이스·창 순서는 건드리지 않는다. 그 pane 이 사람의 키를 받는 pane 이면
+    /// 페이지는 보이되 사람이 그 페이지를 누를 때까지 키·포커스를 주지 않는다(`key_held`). `visible` = maru 가 그 탭을 숨기지 않는가(화면 밖
+    /// 워크스페이스면 거짓). 모달·sheet·탭 끌기·탭 줄 숨김·사람이 그 pane 에서 편집 중이면 실패. base `browser` scope. op.arg 빈 것. **op_kind=35**.
+    show,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -239,6 +244,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "networkMock")) return .network_mock;
     if (eq(rest, "emulate")) return .emulate; // W9e①
     if (eq(rest, "trace")) return .trace; // W9e②
+    if (eq(rest, "show")) return .show;
     return null;
 }
 
@@ -280,6 +286,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .network_mock => "networkMock",
         .emulate => "emulate",
         .trace => "trace",
+        .show => "show",
     };
 }
 
@@ -290,7 +297,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
@@ -299,7 +306,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
         // W9d①: 네트워크 목록·자세히(CEF 자원 요청 처리기 — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show => true,
             else => false,
         },
     };
@@ -2943,8 +2950,8 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         // W9b①: back/forward → 갈 곳이 있었는가, reload → true.
         .back, .forward, .reload => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
-        // W9b③: 엔진이 준 `{"id","url","loaded"}`·`{"closed","reason"?}` 을 검사해 그 필드만 싣는다.
-        .open, .close => serializeTabResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
+        // W9b③: 엔진이 준 `{"id","url","loaded"}`·`{"closed","reason"?}` 을 검사해 그 필드만 싣는다. show 는 `{"shown","visible","changed","key_held"}`.
+        .open, .close, .show => serializeTabResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid tab payload", null),
         },
@@ -3025,7 +3032,8 @@ fn serializeReasonError(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode, p
     return cp.serializeError(gpa, id, code, parsed.value.message, .{ .object = data });
 }
 
-/// W9b③ 결과 — open `{"id":<u64>,"url":<str>,"loaded":<bool>}`, close `{"closed":<bool>,"reason"?:<str>}`. 다른 키·모양은 거절.
+/// W9b③ 결과 — open `{"id":<u64>,"url":<str>,"loaded":<bool>}`, close `{"closed":<bool>,"reason"?:<str>}`, show `{"shown":true,"visible":<bool>,
+/// "changed":<bool>,"key_held":<bool>}`(넷 다 꼭). 다른 키·모양은 거절.
 fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, payload: []const u8) (std.mem.Allocator.Error || error{InvalidTabPayload})![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, payload, .{}) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -3067,6 +3075,26 @@ fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, 
                     s.objectField("reason") catch |e| break :blk e;
                     s.write(r.string) catch |e| break :blk e;
                 }
+                endResult(&s) catch |e| break :blk e;
+            }) catch return error.OutOfMemory;
+        },
+        .show => {
+            const shown = o.get("shown") orelse return error.InvalidTabPayload;
+            const visible = o.get("visible") orelse return error.InvalidTabPayload;
+            const changed = o.get("changed") orelse return error.InvalidTabPayload;
+            const key_held = o.get("key_held") orelse return error.InvalidTabPayload;
+            // 보이지 못했으면 실패로 끝난다(이유와 함께) — 성공 답의 `shown` 은 늘 참이다.
+            if (shown != .bool or !shown.bool or visible != .bool or changed != .bool or key_held != .bool) return error.InvalidTabPayload;
+            (blk: {
+                beginResult(&s, id) catch |e| break :blk e;
+                s.objectField("shown") catch |e| break :blk e;
+                s.write(true) catch |e| break :blk e;
+                s.objectField("visible") catch |e| break :blk e;
+                s.write(visible.bool) catch |e| break :blk e;
+                s.objectField("changed") catch |e| break :blk e;
+                s.write(changed.bool) catch |e| break :blk e;
+                s.objectField("key_held") catch |e| break :blk e;
+                s.write(key_held.bool) catch |e| break :blk e;
                 endResult(&s) catch |e| break :blk e;
             }) catch return error.OutOfMemory;
         },
@@ -3660,7 +3688,7 @@ pub fn browserOpFromRequest(
         .snapshot => try serializeSnapshotArg(gpa, parseSnapshotParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         // console(§9.5.9): clear 플래그를 arg에 실어 Swift가 pull(서버 버퍼 반환 + clear면 비움). base browser scope.
         .console => try serializeConsoleArg(gpa, parseConsoleParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
-        .back, .forward, .reload, .close => try gpa.dupe(u8, ""), // {id}만
+        .back, .forward, .reload, .close, .show => try gpa.dupe(u8, ""), // {id}만
         // W9c②: 대화상자 — 보기는 {id}만, 답하기는 `{accept, text?, dialog?}`.
         .dialog => blk: {
             parseDialogParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
@@ -4975,8 +5003,8 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const webkit = arr.items[0].object;
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
-    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 17), webkit.get("methods").?.array.items.len);
+    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload·show 등 18 개는 Chromium 전용 — WebKit 은 걷어낼 예정).
+    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 18), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
@@ -4984,7 +5012,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
     // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console. W9c③: upload.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock", "networkMock", "emulate", "trace" };
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock", "networkMock", "emulate", "trace", "show" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -6072,6 +6100,72 @@ test "W9b③: open·close 결과는 엔진이 준 필드만 — 모양이 틀리
     };
     for (bad) |c| {
         const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
+    }
+}
+
+// 탭 보이기(사용자 결정 2026-11-17·18): 사람이 탭 머리를 누르듯 에이전트가 탭을 그 pane 의 앞 탭으로 — 엔진은 Chromium 만(WebKit 은 걷어낼 예정이라
+// 새 메서드를 두지 않는다), 인가는 다른 `{id}` op 과 같은 base `browser`(전권이 넣는다). 바꾸는 일(포커스·키 막기)은 앱이 한다.
+test "browser.show: 35 번, Chromium 만, base browser grant 로 op(인자 없음) — 없으면 needs_grant, WebKit 은 -32008, 전권 대상" {
+    try testing.expectEqual(@as(u8, 35), @as(u8, @backingInt(BrowserMethod.show)));
+    try testing.expectEqual(BrowserMethod.show, parseBrowserMethod("show").?);
+    try testing.expectEqualStrings("show", browserMethodWireName(.show));
+    try testing.expect(engineSupports(.chromium, .show) and !engineSupports(.webkit, .show));
+    try testing.expectEqual(capmod.ScopeClass.browser, capmod.methodRequiredScope("browser.show").?);
+    const show12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.show\",\"params\":{\"id\":12}}";
+    var none: cpg.PaneGrantStore = .{};
+    try expectEngineNeedsGrant(show12, &none, .browser);
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser, .any_host = true });
+    switch (try dispatchEngine(show12, &grants)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.show, op.method);
+            try testing.expectEqual(@as(u64, 12), op.surface_id);
+            try testing.expectEqualStrings("", op.arg);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 틀린 id 꼴은 invalid_params.
+    switch (try dispatchEngine("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.show\",\"params\":{\"id\":\"12\"}}", &grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // WebKit 탭 — 모달 전 -32008.
+    switch (try dispatchEngine("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.show\",\"params\":{\"id\":11}}", &grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 전권 대상 — 제어할 수 있는 탭을 가리키는 show 에도 grant 를 넣는다(다른 `{id}` op 과 같다).
+    try testing.expectEqual(@as(?u64, 12), try fullAccessTarget(testing.allocator, show12, fx_engine));
+}
+
+test "browser.show 결과는 shown·visible·changed·key_held 넷 다 — 빠지거나 bool 이 아니거나 shown 이 거짓이면 internal_error" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.show\",\"params\":{\"id\":12}}";
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"shown\":true,\"visible\":false,\"changed\":true,\"key_held\":true,\"extra\":1}");
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"shown\":true,\"visible\":false,\"changed\":true,\"key_held\":true}") != null);
+    }
+    for ([_][]const u8{
+        "{\"shown\":true,\"visible\":true,\"changed\":true}",
+        "{\"shown\":false,\"visible\":true,\"changed\":true,\"key_held\":false}",
+        "{\"shown\":true,\"visible\":1,\"changed\":true,\"key_held\":false}",
+        "{\"shown\":true,\"visible\":true,\"changed\":\"no\",\"key_held\":false}",
+        "[]",
+    }) |payload| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, payload);
         defer testing.allocator.free(w);
         try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
     }

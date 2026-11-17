@@ -6588,6 +6588,10 @@ pub const AppSession = struct {
     osr_cursor_pending: ?CursorKind = null,
     /// W4c: 지금 키 포커스를 준 Chromium 탭(0 = 없음). 바뀌면 `syncOsrKeyTarget` 이 포커스를 옮긴다.
     osr_key_target: u64 = 0,
+    /// 에이전트가 사람의 키를 받는 pane 에 보인 Chromium 탭(`browser.show` — 사용자 결정 2026-11-17·18 「바꾸되 키는 막기」, 0 = 없음). 그 탭이
+    /// 키 받는 자리에 있는 동안 `web_ops.osrKeyTarget` 이 null 을 내 키·조합·포커스를 페이지에 주지 않는다. 사람이 그 페이지·그 탭 머리를 누르거나
+    /// 키 받는 자리가 다른 곳으로 옮겨 가면 풀린다(`web_ops.releaseKeyHold`·`syncOsrKeyTarget`).
+    osr_key_hold: u64 = 0,
     /// maru 가 곧 키 대상을 옮긴다는 표시(그 이동·단조 ms) — 그 바뀜만 사용자 시각을 찍지 않는다(W9c② 적대 리뷰 4·5 회차, `web_ops.markFocusByApp`).
     osr_focus_by_app: ?web_ops.AppFocusMark = null,
     /// W10b: 이 세션이 다운로드 목록(앱 전역)에 마지막으로 알린 「매번 묻기」 — 이 세션의 값이 바뀔 때만 다시 알린다(관계없는 재적용·
@@ -15979,6 +15983,8 @@ pub const AppSession = struct {
                         };
                         _ = pane_ops.focusPaneByPtr(self, lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
                         term_ops.focusTerm(self, tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
+                        // 사람이 그 탭 머리를 눌렀다 — 에이전트가 보이며 막아 둔 키를 그 탭에 준다(`browser.show`).
+                        web_ops.releaseKeyHold(self, lr.leaf.activeTerm().surfaceId());
                         if (on_close) {
                             self.hovered_tab = null; // 닫으면 Pane/Term이 바뀔 수 있으니 stale 호버 비움
                             self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
@@ -102774,6 +102780,135 @@ test "remote reconnect failure repeated recovery advances both cursors and badge
         try std.testing.expectEqual(@as(u64, (cycle + 1) * 100), host.cursors.get(key_v1).?.offset);
         try std.testing.expectEqual(@as(u64, (cycle + 1) * 100), host.cursors.get(key_v2).?.offset);
     }
+}
+
+// 탭 보이기(`browser.show` — 사용자 결정 2026-11-17·18). 「바꾸되 키는 막기」: 사람이 치는 pane 의 탭을 앞으로 내면 그 페이지는 사람이 누를 때까지
+// 키·포커스를 받지 않는다 — 사람이 에이전트에게 답을 치는 도중 화면이 페이지로 바뀌어도 친 글(비밀번호·명령)이 그 사이트로 가지 않게.
+// 「그 pane 안에서만 바꾸기」: 다른 pane·다른 워크스페이스면 그 pane 의 앞 탭만 — 포커스·워크스페이스는 그대로.
+fn showTestTab(session: *AppSession, allocator: std.mem.Allocator, opener: u64) !u64 {
+    const sid = try web_ops.openAgentTab(session, opener, null);
+    try web_osr.testHold(allocator, sid);
+    web_osr.testRunning(sid);
+    return sid;
+}
+
+test "browser.show 키 받는 pane: 앞 탭을 바꾸고 키는 막는다 — 창이 키를 잃어도 그대로, 자리를 옮겼다 돌아오기·탭 머리·페이지 누름이 푼다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const shell = pane.activeTerm().surfaceId();
+    const bg = try showTestTab(session, allocator, shell); // 셸 뒤의 탭
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_target);
+    const r = web_ops.agentShowTab(session, bg).shown;
+    try std.testing.expect(r.visible and r.changed and r.key_held);
+    try std.testing.expectEqual(bg, pane.activeTerm().surfaceId()); // 페이지가 앞에 — 보인다
+    try std.testing.expectEqual(bg, session.osr_key_hold);
+    try std.testing.expect(web_ops.osrKeyTarget(session) == null); // 키·조합·팝업 키의 관문이 닫혔다
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_target); // 포커스를 주지 않았다(hasFocus 거짓)
+    try std.testing.expect(web_ops.takeDownloadAsk(session) == null); // 저장 창도 맡지 않는다(이름 칸이 사람의 키를 받는다)
+    // 창이 키를 잃었다 돌아와도 막음은 그대로(자리는 바뀌지 않았다).
+    session.window_focused = false;
+    web_ops.syncOsrKeyTarget(session);
+    session.window_focused = true;
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(bg, session.osr_key_hold);
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_target);
+    // 이미 앞 탭이면 바꾸지 않고 막음을 알린다.
+    const again = web_ops.agentShowTab(session, bg).shown;
+    try std.testing.expect(!again.changed and again.key_held);
+    // 사람이 다른 탭으로 갔다 돌아온다(⌘⌥[·⌘⌥]) — 사람이 옮긴 것이라 키를 받는다.
+    try std.testing.expect(session.runAction("previous_term"));
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_hold);
+    try std.testing.expect(session.runAction("next_term"));
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(bg, session.osr_key_target);
+    // 다시 보인다(셸에서) → 사람이 그 탭 머리를 누른다(`releaseKeyHold` — 탭 줄 누름이 부른다).
+    try std.testing.expect(session.runAction("previous_term"));
+    try std.testing.expect(web_ops.agentShowTab(session, bg).shown.key_held);
+    web_ops.releaseKeyHold(session, shell); // 다른 탭의 풀기는 아무 일도 아니다
+    try std.testing.expectEqual(bg, session.osr_key_hold);
+    web_ops.releaseKeyHold(session, bg);
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(bg, session.osr_key_target);
+    // 다시 보인다 → 사람이 그 페이지를 누른다(본문 누름).
+    try std.testing.expect(session.runAction("previous_term"));
+    try std.testing.expect(web_ops.agentShowTab(session, bg).shown.key_held);
+    session.osr_layouts.clearRetainingCapacity();
+    try session.osr_layouts.append(allocator, .{ .surface_id = bg, .rect = .{ .x = 0, .y = 0, .w = 400, .h = 300 } });
+    try std.testing.expect(web_ops.osrMouseDown(session, 1, 50, 50, 0, 0));
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_hold);
+    try std.testing.expectEqual(bg, session.osr_key_target);
+    session.finishPointerGesture();
+}
+
+test "browser.show 다른 pane·다른 워크스페이스: 그 pane 의 앞 탭만 — 포커스·워크스페이스는 그대로, 키를 막지 않는다, 화면 밖이면 visible 거짓" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const left = pane_ops.activePane(session);
+    const shell = left.activeTerm().surfaceId();
+    const bg = try showTestTab(session, allocator, shell);
+    const bg2 = try showTestTab(session, allocator, shell);
+    session.dispatchAppAction(.split_horizontal); // 오른쪽 pane 이 키를 받는다
+    const right = pane_ops.activePane(session);
+    try std.testing.expect(right != left);
+    const r = web_ops.agentShowTab(session, bg).shown;
+    try std.testing.expect(r.visible and r.changed and !r.key_held);
+    try std.testing.expectEqual(bg, left.activeTerm().surfaceId());
+    try std.testing.expectEqual(right, pane_ops.activePane(session)); // 포커스는 그대로
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_hold);
+    // 다른 워크스페이스로 간 뒤 — 그 pane 의 앞 탭만 바꾸고 화면은 그대로.
+    session.dispatchAppAction(.new_tab);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    const off = web_ops.agentShowTab(session, bg2).shown;
+    try std.testing.expect(!off.visible and off.changed and !off.key_held);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    try std.testing.expectEqual(bg2, left.activeTerm().surfaceId());
+    // 워크스페이스 대표(탭의 활성 pane 의 앞 Term)는 그대로 맞다.
+    try std.testing.expectEqual(session.tabs.items[0].activeTerm().surface, session.surface_ptrs.items[0]);
+}
+
+test "browser.show 거절: 모달·sheet·그 pane 의 탭 끌기·키 받는 pane 의 주소창 편집·탭 줄 숨김·모르는 탭·터미널 — 앞 탭은 그대로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const shell = pane.activeTerm().surfaceId();
+    const bg = try showTestTab(session, allocator, shell);
+    const Refusal = web_ops.ShowRefusal;
+    session.chrome_host.palette.open = true;
+    try std.testing.expectEqual(Refusal.modal, web_ops.agentShowTab(session, bg).refused);
+    session.chrome_host.palette.open = false;
+    session.osr_dialog = .{ .surface_id = bg, .token = 1 };
+    try std.testing.expectEqual(Refusal.sheet, web_ops.agentShowTab(session, bg).refused);
+    session.osr_dialog = null;
+    session.pointer_gesture_owner = .{ .terminal_tab = .{ .pane = pane, .index = 0 } };
+    try std.testing.expectEqual(Refusal.dragging, web_ops.agentShowTab(session, bg).refused);
+    session.pointer_gesture_owner = .none;
+    session.addr_edit = shell;
+    try std.testing.expectEqual(Refusal.editing, web_ops.agentShowTab(session, bg).refused);
+    session.addr_edit = null;
+    session.chrome_minimal = true;
+    try std.testing.expectEqual(Refusal.tabs_hidden, web_ops.agentShowTab(session, bg).refused);
+    session.chrome_minimal = false;
+    try std.testing.expectEqual(Refusal.not_found, web_ops.agentShowTab(session, bg + 1000).refused);
+    try std.testing.expectEqual(Refusal.not_found, web_ops.agentShowTab(session, shell).refused); // 터미널은 앞으로 내지 않는다
+    try std.testing.expectEqual(shell, pane.activeTerm().surfaceId());
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_hold);
+    // 대조: 다 걷으면 된다.
+    try std.testing.expect(web_ops.agentShowTab(session, bg).shown.key_held);
 }
 
 // W9c② 적대 리뷰 5 회차 — 실제 창의 키 대상 동기화(`syncOsrKeyTarget`)·닫기·sheet 를 지나는 원인 시험.

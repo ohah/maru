@@ -6785,7 +6785,7 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .upload,
         => true,
         // W9b③: open·close 는 따로 둔 탭 op 목록이 본다(대상이 부른 pane·닫히는 것이 성공 — `enqueueTabOp`).
-        .subscribe, .wait, .open, .close => false,
+        .subscribe, .wait, .open, .close, .show => false,
         // W9c②: 대화상자 보기·답하기는 `pushBrowserOp` 가 곧 답한다(실행 중인 것이 없다).
         .dialog, .handle_dialog => false,
         // W9d①: 네트워크 목록·자세히도 곧 답한다(쥔 기록을 읽기만 한다 — DevTools·op 줄 없음).
@@ -6840,6 +6840,7 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .press => "browser.press",
         .open => "browser.open",
         .close => "browser.close",
+        .show => "browser.show",
         .dialog => "browser.dialog",
         .handle_dialog => "browser.handleDialog",
         .upload => "browser.upload",
@@ -7226,6 +7227,8 @@ const control_hello_caps = [_][]const u8{
     // W9b③: 에이전트가 탭을 열고 닫는다.
     "browser.open",
     "browser.close",
+    // 에이전트가 탭을 그 pane 의 앞 탭으로 보인다(사용자 결정 2026-11-17·18).
+    "browser.show",
     // W9c②: 에이전트가 JS 대화상자를 보고 답한다.
     "browser.dialog",
     "browser.handleDialog",
@@ -7385,7 +7388,7 @@ fn handleControlRequest(
     switch (disp) {
         .immediate => |resp| server.resolveRequest(pending, resp),
         // 5e-2b: 인가·유효한 browser op — §5-async로 defer(즉시 resolve 안 함) + browser op 큐에 enqueue(Swift가 실행).
-        .browser => |op| if (op.method == .open or op.method == .close) enqueueTabOp(server, refs, pending, op, now_ns) else enqueueBrowserOp(server, pending, op, now_ns),
+        .browser => |op| if (isTabOp(op.method)) enqueueTabOp(server, refs, pending, op, now_ns) else enqueueBrowserOp(server, pending, op, now_ns),
         // 5f-0b-3b: 인가·유효한 browser.subscribe — 메인에서 SubscriberRegistry에 **동기 등록** + `{subscriber_id}` 응답.
         .subscribe => |s| handleSubscribe(server, pending, s),
         // 미grant valid 요청 — 확인 모달은 없다(사용자 결정 2026-11-16). 전권 grant 를 넣고도 남은 것은 표가 찼거나(`grants_full`) cap 만 든 연결이다.
@@ -8452,14 +8455,14 @@ fn beginCdp(run: *CdpRun) void {
                 .none, .closed, .stayed => {},
             }
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
-            if (!session_mod.web_osr.agentNavigate(gpa, run.surface_id, p.target.?)) return finishCdp(run, .failed, cdp_not_shown_reason);
+            if (!session_mod.web_osr.agentNavigate(gpa, run.surface_id, p.target.?)) return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id));
         },
-        .get_url => p.url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdp_not_shown_reason)).url,
+        .get_url => p.url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id))).url,
         .screenshot => {},
     };
     // W9a③: 확인한 문서 주소를 복사해 op 에 준다 — 쿠키 저장소 op 은 grant 호스트가 그 주소를 덮는지 다시 본다(그사이 다른 사이트로 갔을 수 있다).
     if (run.op.storage) |*st| {
-        const url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdp_not_shown_reason)).url;
+        const url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id))).url;
         run.doc_url = allocator.dupe(u8, url) catch return finishCdp(run, .failed, "out of memory");
         st.doc_url = run.doc_url.?;
         if (run.required_host.len > 0) switch (st.kind) {
@@ -8495,8 +8498,21 @@ fn beginCdp(run: *CdpRun) void {
     cdpAdvance(run, step);
 }
 
-/// 한 번도 보이지 않은 탭(OSR 레코드가 없다) — 몰래 만들지 않는다(W9a 작성자 선택).
-const cdp_not_shown_reason = "the Chromium tab has not been shown yet — show it once first";
+/// 한 번도 배치되지 않은 탭(OSR 레코드가 없다 — 창이 아직 그 탭을 배치하지 않았다). 숨은 탭도 배치되면 숨긴 채 만들어지므로(FP16c) 보통 첫
+/// 순간뿐이다 — 그 탭을 앞으로 내면(`browser.show`) 곧 만들어진다.
+const cdp_not_shown_reason = "the Chromium tab has not been laid out yet — bring it to the front with maru browser show, or wait a moment";
+/// 기록은 있는데 브라우저가 아직 없다(엔진이 뜨는 중·만드는 중) — 기다리면 된다(2026-11-17 실측: 복원 뒤 첫 3~6 초의 navigate 가 「show it once
+/// first」 로 틀린 안내를 했다).
+const cdp_not_ready_reason = "the Chromium tab is not ready (its engine is restarting, or the page is still being created) — wait a moment and try again";
+
+/// DevTools 를 부를 수 없는 탭의 까닭 글(닫힘·배치 전·만드는 중) — 한 자리에서 가른다.
+fn cdpUnavailableReason(surface_id: u64) []const u8 {
+    return switch (session_mod.web_osr.unavailable(surface_id)) {
+        .closed => "the tab closed or its page crashed",
+        .not_shown => cdp_not_shown_reason,
+        .not_ready => cdp_not_ready_reason,
+    };
+}
 const cdp_loading_reason = web_cdp_ops.loading_reason;
 const cdp_ran_then_navigated = "the script ran, but the page started loading a new page before its result could be read";
 
@@ -8698,14 +8714,22 @@ fn onAgentPageTab(pane: u64, tab: u64) bool {
     return adoptAgentTab(pane, tab);
 }
 
+/// 탭 op — 실행 자리·op 줄이 아니라 탭 op 목록(`tab_runs`)이 본다: open(대상이 부른 pane)·close(닫히는 것이 성공)·show(배치가 sidecar 로 갈
+/// 때까지 기다린다). 디스패치 두 자리(`handleControlRequest`·`testDispatchDeferred`)가 같은 판정을 쓴다.
+fn isTabOp(m: control_browser.BrowserMethod) bool {
+    return m == .open or m == .close or m == .show;
+}
+
 const TabRun = struct {
     async_id: u64,
-    kind: enum { open, close },
+    kind: enum { open, close, show },
     tab: u64,
     pane: u64,
     /// open — 주소를 줬다(첫 불러오기까지 기다린다). 없으면 브라우저가 만들어질 때까지.
     want_load: bool = false,
     deadline_ms: i64,
+    /// show — 앱이 정한 답(배치가 sidecar 로 간 뒤에 보낸다).
+    shown: struct { visible: bool = false, changed: bool = false, key_held: bool = false } = .{},
 };
 var tab_runs: std.ArrayList(TabRun) = .empty;
 
@@ -8759,6 +8783,7 @@ fn startTabOp(refs: []const ControlSessionRef, async_id: u64, op: control_browse
     switch (op.method) {
         .open => startAgentOpen(refs, async_id, op.surface_id, op.arg),
         .close => startAgentClose(refs, async_id, op),
+        .show => startAgentShow(refs, async_id, op.surface_id),
         else => completeTabStatus(async_id, .failed, "not a tab operation"),
     }
 }
@@ -8807,6 +8832,55 @@ fn startAgentClose(refs: []const ControlSessionRef, async_id: u64, op: control_b
     }
 }
 
+/// 보인 탭의 배치가 sidecar 로 갈 때까지 기다리는 시한 — 창의 tick 이 다음 배치에서 보낸다(보통 한두 프레임). 창이 멈춰 있으면(그리지 않는다)
+/// 시한에 그대로 답한다.
+const agent_show_wait_ms: i64 = 3_000;
+
+fn startAgentShow(refs: []const ControlSessionRef, async_id: u64, tab: u64) void {
+    const app = appSessionOwningSurface(refs, tab) orelse return completeTabStatus(async_id, .failed, agent_show_closed);
+    switch (session_mod.web_ops.agentShowTab(app, tab)) {
+        .refused => |why| completeTabStatus(async_id, .failed, agentShowRefusal(why)),
+        .shown => |s| {
+            const run: TabRun = .{ .async_id = async_id, .kind = .show, .tab = tab, .pane = 0, .deadline_ms = cdpNowMs() + agent_show_wait_ms, .shown = .{ .visible = s.visible, .changed = s.changed, .key_held = s.key_held } };
+            // 숨긴 채 두는 탭(화면 밖 워크스페이스)은 기다릴 배치가 없다 — 곧 답한다.
+            if (!s.visible or session_mod.web_osr.layoutHidden(tab) == false) return completeAgentShow(run);
+            tab_runs.append(allocator, run) catch completeAgentShow(run);
+        },
+    }
+}
+
+fn pollAgentShow(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
+    if (appSessionOwningSurface(refs, r.tab) == null) {
+        completeTabStatus(r.async_id, .failed, agent_show_closed);
+        return true;
+    }
+    if (session_mod.web_osr.layoutHidden(r.tab) != false and now < r.deadline_ms) return false;
+    completeAgentShow(r);
+    return true;
+}
+
+fn completeAgentShow(r: TabRun) void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    std.json.Stringify.value(.{ .shown = true, .visible = r.shown.visible, .changed = r.shown.changed, .key_held = r.shown.key_held }, .{}, &aw.writer) catch return completeTabStatus(r.async_id, .failed, "out of memory");
+    completeTabStatus(r.async_id, .success, aw.written());
+}
+
+const agent_show_closed = "the tab was closed";
+
+/// 거절 까닭 — 사람이 그 순간 할 수 없는 일이다(답할 일이 끝나면 다시 하면 된다).
+fn agentShowRefusal(why: session_mod.web_ops.ShowRefusal) []const u8 {
+    return switch (why) {
+        .not_found => agent_show_closed,
+        .tabs_hidden => "this window hides its tab bar — the tab could not be brought to the front",
+        .modal => "a dialog or menu is open in that window (the user is answering it) — try again after it closes",
+        .sheet => "a page dialog or save panel is open in that window (the user is answering it) — try again after it closes",
+        .dragging => "the user is dragging tabs in that pane — try again in a moment",
+        .editing => "the user is editing the address bar or a tab name in that pane — try again after they finish",
+        .composing => "the user's text input in that pane could not be committed — try again in a moment",
+    };
+}
+
 /// 매 drain — 열린 탭이 첫 불러오기를 끝냈는가, 물은 닫기가 어떻게 됐는가.
 fn pollTabRuns(refs: []const ControlSessionRef) void {
     if (tab_runs.items.len == 0) return;
@@ -8817,6 +8891,7 @@ fn pollTabRuns(refs: []const ControlSessionRef) void {
         const finished = switch (r.kind) {
             .open => pollAgentOpen(refs, r, now),
             .close => pollAgentClose(refs, r, now),
+            .show => pollAgentShow(refs, r, now),
         };
         if (finished) _ = tab_runs.orderedRemove(i) else i += 1;
     }
@@ -8936,11 +9011,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
                     // 자리 없음은 ops 가 아는 그 글이어야 한다 — kick 을 실은 호출은 그때만 다시 보낸다(`web_cdp_ops.busy_reason`).
                     const why = switch (e) {
                         // 왜 부를 수 없는지 그대로(W9a③ 적대 리뷰 2·3 회차: 닫힌 탭에 「not ready」, 보이지 않은 탭에 「closed」 로 답했다).
-                        error.NotReady => switch (session_mod.web_osr.unavailable(run.surface_id)) {
-                            .closed => "the tab closed or its page crashed",
-                            .not_shown => cdp_not_shown_reason,
-                            .not_ready => "the Chromium tab is not ready (its engine is restarting, or the page is still being created)",
-                        },
+                        error.NotReady => cdpUnavailableReason(run.surface_id),
                         error.DialogShowing => web_cdp_ops.dialog_reason, // 확실히 보내지 않았다(W9b③ 적대 리뷰 2 회차)
                         else => web_cdp_ops.busy_reason,
                     };
@@ -13471,7 +13542,7 @@ fn testDispatchDeferred(server: *control_server_mod.ControlServer, async_id: u64
     switch (disp) {
         .immediate => |resp| _ = server.completeInFlight(async_id, resp),
         .browser => |op| {
-            if (op.method == .open or op.method == .close) {
+            if (isTabOp(op.method)) {
                 defer server.cross_gpa.free(op.arg);
                 return startTabOp(&.{}, async_id, op);
             }
@@ -13968,6 +14039,84 @@ test "W9b③·2026-11-17 A1: close — 어느 탭이든(다른 pane·사람의 �
     startAgentClose(&refs, try control_server_storage.deferRequest(&only, std.math.maxInt(i128)), .{ .surface_id = tab3, .method = .close, .arg = "", .pane_grant = .{ .pane = shell, .target = tab3, .scope = .browser } });
     try expectPendingErrorCode(&only, .internal_error);
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+}
+
+fn expectPendingFailureText(pending: *control_server_mod.PendingRequest, want: []const u8) !void {
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    var pm = try control_plane.parseMessage(std.testing.allocator, response);
+    defer pm.deinit();
+    const e = pm.message.response.err orelse return error.ExpectedError;
+    try std.testing.expect(std.mem.indexOf(u8, e.message, want) != null);
+}
+
+// 탭 보이기(사용자 결정 2026-11-17·18): 탭 op 목록이 본다 — 키 받는 pane 이면 앞 탭을 바꾸고 키를 막는다(`key_held`), 답은 그 탭의 배치가
+// sidecar 로 간 뒤(기록의 hidden 이 내려간 뒤 — 곧 이은 op 이 hidden 페이지를 보지 않게), 시한이면 그대로. 사람이 그 순간 못 하는 때는 이유와 함께 실패.
+test "browser.show: 키 받는 pane 의 뒤쪽 탭을 앞으로 — 배치가 간 뒤 {shown,visible,changed,key_held:true}, 이미 앞이면 곧 changed:false, 닫힌 탭·sheet 는 실패" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    const tab = try session_mod.web_ops.openAgentTab(session, shell, null); // 숨긴 채 만든 뒤쪽 탭
+    session_mod.web_osr.testRunning(tab);
+    try std.testing.expectEqual(@as(?bool, true), session_mod.web_osr.layoutHidden(tab));
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.show\",\"params\":{\"id\":1}}";
+    var shown: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentShow(&refs, try control_server_storage.deferRequest(&shown, std.math.maxInt(i128)), tab);
+    try std.testing.expectEqual(tab, pane.activeTerm().surfaceId()); // 앞 탭이 됐다
+    try std.testing.expectEqual(tab, session.osr_key_hold); // 키는 막혔다
+    pollTabRuns(&refs);
+    try std.testing.expect(shown.response == null); // 배치가 아직 숨김 — 기다린다
+    // 창의 배치가 그 탭을 보이게 sidecar 에 보냈다.
+    session_mod.web_osr.ensure(ta, .{ .surface_id = tab, .width_px = 400, .height_px = 300, .visible = true }, 2000, 0);
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&shown);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expect(r.get("shown").?.bool and r.get("visible").?.bool and r.get("changed").?.bool and r.get("key_held").?.bool);
+    }
+    // 이미 앞 탭 — 배치도 보임이라 곧 답한다(changed:false, 막음은 그대로).
+    var again: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentShow(&refs, try control_server_storage.deferRequest(&again, std.math.maxInt(i128)), tab);
+    {
+        const parsed = try w9b3Result(&again);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expect(!r.get("changed").?.bool and r.get("key_held").?.bool);
+    }
+    // 이 창에 sheet 가 떠 있다 — 사람이 답하는 중이라 바꾸지 않는다.
+    {
+        session.osr_dialog = .{ .surface_id = tab, .token = 1 };
+        defer session.osr_dialog = null;
+        var sheet: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+        startAgentShow(&refs, try control_server_storage.deferRequest(&sheet, std.math.maxInt(i128)), tab);
+        try expectPendingFailureText(&sheet, "page dialog or save panel");
+    }
+    try std.testing.expectEqual(tab, pane.activeTerm().surfaceId());
+    // 닫힌(모르는) 탭.
+    var gone: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentShow(&refs, try control_server_storage.deferRequest(&gone, std.math.maxInt(i128)), tab + 1000);
+    try expectPendingFailureText(&gone, "the tab was closed");
+}
+
+test "browser.show 뒤의 DevTools 거절 글: 기록 없는 탭은 「show 로 내라」, 기록은 있는데 만드는 중이면 「기다려라」(첫 몇 초의 틀린 안내 — 2026-11-17 실측)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ta = std.testing.allocator;
+    defer session_mod.web_osr.testForget(ta);
+    try std.testing.expect(std.mem.indexOf(u8, cdpUnavailableReason(987_654), "maru browser show") != null);
+    try session_mod.web_osr.testHold(ta, 987_655); // 기록은 있다 — 브라우저는 아직(만들어지기 전)
+    defer session_mod.web_osr.destroy(ta, 987_655);
+    try std.testing.expectEqualStrings(cdp_not_ready_reason, cdpUnavailableReason(987_655));
 }
 
 test "W9b③·2026-11-17 A3: 에이전트의 누름·키 누름이 새 탭 장을 준다 — 에이전트 탭은 그 주인 pane 의 장, 사용자 탭은 누른 pane 의 장(pane 없는 연결은 없음), 떼기·이동은 주지 않는다, 닫히면 표에서 빠진다" {

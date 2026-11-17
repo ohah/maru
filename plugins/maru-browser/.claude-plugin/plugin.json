@@ -1,6 +1,6 @@
 {
   "name": "maru-browser",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Teach agents running inside a Maru terminal pane to drive Maru's browser panes with the maru browser CLI.",
   "author": { "name": "ohah", "url": "https://github.com/ohah" },
   "homepage": "https://github.com/ohah/maru/tree/main/plugins/maru-browser",

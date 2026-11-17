@@ -62,6 +62,7 @@ pub const browser_help =
     \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
     \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
     \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
+    \\  show    --surface <id>                     bring a tab to the front of its pane, like clicking its tab (Chromium tabs; keys the user types stay out of the page until they click it; never switches workspace or window)
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
@@ -130,6 +131,8 @@ pub const Request = union(enum) {
     open: struct { url: ?[]const u8, timeout_ms: ?u32 },
     /// `browser close`(W9b③ — 어느 탭이든, 2026-11-17 A1). 응답 {closed, reason?}.
     close: struct { surface_id: u64 },
+    /// `browser show`(Chromium — 사용자 결정 2026-11-17·18). 그 탭을 그 pane 의 앞 탭으로. 응답 {shown, visible, changed, key_held}.
+    show: struct { surface_id: u64 },
     /// `browser dialog`(W9c② — Chromium). 그 탭·팝업 가족에 떠 있는 대화상자. 응답 {dialogs:[…]}.
     dialog: struct { surface_id: u64 },
     /// `browser handle-dialog`(W9c② — Chromium). `--accept`·`--dismiss` 중 하나, `--dialog` 는 `dialog` 가 준 번호. 응답 {ok, kind, continues?}.
@@ -166,6 +169,7 @@ pub const Request = union(enum) {
             .console => .console,
             .open => .open,
             .close => .close,
+            .show => .show,
             .dialog => .dialog,
             .handle_dialog => .handle_dialog,
             .upload => .upload,
@@ -1073,6 +1077,12 @@ fn parseInner(args: []const []const u8, diag: *Diag) ParseError!Command {
         const s = p.surface orelse return error.MissingSurface;
         if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .request = .{ .close = .{ .surface_id = s } } };
+    }
+    if (eq(sub, "show")) {
+        const p = try parseSurfaceArg(rest, diag);
+        const s = p.surface orelse return error.MissingSurface;
+        if (p.arg) |extra| return diag.unexpected(extra);
+        return .{ .request = .{ .show = .{ .surface_id = s } } };
     }
     if (eq(sub, "dialog")) {
         const p = try parseSurfaceArg(rest, diag);
@@ -2209,6 +2219,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
         .clear_storage => |g| return idOnlyRequest(gpa, id, "browser.clearStorage", g.surface_id),
         .back => |g| return idOnlyRequest(gpa, id, "browser.back", g.surface_id),
         .close => |g| return idOnlyRequest(gpa, id, "browser.close", g.surface_id),
+        .show => |g| return idOnlyRequest(gpa, id, "browser.show", g.surface_id),
         .dialog => |g| return idOnlyRequest(gpa, id, "browser.dialog", g.surface_id),
         .handle_dialog => |h| {
             var obj: std.json.ObjectMap = .empty;
@@ -2495,7 +2506,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock, emulate, trace };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, show, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock, emulate, trace };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -2698,6 +2709,13 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.print("not closed: {s}\n", .{safe_r[0..displaySafe(reason[0..@min(reason.len, safe_r.len)], &safe_r)]});
                 return false;
             }
+        },
+        // 앞 탭이 됐다. 화면 밖 워크스페이스면 그 pane 의 앞 탭일 뿐이고(워크스페이스·창은 바꾸지 않는다), 사람이 치는 pane 이면 그 페이지는 사람이
+        // 누를 때까지 키를 받지 않는다 — 둘 다 에이전트가 사람에게 말할 것이라 한 줄씩 알린다.
+        .show => {
+            try w.writeAll(if (boolField(result.get("changed"))) "shown\n" else "already in front\n");
+            if (!boolField(result.get("visible"))) try w.writeAll("note: its workspace is not the one on screen — it is the front tab of its pane there (the workspace was not switched)\n");
+            if (boolField(result.get("key_held"))) try w.writeAll("note: the user types in that pane — the page gets their keys only after they click it\n");
         },
         .get_url => {
             try writePageText(gpa, w, strField(result.get("url")), false);
@@ -5204,6 +5222,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
         \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
         \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
+        \\  show    --surface <id>                     bring a tab to the front of its pane, like clicking its tab (Chromium tabs; keys the user types stay out of the page until they click it; never switches workspace or window)
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
@@ -5555,6 +5574,33 @@ test "render: open(W9b③) 은 id·주소(다 못 불렀으면 경고), close �
     for (cases) |c| {
         var w: std.Io.Writer = .fixed(&buf);
         try testing.expectEqual(c.ok, try renderResponse(testing.allocator, c.bytes, c.kind, &w));
+        try testing.expectEqualStrings(c.want, w.buffered());
+    }
+}
+
+// 탭 보이기(사용자 결정 2026-11-17·18): `show --surface <id>` 는 `browser.show {id}` 이고, 답의 두 갈래(화면 밖 워크스페이스·사람이 치는 pane)는
+// 에이전트가 사람에게 말할 것이라 한 줄씩 알린다.
+test "parse·build·render: show — surface 만, browser.show {id}, shown/already in front 와 화면 밖·키 막음 안내" {
+    try testing.expectEqual(@as(u64, 9), (try parse(&.{ "show", "--surface", "9" })).request.show.surface_id);
+    try testing.expectError(error.MissingSurface, parse(&.{"show"}));
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "show", "--surface", "9" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.show", pm.message.request.method);
+        try testing.expectEqual(@as(i64, 9), pm.message.request.params.?.object.get("id").?.integer);
+    }
+    var buf: [512]u8 = undefined;
+    const cases = [_]struct { bytes: []const u8, want: []const u8 }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"shown\":true,\"visible\":true,\"changed\":true,\"key_held\":false}}", .want = "shown\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"shown\":true,\"visible\":true,\"changed\":false,\"key_held\":false}}", .want = "already in front\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"shown\":true,\"visible\":false,\"changed\":true,\"key_held\":false}}", .want = "shown\nnote: its workspace is not the one on screen — it is the front tab of its pane there (the workspace was not switched)\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"shown\":true,\"visible\":true,\"changed\":true,\"key_held\":true}}", .want = "shown\nnote: the user types in that pane — the page gets their keys only after they click it\n" },
+    };
+    for (cases) |c| {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, c.bytes, .show, &w));
         try testing.expectEqualStrings(c.want, w.buffered());
     }
 }

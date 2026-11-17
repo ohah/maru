@@ -73493,11 +73493,17 @@ test "P0-2: WebKit 탭의 늦은 찾음/없음은 Chromium 탭 오버레이에 �
     try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).stops);
     try std.testing.expect(web_osr.findLive(t.browser, other.sent));
 
-    // 보낼 수 없는 글(제어 문자 — 붙여넣기) — 한 번 거절되면 tick 이 다시 내지 않는다.
+    // 보낼 수 없는 글(제어 문자 — 붙여넣기) — 칠해 둔 앞 찾기는 지우고, 「보냈다」 표지를 세워 tick 이 다시 내지 않는다.
     session.dispatchAppAction(.toggle_find);
     _ = try session.tick();
-    try session.chrome_host.find.input.query.appendSlice(allocator, "a\x01b");
+    try p02Type(session, "ap");
+    try std.testing.expect(web_osr.findLive(t.browser, session.web_find_osr_request));
+    web_osr.testClearSent();
+    try session.chrome_host.find.input.query.appendSlice(allocator, "\x01b");
     session.dispatchChromeAction(.find_query_changed);
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).stops);
+    try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).finds);
+    try std.testing.expectEqual(t.browser, session.web_find_last_surface);
     const seq = session.web_find_seq;
     var i: usize = 0;
     while (i < 5) : (i += 1) _ = try session.tick();

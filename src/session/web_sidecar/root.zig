@@ -35,3 +35,5 @@ pub const emu_fields = @import("emu_fields.zig");
 pub const trace_fields = @import("trace_fields.zig");
 /// 사람이 그 탭을 쓴·건드린 메시지의 가름(W9e② — sidecar 는 받은 것으로, maru 는 보내는 것으로 같은 규칙을 쓴다: trace 버림·조건 풂).
 pub const human_use = @import("human_use.zig");
+/// 페이지 찾기(P0-2 — wire 27 `find`·`find_stop`·`find_result`)의 짝 맞추기 — sidecar 가 CEF 의 답을 지금 찾기의 것만 골라 정리한다.
+pub const find = @import("find.zig");

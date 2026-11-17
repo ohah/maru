@@ -285,7 +285,19 @@ const Surface = struct {
     /// W9e①: 흉내가 바뀌었다(설정·지움·sidecar 의 상태) — 그 탭이 있는 창이 다시 짓는다(제목의 ◫·맞춤 바깥의 어둡게). 웹 프레임만으로는
     /// 세대만 올라 탭 줄·덧그림을 다시 짓지 않는다(실제 앱 스크린샷이 잡았다 — ◫ 도 어둡게도 없었다).
     emu_redraw: bool = false,
+    /// P0-2: 이 탭의 지금 찾기 번호(0 = 없음 — 멈췄거나, 브라우저가 새로 만들어졌다). 번호는 앱 전역에서 겹치지 않는다(`next_find_request`) —
+    /// 그래서 창이 둘이어도 번호 하나로 「이 창이 낸 찾기인가」를 가른다(탭을 다른 창으로 옮긴 뒤 옛 창의 멈춤이 새 창의 찾기를 지우지 않게).
+    find_request: u32 = 0,
+    /// 그 번호의 마지막 답(sidecar 의 `find_result`)과 받을 때마다 오르는 세대 — 창이 세대로 새 답을 안다(꺼내 가지 않는다).
+    find_answer: ?FindAnswer = null,
+    find_generation: u32 = 0,
 };
+
+/// P0-2: 찾기의 답 — 일치 수와 지금 차례(1 부터, 없으면 0).
+pub const FindAnswer = struct { request: u32, count: u32, active: u32, final: bool, generation: u32 };
+
+/// P0-2: 찾기를 보낸 결과 — 보냈다(번호), 아직 보낼 수 없다(탭의 브라우저가 아직 없다 — 다음 tick 에 다시), 보낼 수 없는 글(제어 문자 등 — 다시 해도 같다).
+pub const FindSend = union(enum) { sent: u32, not_ready, refused };
 
 /// W9d①: 보낸 `net_watch` 의 값 — 켬·설정·어느 호스트든·grant 호스트(넷까지).
 const NetWatchKey = struct {
@@ -1891,6 +1903,25 @@ pub fn testLastUrl(surface_id: u64) ?[]const u8 {
     return s.last_url;
 }
 
+/// 시험 전용(P0-2): 돌고 있는(`running`) 채 프로세스 없이 보낸 frame 을 쌓는다(`testSent` 로 본다). 끄면 쌓인 것도 버린다.
+pub fn testRecordSends(gpa: std.mem.Allocator, on: bool) void {
+    if (!builtin.is_test) @compileError("test only");
+    test_record_sends = on;
+    if (!on) outbox_pending.clearAndFree(gpa);
+}
+
+/// 시험 전용(P0-2): 쌓인 frame 을 풀어 `out` 에(앞에서부터) — 돌려준 메시지의 글은 쌓인 바이트를 빌린다(`testClearSent` 전까지).
+pub fn testSent(out: []Message) usize {
+    if (!builtin.is_test) @compileError("test only");
+    return sentFrames(out);
+}
+
+/// 시험 전용(P0-2): 쌓인 frame 을 비운다.
+pub fn testClearSent() void {
+    if (!builtin.is_test) @compileError("test only");
+    outbox_pending.clearRetainingCapacity();
+}
+
 /// 시험 전용(W10c): sidecar 의 메시지 하나를 적용한다.
 pub fn testApply(gpa: std.mem.Allocator, message: Message) void {
     if (!builtin.is_test) @compileError("test only");
@@ -2407,6 +2438,46 @@ pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.Nav
     s.console.userDrove(); // W9c① 4 회차 D: 뒤로 가면 사용자가 그 탭으로 지나온 곳일 수 있다
     networkUserDrove(surface_id, s); // W9d①
     if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action, .user = true } }); // W9d③ D2 — 부르는 곳은 모두 사용자다
+}
+
+/// P0-2: 앱 전역 찾기 번호(0 은 「없음」이라 건너뛴다).
+var next_find_request: u32 = 0;
+
+/// P0-2: 그 탭에서 페이지 찾기(사용자의 ⌘F 글·Enter·⌘G — 창이 정했다). 그 탭의 브라우저가 만들어졌을 때만 보낸다 — 아직이면 `not_ready`
+/// (창의 tick 이 다음에 다시 낸다 — 쥐었다 늦게 보내지 않는다: 만들어지기 전의 글이 그 사이 바뀔 수 있다). 대소문자 무시, 글이 바뀌었거나
+/// 멈춘 뒤면 sidecar(CEF)가 새로 찾는다.
+pub fn find(gpa: std.mem.Allocator, surface_id: u64, text: []const u8, forward: bool) FindSend {
+    const s = surfaces.getPtr(surface_id) orelse return .not_ready;
+    if (!s.created) return .not_ready;
+    next_find_request +%= 1;
+    if (next_find_request == 0) next_find_request = 1;
+    const request = next_find_request;
+    if (!trySend(gpa, .{ .find = .{ .browser = surface_id, .request = request, .forward = forward, .text = text } })) return .refused;
+    s.find_request = request;
+    s.find_answer = null;
+    return .{ .sent = request };
+}
+
+/// P0-2: 그 탭의 찾기를 멈추고 하이라이트를 지운다 — **그 탭의 지금 찾기가 `request` 일 때만**(다른 창이 낸 찾기를 지우지 않는다).
+/// `keep_selection` 이면 지금 일치는 선택으로 남긴다(닫힌 오버레이의 ⌘G).
+pub fn findStop(gpa: std.mem.Allocator, surface_id: u64, request: u32, keep_selection: bool) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    if (request == 0 or s.find_request != request) return;
+    s.find_request = 0;
+    s.find_answer = null;
+    if (s.created) send(gpa, .{ .find_stop = .{ .browser = surface_id, .keep_selection = keep_selection } });
+}
+
+/// P0-2: 그 번호의 찾기가 그 탭에 아직 살아 있는가 — 브라우저가 새로 만들어졌거나(sidecar 재시작) 멈췄으면 거짓이라 창이 다시 낸다.
+pub fn findLive(surface_id: u64, request: u32) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return request != 0 and s.created and s.find_request == request;
+}
+
+/// P0-2: 그 탭의 지금 찾기의 마지막 답(없으면 null).
+pub fn findAnswer(surface_id: u64) ?FindAnswer {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return s.find_answer;
 }
 
 /// W9c②: 에이전트가 이 탭을 움직였다(앱의 DevTools op 이 누름·키·이동·스크립트를 보낼 때 — `app_host_abi`). 그 뒤 5 초 안의 대화상자는
@@ -6641,6 +6712,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.created = true;
             s.initial_load_pending = true;
             dropPopup(s);
+            // P0-2: 새 브라우저(처음이거나 sidecar 가 다시 떴다)에는 찾기가 없다 — 창이 `findLive` 로 알고 지금 검색어로 다시 낸다.
+            s.find_request = 0;
+            s.find_answer = null;
             // W9d①: 새 브라우저(처음이거나 sidecar 가 다시 떴다)는 지켜보기를 모른다 — 첫 이동보다 **먼저** 알린다(그 이동의 문서 요청부터 적게).
             // 옛 브라우저에서 진행 중이던 요청의 끝은 오지 않는다 — 끝난 것으로 치고 번호 표를 비운다(적대 리뷰 3 회차 T2: 새 프로세스가 같은 이동
             // 요청 번호를 다시 써 그 응답이 옛 기록에 붙었다).
@@ -6938,6 +7012,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             forgetDrag(s);
         },
         .tooltip_changed => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, v.text),
+        // P0-2: 그 탭의 지금 찾기의 답만(멈춘 뒤·다시 낸 뒤의 늦은 답은 번호가 다르다).
+        .find_result => |v| if (surfaces.getPtr(v.browser)) |s| if (v.request != 0 and v.request == s.find_request) {
+            s.find_generation +%= 1;
+            s.find_answer = .{ .request = v.request, .count = v.count, .active = v.active, .final = v.final, .generation = s.find_generation };
+        },
         .cursor_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.cursor = v.cursor;
             s.cursor_generation +%= 1;
@@ -7048,7 +7127,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .emulation, .trace, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .emulation, .trace, .find, .find_stop, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 

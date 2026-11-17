@@ -6926,6 +6926,16 @@ pub const AppSession = struct {
     /// 웹 탭 A에서 한 번 찾은 뒤 웹 탭 B로 옮겼을 때 B는 영영 검색되지 않는다(실측 결함). 올바른 질문은
     /// "**지금 이 탭에, 지금 이 검색어를** 이미 보냈는가"다.
     web_find_last_surface: u64 = 0,
+    /// P0-2: 이 창이 Chromium 탭에 낸 마지막 찾기 — 탭과 번호(`web_osr.find` 가 앱 전역에서 매긴다 — 창이 둘이어도 겹치지 않는다). 0 이면
+    /// 없다. Swift 를 거치지 않는다(`web_find_pending` 은 WebKit 몫).
+    web_find_osr_surface: u64 = 0,
+    web_find_osr_request: u32 = 0,
+    /// 그 찾기의 답 가운데 오버레이에 마지막으로 실은 세대(`web_osr.FindAnswer.generation`).
+    web_find_osr_seen: u32 = 0,
+    /// 그 찾기를 오버레이가 닫힌 채 냈다(⌘G) — 마지막 답이 오면 칠한 것을 지우고 그 일치를 선택으로 남긴다(`settleClosedOsrFind`).
+    web_find_osr_closed: bool = false,
+    /// 지난 tick 의 오버레이 열림 — 열림·닫힘 가장자리에서 Chromium 찾기를 멈춘다(`reconcileOsrFind`).
+    web_find_open_seen: bool = false,
     /// 지금 열린 컨텍스트 메뉴가 **브랜치 목록**인지. 선택 처리 분기의 단일 출처다.
     branch_menu_open: bool = false,
     // 메뉴에서 고른 항목 중 **web이 실행할 것**의 1회성 신호. 선택은 문서 안에 있어 native가 범위를 모른다.
@@ -21204,6 +21214,10 @@ pub const AppSession = struct {
             if (self.chrome_host.find.target != want) {
                 self.chrome_host.find.target = want;
                 self.chrome_host.find.page_found = null; // 대상이 바뀌면 지난 답은 이 화면 것이 아니다
+                self.chrome_host.find.page_count = null;
+                // Chromium 탭의 찾기도 멈춘다(P0-2) — 터미널로 갔다 돌아오면 수가 비어 있는데 하이라이트만 남은 채 다시 내지 않았다(옮긴 뒤
+                // 「이미 보냈다」로 남는다). 멈추면 돌아올 때 tick 이 다시 낸다(`osrFindCurrent`).
+                web_ops.stopOsrFind(self);
                 // 터미널로 **돌아올 때는 다시 찾는다**. 웹 활성 동안 매치를 버렸으므로(그 화면 것이 아니다)
                 // 아무도 다시 계산하지 않으면 검색어만 남고 하이라이트·카운터가 죽는다(R5 실측). 재검색을
                 // 부르는 곳은 여기 한 곳 — 전환 경로마다 부르면 반드시 빠뜨리는 문이 남는다.
@@ -21235,7 +21249,10 @@ pub const AppSession = struct {
                 }
             }
         }
+        web_ops.reconcileOsrFind(self); // P0-2: 오버레이가 열리거나 닫히면 Chromium 찾기를 멈춘다(닫는 길과 무관하게)
+        web_ops.settleClosedOsrFind(self); // P0-2: 닫힌 채 ⌘G 가 찾았으면 칠한 것을 거두고 그 일치만 선택으로
         if (self.chrome_host.find.open and web_ops.activeWebSurfaceIdAnyKind(self) != 0) {
+            web_ops.pollOsrFindResult(self); // P0-2: Chromium 탭의 새 답(수·차례)을 오버레이에
             if (self.find_matches.items.len > 0) {
                 // 터미널에서 넘어온 매치·카운트는 이 화면과 무관하다 — 남기면 웹 위에서 남의 숫자를 보여 준다.
                 self.find_matches.clearRetainingCapacity();
@@ -21249,8 +21266,11 @@ pub const AppSession = struct {
             // 웹 탭에 갔을 때 그 탭은 검색되지 않는다(R2 실측). 반대로 조건이 없으면 tick마다 재제출해
             // WebKit 하이라이트가 매 프레임 처음으로 튄다 — 그래서 "이미 이 조합을 보냈으면 안 보낸다".
             const q = self.chrome_host.find.input.query.items;
-            const already = self.web_find_last_surface == web_ops.activeWebSurfaceIdAnyKind(self) and
-                std.mem.eql(u8, q, self.web_find_query_buf[0..self.web_find_query_len]);
+            // Chromium 탭이면 그 찾기가 아직 살아 있어야 「보냈다」다(P0-2 — sidecar 가 다시 뜨면 새 브라우저에 다시 낸다, `osrFindCurrent`).
+            const active_sid = web_ops.activeWebSurfaceIdAnyKind(self);
+            const already = self.web_find_last_surface == active_sid and
+                std.mem.eql(u8, q, self.web_find_query_buf[0..self.web_find_query_len]) and
+                web_ops.osrFindCurrent(self, active_sid);
             if (self.web_find_pending == null and !already and q.len > 0)
                 web_ops.submitWebFind(self, false);
         }
@@ -73147,6 +73167,344 @@ test "WP-F1: 웹 탭에서 ⌘G는 터미널 검색어로 엉뚱한 동작을 �
 // 마크다운 뷰어에서 열리면 우상단에 검색창이 뜨는데 페이지는 검색되지 않는다(사용자 제보).
 // 판정 기준이 `activeWebSurfaceIdAnyKind`인 것이 핵심이다 — browser 전용 함수를 쓰면 **마크다운이 빠져**
 // 제보된 그 버그가 그대로 남는다(docs/web-panel-features.md §8).
+// ── P0-2: Chromium 탭의 ⌘F(CEF 찾기) ──────────────────────────────────────────────────────────────────────────────
+// 이 시험들은 ⌘F 가 Chromium 탭에서 **Swift(WKWebView)를 거치지 않고 sidecar 로 가는지**와, 예전에 실앱에서 잰 고리(오버레이가 열린 동안
+// tick 마다 다시 제출·창 전체 다시 그리기 — 776 번·≈ 62 fps)가 없어졌는지를 증명한다. 사용자는 찾기 상자를 열어 둔 채 페이지를 읽는다 —
+// 그동안 창이 쉬지 않고 다시 그려지면 배터리와 다른 pane 의 반응을 먹는다. WebKit 탭·파일 Term 의 길은 대조로 그대로인지 본다.
+
+/// P0-2 시험: Chromium 탭 하나를 둔 창(sidecar 없이 「돈다·만들어졌다」로 친다 — 보낸 frame 은 쌓인다).
+fn p02Session(allocator: std.mem.Allocator, created: bool) !struct { session: *AppSession, browser: u64 } {
+    const session = try w6jSession(allocator);
+    errdefer {
+        session.deinit();
+        allocator.destroy(session);
+    }
+    const browser = try pane_ops.appendWebTermInActivePane(session, .browser);
+    try web_osr.testHold(allocator, browser);
+    if (created) web_osr.testRunning(browser);
+    web_osr.testRecordSends(allocator, true);
+    return .{ .session = session, .browser = browser };
+}
+
+fn p02Done(allocator: std.mem.Allocator, session: *AppSession) void {
+    session.deinit();
+    allocator.destroy(session);
+    web_osr.testRecordSends(allocator, false);
+    web_osr.testForget(allocator);
+}
+
+/// 쌓인 frame 가운데 `find`(그 탭)·`find_stop`(그 탭)의 수와 마지막 `find`.
+const P02Sent = struct { finds: usize = 0, stops: usize = 0, keeps: usize = 0, last_text: []const u8 = "", last_forward: bool = true, last_request: u32 = 0 };
+fn p02Sent(browser: u64) P02Sent {
+    var buf: [32]maru.session.web_sidecar.message.Message = undefined;
+    const n = web_osr.testSent(&buf);
+    var out: P02Sent = .{};
+    for (buf[0..n]) |m| switch (m) {
+        .find => |f| if (f.browser == browser) {
+            out.finds += 1;
+            out.last_text = f.text;
+            out.last_forward = f.forward;
+            out.last_request = f.request;
+        },
+        .find_stop => |b| if (b.browser == browser) {
+            out.stops += 1;
+            if (b.keep_selection) out.keeps += 1;
+        },
+        else => {},
+    };
+    return out;
+}
+
+fn p02Type(session: *AppSession, text: []const u8) !void {
+    for (text) |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+}
+
+test "P0-2: Chromium 탭의 ⌘F 는 Swift 질의 없이 sidecar 에 find 를 보내고, 열어 둔 채 tick 을 돌려도 다시 내지 않는다(재현된 고리)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try p02Type(session, "ap");
+    try std.testing.expect(web_ops.takeWebFindQuery(session) == null); // Swift 는 아무것도 걷지 않는다 — 「전달 못함」 고리의 뿌리
+    const typed = p02Sent(t.browser);
+    try std.testing.expectEqual(@as(usize, 2), typed.finds); // 글자마다 새 찾기
+    try std.testing.expectEqualStrings("ap", typed.last_text);
+    try std.testing.expect(typed.last_forward);
+    try std.testing.expectEqual(typed.last_request, session.web_find_osr_request);
+
+    // 열어 둔 채 쉰다 — 예전에는 tick 마다 다시 제출하고 `metal_dirty` 를 세웠다(창 전체 다시 그리기). tick 은 표지를 그리기로 소비하므로
+    // 표지는 tick 의 찾기 자리(`runFramePreHousekeeping`)만 돌려 본다.
+    web_osr.testClearSent();
+    const seq = session.web_find_seq;
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        _ = try session.tick();
+        session.metal_dirty = false;
+        session.runFramePreHousekeeping();
+        try std.testing.expect(!session.metal_dirty);
+        try std.testing.expect(web_ops.takeWebFindQuery(session) == null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).finds);
+    try std.testing.expectEqual(seq, session.web_find_seq);
+}
+
+test "P0-2: Chromium 답은 수와 차례로 오버레이에 실린다 — 이 창의 지금 번호·열린 오버레이·보이는 그 탭일 때만, 새 세대만" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try p02Type(session, "apple");
+    const req = session.web_find_osr_request;
+    try std.testing.expect(req != 0);
+    try std.testing.expect(session.chrome_host.find.page_count == null); // 답 전에는 빈칸
+
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = t.browser, .request = req, .count = 7, .active = 1, .final = false } });
+    _ = try session.tick();
+    session.metal_dirty = false;
+    session.runFramePreHousekeeping(); // tick 이 이미 실었다 — 같은 세대는 다시 싣지 않는다(다시 그리기도 청하지 않는다)
+    try std.testing.expect(!session.metal_dirty);
+    try std.testing.expectEqual(chrome.components.find.PageCount{ .active = 1, .total = 7 }, session.chrome_host.find.page_count.?);
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = t.browser, .request = req, .count = 7, .active = 1, .final = true } });
+    session.metal_dirty = false;
+    session.runFramePreHousekeeping();
+    try std.testing.expect(session.metal_dirty); // 새 세대 — 다시 그린다
+    // 옛 번호의 늦은 답은 sidecar 쪽 기록에서부터 버려진다.
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = t.browser, .request = req -% 1, .count = 3, .active = 3, .final = true } });
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.PageCount{ .active = 1, .total = 7 }, session.chrome_host.find.page_count.?);
+    // Enter 는 같은 글로 앞으로, ⇧Enter 는 뒤로 — 새 번호.
+    web_osr.testClearSent();
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    const next = p02Sent(t.browser);
+    try std.testing.expectEqual(@as(usize, 1), next.finds);
+    try std.testing.expectEqualStrings("apple", next.last_text);
+    try std.testing.expect(next.last_forward and next.last_request != req);
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .shift = true } });
+    try std.testing.expect(!p02Sent(t.browser).last_forward);
+    const back_req = session.web_find_osr_request;
+    // 앞 수는 새 답이 올 때까지 남는다(Enter 마다 깜빡이지 않게) — 새 답이 오면 바뀐다.
+    try std.testing.expectEqual(@as(u32, 7), session.chrome_host.find.page_count.?.total);
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = t.browser, .request = back_req, .count = 7, .active = 7, .final = true } });
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.PageCount{ .active = 7, .total = 7 }, session.chrome_host.find.page_count.?);
+    // 일치 없음은 0/0 이다(Chromium 은 수를 안다).
+    try p02Type(session, "zz");
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = t.browser, .request = session.web_find_osr_request, .count = 0, .active = 0, .final = true } });
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.PageCount{ .active = 0, .total = 0 }, session.chrome_host.find.page_count.?);
+}
+
+test "P0-2: Esc(닫힘 가장자리)는 하이라이트를 지운다 — 닫힌 ⌘G 는 찾고 마지막 답에 칠을 거둬 선택만 남기며 오버레이에 싣지 않는다, 답 전에 열면 열림 가장자리가 지운다, 검색어를 비워도 지운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try p02Type(session, "ap");
+    const req = session.web_find_osr_request;
+    web_osr.testClearSent();
+
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.find.open);
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).stops);
+    try std.testing.expect(!web_osr.findLive(t.browser, req));
+    _ = try session.tick(); // 가장자리는 한 번
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).stops);
+
+    // 닫힌 채 ⌘G — 보존된 검색어로 찾는다(WebKit 과 같다). 답은 닫힌 오버레이에 싣지 않고, 마지막 답이 오면 칠을 거둬 그 일치만 선택으로.
+    web_osr.testClearSent();
+    session.dispatchAppAction(.find_next);
+    const g = p02Sent(t.browser);
+    try std.testing.expectEqual(@as(usize, 1), g.finds);
+    try std.testing.expectEqualStrings("ap", g.last_text);
+    const g_req = session.web_find_osr_request;
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = t.browser, .request = g_req, .count = 2, .active = 1, .final = false } });
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).stops); // 아직 수를 세는 중 — 닫힌 채 ⌘G 는 가장자리가 아니다
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = t.browser, .request = g_req, .count = 2, .active = 1, .final = true } });
+    _ = try session.tick();
+    try std.testing.expect(session.chrome_host.find.page_count == null);
+    const settled = p02Sent(t.browser);
+    try std.testing.expectEqual(@as(usize, 1), settled.stops);
+    try std.testing.expectEqual(@as(usize, 1), settled.keeps); // 선택은 남긴다
+    try std.testing.expect(!web_osr.findLive(t.browser, g_req));
+
+    // 다시 연다 — 거둔 뒤라 열림 가장자리에 보낼 것이 없다.
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).stops);
+    // 치고 닫고 ⌘G 한 뒤, 답 전에 연다 — 열림 가장자리가 칠한 것까지 지운다(선택도).
+    try p02Type(session, "ap");
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    _ = try session.tick();
+    session.dispatchAppAction(.find_next);
+    try std.testing.expect(web_osr.findLive(t.browser, session.web_find_osr_request));
+    web_osr.testClearSent();
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    const reopened = p02Sent(t.browser);
+    try std.testing.expectEqual(@as(usize, 1), reopened.stops);
+    try std.testing.expectEqual(@as(usize, 0), reopened.keeps);
+
+    // 검색어를 다 지우면 멈춘다.
+    try p02Type(session, "a");
+    web_osr.testClearSent();
+    _ = try session.handleKeyEvent(.{ .key = .backspace, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.input.query.items.len);
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).stops);
+    try std.testing.expect(session.chrome_host.find.page_count == null);
+}
+
+test "P0-2: 브라우저가 아직 없으면 보내지 않고 다시 그리기도 청하지 않는다 — 만들어지면 tick 이 한 번 내고, sidecar 가 다시 떠도 다시 낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, false);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try p02Type(session, "ap");
+    try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).finds);
+    const seq = session.web_find_seq;
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        _ = try session.tick();
+        try std.testing.expect(web_ops.takeWebFindQuery(session) == null); // Swift 로 새지 않는다(그쪽은 「전달 못함」 고리)
+    }
+    try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).finds);
+    try std.testing.expectEqual(seq, session.web_find_seq); // 표지·seq 를 건드리지 않았다
+    try std.testing.expectEqual(@as(u32, 0), session.web_find_osr_request);
+
+    web_osr.testRunning(t.browser); // 만들어졌다
+    _ = try session.tick();
+    const sent = p02Sent(t.browser);
+    try std.testing.expectEqual(@as(usize, 1), sent.finds);
+    try std.testing.expectEqualStrings("ap", sent.last_text);
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(t.browser).finds);
+
+    // sidecar 가 다시 떴다 — 새 브라우저에는 찾기가 없다. tick 이 지금 검색어로 다시 낸다(새 번호).
+    const before = session.web_find_osr_request;
+    web_osr.testApply(allocator, .{ .browser_created = t.browser });
+    try std.testing.expect(!web_osr.findLive(t.browser, before));
+    _ = try session.tick();
+    const again = p02Sent(t.browser);
+    try std.testing.expectEqual(@as(usize, 2), again.finds);
+    try std.testing.expect(session.web_find_osr_request != before);
+}
+
+test "P0-2: 열어 둔 채 탭을 옮기면 앞 Chromium 탭을 멈추고 새 탭에 낸다 — WebKit 탭(파일 Term)은 예전처럼 Swift 질의로, 터미널에 갔다 오면 다시 낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    const a = t.browser;
+    const b = try pane_ops.appendWebTermInActivePane(session, .browser);
+    try web_osr.testHold(allocator, b);
+    web_osr.testRunning(b);
+    const pane = pane_ops.activePane(session);
+    const md = try web_ops.createWebTerm(session, .markdown); // 파일 Term(WKWebView) — 대조
+    try pane.terms.append(allocator, md);
+    const index_of = struct {
+        fn f(p: anytype, sid: u64) usize {
+            for (p.terms.items, 0..) |term, i| if (term.surfaceId() == sid) return i;
+            unreachable;
+        }
+    }.f;
+
+    term_ops.focusTerm(session, index_of(pane, a));
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try p02Type(session, "ap");
+    try std.testing.expectEqual(@as(usize, 2), p02Sent(a).finds);
+    web_osr.testApply(allocator, .{ .find_result = .{ .browser = a, .request = session.web_find_osr_request, .count = 4, .active = 1, .final = true } });
+    _ = try session.tick();
+    web_osr.testClearSent();
+
+    term_ops.focusTerm(session, index_of(pane, b));
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(a).stops);
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(b).finds);
+    try std.testing.expect(session.chrome_host.find.page_count == null); // a 의 수는 b 의 것이 아니다
+    web_osr.testClearSent();
+
+    // WebKit 대조: 파일 Term 은 예전 길(Swift 질의) — Chromium 의 찾기는 멈춘다.
+    term_ops.focusTerm(session, index_of(pane, md.surfaceId()));
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(b).stops);
+    const q = web_ops.takeWebFindQuery(session) orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expectEqualStrings("ap", q.query);
+    try std.testing.expectEqual(md.surfaceId(), q.surface_id);
+    web_osr.testClearSent();
+
+    // 터미널로 갔다 오면(대상이 바뀐다) 다시 낸다 — 수가 빈 채 「이미 보냈다」로 남지 않는다.
+    term_ops.focusTerm(session, index_of(pane, b));
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(b).finds);
+    term_ops.focusTerm(session, 0); // 첫 탭은 터미널
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), p02Sent(b).stops);
+    term_ops.focusTerm(session, index_of(pane, b));
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 2), p02Sent(b).finds);
+}
+
+test "P0-2: WebKit 탭의 늦은 찾음/없음은 Chromium 탭 오버레이에 붙지 않는다, 다른 창이 낸 찾기는 이 창이 닫혀도 지우지 않는다, 보낼 수 없는 글은 다시 내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const t = try p02Session(allocator, true);
+    defer p02Done(allocator, t.session);
+    const session = t.session;
+    const pane = pane_ops.activePane(session);
+    const md = try web_ops.createWebTerm(session, .markdown);
+    try pane.terms.append(allocator, md);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try p02Type(session, "ap");
+    var webkit_seq: u64 = 0;
+    while (web_ops.takeWebFindQuery(session)) |r| webkit_seq = r.seq;
+    try std.testing.expect(webkit_seq != 0);
+
+    // 답이 오기 전에 Chromium 탭으로 — tick 이 그 탭에 낸다. 그 뒤에 온 WebKit 의 답은 붙지 않는다.
+    for (pane.terms.items, 0..) |term, i| if (term.surfaceId() == t.browser) term_ops.focusTerm(session, i);
+    _ = try session.tick();
+    try std.testing.expect(session.web_find_osr_request != 0);
+    web_ops.provideWebFindResult(session, webkit_seq, true);
+    try std.testing.expect(session.chrome_host.find.page_found == null);
+
+    // 다른 창이 그 탭에 새 찾기를 냈다(탭을 옮겼다) — 이 창이 닫혀도 그 찾기는 그대로.
+    const other = web_osr.find(allocator, t.browser, "other", true);
+    try std.testing.expect(other == .sent);
+    web_osr.testClearSent();
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), p02Sent(t.browser).stops);
+    try std.testing.expect(web_osr.findLive(t.browser, other.sent));
+
+    // 보낼 수 없는 글(제어 문자 — 붙여넣기) — 한 번 거절되면 tick 이 다시 내지 않는다.
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try session.chrome_host.find.input.query.appendSlice(allocator, "a\x01b");
+    session.dispatchChromeAction(.find_query_changed);
+    const seq = session.web_find_seq;
+    var i: usize = 0;
+    while (i < 5) : (i += 1) _ = try session.tick();
+    try std.testing.expectEqual(seq, session.web_find_seq);
+    try std.testing.expect(session.chrome_host.find.page_count == null);
+}
+
 test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지로 나간다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

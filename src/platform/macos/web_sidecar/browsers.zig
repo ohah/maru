@@ -44,6 +44,8 @@ pub const State = struct {
     /// maru 의 받는 port(W2). 오기 전의 그리기는 링에 쥐어 두었다가 오면 알린다(`ring_producer` 의 `pending`).
     channel: ?ring_producer.Channel = null,
     ring_retry_posted: bool = false,
+    /// CEF 찾기 identifier 의 셈(P0-2) — CEF 는 모든 브라우저의 찾기를 한 수로 센다(실측 — `protocol.find`).
+    find_counter: protocol.find.Counter = .{},
 };
 
 pub var state: State = undefined;
@@ -99,6 +101,8 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         },
         .navigate => |value| navigate(value, writer),
         .nav_action => |value| navAction(value, writer),
+        .find => |value| find(value, writer), // P0-2
+        .find_stop => |value| findStop(value),
         .frame_channel => |value| frameChannel(value, writer),
         .context_menu_command => |value| context_menus.onCommand(value),
         .popup_reserve => |value| new_tab.onReserve(value.browser),
@@ -279,6 +283,35 @@ fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
         if (emulation.gateNav(entry, .{ .action = action, .user = value.user }, "")) return;
     }
     startNavAction(entry, value.action, value.user);
+}
+
+/// 페이지 찾기(P0-2). CEF `find` 는 대소문자 무시(`matchCase=0` — WebKit 탭의 찾기와 같은 규칙), `findNext=1`: 글이 바뀌었거나 멈춘 뒤면
+/// CEF 가 새로 찾아 첫 일치를 고르고, 같은 글이 이어지면 다음·이전 일치로 간다(실측 — `findNext=0` 은 칠하기만 하고 지금 일치가 없다, 차례 0).
+/// 답은 그 host 의 찾기 처리기(`find.zig`)로 오고, 이 부름의 identifier(`Session.begin`)와 같은 것만 maru 에 간다.
+fn find(value: protocol.message.Find, writer: *events.Writer) void {
+    const entry = state.registry.byId(value.browser) orelse return fail(writer, value.browser, .unknown_browser, "no such browser");
+    if (entry.closing) return;
+    const browser = browserOf(entry);
+    const host = browser.*.get_host.?(browser);
+    defer object.release(host);
+    var text = std.mem.zeroes(c.cef_string_t);
+    library.setString(state.api, &text, value.text);
+    defer state.api.string_utf16_clear(&text);
+    entry.find.begin(&state.find_counter, value.request);
+    host.*.find.?(host, &text, @intFromBool(value.forward), 0, 1);
+}
+
+/// 찾기를 멈추고 하이라이트를 지운다(P0-2) — `keep_selection` 이면 지금 일치는 선택으로 남긴다(CEF `clearSelection=0`). 그 뒤의 늦은 답은
+/// `Session` 이 버린다. 모르는 브라우저는 조용히 넘긴다 — 탭이 닫힌 뒤 maru 가 늦게 멈출 수 있다(실패로 알리면 maru 쪽에 쓸모없는 실패 줄이
+/// 남는다).
+fn findStop(value: protocol.message.FindStop) void {
+    const entry = state.registry.byId(value.browser) orelse return;
+    entry.find.stop();
+    if (entry.closing) return;
+    const browser = browserOf(entry);
+    const host = browser.*.get_host.?(browser);
+    defer object.release(host);
+    host.*.stop_finding.?(host, @intFromBool(!value.keep_selection));
 }
 
 /// 뒤로·앞으로·새로고침·멈춤을 낸다(곧, 또는 게이트가 연 뒤 — `emulation.openGate`).

@@ -432,6 +432,19 @@ pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can
     }.pred) != null) self.workspaceChanged(.persisted_surface);
 }
 
+/// 워크스페이스에 저장할 이 브라우저 Term 의 주소(없으면 저장하지 않는다). 사실을 모으기만 하고 고르는 규칙은 L2
+/// `workspace.browserTermUrl` 하나다 — 본 주소(nav 상태)만 보던 예전 판은 엔진이 뜨기 전에 저장되거나 복원 주소가 열리지 않은(접속 거부)
+/// 탭을 다음 저장에서 빠뜨려 다음 실행에 그 탭이 사라졌다(2026-11-17 실측). 상한은 주소창 이동 상한(`addr_nav_url_cap`)이다.
+pub fn persistedBrowserUrl(self: *AppSession, term: *const Term) ?[]const u8 {
+    const sid = term.surfaceId();
+    const observed = if (webNavState(self, sid)) |nav| nav.url else "";
+    return maru.session.workspace.browserTermUrl(.{
+        .observed = observed,
+        .pending = term.pending_url,
+        .engine = if (isOsrTerm(term)) web_osr.requestFacts(sid) else null,
+    }, app_session_mod.addr_nav_url_cap);
+}
+
 /// Phase 7e-1a: surface_id의 저장된 nav 상태(없으면 null). 반환 url 슬라이스는 맵 소유로 다음 mutation까지 유효
 /// (ABI getter가 즉시 out 버퍼로 복사). 7e-1b 주소창 소비.
 pub fn webNavState(self: *AppSession, surface_id: u64) ?WebNavState {

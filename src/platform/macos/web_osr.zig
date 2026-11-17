@@ -90,6 +90,10 @@ const Surface = struct {
     /// `page_started` 뒤 `url_changed` 를 보내지만(판정 `R9d4-nav-order(obs)`) 32 KiB 를 넘는 주소는 `url_changed` 가 없다(sidecar 가 자른 주소를
     /// 보내지 않는다 — `R9d4-long-url-no-url-changed(obs)`). 네트워크 판정은 옛 주소의 호스트를 쓰지 않는다(`netKnownUrl` — 덮지 않는 쪽으로).
     url_stale: bool = false,
+    /// `last_url` 로 보낸 이동이 오류 페이지(접속 거부·DNS·막기 규칙 — sidecar 의 `error_page`)로 끝났다. 새 이동을 보낼 때 내린다. 저장할 주소를
+    /// 고를 때 쓴다(`requestFacts` — 주소를 한 번도 받지 못한 탭이 보이려던 주소를 잃지 않게). 문서 없이 끝난 이동(다운로드·204 — CEF 의
+    /// `ERR_ABORTED`)은 `error_page` 가 오지 않아 세우지 않는다.
+    request_failed: bool = false,
     can_go_back: bool = false,
     can_go_forward: bool = false,
     /// Chromium 이 이 탭을 불러오는 중인가(`nav_state.loading` — 이동이 막 시작된 것도 참이다, W9b①b 의 wait --load).
@@ -2300,6 +2304,14 @@ pub fn grantNewTabCredit(gpa: std.mem.Allocator, surface_id: u64) void {
     if (s.created and (state == .running or state == .starting)) send(gpa, .{ .new_tab_credit = surface_id });
 }
 
+/// 워크스페이스 저장이 그 탭의 주소를 고르는 데 쓰는 엔진 쪽 사실(규칙은 L2 `workspace.browserTermUrl` 하나 — 여기는 사실만). `open` 은
+/// 보낸 이동이 아직 열려 있는가 — 브라우저를 만드는 중(만들어지면 `last_url` 로 보낸다), 진행 중, 오류 페이지로 끝났다. 다운로드·204 처럼
+/// 문서 없이 끝난 이동은 거짓(다음 실행마다 그 파일을 다시 받지 않게). 모르는 탭(한 번도 배치되지 않았다)은 null.
+pub fn requestFacts(surface_id: u64) ?maru.session.workspace.BrowserUrlFacts.EngineRequest {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return .{ .address = s.url, .requested = s.last_url, .open = !s.created or s.nav_pending or s.request_failed };
+}
+
 /// W9b③: 그 탭의 브라우저가 만들어졌고, 빈 페이지가 아닌 주소에서 불러오기를 몇 번 끝냈는가(`browser.open` 이 첫 불러오기를
 /// 기다린다). 모르는 탭은 null.
 pub fn pageState(surface_id: u64) ?struct { created: bool, loads: u32, url: []const u8 } {
@@ -2383,6 +2395,7 @@ fn navigateAs(gpa: std.mem.Allocator, surface_id: u64, url: []const u8, user: bo
     const owned = gpa.dupe(u8, url) catch return;
     if (s.last_url) |old| gpa.free(old);
     s.last_url = owned;
+    s.request_failed = false;
     if (s.created) {
         send(gpa, .{ .navigate = .{ .browser = surface_id, .url = url, .user = user } });
         s.nav_pending = true;
@@ -6949,6 +6962,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         // W9c①: 실패한 이동이 오류 페이지로 옛 문서를 바꿨다(`page_started` 가 없다) — 콘솔의 문서 경계로만 쓴다. 다운로드의 몸짓(`last_nav_ms`)·
         // 에이전트 이동(`agent_nav`)은 건드리지 않는다 — 그쪽 판정은 `load_finished` 가 한다.
         .error_page => |v| if (surfaces.getPtr(v.browser)) |s| {
+            s.request_failed = true; // 보낸 이동이 열리지 않았다 — 그 주소는 그 탭이 보이려던 주소로 남는다(`requestFacts`)
             s.console.newDocument();
             s.block.newDocument();
             s.mock.newDocument();
@@ -9128,6 +9142,53 @@ const TestAccess = struct {
 fn testLastDialog(surface_id: u64) *Dialog {
     const s = surfaces.getPtr(surface_id).?;
     return &s.dialogs.items[s.dialogs.items.len - 1];
+}
+
+// 워크스페이스가 저장할 주소의 엔진 쪽 사실(`requestFacts` → L2 `workspace.browserTermUrl`). 복원한 탭의 주소가 열리지 않거나(접속 거부) 엔진이
+// 뜨기 전에 저장되면 그 탭이 다음 실행에 사라졌다(2026-11-17 실측) — 보낸 이동이 열려 있으면 그 주소가 남아야 하고, 다운로드처럼 문서 없이
+// 끝난 이동은 남지 않아야 한다(다음 실행마다 다시 받는다).
+test "requestFacts: 만드는 중·진행 중·오류 페이지는 열린 이동, 문서 없이 끝난 이동은 닫힘, 새 이동이 오류 표지를 내린다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try std.testing.expect(requestFacts(61) == null); // 모르는 탭
+    try testHold(gpa, 61);
+    // 만들어지기 전 — 복원 주소를 넘겼다(`last_url` 만, 보내지 않았다).
+    navigate(gpa, 61, "https://r.test/a");
+    {
+        const f = requestFacts(61).?;
+        try std.testing.expect(f.address == null);
+        try std.testing.expectEqualStrings("https://r.test/a", f.requested.?);
+        try std.testing.expect(f.open);
+    }
+    testRunning(61);
+    // 만들어졌는데 아직 아무것도 보내지 않았다 — 닫힘(만들어질 때 보내는 길은 `browser_created`).
+    try std.testing.expect(!requestFacts(61).?.open);
+    // 보낸 이동이 진행 중.
+    navigate(gpa, 61, "https://r.test/b");
+    try std.testing.expect(requestFacts(61).?.open);
+    // 접속 거부 — 오류 페이지로 끝났다(불러오기도 끝난다). 열린 채.
+    testApply(gpa, .{ .nav_state = .{ .browser = 61, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    testApply(gpa, .{ .error_page = .{ .browser = 61, .error_code = -102 } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 61, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    {
+        const f = requestFacts(61).?;
+        try std.testing.expect(f.open);
+        try std.testing.expect(f.address == null);
+        try std.testing.expectEqualStrings("https://r.test/b", f.requested.?);
+    }
+    // 새 이동(다운로드 주소)이 오류 표지를 내린다 — 문서 없이 끝나면(오류 페이지 없음) 닫힘.
+    navigate(gpa, 61, "https://r.test/file.zip");
+    testApply(gpa, .{ .nav_state = .{ .browser = 61, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 61, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expect(!requestFacts(61).?.open);
+    // 주소가 오면 그것이 엔진이 안 주소다.
+    testApply(gpa, .{ .url_changed = .{ .browser = 61, .url = "https://a.test/" } });
+    try std.testing.expectEqualStrings("https://a.test/", requestFacts(61).?.address.?);
 }
 
 test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오류 페이지가 문서를 가르고, 버린 수는 표지로, 모르는 탭은 버린다" {

@@ -159,6 +159,47 @@ pub const BrowserTerm = struct {
     url: []const u8,
 };
 
+/// 브라우저 Term 이 저장할 주소를 고르는 데 쓰는 사실(앱이 모아 넘긴다 — 규칙은 `browserTermUrl` 하나).
+pub const BrowserUrlFacts = struct {
+    /// 엔진이 알려 화면에 쓰는 지금 주소(주소창 — nav 상태). 비었으면 아직 모른다.
+    observed: []const u8 = "",
+    /// 아직 엔진에 넘기지 않은 첫 주소(복원·주소를 실은 새 탭 — `Term.pending_url`).
+    pending: ?[]const u8 = null,
+    /// Chromium 탭이면 엔진 쪽 사실(WebKit 탭은 null).
+    engine: ?EngineRequest = null,
+
+    pub const EngineRequest = struct {
+        /// 엔진이 알린 주 프레임 주소(nav 상태로 옮겨지기 전 한 tick 도 덮는다). 한 번도 오지 않았으면 null.
+        address: ?[]const u8 = null,
+        /// maru 가 그 브라우저에 보낸 마지막 이동 주소.
+        requested: ?[]const u8 = null,
+        /// 그 이동이 아직 열려 있다 — 브라우저를 만드는 중이거나, 진행 중이거나, 오류 페이지(접속 거부·DNS·막기)로 끝났다.
+        /// 문서 없이 끝난 이동(다운로드·204)은 거짓이다.
+        open: bool = false,
+    };
+};
+
+/// 브라우저 Term 이 저장할 주소 — **그 탭이 보이는(보이려던) 주소**. 차례: 본 주소 → 아직 넘기지 않은 첫 주소 → 엔진이 알린 주소 →
+/// 보냈지만 주소를 받지 못한 열린 이동. **처음 있는 후보가 답이다** — 그것이 `cap` 을 넘으면(큰 `data:`) 저장하지 않고 다음 후보로 넘어가지
+/// 않는다(지금 화면과 다른 페이지를 되살리지 않게). 아무것도 없으면 null(아직 아무것도 띄우지 않은 빈 탭).
+///
+/// 왜 본 주소만으로 모자란가: 본 주소는 엔진이 주 프레임 주소를 알린 뒤에만 생긴다. 엔진이 뜨기 전에 저장되거나 복원 주소가 열리지
+/// 않으면(접속 거부 — CEF 는 실패한 주 프레임 이동에 주소를 알리지 않는다) 그 탭이 다음 저장에서 빠져 다음 실행에 사라졌다
+/// (docs/workspace-restore.md §WP-P). 문서 없이 끝난 이동은 쓰지 않는다 — 저장하면 다음 실행마다 그 파일을 다시 받는다.
+pub fn browserTermUrl(facts: BrowserUrlFacts, cap: usize) ?[]const u8 {
+    if (facts.observed.len > 0) return capped(facts.observed, cap);
+    if (facts.pending) |p| if (p.len > 0) return capped(p, cap);
+    const e = facts.engine orelse return null;
+    if (e.address) |a| if (a.len > 0) return capped(a, cap);
+    if (!e.open) return null;
+    const r = e.requested orelse return null;
+    return if (r.len > 0) capped(r, cap) else null;
+}
+
+fn capped(url: []const u8, cap: usize) ?[]const u8 {
+    return if (url.len <= cap) url else null;
+}
+
 /// U4c 이름 없는 문서 record. **신원은 번호 하나**다 — 내용은 §3.10 의 백업 레코드가 들고
 /// (`u-<번호>.bak`), 그 파일 이름은 이 번호에서 **파생**된다. 이름을 여기 적으면 규칙이 바뀌는 순간
 /// 옛 workspace 가 자기 레코드를 못 찾는다(단일 출처는 `session/editor/backup.zig` 다).
@@ -1585,6 +1626,41 @@ const LineFields = struct {
         return unescapeQuoted(a, f.raw);
     }
 };
+
+// 복원한 브라우저 탭이 다음 실행에 사라지던 결함(2026-11-17 실측 — 복원 주소가 열리지 않거나 엔진이 뜨기 전에 저장되면 `browser-term` 이
+// 빠졌다)의 규칙. 저장 주소는 그 탭이 보이는(보이려던) 주소이고, 문서 없이 끝난 이동(다운로드)은 저장하지 않는다 — 저장하면 다음 실행마다
+// 그 파일을 다시 받는다.
+test "browserTermUrl: 본 주소 → 넘기지 않은 첫 주소 → 엔진이 알린 주소 → 열린 이동, 처음 있는 후보가 답" {
+    const cap: usize = 32;
+    const E = BrowserUrlFacts.EngineRequest;
+    // 아무것도 없다(빈 새 탭) — 저장하지 않는다.
+    try std.testing.expect(browserTermUrl(.{}, cap) == null);
+    try std.testing.expect(browserTermUrl(.{ .pending = "", .engine = .{ .requested = "", .open = true } }, cap) == null);
+    // 본 주소가 있으면 그것.
+    try std.testing.expectEqualStrings("https://a.test/", browserTermUrl(.{ .observed = "https://a.test/", .pending = "https://p.test/", .engine = .{ .address = "https://e.test/", .requested = "https://r.test/", .open = true } }, cap).?);
+    // 엔진에 넘기지 않은 복원 주소(엔진이 뜨기 전 저장 — 실측 M2). WebKit 탭도(engine null).
+    try std.testing.expectEqualStrings("https://p.test/", browserTermUrl(.{ .pending = "https://p.test/" }, cap).?);
+    try std.testing.expectEqualStrings("https://p.test/", browserTermUrl(.{ .pending = "https://p.test/", .engine = .{ .requested = "https://r.test/", .open = true } }, cap).?);
+    // 엔진이 주소를 알렸는데 nav 상태로 오기 전 한 tick.
+    try std.testing.expectEqualStrings("https://e.test/", browserTermUrl(.{ .engine = E{ .address = "https://e.test/", .requested = "https://r.test/", .open = false } }, cap).?);
+    // 보냈지만 주소가 오지 않은 열린 이동(만드는 중·진행 중·접속 거부 — 실측 M1).
+    try std.testing.expectEqualStrings("https://r.test/", browserTermUrl(.{ .engine = E{ .address = "", .requested = "https://r.test/", .open = true } }, cap).?);
+    // 문서 없이 끝난 이동(다운로드·204)은 저장하지 않는다.
+    try std.testing.expect(browserTermUrl(.{ .engine = E{ .requested = "https://r.test/file.zip", .open = false } }, cap) == null);
+    try std.testing.expect(browserTermUrl(.{ .engine = E{ .requested = null, .open = true } }, cap) == null);
+}
+
+test "browserTermUrl: 처음 있는 후보가 상한을 넘으면 저장하지 않는다 — 뒤 후보(다른 페이지)로 넘어가지 않는다" {
+    const long = "https://a.test/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; // 상한 32 를 넘는다
+    try std.testing.expect(browserTermUrl(.{ .observed = long, .pending = "https://p.test/" }, 32) == null);
+    try std.testing.expect(browserTermUrl(.{ .pending = long, .engine = .{ .address = "https://e.test/" } }, 32) == null);
+    try std.testing.expect(browserTermUrl(.{ .engine = .{ .address = long, .requested = "https://r.test/", .open = true } }, 32) == null);
+    try std.testing.expect(browserTermUrl(.{ .engine = .{ .requested = long, .open = true } }, 32) == null);
+    // 상한과 같은 길이는 저장한다.
+    const exact = "https://a.test/yyyyyyyyyyyyyyyyy";
+    try std.testing.expectEqual(@as(usize, 32), exact.len);
+    try std.testing.expectEqualStrings(exact, browserTermUrl(.{ .pending = exact }, 32).?);
+}
 
 test "workspace serialize: 단일 창/탭/pane/surface" {
     const surfaces = [_]Surface{

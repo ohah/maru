@@ -7401,22 +7401,20 @@ fn handleControlRequest(
 
 /// **전권(사용자 결정 2026-11-16 원문 「그 권한요청 이런거 다 없애주세요 그냥 AI가 모든 접근 가능하게」)**: 신원 판정(1g — pane 의 foreground 작업과
 /// 그 자손, pane 안 tmux)을 지난 요청이 탭을 가리키면, 그 (pane, 탭) 이 지금 문서에서 아직 갖지 못한 scope 를 모두 표에 넣는다
-/// (`control_pane_grant.fullAccessPlan` — 순수). 그다음 디스패치는 늘 인가된다 — 확인 모달이 없다. 이미 다 있으면 아무것도 바꾸지 않는다(번호가
-/// 그대로라 네트워크·콘솔의 읽는 쪽이 다시 시작하지 않는다). 표에 새 자리가 모자라면 이미 있는 자리만 맞추고 디스패치에 맡긴다 — 그 요청이 쓸
-/// scope 가 없으면 `answerNeedsGrant` 가 `grants_full` 로 답한다. pane 이 없거나(cap 만 든 연결·pane 밖) 탭이 아닌 요청은 아무것도 넣지 않는다.
+/// (`control_pane_grant.fullAccessPlan` — 순수). 확인 모달이 없다. 이미 다 있으면 아무것도 바꾸지 않는다(번호가 그대로라 네트워크·콘솔의 읽는 쪽이
+/// 다시 시작하지 않는다). 표에 자리가 모자라면 들어가는 만큼(browser 부터) 넣고 디스패치에 맡긴다 — 그 요청이 쓸 scope 가 끝내 없으면 표가 꽉
+/// 찬 것이고 `answerNeedsGrant` 가 `grants_full` 로 답한다. pane 이 없거나(cap 만 든 연결·pane 밖) 탭이 아닌 요청은 아무것도 넣지 않는다.
 fn grantFullAccess(server: *control_server_mod.ControlServer, pending: *control_server_mod.PendingRequest, snapshot: control_surface.CollectorSnapshot) void {
     const pane = pending.browser_pane orelse return;
     const target = (control_browser.fullAccessTarget(server.cross_gpa, pending.request_bytes, snapshot) catch return) orelse return;
     var out: [control_pane_grant.full_access_scopes.len]control_pane_grant.PaneGrant = undefined;
     const plan = control_pane_grant.fullAccessPlan(&control_pane_grant_store, pane, target, control_browser.targetHost(snapshot, target), &out);
     if (plan.len == 0) return;
-    // 표에 새 자리가 모자라면 이미 있는 자리의 호스트 바꾸기만 넣고 디스패치에 맡긴다(적대 검증 R2) — 그 요청이 쓸 scope 를 이미 가졌으면 그대로
-    // 되고(표가 찼다고 방금 연 탭이나 메뉴에서 한 줄만 철회한 탭 전체를 막지 않는다), 없으면 `answerNeedsGrant` 가 `grants_full` 로 답한다.
-    const fits = control_pane_grant_store.normalRoom(control_pane_grant.fullAccessFreshSlots(&control_pane_grant_store, plan));
-    if (!fits) control_log.info("control: browser access table is full — pane {d} gets only the permissions it already had on tab {d}", .{ pane, target });
+    // 들어가는 만큼 넣고 디스패치에 맡긴다(적대 검증 R2·22 회차) — 표가 거의 찼다고 계획 전체를 거절하면 방금 연 탭이나 메뉴에서 한 줄만 철회한
+    // 탭까지 막혔고, 계획 전체가 들어갈 때만 넣으면 자리가 몇 개 남은 표에서 새 탭이 `grants_full` 이 아니라 균일 unauthorized 를 받았다. 이미 있는
+    // 자리의 호스트 바꾸기는 자리를 먹지 않는다. 그래서 그 요청이 끝내 인가되지 않으면 표가 꽉 찬 것이다(`answerNeedsGrant` 의 `normalRoom(1)`).
     var network = false;
     for (plan) |g| {
-        if (!fits and !control_pane_grant_store.hasGrant(g.pane, g.target, g.scope)) continue;
         control_pane_grant_store.grant(g) catch continue;
         if (g.scope != .browser and g.scope != .browser_storage) network = true;
     }
@@ -13433,44 +13431,53 @@ fn testDispatchDeferred(server: *control_server_mod.ControlServer, async_id: u64
     }
 }
 
-test "전권: 표가 차면 새 자리를 넣지 않고 디스패치에 맡긴다 — 쓸 scope 가 없으면 grants_full, 이미 가진 탭은 그대로 된다(적대 검증 R2), 탭이 닫히면 자리가 난다" {
+test "전권: 표에 자리가 몇 개만 남으면 browser 부터 들어가는 만큼 — 끝내 쓸 scope 가 없을 때만 grants_full, 이미 가진 탭은 그대로 된다(적대 검증 R2·22 회차), 탭이 닫히면 자리가 난다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     installTransferTestServer();
     defer uninstallTransferTestServer();
     // 탭 88 은 표가 차기 전에 browser 하나만 가졌다(메뉴에서 나머지를 철회했다).
     try control_pane_grant_store.grant(.{ .pane = 3, .target = 88, .scope = .browser });
+    // 보통 자리를 꼭 하나만 남긴다(7 의 배수가 아닌 남은 자리 — 에이전트 탭 쌍은 보통 자리를 둘만 쓴다).
     var pair: u64 = 0;
-    while (control_pane_grant_store.normalRoom(1)) : (pair += 1) for (control_pane_grant.full_access_scopes) |scope| {
-        if (!control_pane_grant_store.normalRoom(1)) break;
+    while (control_pane_grant_store.normalRoom(2)) : (pair += 1) for (control_pane_grant.full_access_scopes) |scope| {
+        if (!control_pane_grant_store.normalRoom(2)) break;
         try control_pane_grant_store.grant(.{ .pane = 9, .target = 5000 + pair, .scope = scope, .any_host = true });
     };
+    try std.testing.expect(control_pane_grant_store.normalRoom(1));
     const surfaces = [_]control_surface.SurfaceDto{
         .{ .surface_id = 77, .title = "tab", .window = 1, .detail = .{ .web = .{ .url = "https://a.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true } } },
         .{ .surface_id = 88, .title = "mine", .window = 1, .detail = .{ .web = .{ .url = "https://b.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true } } },
+        .{ .surface_id = 99, .title = "late", .window = 1, .detail = .{ .web = .{ .url = "https://c.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true } } },
     };
-    const ids = [_]u64{ 77, 88 };
+    const ids = [_]u64{ 77, 88, 99 };
     const windows = [_]maru.session.WindowMembershipSnapshot{.{ .window_id = 1, .window_kind = .normal, .surface_ids = &ids }};
     const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &surfaces, .windows = &windows };
+    // 남은 한 자리에 새 탭 77 의 browser 가 들어간다 — click 은 인가된다(예전 판은 계획 전체가 안 들어가 아무것도 넣지 않고 균일 unauthorized).
     const request = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.click\",\"params\":{\"id\":77,\"selector\":\"h1\"}}";
     var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .browser_pane = 3 };
-    const before_full = control_pane_grant_store.len;
     grantFullAccess(&control_server_storage, &pending, snapshot);
-    try std.testing.expect(pending.response == null and !control_pane_grant_store.hasGrant(3, 77, .browser));
-    try std.testing.expectEqual(before_full, control_pane_grant_store.len);
-    // 디스패치가 needs_grant 를 내면 grants_full 로 곧 답한다(모달 없이).
-    answerNeedsGrant(&control_server_storage, &pending);
-    const response = pending.response orelse return error.ExpectedResponse;
-    defer allocator.free(response);
-    try std.testing.expect(std.mem.indexOf(u8, response, "-32603") != null and std.mem.indexOf(u8, response, "grants_full") != null);
-    // 이미 browser 를 가진 탭 88 의 click 은 표가 찼어도 그대로 인가된다(예전 판은 디스패치 전에 grants_full 로 끝냈다).
+    try std.testing.expect(pending.response == null and control_pane_grant_store.authorizes(3, 77, .browser, "a.test"));
+    try std.testing.expect(!control_pane_grant_store.hasGrant(3, 77, .browser_storage) and !control_pane_grant_store.normalRoom(1));
+    // 이미 browser 를 가진 탭 88 의 click 은 꽉 찬 표에서도 그대로 인가된다.
     const mine = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"browser.click\",\"params\":{\"id\":88,\"selector\":\"h1\"}}";
     var own: control_server_mod.PendingRequest = .{ .request_bytes = mine, .selector = null, .io = std.testing.io, .browser_pane = 3 };
     grantFullAccess(&control_server_storage, &own, snapshot);
     try std.testing.expect(own.response == null and control_pane_grant_store.authorizes(3, 88, .browser, "b.test"));
+    // 꽉 찬 표의 새 탭 99 — 아무것도 넣지 못하고, 디스패치가 needs_grant 를 내면 grants_full 로 곧 답한다(모달 없이).
+    const late = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.click\",\"params\":{\"id\":99,\"selector\":\"h1\"}}";
+    var full: control_server_mod.PendingRequest = .{ .request_bytes = late, .selector = null, .io = std.testing.io, .browser_pane = 3 };
+    const before_full = control_pane_grant_store.len;
+    grantFullAccess(&control_server_storage, &full, snapshot);
+    try std.testing.expect(full.response == null and !control_pane_grant_store.hasGrant(3, 99, .browser));
+    try std.testing.expectEqual(before_full, control_pane_grant_store.len);
+    answerNeedsGrant(&control_server_storage, &full);
+    const response = full.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "-32603") != null and std.mem.indexOf(u8, response, "grants_full") != null);
     control_pane_grant_store.removeSurface(5000); // 탭 하나가 닫혔다
-    var retry: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .browser_pane = 3 };
+    var retry: control_server_mod.PendingRequest = .{ .request_bytes = late, .selector = null, .io = std.testing.io, .browser_pane = 3 };
     grantFullAccess(&control_server_storage, &retry, snapshot);
-    try std.testing.expect(retry.response == null and control_pane_grant_store.authorizes(3, 77, .browser_storage, "a.test"));
+    try std.testing.expect(retry.response == null and control_pane_grant_store.authorizes(3, 99, .browser_storage, "c.test"));
     // pane 이 없는 요청(cap 만·pane 밖)·탭이 아닌 요청은 표를 바꾸지 않고 그대로 디스패치로 간다.
     const before = control_pane_grant_store.len;
     var no_pane: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
@@ -13498,6 +13505,10 @@ test "전권(적대 검증 R3): 좁혀진 에이전트 탭을 다른 사이트�
     try std.testing.expect(net.birth and control_pane_grant_store.authorizes(3, 66, .browser_network, "second.test"));
     try std.testing.expect(agentNetworkBirth(3, 66, net.id));
     try std.testing.expect(agentNetworkBirth(3, 66, control_pane_grant_store.idOf(3, 66, .browser_network_body).?));
+    try std.testing.expect(agentNetworkBirth(3, 66, control_pane_grant_store.idOf(3, 66, .browser_network_block).?));
+    // 철회 연쇄: 사용자가 browser 를 거두면 탭과 함께 생긴(넓혀진) 네트워크 grant 도 함께 거둔다 — 번호가 맞춰졌기 때문이다.
+    _ = maru_macos_control_revoke_browser_grant(3, 66, 0);
+    try std.testing.expect(!control_pane_grant_store.hasGrant(3, 66, .browser_network));
 }
 
 // 사용자 결정 2026-11-16: 탭 줄의 라벨 함수(`diffAwareLabel` — 사용자가 보는 제목의 단일 자리)가 에이전트 탭에만 ◈ 를 붙이고, 그 출처는 에이전트

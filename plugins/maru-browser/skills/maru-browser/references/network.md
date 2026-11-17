@@ -46,8 +46,13 @@ maru browser network-mock --surface 12 --add "https://api.example.com/v1/user" -
 
 - Patterns are `scheme://host[:port]/path` with `*` wildcards. A rule applies on the site where you added it.
 - `--list`, `--remove <pattern>`, `--rule <n>` and `--clear` manage rules. At most 32 rules per tab, across all
-  panes; at most 10 changes a second.
+  panes; at most 10 changes a second. `--list` shows another pane's rules too (`[set by another pane]`), and
+  `--remove`, `--rule`, `--clear` and `--strict` change them too (an older Maru: only your own) — the pane that
+  changes something owns it. `--clear` removes every rule on the tab; to remove only yours, use `--rule <n>`.
 - A site's service worker can answer requests before your rules see them; `--strict on` makes the tab bypass
   that site's service worker (not shared workers).
 - Service and shared workers never see mocks. Mocked pages and scripts run as that site.
-- The tab title shows ⊘ while blocking and ▣ while mocking. **Remove your rules when done** — `--clear`.
+- Mocks also answer pages the user opens with a link or form on a user's tab (an older Maru leaves those real);
+  pages the user types or reaches with back, forward or reload stay real.
+- The tab title shows ⊘ while blocking and ▣ while mocking. **Remove your rules when done** — `--rule <n>` for
+  yours, or `--clear` when no other pane uses the tab.

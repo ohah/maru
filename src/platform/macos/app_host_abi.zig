@@ -7410,7 +7410,12 @@ fn grantFullAccess(server: *control_server_mod.ControlServer, pending: *control_
     const pane = pending.browser_pane orelse return;
     const target = (control_browser.fullAccessTarget(server.cross_gpa, pending.request_bytes, snapshot) catch return) orelse return;
     var out: [control_pane_grant.full_access_scopes.len]control_pane_grant.PaneGrant = undefined;
-    const plan = control_pane_grant.fullAccessPlan(&control_pane_grant_store, pane, target, control_browser.targetHost(snapshot, target), &out);
+    // 사용자 결정 2026-11-17 B: 그 pane 이 연 에이전트 탭이면 철회로 빠진 태어날 때 grant 를 태어날 때 grant 로 다시 넣는다(표지 ◈·birth 가 남는다).
+    var own_agent_tab = false;
+    for (agent_tabs.items) |t| if (t.pane == pane and t.tab == target) {
+        own_agent_tab = true;
+    };
+    const plan = control_pane_grant.fullAccessPlanFor(&control_pane_grant_store, pane, target, control_browser.targetHost(snapshot, target), own_agent_tab, &out);
     if (plan.len == 0) return;
     // 들어가는 만큼 넣고 디스패치에 맡긴다(적대 검증 R2·22 회차) — 표가 거의 찼다고 계획 전체를 거절하면 방금 연 탭이나 메뉴에서 한 줄만 철회한
     // 탭까지 막혔고, 계획 전체가 들어갈 때만 넣으면 자리가 몇 개 남은 표에서 새 탭이 `grants_full` 이 아니라 균일 unauthorized 를 받았다. 이미 있는
@@ -7423,6 +7428,16 @@ fn grantFullAccess(server: *control_server_mod.ControlServer, pending: *control_
     refreshAgentTabGrantIds(pane, target);
     // W9d①~W9e①: 네트워크·본문·막기·가짜·흉내 grant 가 생겼다 — 지켜보기를 맞춘다(사용자 탭은 이때부터 적는다).
     if (network) syncNetworkWatch();
+}
+
+/// 철회로 그 탭과 함께 넣었던 grant 가 빠졌다 — 표의 번호를 지운다(남은 번호가 뒤에 생긴 다른 grant 와 같아질 일은 없지만, 「탭과 함께 넣은 것」 의
+/// 대조가 옛 번호로 맞지 않게 — 다시 넣으면 `refreshAgentTabGrantIds` 가 적는다).
+fn forgetAgentTabGrantIds(t: *AgentTab) void {
+    t.network_grant = 0;
+    t.body_grant = 0;
+    t.block_grant = 0;
+    t.mock_grant = 0;
+    t.emu_grant = 0;
 }
 
 /// 전권 계획이 좁혀진 태어날 때 grant 를 다른 호스트로 넓히면 `grant` 가 새 번호를 준다(새 동의 — 읽는 쪽이 다시 시작한다). 에이전트 탭 표가 쥔
@@ -8155,8 +8170,8 @@ fn takeNetworkNarrowsIntoStore() bool {
 
 // ── W9c②: 에이전트가 JS 대화상자를 보고 답한다(`browser.dialog`·`browser.handleDialog`) ─────────────────────────────────────
 // 누가 볼 수 있나(C7·C8): pane 으로 인가된 연결은 그 pane 이 grant 를 가진 가족 탭의 대화상자를 다 보고 답한다 — 나머지 가족 탭은
-// `{tab, kind}` 만(무엇이 막는지는 알게). cap 으로 인가된 연결(pane 없음)은 자기 탭의 것만 보고 답한다. 답해도 되는지(원인·보임·C13)는
-// `web_osr.agentReplyDialog` 가 `dialog_cause` 로 정한다 — 여기는 grant 표와 에이전트 탭 표만 넘긴다.
+// `{tab, kind}` 만(무엇이 막는지는 알게). cap 으로 인가된 연결(pane 없음)은 자기 탭의 것만 보고 답한다. 볼 수 있는 대화상자는 누가 띄웠든
+// 답한다(사용자 결정 2026-11-17 「에이전트는 사용자와 같은 힘」 — 원인 `cause` 는 정보로만 싣는다). 여기는 grant 표만 넘긴다.
 
 const DialogCaller = struct {
     surface_id: u64,
@@ -8170,16 +8185,8 @@ const DialogCaller = struct {
         return control_pane_grant_store.authorizes(pane, tab, .browser, null);
     }
 
-    /// 묻는 pane 이 `browser.open` 으로 연 탭인가(C13 — 다른 pane 이 연 탭은 아니다).
-    fn agentTab(ctx: ?*const anyopaque, tab: u64) bool {
-        const self: *const DialogCaller = @ptrCast(@alignCast(ctx.?));
-        const pane = self.pane orelse return false;
-        for (agent_tabs.items) |t| if (t.pane == pane and t.tab == tab) return true;
-        return false;
-    }
-
     fn access(self: *const DialogCaller) session_mod.web_osr.DialogAccess {
-        return .{ .ctx = self, .granted = granted, .agent_tab = agentTab };
+        return .{ .ctx = self, .granted = granted };
     }
 };
 
@@ -8204,9 +8211,7 @@ fn answerDialogOp(server: *control_server_mod.ControlServer, async_id: u64, op: 
             const gpa = session_mod.web_osr.gpaRef() orelse return completeTabStatus(async_id, .failed, "the Chromium engine is not running");
             const replied = session_mod.web_osr.agentReplyDialog(gpa, op.surface_id, a.dialog, a.accept, a.text orelse "", caller.access()) catch |e| return completeTabStatus(async_id, .failed, switch (e) {
                 error.NoDialog => if (a.dialog != null) dialog_unknown_reason else dialog_none_reason,
-                error.NotYours => dialog_not_yours_reason,
                 error.FileChooser => dialog_file_reason,
-                error.LeaveRefused => dialog_leave_refused_reason,
             });
             const ok = if (replied.continues)
                 std.json.Stringify.value(.{ .ok = true, .kind = replied.kind.wireName(), .continues = true }, .{}, &aw.writer)
@@ -8248,14 +8253,6 @@ fn writeDialogList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const
             }
             try s.objectField("cause");
             try s.write(@tagName(e.cause));
-            const sit = e.situation(DialogCaller.agentTab(caller, e.tab));
-            try s.objectField("may_answer");
-            try s.write(maru.session.web_osr_dialog_cause.mayAnswer(sit));
-            // 떠나기 확인은 「떠나기」 가 따로 막힐 수 있다 — 사용자가 이 문서에 입력했다(W9c② 적대 리뷰 1 회차: may_answer 만 보면 떠나기가 될 듯했다).
-            if (e.kind == .before_unload) {
-                try s.objectField("may_leave");
-                try s.write(maru.session.web_osr_dialog_cause.mayLeave(sit, e.document_touched));
-            }
         }
         try s.endObject();
     }
@@ -8266,9 +8263,7 @@ fn writeDialogList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const
 const dialog_none_reason = "no dialog is showing in this tab — a dialog in a tab it opened, or that opened it, is answered with its token (see maru browser dialog)";
 /// 번호가 없거나 grant 가 없는 탭의 번호 — 둘을 가르지 않는다(다른 탭의 대화상자를 떠보지 못하게).
 const dialog_unknown_reason = "no such dialog — it was answered already, or it is not in a tab this caller controls (see maru browser dialog)";
-const dialog_not_yours_reason = "the user is answering this dialog (it was not opened by the agent) — the user decides in that tab";
-const dialog_file_reason = "a file chooser can only be dismissed here (--dismiss) — choosing files is not supported";
-const dialog_leave_refused_reason = "the user has typed into this page (it may hold unsaved input) — only --dismiss (stay on the page) is allowed";
+const dialog_file_reason = "a file chooser can only be dismissed here (--dismiss) — to put files in a file input, dismiss it and use browser upload (it asks the user each time)";
 
 // ── W9b①: Chromium 탭의 op 실행 — DevTools 호출 차례 ──────────────────────────────────────────────────────────────
 // 한 op = `web_cdp_ops.Op` 하나(호출 여러 번). 호출마다 `web_osr.devtoolsCall` 로 보내고, 답(`pump` 끝에서 온다)을 차례에
@@ -8561,8 +8556,8 @@ const max_agent_tabs_per_pane: usize = 8;
 const agent_tab_close_wait_ms: i64 = 10_000;
 /// 물은 닫기에 페이지가 떠나기 확인으로 물었다. 에이전트의 닫기면 그 에이전트가 답할 수 있다(W9c② — 자기 이동의 떠나기 확인과 같다), 사람이
 /// 먼저 닫기를 고른 것이면 사람의 질문이다(`closeAskedByAgent` 거짓 — 사용자가 정한다).
-const agent_close_page_asks = "the page asks before leaving (unsaved input); the user decides in that tab";
-const agent_close_page_asks_answerable = "the page asks before leaving (unsaved input) — answer it with maru browser handle-dialog --accept if you may (the tab then closes), otherwise the user decides in that tab";
+const agent_close_page_asks = "the page is already asking before leaving (unsaved input) — answer it with maru browser handle-dialog (--accept lets that close or navigation continue, --dismiss keeps the page), then close again if the tab is still open";
+const agent_close_page_asks_answerable = "the page asks before leaving (unsaved input) — answer it with maru browser handle-dialog --accept (the tab then closes) or --dismiss (it stays open)";
 
 fn agentClosePageAsks(tab: u64) []const u8 {
     return if (session_mod.web_osr.closeAskedByAgent(tab)) agent_close_page_asks_answerable else agent_close_page_asks;
@@ -8623,8 +8618,8 @@ fn onAgentPaneKnown(pane: u64) bool {
     return agentTabCount(pane) > 0;
 }
 
-/// 그 탭이 지금 에이전트 탭인가(`AppSession.agent_tab_known_callback` — 탭 줄의 ◈, 사용자 결정 2026-11-16). 표가 출처다 — 철회·pane 닫힘이면
-/// 사람의 탭이고 표지도 사라진다.
+/// 그 탭이 지금 에이전트 탭인가(`AppSession.agent_tab_known_callback` — 탭 줄의 ◈, 사용자 결정 2026-11-16). 표가 출처다 — pane 이 닫히면
+/// 사람의 탭이고 표지도 사라진다(Browser Grants 철회로는 남는다 — 2026-11-17 B).
 fn onAgentTabKnown(tab: u64) bool {
     return isAgentTab(tab);
 }
@@ -8777,20 +8772,15 @@ fn startAgentOpen(refs: []const ControlSessionRef, async_id: u64, pane: u64, arg
 }
 
 fn startAgentClose(refs: []const ControlSessionRef, async_id: u64, op: control_browser.BrowserOp) void {
-    // cap 으로 인가된 연결은 pane 이 없다 — 그 pane 이 연 탭인지 알 수 없다.
+    // cap 으로 인가된 연결은 pane 이 없다 — pane 의 에이전트가 아니다(디스패치도 pane 없이는 인가하지 않는다).
     const pane = if (op.pane_grant) |g| g.pane else return completeTabStatus(async_id, .unauthorized, "");
     const app = appSessionOwningSurface(refs, op.surface_id) orelse return completeAgentClose(async_id, true, null);
-    // 에이전트 탭 표에 없으면(사용자가 grant 를 철회해 사람의 탭이 됐다) 탭에 남은 `agent_opener` 가 같아도 닫지 않는다(5 회차 — 다시 허락받은
-    // 에이전트가 사람의 탭을 닫았다).
-    var listed = false;
-    for (agent_tabs.items) |t| if (t.pane == pane and t.tab == op.surface_id) {
-        listed = true;
-    };
-    if (!listed) return completeTabStatus(async_id, .failed, "this tab was not opened by this pane — only tabs opened with browser open can be closed");
-    switch (session_mod.web_ops.agentCloseTab(app, op.surface_id, pane)) {
+    // 사용자 결정 2026-11-17(「에이전트는 사용자와 같은 힘」 A1): 어느 탭이든 닫는다 — 사람의 탭·다른 pane 이 연 탭도(옛 「이 pane 이 연 탭만」 을
+    // 걷었다). 떠나기 확인은 사람의 ⌘W 처럼 페이지가 묻고, 에이전트가 `handleDialog` 로 답한다. 창의 마지막 탭은 그대로 닫지 않는다(상한).
+    switch (session_mod.web_ops.agentCloseTab(app, op.surface_id)) {
         .closed, .not_found => completeAgentClose(async_id, true, null),
         .page_asks => completeAgentClose(async_id, false, agentClosePageAsks(op.surface_id)),
-        .not_owner => completeTabStatus(async_id, .failed, "this tab was not opened by this pane — only tabs opened with browser open can be closed"),
+        .not_browser => completeTabStatus(async_id, .failed, "this is not a browser tab"),
         .only_tab => completeTabStatus(async_id, .failed, "this is the only tab in its window — closing it would close the window, so it is left open"),
         .asking => tab_runs.append(allocator, .{ .async_id = async_id, .kind = .close, .tab = op.surface_id, .pane = pane, .deadline_ms = cdpNowMs() + agent_tab_close_wait_ms }) catch completeAgentClose(async_id, false, "out of memory"),
     }
@@ -8847,15 +8837,23 @@ fn pollAgentClose(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
     return true;
 }
 
-/// 에이전트가 자기가 연 탭에 진짜 누름·키를 보낸다 — 페이지가 새 탭을 열 수 있는 장을 준다(사람의 입력처럼 — 결정 ④가 돌게).
-/// 사람의 탭은 그대로(에이전트의 누름은 사람의 입력이 아니다 — W6e).
-fn grantAgentNewTabCredit(tab: u64, method: []const u8, params: []const u8) void {
+/// 에이전트가 탭에 진짜 누름·키를 보낸다 — 페이지가 새 탭을 열 수 있는 장을 준다(사람의 입력처럼 — 결정 ④가 돌게). 2026-11-17 A3(「에이전트는
+/// 사용자와 같은 힘」): 사용자 탭에도 준다 — 그 장으로 열린 새 탭은 누른 pane(`caller`)의 에이전트 탭이 된다(◈·뒤쪽·그 pane 의 8 개 상한). 에이전트
+/// 탭이면 지금처럼 그 탭의 주인 pane 의 것. pane 이 없는 연결(cap)은 장을 주지 않는다(주인이 없다).
+fn grantAgentNewTabCredit(tab: u64, caller: ?u64, method: []const u8, params: []const u8) void {
     const pane = for (agent_tabs.items) |t| {
         if (t.tab == tab) break t.pane;
-    } else return;
+    } else caller orelse return;
     // 그 pane 이 에이전트 탭을 더 가질 자리가 없으면 장을 주지 않는다 — 팝업으로 상한이 뚫렸다(적대 리뷰 1 회차).
     if (!agentTabRoom(pane)) return;
-    if (session_mod.web_osr.devtoolsInputActivates(method, params)) session_mod.web_osr.grantNewTabCredit(allocator, tab);
+    if (session_mod.web_osr.devtoolsInputActivates(method, params)) session_mod.web_osr.grantNewTabCredit(allocator, tab, pane);
+}
+
+/// 그 op 을 부른 pane(신원 판정 — 1g). cap 으로 온 요청·끝난 요청은 null.
+fn cdpCallerPane(async_id: u64) ?u64 {
+    if (!control_server_active) return null;
+    const pending = control_server_storage.inFlightPending(async_id) orelse return null;
+    return pending.browser_pane;
 }
 
 fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
@@ -8892,7 +8890,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             // 움직이지 않는다).
             if (web_cdp_ops.acting(run.op.kind) or run.op.uploadSetting()) session_mod.web_osr.noteAgentInput(run.surface_id);
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
-            grantAgentNewTabCredit(run.surface_id, next.method, next.params);
+            grantAgentNewTabCredit(run.surface_id, cdpCallerPane(run.async_id), next.method, next.params);
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
             // required 는 Busy, best_effort 는 주 호출만(`web_cdp_kick.Kick` — web_osr 가 그대로 받는다).
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
@@ -10475,14 +10473,16 @@ pub export fn maru_macos_control_push_browser_closed(surface_id: u64) void {
 
 /// grant UX(revoke, §9.2 Model B): **모든** pane-bound browser grant를 취소한다 — 메뉴 "Revoke All"이 호출. 사용자 결정 2026-11-16
 /// (「AI 가 모든 접근」) 뒤로는 묻지 않으므로 다음 요청이 다시 전권을 받는다 — 철회의 뜻은 「지금 에이전트가 세운 것(막기·가짜·흉내·기록·
-/// trace·에이전트 탭 표지 ◈)을 거둔다」 다. grant store는 앱-전역(control_pane_grant_store)이라 세션
+/// trace)을 거둔다」 다. 에이전트가 연 탭의 표지 ◈ 는 남는다(사용자 결정 2026-11-17 B). grant store는 앱-전역(control_pane_grant_store)이라 세션
 /// 무관. 서버 미시작이어도 store는 살아 있으므로 게이트 없이 클리어. 취소된 grant 수 반환(Swift가 사용자 피드백에 쓸 수 있음).
 pub export fn maru_macos_control_revoke_all_browser_grants() u32 {
     const n: u32 = @intCast(control_pane_grant_store.len);
     control_pane_grant_store.clearAll();
     syncNetworkWatch(); // W9d①: 지켜보기를 끄고 적은 것을 지운다
-    // 에이전트가 연 탭도 이제 사람의 탭이다 — 표가 남으면 에이전트는 그 탭을 닫지도(grant 없음) 새로 열지도(「8 개」) 못했다(W9b③ 적대 리뷰 4 회차).
-    agent_tabs.clearRetainingCapacity();
+    // 사용자 결정 2026-11-17 B: 에이전트가 연 탭(◈)은 철회 뒤에도 에이전트 탭이다 — 표는 남기고 그 탭과 함께 넣었던 grant 번호만 지운다(다음 요청의
+    // 전권이 태어날 때 grant 를 다시 넣고 `refreshAgentTabGrantIds` 가 새 번호를 적는다). 옛 W9b③ 4 회차가 표를 비운 까닭(그 탭을 닫지도 못했다)은 A1
+    // (닫기는 grant 없이)로 사라졌다.
+    for (agent_tabs.items) |*t| forgetAgentTabGrantIds(t);
     if (control_server_active) {
         cancelAllPaneGrantBrowserWaits(&control_server_storage);
         cancelAllPaneGrantBrowserExecutions(&control_server_storage);
@@ -10542,9 +10542,10 @@ pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, sc
     const before = control_pane_grant_store.len;
     control_pane_grant_store.revoke(pane, target, sc);
     const removed = control_pane_grant_store.len < before;
-    // 에이전트 탭 하나의 grant 를 철회했다 — 그 탭도 사람의 탭이 된다(W9b③ 적대 리뷰 5 회차: 모두 철회만 표를 비워, 하나 철회한 탭은 상한을
-    // 쥔 채 에이전트가 닫지도 새로 열지도 못했다). 탭과 함께 넣은 어느 호스트든 네트워크 grant 도 함께 거둔다(W9d① 적대 리뷰 1 회차 F3 — 남으면
-    // 사람의 탭이 된 뒤의 브라우징을 어느 사이트든 묻지 않고 읽었다). 사용자가 모달로 따로 허락한 것(번호가 다르다)은 남긴다.
+    // 에이전트 탭 하나의 `browser` grant 를 철회했다 — 탭과 함께 넣은 어느 호스트든 grant 다섯도 함께 거둔다(W9d① 적대 리뷰 1 회차 F3 — 남으면
+    // 철회 뒤의 브라우징을 어느 사이트든 묻지 않고 읽었다; 철회는 그 grant 로 세운 것 — 막기·가짜·흉내·기록·trace — 을 거둔다). 그 밖의 grant(번호가
+    // 다르다)는 남긴다. 탭은 에이전트 탭으로 남는다(사용자 결정 2026-11-17 B — ◈·태어날 때 표지; 옛 W9b③ 5 회차는 표에서 내렸다). 다음 요청이 전권을
+    // 다시 받으며 태어날 때 grant 를 다시 넣는다.
     var network_revoked = false;
     var body_revoked = false;
     var block_revoked = false;
@@ -10579,8 +10580,10 @@ pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, sc
                     control_pane_grant_store.revoke(pane, target, .browser_emulation);
                     emu_revoked = true;
                 }
-                _ = agent_tabs.swapRemove(i);
-            } else i += 1;
+                // 사용자 결정 2026-11-17 B: 탭은 에이전트 탭으로 남는다(◈) — 번호만 지운다. 다음 요청이 태어날 때 grant 를 다시 넣는다.
+                forgetAgentTabGrantIds(&agent_tabs.items[i]);
+            }
+            i += 1;
         }
     }
     if (removed and control_server_active) {
@@ -13508,8 +13511,42 @@ test "전권: 표에 자리가 몇 개만 남으면 browser 부터 들어가는 
     grantFullAccess(&control_server_storage, &no_pane, snapshot);
     var list: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.list\"}", .selector = null, .io = std.testing.io, .browser_pane = 4 };
     grantFullAccess(&control_server_storage, &list, snapshot);
-    try std.testing.expect(no_pane.response == null and list.response == null);
+    // 2026-11-17 A1: close 는 grant 를 쓰지 않는다 — 전권도 넣지 않는다(닫지 못한 close 가 그 탭에 일곱 scope·지켜보기를 남기지 않게).
+    var close: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.close\",\"params\":{\"id\":77}}", .selector = null, .io = std.testing.io, .browser_pane = 4 };
+    grantFullAccess(&control_server_storage, &close, snapshot);
+    try std.testing.expect(no_pane.response == null and list.response == null and close.response == null);
     try std.testing.expectEqual(before, control_pane_grant_store.len);
+    try std.testing.expect(!control_pane_grant_store.hasGrant(4, 77, .browser));
+}
+
+test "2026-11-17 B: 철회 뒤 그 pane 의 에이전트 탭에 온 요청의 전권은 태어날 때 grant(birth)로 다시 넣고 탭 표의 번호를 맞춘다 — 다른 pane 의 요청은 보통 grant" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer agent_tabs.clearRetainingCapacity();
+    defer control_pane_grant_store.clearAll();
+    try std.testing.expect(adoptAgentTab(3, 67));
+    _ = maru_macos_control_revoke_all_browser_grants();
+    try std.testing.expect(isAgentTab(67) and control_pane_grant_store.len == 0);
+    const surfaces = [_]control_surface.SurfaceDto{.{ .surface_id = 67, .title = "agent", .window = 1, .detail = .{ .web = .{ .url = "https://a.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true } } }};
+    const ids = [_]u64{67};
+    const windows = [_]maru.session.WindowMembershipSnapshot{.{ .window_id = 1, .window_kind = .normal, .surface_ids = &ids }};
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &surfaces, .windows = &windows };
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.click\",\"params\":{\"id\":67,\"selector\":\"h1\"}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .browser_pane = 3 };
+    grantFullAccess(&control_server_storage, &pending, snapshot);
+    for ([_]control_capability.ScopeClass{ .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock, .browser_emulation }) |sc| {
+        const g = control_pane_grant_store.get(3, 67, sc) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(g.birth and g.any_host);
+    }
+    try std.testing.expect(!control_pane_grant_store.get(3, 67, .browser).?.birth);
+    for (agent_tabs.items) |t| if (t.tab == 67) {
+        try std.testing.expectEqual(control_pane_grant_store.idOf(3, 67, .browser_network).?, t.network_grant);
+        try std.testing.expectEqual(control_pane_grant_store.idOf(3, 67, .browser_network_mock).?, t.mock_grant);
+    };
+    var other: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .browser_pane = 4 };
+    grantFullAccess(&control_server_storage, &other, snapshot);
+    try std.testing.expect(!control_pane_grant_store.get(4, 67, .browser_emulation).?.birth);
 }
 
 test "전권(적대 검증 R3): 좁혀진 에이전트 탭을 다른 사이트에서 부르면 태어날 때 grant 가 그 표지·탭 표의 번호와 함께 넓어진다 — trace 가 계속 되고 철회 연쇄가 그것을 거둔다" {
@@ -13619,7 +13656,7 @@ test "다운로드 보류(2026-11-17): 세션을 만들면 다운로드 목록�
 
 // 사용자 결정 2026-11-16: 탭 줄의 라벨 함수(`diffAwareLabel` — 사용자가 보는 제목의 단일 자리)가 에이전트 탭에만 ◈ 를 붙이고, 그 출처는 에이전트
 // 탭 표다 — 사람의 탭·철회한 탭(사람의 탭이 됐다)·pane 이 닫힌 탭에는 없다. 제품이 거는 콜백(`onAgentTabKnown`)을 그대로 건다.
-test "에이전트 탭 표지: 탭 줄 라벨과 사이드바 행이 에이전트 탭에만 ◈ 를 붙인다 — 사람의 탭·철회한 탭·pane 이 닫힌 탭에는 없다" {
+test "에이전트 탭 표지: 탭 줄 라벨과 사이드바 행이 에이전트 탭에만 ◈ 를 붙인다 — 사람의 탭·pane 이 닫힌 탭에는 없다, Browser Grants 철회로는 남는다(2026-11-17 B)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -13656,9 +13693,9 @@ test "에이전트 탭 표지: 탭 줄 라벨과 사이드바 행이 에이전�
         defer session.allocator.free(row);
         try std.testing.expectEqual(t.surfaceId() == tab, std.mem.startsWith(u8, row, @import("app_session/tab.zig").agent_tab_mark_utf8 ++ " "));
     }
-    _ = maru_macos_control_revoke_browser_grant(shell, tab, 0); // 그 탭의 제어를 철회 — 사람의 탭이 된다
-    try std.testing.expect(!try labelHas(session, pane, tab));
-    try std.testing.expect(adoptAgentTab(shell, tab));
+    _ = maru_macos_control_revoke_browser_grant(shell, tab, 0); // 그 탭의 제어를 철회 — 에이전트 탭으로 남는다(B)
+    try std.testing.expect(try labelHas(session, pane, tab));
+    _ = maru_macos_control_revoke_all_browser_grants(); // 모두 철회도 같다
     try std.testing.expect(try labelHas(session, pane, tab));
     forgetAgentTab(shell); // 에이전트의 pane 이 닫혔다
     try std.testing.expect(!try labelHas(session, pane, tab));
@@ -13747,8 +13784,8 @@ test "에이전트 탭 표지 ◈: 사이드바 세션 목록은 그 칸만 마�
     const grouped_spoof = try sidebarAgentMarkCells(session, shell);
     try std.testing.expectEqual(@as(usize, 1), grouped_spoof.all);
     try std.testing.expectEqual(@as(usize, 0), grouped_spoof.magenta);
-    // 철회하면 사람의 탭 — 그 행에 maru 의 ◈ 가 없다(이름의 ◈ 하나만 글자색으로 남는다).
-    _ = maru_macos_control_revoke_browser_grant(shell, tab, 0);
+    // 에이전트의 pane 이 닫히면 사람의 탭 — 그 행에 maru 의 ◈ 가 없다(이름의 ◈ 하나만 글자색으로 남는다; 철회로는 남는다 — 2026-11-17 B).
+    forgetAgentTab(shell);
     const revoked = try sidebarAgentMarkCells(session, tab);
     try std.testing.expectEqual(@as(usize, 1), revoked.all);
     try std.testing.expectEqual(@as(usize, 0), revoked.magenta);
@@ -13801,14 +13838,15 @@ test "에이전트 탭 표지 ◈: 탭 줄 그리기 경로가 그 칸을 마젠
     try std.testing.expectEqual(@as(usize, 1), strip.all);
     try std.testing.expectEqual(@as(usize, 1), strip.painted);
     try std.testing.expect(strip.closes >= 2); // 탭 둘(셸·에이전트 탭)의 ✕
-    // 철회하면 사람의 탭 — ◈ 셀이 없다. 탭 줄은 그대로 그려진다(부정 판정자의 양성 대조 — 탭 줄이 사라져도 「◈ 없음」 은 참이다).
-    _ = maru_macos_control_revoke_browser_grant(shell, tab, 0);
+    // 에이전트의 pane 이 닫히면 사람의 탭 — ◈ 셀이 없다(Browser Grants 철회로는 남는다 — 2026-11-17 B). 탭 줄은 그대로 그려진다(부정 판정자의 양성
+    // 대조 — 탭 줄이 사라져도 「◈ 없음」 은 참이다).
+    forgetAgentTab(shell);
     const after = try countTabStrip(session, magenta);
     try std.testing.expectEqual(@as(usize, 0), after.all);
     try std.testing.expect(after.closes >= 2);
 }
 
-test "W9b③: close — 그 pane 이 연 탭만, cap 연결은 unauthorized, 물으면 떠나기 확인이 뜰 때 closed:false, 닫히면 closed:true, 창의 유일한 탭은 실패" {
+test "W9b③·2026-11-17 A1: close — 어느 탭이든(다른 pane·사람의 탭도), cap 연결은 unauthorized, 물으면 떠나기 확인이 뜰 때 closed:false, 닫히면 closed:true, 창의 유일한 탭은 실패" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -13830,10 +13868,23 @@ test "W9b③: close — 그 pane 이 연 탭만, cap 연결은 unauthorized, 물
     var cap_pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
     startAgentClose(&refs, try control_server_storage.deferRequest(&cap_pending, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "" });
     try expectPendingErrorCode(&cap_pending, .unauthorized);
-    // 다른 pane — 실패(남의 탭).
+    // 다른 pane 이 사람의 탭을 닫는다 — 페이지에 묻고, 닫히면 closed:true(옛 「그 pane 이 연 탭만」 을 걷었다). 표의 grant 는 쓰지 않는다.
+    const human = try session_mod.pane_ops.appendWebTermInActivePane(session, .browser);
+    try session_mod.web_osr.testHold(ta, human);
+    session_mod.web_osr.testRunning(human);
+    const grants_before = control_pane_grant_store.len;
     var other: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
-    startAgentClose(&refs, try control_server_storage.deferRequest(&other, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "", .pane_grant = .{ .pane = shell + 1, .target = tab, .scope = .browser } });
-    try expectPendingErrorCode(&other, .internal_error);
+    startAgentClose(&refs, try control_server_storage.deferRequest(&other, std.math.maxInt(i128)), .{ .surface_id = human, .method = .close, .arg = "", .pane_grant = .{ .pane = shell + 1, .target = human, .scope = .browser } });
+    try std.testing.expectEqual(session_mod.web_osr.CloseAskPhase.asking, session_mod.web_osr.closeAskPhase(human));
+    session_mod.web_ops.osrCloseAskedTab(session, human, .closed);
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&other);
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("result").?.object.get("closed").?.bool);
+    }
+    try std.testing.expectEqual(grants_before, control_pane_grant_store.len);
+    // 다른 pane 이 이 pane 의 에이전트 탭을 닫는 것도 같다(아래 — 이 pane 의 grant 로 물어 본다).
     // 물었다 — 페이지가 떠나기 확인을 띄우면 기다리지 않고 closed:false.
     var asked: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
     startAgentClose(&refs, try control_server_storage.deferRequest(&asked, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "", .pane_grant = grant });
@@ -13876,7 +13927,7 @@ test "W9b③: close — 그 pane 이 연 탭만, cap 연결은 unauthorized, 물
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
 }
 
-test "W9b③: 에이전트가 자기가 연 탭에 보낸 누름·키 누름만 새 탭 장을 준다 — 사람 탭·떼기·이동은 주지 않는다, 닫히면 표에서 빠진다" {
+test "W9b③·2026-11-17 A3: 에이전트의 누름·키 누름이 새 탭 장을 준다 — 에이전트 탭은 그 주인 pane 의 장, 사용자 탭은 누른 pane 의 장(pane 없는 연결은 없음), 떼기·이동은 주지 않는다, 닫히면 표에서 빠진다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const ta = std.testing.allocator;
     defer {
@@ -13894,18 +13945,25 @@ test "W9b③: 에이전트가 자기가 연 탭에 보낸 누름·키 누름만 
     control_server_active = true;
     defer control_server_active = false;
     try std.testing.expect(onAgentPageTab(5, 41)); // 41 은 pane 5 의 에이전트 탭
-    const cases = [_]struct { tab: u64, method: []const u8, params: []const u8, credit: bool }{
-        .{ .tab = 41, .method = "Input.dispatchMouseEvent", .params = "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}", .credit = true },
-        .{ .tab = 41, .method = "Input.dispatchKeyEvent", .params = "{\"type\":\"keyDown\",\"key\":\"Enter\",\"text\":\"\\r\"}", .credit = true },
+    const press = "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}";
+    const cases = [_]struct { tab: u64, caller: ?u64 = 5, method: []const u8, params: []const u8, credit: bool, owner: u64 = 0 }{
+        .{ .tab = 41, .method = "Input.dispatchMouseEvent", .params = press, .credit = true, .owner = 5 },
+        .{ .tab = 41, .caller = 6, .method = "Input.dispatchMouseEvent", .params = press, .credit = true, .owner = 5 }, // 다른 pane 이 눌러도 그 탭 주인의 것
+        .{ .tab = 41, .method = "Input.dispatchKeyEvent", .params = "{\"type\":\"keyDown\",\"key\":\"Enter\",\"text\":\"\\r\"}", .credit = true, .owner = 5 },
         .{ .tab = 41, .method = "Input.dispatchMouseEvent", .params = "{\"type\":\"mouseReleased\",\"x\":1,\"y\":1}", .credit = false },
         .{ .tab = 41, .method = "Input.dispatchMouseEvent", .params = "{\"type\":\"mouseMoved\",\"x\":1,\"y\":1}", .credit = false },
-        .{ .tab = 42, .method = "Input.dispatchMouseEvent", .params = "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}", .credit = false }, // 사람 탭
+        .{ .tab = 42, .caller = 6, .method = "Input.dispatchMouseEvent", .params = press, .credit = true, .owner = 6 }, // 사용자 탭 — 누른 pane 의 것(A3)
+        .{ .tab = 42, .caller = null, .method = "Input.dispatchMouseEvent", .params = press, .credit = false }, // pane 없는 연결 — 주인이 없다
     };
     for (cases) |case| {
-        grantAgentNewTabCredit(case.tab, case.method, case.params);
+        grantAgentNewTabCredit(case.tab, case.caller, case.method, case.params);
         session_mod.web_osr.testApplyNow(ta, .{ .open_tab = .{ .browser = case.tab, .placement = .foreground, .url = "https://e.test/n" } });
         try std.testing.expectEqual(case.credit, session_mod.web_osr.newTabPending(case.tab));
-        if (session_mod.web_osr.takeNewTab(case.tab)) |n| ta.free(n.url);
+        if (session_mod.web_osr.takeNewTab(case.tab)) |n| {
+            ta.free(n.url);
+            try std.testing.expect(n.by_agent);
+            try std.testing.expectEqual(case.owner, n.agent_pane);
+        }
     }
     // 탭이 닫히면 표·grant 에서 빠진다.
     onAppSessionSurfaceClosed(null, 41);
@@ -13934,7 +13992,7 @@ test "W9b③ 적대 리뷰 1 회차: 상한(8)에 닿은 pane 의 에이전트 �
     try std.testing.expect(onAgentPageTab(9, 51));
     for (1..max_agent_tabs_per_pane) |i| try agent_tabs.append(allocator, .{ .pane = 9, .tab = 600 + i });
     try std.testing.expectEqual(max_agent_tabs_per_pane, agentTabCount(9));
-    grantAgentNewTabCredit(51, "Input.dispatchMouseEvent", "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}");
+    grantAgentNewTabCredit(51, 9, "Input.dispatchMouseEvent", "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}");
     session_mod.web_osr.testApplyNow(ta, .{ .open_tab = .{ .browser = 51, .placement = .foreground, .url = "https://e.test/n" } });
     try std.testing.expect(!session_mod.web_osr.newTabPending(51));
 }
@@ -14042,7 +14100,7 @@ test "W9b③ 적대 리뷰 3 회차: 대화상자로 끝난 호출은 op 에 그
     try std.testing.expect(cdpReply(.busy, "") == .not_sent);
 }
 
-test "W9b③ 적대 리뷰 4 회차: 사용자가 browser grant 를 모두 철회하면 에이전트 탭 표도 비운다(닫지도 새로 열지도 못하는 막다른 길)" {
+test "W9b③ 적대 리뷰 4 회차 → 2026-11-17 B: 모두 철회해도 에이전트 탭 표는 남는다(◈) — 막다른 길이 아니다: 닫기는 grant 없이 된다(A1), 자리는 닫으면 돈다" {
     defer agent_tabs.clearRetainingCapacity();
     defer control_pane_grant_store.clearAll();
     for (0..max_agent_tabs_per_pane) |i| try std.testing.expect(adoptAgentTab(5, 900 + i));
@@ -14050,22 +14108,36 @@ test "W9b③ 적대 리뷰 4 회차: 사용자가 browser grant 를 모두 철�
     try std.testing.expect(onAgentPaneKnown(5)); // 에이전트 탭이 있는 pane — 살아 있다(창을 가리지 않는 판정)
     try std.testing.expect(!onAgentPaneKnown(6));
     _ = maru_macos_control_revoke_all_browser_grants();
-    try std.testing.expectEqual(@as(usize, 0), agentTabCount(5));
+    try std.testing.expectEqual(max_agent_tabs_per_pane, agentTabCount(5));
+    try std.testing.expectEqual(@as(usize, 0), control_pane_grant_store.len);
+    try std.testing.expect(onAgentPaneKnown(5)); // 여전히 에이전트 탭이 있는 pane
+    forgetAgentTab(900); // 탭이 닫히면(닫기는 grant 없이 — A1) 자리가 돈다
     try std.testing.expect(agentTabRoom(5));
-    try std.testing.expect(!onAgentPaneKnown(5)); // 철회 뒤에는 에이전트 pane 이 아니다
 }
 
-test "W9b③ 적대 리뷰 5 회차: grant 하나를 철회해도 그 탭은 에이전트 표에서 빠진다(상한·장)" {
+test "2026-11-17 B: 에이전트 탭의 browser grant 를 철회하면 태어날 때 grant 다섯은 거두지만 탭은 에이전트 탭으로 남는다(◈) — 다음 전권이 태어날 때 grant 로 다시 넣고 번호를 맞춘다" {
     defer agent_tabs.clearRetainingCapacity();
     defer control_pane_grant_store.clearAll();
     for (0..max_agent_tabs_per_pane) |i| try std.testing.expect(adoptAgentTab(5, 900 + i));
     try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 900, 0));
-    try std.testing.expect(!isAgentTab(900));
-    try std.testing.expectEqual(max_agent_tabs_per_pane - 1, agentTabCount(5));
-    try std.testing.expect(agentTabRoom(5));
+    try std.testing.expect(isAgentTab(900)); // 표에 남는다(옛 W9b③ 5 회차는 뺐다)
+    try std.testing.expectEqual(max_agent_tabs_per_pane, agentTabCount(5));
+    for ([_]control_capability.ScopeClass{ .browser, .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock, .browser_emulation }) |sc| try std.testing.expect(control_pane_grant_store.get(5, 900, sc) == null);
+    for (agent_tabs.items) |t| if (t.tab == 900) try std.testing.expect(t.network_grant == 0 and t.emu_grant == 0);
+    // 다음 요청의 전권 — 그 pane 의 에이전트 탭이라 태어날 때 grant(어느 호스트든·birth)로.
+    var out: [control_pane_grant.full_access_scopes.len]control_pane_grant.PaneGrant = undefined;
+    for (control_pane_grant.fullAccessPlanFor(&control_pane_grant_store, 5, 900, "a.test", true, &out)) |g| try control_pane_grant_store.grant(g);
+    refreshAgentTabGrantIds(5, 900);
+    try std.testing.expect(control_pane_grant_store.get(5, 900, .browser_emulation).?.birth);
+    for (agent_tabs.items) |t| if (t.tab == 900) {
+        try std.testing.expectEqual(control_pane_grant_store.idOf(5, 900, .browser_network).?, t.network_grant);
+        try std.testing.expectEqual(control_pane_grant_store.idOf(5, 900, .browser_emulation).?, t.emu_grant);
+    };
+    // 상한은 그대로 — 9 번째는 열지 않는다(닫으면 자리가 돈다 — A1).
+    try std.testing.expect(!agentTabRoom(5));
 }
 
-test "W9b③ 적대 리뷰 5 회차: 모두 철회(사람의 탭이 됨) 뒤 다시 허락받아도 그 탭은 닫지 못한다" {
+test "2026-11-17 A1·B: 모두 철회한 뒤에도 그 탭은 에이전트 탭이고(◈) 닫을 수 있다 — grant 없이" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -14082,12 +14154,20 @@ test "W9b③ 적대 리뷰 5 회차: 모두 철회(사람의 탭이 됨) 뒤 다
     try std.testing.expect(adoptAgentTab(shell, tab));
     session_mod.web_osr.testRunning(tab);
     _ = maru_macos_control_revoke_all_browser_grants();
-    try control_pane_grant_store.grant(.{ .pane = shell, .target = tab, .scope = .browser }); // 사용자가 다른 op 의 확인 모달을 승인
+    try std.testing.expect(isAgentTab(tab));
+    try std.testing.expectEqual(@as(usize, 0), control_pane_grant_store.len);
     const request = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.close\",\"params\":{\"id\":1}}";
     var p: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
     startAgentClose(&refs, try control_server_storage.deferRequest(&p, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "", .pane_grant = .{ .pane = shell, .target = tab, .scope = .browser } });
-    try expectPendingErrorCode(&p, .internal_error); // 「이 pane 이 연 탭이 아니다」
-    try std.testing.expectEqual(@as(usize, 0), tab_runs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab_runs.items.len); // 페이지에 물었다
+    session_mod.web_ops.osrCloseAskedTab(session, tab, .closed);
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&p);
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("result").?.object.get("closed").?.bool);
+    }
+    try std.testing.expect(!isAgentTab(tab)); // 닫힘 콜백이 표에서 뺐다
 }
 
 /// W9a 시험: 그 탭에 허가된 요청 하나를 만든다(응답은 `pending.response`).
@@ -15028,7 +15108,7 @@ fn w9c2Grant(pane: u64, tab: u64) control_browser.GrantProvenance {
     return .{ .pane = pane, .target = tab, .scope = .browser };
 }
 
-test "W9c②: dialog·handleDialog 는 DevTools op 줄을 거치지 않고 곧 답한다 — 목록에 번호·글·원인·may_answer, 답하면 사라지고 두 번째 답은 「없다」" {
+test "W9c②: dialog·handleDialog 는 DevTools op 줄을 거치지 않고 곧 답한다 — 목록에 번호·글·원인(옛 may_answer 칸은 없다 — 2026-11-17 A4), 답하면 사라지고 두 번째 답은 「없다」" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -15057,7 +15137,7 @@ test "W9c②: dialog·handleDialog 는 DevTools op 줄을 거치지 않고 곧 �
         try std.testing.expectEqualStrings("https://a.test", d.get("origin").?.string);
         try std.testing.expectEqualStrings("d", d.get("default_text").?.string);
         try std.testing.expectEqualStrings("agent", d.get("cause").?.string);
-        try std.testing.expect(d.get("may_answer").?.bool);
+        try std.testing.expect(d.get("may_answer") == null and d.get("may_leave") == null);
     }
     var answer: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.handleDialog\",\"params\":{\"id\":71,\"accept\":true,\"text\":\"maru\"}}", .selector = null, .io = std.testing.io };
     try w9c2Push(&answer, .{ .surface_id = 71, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true,\"text\":\"maru\"}"), .pane_grant = w9c2Grant(5, 71) });
@@ -15077,7 +15157,7 @@ test "W9c②: dialog·handleDialog 는 DevTools op 줄을 거치지 않고 곧 �
     try expectPendingErrorCode(&again, .internal_error);
 }
 
-test "W9c②: 가족 탭 — grant 가 없는 탭은 {tab, kind} 만, 그 번호로 답하면 모르는 번호와 같은 실패, grant 를 받으면 답한다; 사용자 것은 거절" {
+test "W9c②: 가족 탭 — grant 가 없는 탭은 {tab, kind} 만, 그 번호로 답하면 모르는 번호와 같은 실패, grant 를 받으면 답한다; 사용자 것도 답한다(2026-11-17 A4)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -15126,7 +15206,7 @@ test "W9c②: 가족 탭 — grant 가 없는 탭은 {tab, kind} 만, 그 번호
         parsed.deinit();
     }
     try std.testing.expect(session_mod.web_osr.testDialogToken(74) == null);
-    // 사용자가 띄운 것(에이전트가 손대지 않은 다른 탭 — 사용자의 탐색 단추 뒤 떠나기 확인) — 거절, 답은 가지 않는다.
+    // 사용자가 띄운 것(에이전트가 손대지 않은 다른 탭 — 사용자의 탐색 단추 뒤 떠나기 확인) — 그래도 답한다(머무르기).
     try w9c2Hold(ta, &.{83});
     defer session_mod.web_osr.destroy(ta, 83);
     try control_pane_grant_store.grant(.{ .pane = 5, .target = 83, .scope = .browser });
@@ -15134,13 +15214,15 @@ test "W9c②: 가족 탭 — grant 가 없는 탭은 {tab, kind} 만, 그 번호
     session_mod.web_osr.testApplyNow(ta, .{ .js_dialog = .{ .browser = 83, .request = 2, .kind = .before_unload, .origin = "", .message = "" } });
     var user: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.handleDialog\",\"params\":{\"id\":83,\"accept\":false}}", .selector = null, .io = std.testing.io };
     try w9c2Push(&user, .{ .surface_id = 83, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":false}"), .pane_grant = w9c2Grant(5, 83) });
-    const user_msg = try pendingErrorMessage(&user);
-    defer allocator.free(user_msg);
-    try std.testing.expect(std.mem.indexOf(u8, user_msg, "the user is answering") != null);
-    try std.testing.expect(session_mod.web_osr.testDialogToken(83) != null);
+    {
+        const parsed = try w9b3Result(&user);
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("before_unload", parsed.value.object.get("result").?.object.get("kind").?.string);
+    }
+    try std.testing.expect(session_mod.web_osr.testDialogToken(83) == null);
 }
 
-test "W9c②: 누가 띄웠는지 모르는 대화상자는 이 pane 이 browser.open 으로 연 탭에서만 답한다(C13 — 오래된 grant 로 사람 탭에 답하지 않게)" {
+test "W9c② C13 → 2026-11-17 A4: 누가 띄웠는지 모르는 대화상자도 사람의 탭에서 답한다(옛 C13 은 이 pane 이 연 탭에서만)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -15153,19 +15235,12 @@ test "W9c②: 누가 띄웠는지 모르는 대화상자는 이 pane 이 browser
     try control_pane_grant_store.grant(.{ .pane = 5, .target = 75, .scope = .browser });
     var human: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":75,\"accept\":true}}", .selector = null, .io = std.testing.io };
     try w9c2Push(&human, .{ .surface_id = 75, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true}"), .pane_grant = w9c2Grant(5, 75) });
-    try expectPendingErrorCode(&human, .internal_error);
-    // 다른 pane 이 연 탭이어도 아니다 — 묻는 pane 이 연 탭이어야 한다.
-    try agent_tabs.append(allocator, .{ .pane = 6, .tab = 75 });
-    var other: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.handleDialog\",\"params\":{\"id\":75,\"accept\":true}}", .selector = null, .io = std.testing.io };
-    try w9c2Push(&other, .{ .surface_id = 75, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true}"), .pane_grant = w9c2Grant(5, 75) });
-    try expectPendingErrorCode(&other, .internal_error);
-    try agent_tabs.append(allocator, .{ .pane = 5, .tab = 75 });
-    var mine: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.handleDialog\",\"params\":{\"id\":75,\"accept\":true}}", .selector = null, .io = std.testing.io };
-    try w9c2Push(&mine, .{ .surface_id = 75, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true}"), .pane_grant = w9c2Grant(5, 75) });
     {
-        const parsed = try w9b3Result(&mine);
-        parsed.deinit();
+        const parsed = try w9b3Result(&human);
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("alert", parsed.value.object.get("result").?.object.get("kind").?.string);
     }
+    try std.testing.expect(session_mod.web_osr.testDialogToken(75) == null);
 }
 
 test "W9c②: 붙잡힌 요청의 처리(pushBrowserOp)도 곧 답한다 — 전에는 Chromium op 줄에서 「not supported」; cap 연결은 자기 탭의 것만 본다" {
@@ -15266,7 +15341,7 @@ fn pendingErrorMessage(pending: *control_server_mod.PendingRequest) ![]u8 {
     return allocator.dupe(u8, err.message);
 }
 
-test "W9c②: 에이전트가 물은 닫기의 떠나기 확인은 handle-dialog 로 답할 수 있다고 알린다 — 사람이 먼저 묻던 닫기면 사용자가 정한다" {
+test "W9c②·2026-11-17 A4: 닫기의 떠나기 확인은 handle-dialog 로 답할 수 있다고 알린다 — 에이전트가 물은 닫기는 --accept 면 닫힌다, 사람이 먼저 묻던 닫기면 그 닫기·이동이 이어진다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const ta = std.testing.allocator;
     try w9c2Hold(ta, &.{ 80, 81 });
@@ -15275,8 +15350,9 @@ test "W9c②: 에이전트가 물은 닫기의 떠나기 확인은 handle-dialog
     try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(80), "maru browser handle-dialog") != null);
     try std.testing.expect(session_mod.web_osr.askClose(ta, 81, 0)); // 사람이 먼저 닫기를 골랐다
     try std.testing.expect(session_mod.web_osr.askCloseByAgent(ta, 81, 0));
-    try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(81), "handle-dialog") == null);
-    try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(81), "the user decides") != null);
+    try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(81), "maru browser handle-dialog") != null);
+    try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(81), "already asking") != null);
+    try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(80), "the tab then closes") != null);
 }
 
 // ── W9c①: Chromium 탭의 콘솔(`browser.console`) — sidecar 가 보낸 줄을 web_osr 이 쥐고, 여기서 곧 답한다 ─────────────────────────────
@@ -15772,7 +15848,7 @@ test "W9d① 적대 리뷰 1 회차 재현 A2: 탭이 grant 가 덮지 않는 �
     }
 }
 
-test "W9d① 적대 리뷰 1 회차 재현 A3: 에이전트 탭의 제어 grant 를 철회하면(W9b③ — 사람의 탭이 된다) 탭과 함께 넣은 어느 호스트든 네트워크 grant 도 거둔다 — 지켜보기를 끄고 지운다" {
+test "W9d① 적대 리뷰 1 회차 재현 A3: 에이전트 탭의 제어 grant 를 철회하면 탭과 함께 넣은 어느 호스트든 네트워크 grant 도 거둔다 — 지켜보기를 끄고 지운다(탭은 에이전트 탭으로 남는다 — 2026-11-17 B)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -15786,7 +15862,7 @@ test "W9d① 적대 리뷰 1 회차 재현 A3: 에이전트 탭의 제어 grant 
     const birth = w9d1Grant(5, 193); // 철회 전에 받은 인가(그 사이 돌던 읽기)
     try std.testing.expectEqual(@as(usize, 1), try w9d1Count(193, birth)); // 첫 읽기
     try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 193, 0)); // 메뉴: 「· control」
-    try std.testing.expect(!isAgentTab(193)); // 이제 사람의 탭
+    try std.testing.expect(isAgentTab(193)); // ◈ 는 남는다(B) — 철회는 grant 와 그것으로 세운 것만 거둔다
     r9d1Begin(193, 2, "https://bank.test/login", "bank.test", r9d1_cookie_bank); // 사용자가 은행에 쓴다
     try std.testing.expect(!control_pane_grant_store.authorizes(5, 193, .browser_network, "bank.test"));
     try std.testing.expect(control_pane_grant_store.idOf(5, 193, .browser_network) == null);
@@ -18184,7 +18260,7 @@ fn w9d3Block(pending: *control_server_mod.PendingRequest, tab: u64, grant: contr
     try w9c2Push(pending, .{ .surface_id = tab, .method = .network_block, .arg = try allocator.dupe(u8, arg), .pane_grant = grant });
 }
 
-test "W9d③: 에이전트가 연 탭은 묻지 않고 막는다 — 곧 답하고 ⊘, 둘째 pane 은 수만, 실행 단계의 거절은 까닭마다 코드, 제어 철회가 ⊘ 를 거둔다, 설정 끔이면 서비스 워커 수를 숨긴다" {
+test "W9d③: 에이전트가 연 탭은 묻지 않고 막는다 — 곧 답하고 ⊘, 둘째 pane 도 규칙을 보고 지운다(2026-11-17 A2), 실행 단계의 거절은 까닭마다 코드, 제어 철회가 ⊘ 를 거둔다, 설정 끔이면 서비스 워커 수를 숨긴다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -18246,16 +18322,23 @@ test "W9d③: 에이전트가 연 탭은 묻지 않고 막는다 — 곧 답하�
         const p = try w9b3Result(&pending);
         defer p.deinit();
         const r = p.value.object.get("result").?.object;
-        try std.testing.expectEqual(@as(usize, 0), r.get("rules").?.array.items.len);
+        try std.testing.expectEqual(@as(usize, 1), r.get("rules").?.array.items.len); // 남의 규칙도 보인다(2026-11-17 A2)
+        try std.testing.expect(r.get("rules").?.array.items[0].object.get("other_pane").?.bool);
         try std.testing.expectEqual(@as(i64, 1), r.get("other_rules").?.integer);
     }
-    // 남의 규칙은 지우지 못한다 — -32602 unknown_rule(index 0).
+    // 남의 규칙도 지운다(2026-11-17 A2) — 그다음 주인이 다시 둔다(새 번호, 주인 pane 5).
     {
         var pending: control_server_mod.PendingRequest = undefined;
         try w9d3Block(&pending, 241, w9d3BlockGrant(6, 241), "{\"action\":\"remove\",\"rules\":[1]}");
-        const response = pending.response orelse return error.ExpectedResponse;
-        defer allocator.free(response);
-        try std.testing.expect(std.mem.indexOf(u8, response, "-32602") != null and std.mem.indexOf(u8, response, "unknown_rule") != null);
+        const p = try w9b3Result(&pending);
+        defer p.deinit();
+        try std.testing.expectEqual(@as(i64, 1), p.value.object.get("result").?.object.get("removed").?.array.items[0].integer);
+    }
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 241, w9d3BlockGrant(5, 241), "{\"action\":\"add\",\"patterns\":[\"*://*.track.test/*\"]}");
+        const p = try w9b3Result(&pending);
+        p.deinit();
     }
     // 설정 끔 — 서비스 워커 수를 숨긴다(규칙마다·합계).
     session_mod.web_osr.setNetworkFull(false);
@@ -18595,7 +18678,7 @@ test "W9d③ 20 회 검증 B N7: pane 을 못 찾은(cap 만) 막기 op 은 막�
 
 // ── W9d③ 2 차 20 회 검증 11–20 회차(검증자 B2 — 6077ecc4c 를 다시 친 실제 op 길 시험) ──
 
-test "W9d③ v20b2 R16 DEF-3: 실제 op 길 — 에이전트 탭의 엄격을 둘째 pane(모달 grant)이 끄거나 켜면 -32602 other_pane, Grants 줄의 엄격은 주인에게만, 주인의 grant 철회 뒤에는 둘째 pane 이 켠다" {
+test "W9d③ v20b2 R16 DEF-3 → 2026-11-17 A2: 실제 op 길 — 둘째 pane 이 같은 사이트에서 엄격을 다시 켜면 주인은 그대로(그 pane 의 철회가 지우지 않는다), 끌 수도 있다, Grants 줄의 엄격은 주인에게만, 주인의 grant 철회는 엄격을 거둔다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -18618,34 +18701,40 @@ test "W9d③ v20b2 R16 DEF-3: 실제 op 길 — 에이전트 탭의 엄격을 �
         const p = try v20bBlockJson(261, w9d3BlockGrant(5, 261), "{\"action\":\"strict\",\"on\":true}");
         p.deinit();
     }
-    for ([_][]const u8{ "{\"action\":\"strict\",\"on\":false}", "{\"action\":\"strict\",\"on\":true}" }) |arg| {
-        var pending: control_server_mod.PendingRequest = undefined;
-        try w9d3Block(&pending, 261, w9d3BlockGrant(6, 261), arg);
-        const response = pending.response orelse return error.ExpectedResponse;
-        defer allocator.free(response);
-        try std.testing.expect(std.mem.indexOf(u8, response, "-32602") != null and std.mem.indexOf(u8, response, "other_pane") != null);
+    // pane 6 이 같은 사이트에서 다시 켠다 — 받지만(거절 없음) 바뀌지 않아 주인은 pane 5.
+    {
+        const p = try v20bBlockJson(261, w9d3BlockGrant(6, 261), "{\"action\":\"strict\",\"on\":true}");
+        defer p.deinit();
+        const st = p.value.object.get("result").?.object.get("strict").?.object;
+        try std.testing.expect(st.get("on").?.bool and st.get("other_pane").?.bool);
     }
     var strict: u8 = 9;
     _ = maru_macos_control_browser_block_summary(6, 261, &strict);
     try std.testing.expectEqual(@as(u8, 0), strict);
     _ = maru_macos_control_browser_block_summary(5, 261, &strict);
     try std.testing.expectEqual(@as(u8, 1), strict);
+    // pane 6 의 막기 grant 를 메뉴로 거둔다 — pane 5 의 엄격은 남는다(DEF-3 의 뜻).
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(6, 261, 4));
+    try std.testing.expect(session_mod.web_osr.networkBlocking(261) != null);
+    _ = maru_macos_control_browser_block_summary(5, 261, &strict);
+    try std.testing.expectEqual(@as(u8, 1), strict);
+    // pane 6 이 grant 를 다시 받아 끈다 — 된다(2026-11-17 A2).
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 261, .scope = .browser_network_block, .host = control_pane_grant.GrantHost.init("agent.test") });
+    syncNetworkWatch();
     {
-        const p = try v20bBlockJson(261, w9d3BlockGrant(6, 261), "{\"action\":\"list\"}");
+        const p = try v20bBlockJson(261, w9d3BlockGrant(6, 261), "{\"action\":\"strict\",\"on\":false}");
         defer p.deinit();
-        const st = p.value.object.get("result").?.object.get("strict").?.object;
-        try std.testing.expect(st.get("on").?.bool and st.get("other_pane").?.bool);
+        try std.testing.expect(!p.value.object.get("result").?.object.get("strict").?.object.get("on").?.bool);
     }
-    // 주인(pane 5)의 grant 를 메뉴로 거둔다 — 엄격이 사라지고 pane 6 이 켤 수 있다(주인이 된다).
+    // pane 5 가 다시 켜고, 주인(pane 5)의 grant 를 메뉴로 거두면 엄격이 사라진다.
+    {
+        const p = try v20bBlockJson(261, w9d3BlockGrant(5, 261), "{\"action\":\"strict\",\"on\":true}");
+        p.deinit();
+    }
     try std.testing.expect(maru_macos_control_revoke_browser_grant(5, 261, 0) >= 1);
     try std.testing.expect(session_mod.web_osr.networkBlocking(261) == null);
-    {
-        const p = try v20bBlockJson(261, w9d3BlockGrant(6, 261), "{\"action\":\"strict\",\"on\":true}");
-        defer p.deinit();
-        try std.testing.expect(p.value.object.get("result").?.object.get("strict").?.object.get("other_pane") == null);
-    }
     _ = maru_macos_control_browser_block_summary(6, 261, &strict);
-    try std.testing.expectEqual(@as(u8, 1), strict);
+    try std.testing.expectEqual(@as(u8, 0), strict);
 }
 
 test "W9d③ v20b2 R14 DEF-2: 실제 op 길 — 254 바이트(끝 점)·wire 밖 글자 호스트의 에이전트 탭에서 add·strict on 은 -32602 page_host_too_long·page_host_invalid, ⊘ 없음, punycode·253 바이트 호스트는 받고 그 사이트에 묶인다" {
@@ -18767,7 +18856,7 @@ fn w9d4Mock(pending: *control_server_mod.PendingRequest, tab: u64, grant: contro
     try w9c2Push(pending, .{ .surface_id = tab, .method = .network_mock, .arg = try allocator.dupe(u8, arg), .pane_grant = grant });
 }
 
-test "W9d④: 에이전트가 연 탭은 묻지 않고 가짜를 둔다 — 곧 답하고 ▣, 둘째 pane 은 수만, browser grant 가 사라지면 needs_browser_permission, 제어 철회가 ▣ 를 거둔다" {
+test "W9d④: 에이전트가 연 탭은 묻지 않고 가짜를 둔다 — 곧 답하고 ▣, 둘째 pane 도 규칙을 본다(2026-11-17 A2), browser grant 가 사라지면 needs_browser_permission, 제어 철회가 ▣ 를 거둔다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -18814,7 +18903,8 @@ test "W9d④: 에이전트가 연 탭은 묻지 않고 가짜를 둔다 — 곧 
         const p = try w9b3Result(&pending);
         defer p.deinit();
         const r = p.value.object.get("result").?.object;
-        try std.testing.expectEqual(@as(usize, 0), r.get("rules").?.array.items.len);
+        try std.testing.expectEqual(@as(usize, 1), r.get("rules").?.array.items.len); // 남의 규칙도 보인다(2026-11-17 A2)
+        try std.testing.expect(r.get("rules").?.array.items[0].object.get("other_pane").?.bool);
         try std.testing.expectEqual(@as(i64, 1), r.get("other_rules").?.integer);
     }
     // 그 사이 둘째 pane 의 browser grant 를 메뉴에서 철회 — 실행 단계에서 -32002 needs_browser_permission(모달 없이).
@@ -18866,7 +18956,7 @@ test "W9d④ 변이: 실행 단계 — 사용자 탭의 browser grant 철회가 
     syncNetworkWatch();
     const add = "{\"action\":\"add\",\"pattern\":\"https://app.test/api\",\"types\":8192,\"response\":{\"status\":200,\"content_type\":\"text/plain\",\"headers\":[],\"body_base64\":\"\"}}";
     try w9d4MockAnswer(242, 6, add, null);
-    try std.testing.expect(session_mod.web_osr.testMockRuleHuman(242, 0).?); // 사용자 탭 — 모달로 받은 grant(Q2)
+    try std.testing.expect(!session_mod.web_osr.testMockRuleHuman(242, 0).?); // 사용자 탭도 사람의 누름 예외가 없다(2026-11-17 A8 — 옛 Q2)
     // 메뉴에서 그 pane 의 제어(browser) grant 만 철회 — 가짜는 eval 위에 선다: 동기화해 규칙을 거둔다.
     try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(6, 242, 0));
     try std.testing.expect(session_mod.web_osr.networkMocking(242) == null);
@@ -18899,7 +18989,7 @@ fn v2StrictOf(tab: u64, pane: u64) !struct { on: bool, other: bool } {
     return .{ .on = st.get("on").?.bool, .other = st.get("other_pane") != null };
 }
 
-test "v2-R13: 실제 op 길 — 가짜 엄격은 켠 pane 의 것(W9d④ v2 검증 R13): 둘째 pane(모달 grant)의 strict off·on 은 -32602 other_pane, 그 pane 의 mock grant 철회 뒤에도 주인의 엄격과 Grants 줄은 남는다" {
+test "v2-R13 → 2026-11-17 A2: 실제 op 길 — 둘째 pane(모달 grant)이 같은 사이트에서 가짜 엄격을 다시 켜면 받지만 주인은 그대로, 그 pane 의 mock grant 철회 뒤에도 주인의 엄격과 Grants 줄은 남는다, 그 pane 이 끌 수도 있다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -18921,16 +19011,7 @@ test "v2-R13: 실제 op 길 — 가짜 엄격은 켠 pane 의 것(W9d④ v2 검�
     try control_pane_grant_store.grant(.{ .pane = 6, .target = 263, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("agent.test") });
     try control_pane_grant_store.grant(.{ .pane = 6, .target = 263, .scope = .browser_network_mock, .host = control_pane_grant.GrantHost.init("agent.test") });
     syncNetworkWatch();
-    for ([_][]const u8{ "{\"action\":\"strict\",\"on\":false}", "{\"action\":\"strict\",\"on\":true}" }) |arg| {
-        var pending: control_server_mod.PendingRequest = undefined;
-        try w9d4Mock(&pending, 263, w9d4MockGrant(6, 263), arg);
-        const response = pending.response orelse return error.ExpectedResponse;
-        defer allocator.free(response);
-        std.testing.expect(std.mem.indexOf(u8, response, "-32602") != null and std.mem.indexOf(u8, response, "other_pane") != null) catch |e| {
-            std.debug.print("v2-R13 pane 6 {s}: {s}\n", .{ arg, response[0..@min(response.len, 300)] });
-            return e;
-        };
-    }
+    try w9d4MockAnswer(263, 6, "{\"action\":\"strict\",\"on\":true}", null); // 같은 사이트 — 바뀌지 않는다
     const s1 = try v2StrictOf(263, 5);
     const s6 = try v2StrictOf(263, 6);
     try std.testing.expect(s1.on and !s1.other and s6.on and s6.other);
@@ -18946,6 +19027,12 @@ test "v2-R13: 실제 op 길 — 가짜 엄격은 켠 pane 의 것(W9d④ v2 검�
     try std.testing.expect(s3.on and !s3.other);
     _ = maru_macos_control_browser_mock_summary(5, 263, &strict);
     try std.testing.expectEqual(@as(u8, 1), strict);
+    // grant 를 다시 받은 pane 6 이 끈다 — 된다(남의 엄격).
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 263, .scope = .browser_network_mock, .host = control_pane_grant.GrantHost.init("agent.test") });
+    syncNetworkWatch();
+    try w9d4MockAnswer(263, 6, "{\"action\":\"strict\",\"on\":false}", null);
+    const s4 = try v2StrictOf(263, 5);
+    try std.testing.expect(!s4.on);
 }
 
 // ── W9e①: 기기 흉내(`browser.emulate`) — 앱 쪽 ──────────────────────────────────────────────────────────────────────
@@ -18962,7 +19049,7 @@ fn w9e1Emulate(pending: *control_server_mod.PendingRequest, tab: u64, grant: con
     try w9c2Push(pending, .{ .surface_id = tab, .method = .emulate, .arg = try allocator.dupe(u8, arg), .pane_grant = grant });
 }
 
-test "W9e①: 에이전트가 연 탭은 묻지 않고 흉내를 건다 — 곧 답하고 ◫, 둘째 pane 은 get 만, Grants 줄은 주인에게, 제어 철회가 ◫ 를 거둔다" {
+test "W9e①: 에이전트가 연 탭은 묻지 않고 흉내를 건다 — 곧 답하고 ◫, 둘째 pane 도 바꾼다(바꾸면 주인 — 2026-11-17 A2), Grants 줄은 주인에게, 제어 철회가 ◫ 를 거둔다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -18997,27 +19084,31 @@ test "W9e①: 에이전트가 연 탭은 묻지 않고 흉내를 건다 — 곧 
     var sum: [160]u8 = undefined;
     const n = maru_macos_control_browser_emulation_summary(5, 244, &sum, sum.len);
     try std.testing.expect(std.mem.startsWith(u8, sum[0..n], "390\u{00D7}844@3 mobile, fr-FR"));
-    // 둘째 pane — 모달로 받은 흉내 grant. 바꾸지 못하고 읽기만.
+    // 둘째 pane — 모달로 받은 흉내 grant. 읽으면 other_pane, 바꾸면(2026-11-17 A2) 그 pane 이 통째로 주인이 된다(Grants 줄도 옮긴다).
     try control_pane_grant_store.grant(.{ .pane = 6, .target = 244, .scope = .browser_emulation, .host = control_pane_grant.GrantHost.init("agent.test") });
     syncNetworkWatch();
-    {
-        var pending: control_server_mod.PendingRequest = undefined;
-        try w9e1Emulate(&pending, 244, w9e1EmuGrant(6, 244), "{\"action\":\"set\",\"timezone\":\"UTC\"}");
-        const response = pending.response orelse return error.ExpectedResponse;
-        defer allocator.free(response);
-        try std.testing.expect(std.mem.indexOf(u8, response, "-32603") != null and std.mem.indexOf(u8, response, "emulated_by_other_pane") != null);
-    }
     {
         var pending: control_server_mod.PendingRequest = undefined;
         try w9e1Emulate(&pending, 244, w9e1EmuGrant(6, 244), "{\"action\":\"get\"}");
         const p = try w9b3Result(&pending);
         defer p.deinit();
         try std.testing.expect(p.value.object.get("result").?.object.get("emulation").?.object.get("locale") != null);
+        try std.testing.expect(p.value.object.get("result").?.object.get("other_pane").?.bool);
     }
     try std.testing.expectEqual(@as(usize, 0), maru_macos_control_browser_emulation_summary(6, 244, &sum, sum.len));
-    // 둘째 pane 의 grant 를 메뉴에서 철회한 뒤의 실행 — needs_grant(모달 없이).
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9e1Emulate(&pending, 244, w9e1EmuGrant(6, 244), "{\"action\":\"set\",\"timezone\":\"UTC\"}");
+        const p = try w9b3Result(&pending);
+        defer p.deinit();
+        try std.testing.expect(p.value.object.get("result").?.object.get("other_pane") == null);
+    }
+    try std.testing.expect(maru_macos_control_browser_emulation_summary(6, 244, &sum, sum.len) > 0);
+    try std.testing.expectEqual(@as(usize, 0), maru_macos_control_browser_emulation_summary(5, 244, &sum, sum.len));
+    // 둘째 pane(지금 주인)의 grant 를 메뉴에서 철회 — 그 흉내가 사라진다(◫), 그 뒤의 실행은 needs_grant(모달 없이).
     const stale = w9e1EmuGrant(6, 244);
     try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(6, 244, 6));
+    try std.testing.expect(session_mod.web_osr.emulation(244, &eb) == null);
     {
         var pending: control_server_mod.PendingRequest = undefined;
         try w9e1Emulate(&pending, 244, stale, "{\"action\":\"get\"}");
@@ -19025,7 +19116,14 @@ test "W9e①: 에이전트가 연 탭은 묻지 않고 흉내를 건다 — 곧 
         defer allocator.free(response);
         try std.testing.expect(std.mem.indexOf(u8, response, "-32002") != null and std.mem.indexOf(u8, response, "needs_grant") != null);
     }
-    // 메뉴의 제어 철회 — 태어날 때 emulation grant 도 함께 거둔다(◫ 가 사라진다).
+    // 주인(pane 5)이 다시 건 뒤 메뉴의 제어 철회 — 태어날 때 emulation grant 도 함께 거둔다(◫ 가 사라진다).
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9e1Emulate(&pending, 244, w9e1EmuGrant(5, 244), "{\"action\":\"set\",\"timezone\":\"UTC\"}");
+        const p = try w9b3Result(&pending);
+        p.deinit();
+    }
+    try std.testing.expect(session_mod.web_osr.emulation(244, &eb) != null);
     try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 244, 0));
     try std.testing.expect(control_pane_grant_store.get(5, 244, .browser_emulation) == null);
     try std.testing.expect(session_mod.web_osr.emulation(244, &eb) == null);

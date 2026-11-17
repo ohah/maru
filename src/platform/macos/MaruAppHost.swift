@@ -13993,8 +13993,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private struct GrantRef { let pane: UInt64; let target: UInt64; let scope: UInt8 }
 
     /// "Revoke All"(§9.2 revoke UX) — **모든** pane-bound 브라우저 grant 를 거둔다(앱-전역 grant store, 세션 무관). 사용자 결정 2026-11-16
-    /// (「AI 가 모든 접근」) 뒤로는 묻지 않으므로 다음 요청이 다시 전권을 받는다 — 지금 에이전트가 세운 것(막기·가짜·흉내·기록·trace·◈)을 거두는
-    /// 단추다. Zig가 단일 출처(control_pane_grant_store).
+    /// (「AI 가 모든 접근」) 뒤로는 묻지 않으므로 다음 요청이 다시 전권을 받는다 — 지금 에이전트가 세운 것(막기·가짜·흉내·기록·trace)을 거두는
+    /// 단추다. 에이전트가 연 탭의 ◈ 는 남는다(사용자 결정 2026-11-17). Zig가 단일 출처(control_pane_grant_store).
     @objc private func menuRevokeBrowserGrants(_ sender: Any?) {
         _ = sender
         _ = maru_macos_control_revoke_all_browser_grants()

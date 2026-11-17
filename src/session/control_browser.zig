@@ -134,16 +134,16 @@ pub const BrowserMethod = enum {
     /// 끝에 뒤쪽 탭으로 열고(포커스 그대로) 그 pane 이 곧 제어하게 grant 를 넣은 뒤, 요청한 주소의 첫 불러오기까지 기다려 답한다.
     /// op.arg=`{url?, timeout_ms}`. **op_kind=23 고정**.
     open,
-    /// `browser.close {id}`(W9b③ — Chromium 전용) → `{closed:true}` 또는 `{closed:false, reason}`. 그 pane 이 연 탭만(앱이 본다).
-    /// 여는 순간 넣은 `browser` grant 가 없으면 확인 모달 없이 `unauthorized`(남의 탭을 닫으려고 허락을 묻지 않는다). 페이지에 묻는
-    /// 닫기 — 떠나기 확인으로 물으면 기다리지 않고 `closed:false`(사용자가 그 탭에서 정한다). op.arg 빈 것. **op_kind=24 고정**.
+    /// `browser.close {id}`(W9b③ — Chromium 전용) → `{closed:true}` 또는 `{closed:false, reason}`. 어느 탭이든(사용자 결정 2026-11-17 —
+    /// 사람의 탭·다른 pane 이 연 탭도). grant 를 쓰지 않는다 — 신원 판정을 지난 pane 이면 인가(cap 만 든 연결은 `unauthorized`). 페이지에 묻는
+    /// 닫기 — 떠나기 확인으로 물으면 기다리지 않고 `closed:false`(그 대화상자는 `handleDialog` 로 답한다). op.arg 빈 것. **op_kind=24 고정**.
     close,
     /// `browser.dialog {id}`(W9c② — Chromium 전용) → `{dialogs:[…]}` — 그 탭의 팝업 가족에 떠 있는 JS 대화상자·파일 선택(권한 요청은
-    /// 싣지 않는다). grant 가 있는 탭의 것만 전부(`token`·글·`cause`·`may_answer`), 나머지는 `{tab, kind}`. DevTools 를 부르지 않아 앱이
+    /// 싣지 않는다). grant 가 있는 탭의 것만 전부(`token`·글·`cause`), 나머지는 `{tab, kind}`. DevTools 를 부르지 않아 앱이
     /// 곧 답한다(대화상자로 멈춘 탭의 op 줄 뒤에 서지 않는다). op.arg 빈 것. **op_kind=25 고정**.
     dialog,
     /// `browser.handleDialog {id, accept, text?, dialog?}`(W9c② — Chromium 전용) → `{ok:true, kind, continues?}`. `dialog`(번호)가 없으면
-    /// 그 탭 자신의 대화상자, 있으면 grant 가 있는 가족 탭의 그 대화상자. 답해도 되는지(`may_answer`)는 앱이 본다. 파일 선택은 닫기만.
+    /// 그 탭 자신의 대화상자, 있으면 grant 가 있는 가족 탭의 그 대화상자. 누가 띄웠든 답한다(2026-11-17). 파일 선택은 닫기만(파일은 `upload`).
     /// op.arg=`{accept, text?, dialog?}`. **op_kind=26 고정**.
     handle_dialog,
     /// `browser.upload {id, selector|ref|locator, files:[절대 경로]}`(W9c③ — Chromium 전용) → `{origin, files:[{name,size}], kept, navigated, dialog}`. 로케이터가 가리킨
@@ -188,8 +188,8 @@ pub const BrowserMethod = enum {
     /// 페이지·서버에 보이는 기기(화면·UA·client hints·언어·시간대·위치·미디어·색각)를 바꾼다 — `set` 은 덧쓰기(준 무리만, `null` 은 그 무리를
     /// 지운다), `clear` 는 모두, `get` 은 지금 상태. **`browser_emulation` scope**(사이트에 묶인 grant — 사용자 탭은 사이트마다 확인 모달이고 그
     /// 사이트를 보일 때만 걸린다, 에이전트가 연 탭은 묻지 않는다 — 사용자 결정 Q1). `browser` grant 는 요구하지 않는다. 인자는 모달 **전에** 본다
-    /// (`-32602` + `data.reason` — 계획 §4 의 차례). grant 가 없으면 `set` 은 모달, `clear`·`get` 은 모달 없이 `-32002`. 처음 건 pane 이 주인 —
-    /// 다른 pane 의 `set`·`clear` 는 `-32603 emulated_by_other_pane`. 곧 답한다(op 줄 없음). op.arg=정규형 인자 JSON. **op_kind=33 고정**(W9e② 34–36).
+    /// (`-32602` + `data.reason` — 계획 §4 의 차례). grant 가 없으면 `set` 은 모달, `clear`·`get` 은 모달 없이 `-32002`. 어느 pane 이든 바꾸고
+    /// 지운다 — 실제로 바꾼 pane 이 주인(2026-11-17 A2, 결과 `other_pane`). 곧 답한다(op 줄 없음). op.arg=정규형 인자 JSON. **op_kind=33 고정**(W9e② 34–36).
     /// W9e②: `cpu`(1–20)·`network`(프리셋·수치·offline)·`holder` 를 더 받는다 — 그 둘은 주인 프로세스의 수명을 따른다(사용자 결정 7).
     emulate,
     /// `browser.trace {id, action:"start"|"stop"|"status"|"abort"|"read", reload?, duration_ms?, screenshots?, offset?}`(W9e② — Chromium 전용).
@@ -1178,9 +1178,8 @@ fn serializeBlockFailure(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
     };
     defer parsed.deinit();
     const r = parsed.value.reason;
-    // W9e①: 흉내의 주인이 다른 pane(`emulated_by_other_pane`)은 바꾸기 상한과 같은 -32603(계획 §4).
-    // W9e②: 다른 trace 중(`trace_busy` — `retry_after_ms`)도 -32603.
-    const code: cp.ErrorCode = if (eq(r, "needs_network_permission") or eq(r, "needs_browser_permission") or eq(r, "needs_grant")) .unauthorized else if (eq(r, "resource_busy") or eq(r, "emulated_by_other_pane") or eq(r, "trace_busy") or traceRuntimeFailure(r)) .internal_error else .invalid_params;
+    // W9e②: 다른 trace 중(`trace_busy` — `retry_after_ms`)도 바꾸기 상한과 같은 -32603. (옛 `emulated_by_other_pane` 은 2026-11-17 A2 로 걷었다.)
+    const code: cp.ErrorCode = if (eq(r, "needs_network_permission") or eq(r, "needs_browser_permission") or eq(r, "needs_grant")) .unauthorized else if (eq(r, "resource_busy") or eq(r, "trace_busy") or traceRuntimeFailure(r)) .internal_error else .invalid_params;
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = r });
@@ -3076,7 +3075,7 @@ fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, 
     return aw.toOwnedSlice();
 }
 
-/// W9c② 결과 — dialog `{"dialogs":[{tab,kind, token?,message?,origin?,default_text?,cause?,may_answer?,may_leave?}]}`(`tab`·`kind` 는 꼭,
+/// W9c② 결과 — dialog `{"dialogs":[{tab,kind, token?,message?,origin?,default_text?,cause?}]}`(`tab`·`kind` 는 꼭,
 /// 나머지는 grant 가 있는 탭에만 — 앱이 정한다), handleDialog `{"ok":true,"kind":<str>,"continues"?:<bool>}`. 모르는 키는 버리고 타입이
 /// 틀리면 거절(앱이 낸 것이라도 wire 로 나가는 모양은 여기서 고정한다).
 fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, payload: []const u8) (std.mem.Allocator.Error || error{InvalidDialogPayload})![]u8 {
@@ -3103,7 +3102,6 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
                 if (tab != .integer or tab.integer <= 0 or kind != .string) return error.InvalidDialogPayload;
                 for (int_keys) |k| if (item.object.get(k)) |v| if (v != .integer or v.integer <= 0) return error.InvalidDialogPayload;
                 for (str_keys) |k| if (item.object.get(k)) |v| if (v != .string) return error.InvalidDialogPayload;
-                for ([_][]const u8{ "may_answer", "may_leave" }) |k| if (item.object.get(k)) |v| if (v != .bool) return error.InvalidDialogPayload;
             }
             (blk: {
                 beginResult(&s, id) catch |e| break :blk e;
@@ -3111,8 +3109,8 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
                 s.beginArray() catch |e| break :blk e;
                 for (list.array.items) |item| {
                     s.beginObject() catch |e| break :blk e;
-                    // 순서를 고정한다(번호·탭·종류·글·출처·기본 글·원인·답해도 되는가·떠나도 되는가).
-                    for ([_][]const u8{ "token", "tab", "kind", "message", "origin", "default_text", "cause", "may_answer", "may_leave" }) |k| if (item.object.get(k)) |v| {
+                    // 순서를 고정한다(번호·탭·종류·글·출처·기본 글·원인). 옛 `may_answer`·`may_leave` 는 걷었다(2026-11-17 — 에이전트는 어느 대화상자든 답한다).
+                    for ([_][]const u8{ "token", "tab", "kind", "message", "origin", "default_text", "cause" }) |k| if (item.object.get(k)) |v| {
                         s.objectField(k) catch |e| break :blk e;
                         s.write(v) catch |e| break :blk e;
                     };
@@ -3539,8 +3537,15 @@ pub fn browserOpFromRequest(
     if (unsupportedOnSurface(dto.?, bmethod)) |w| return .{ .err = try unsupportedByEngineResponse(gpa, req.id, w.engine, w.controllable) };
     // W9b②: 로케이터(`locator`)는 Chromium 만 — 키가 있는지만 본다(인가 전에는 params 값을 풀지 않는다 — §8.3 oracle 불변식).
     if (locatorUnsupported(dto.?, bmethod, req.params)) |w| return .{ .err = try unsupportedByEngineParamResponse(gpa, req.id, w.engine, w.controllable, "locator") };
-    // W9b③: close 는 그 pane 이 연 탭만 — 여는 순간 넣은 grant 가 없으면 확인 모달로 묻지 않고 거절한다(남의 탭을 닫으려고 허락을 묻지 않는다).
-    if (!authorized and bmethod == .close) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+    // 사용자 결정 2026-11-17(「에이전트는 사용자와 같은 힘」 A1): close 는 어느 Chromium 탭이든 — 사람의 ⌘W 처럼(떠나기 확인은 페이지가 묻는다).
+    // grant 를 쓰지 않는다: 신원 판정을 지난 pane(`pane_selector` — 1g)이면 인가하고, 전권도 close 에는 grant 를 넣지 않는다(`fullAccessTarget`) — 닫지
+    // 못한 close(창의 마지막 탭·떠나기 확인 대기)가 그 탭의 일곱 scope 와 네트워크 지켜보기를 켜 두던 곁 효과를 없앤다. cap 만 든 연결은 pane 이
+    // 없다 — 균일 unauthorized(앱도 pane 없이는 닫지 않는다).
+    if (bmethod == .close and !authorized) {
+        const pane = pane_selector orelse return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        authorized = true;
+        pane_grant = .{ .pane = pane, .target = target_id, .scope = .browser };
+    }
     // W9d②: 본문 기록은 네트워크 기록 위에 선다 — 그 탭의 `browser_network` grant 가 지금 문서를 덮지 않으면 본문 모달을 띄우지 않고 먼저
     // 네트워크 권한을 받으라고 답한다(본문을 허락해도 그 요청을 볼 수 없다). 끄기는 본문 권한이 없으면 모달 없이 거절한다(끌 것이 없다).
     if (!authorized and bmethod == .network_record) {
@@ -3753,7 +3758,7 @@ fn ungrantedResult(gpa: std.mem.Allocator, id: cp.Id, pane_selector: ?u64, targe
 }
 
 /// **전권(사용자 결정 2026-11-16)**: 이 요청이 전권 grant(`control_pane_grant.fullAccessPlan`)를 넣을 탭 — `browser.*` 이고 탭을 대상으로 하며(`list`·
-/// `open` 은 탭이 없다) `id` 가 스냅샷의 **제어할 수 있는** web surface 인 요청의 그 id. 형식이 틀렸거나 없는 id·터미널·markdown 패널이면 null —
+/// `open` 은 탭이 없다, `close` 는 grant 를 쓰지 않는다 — 2026-11-17) `id` 가 스냅샷의 **제어할 수 있는** web surface 인 요청의 그 id. 형식이 틀렸거나 없는 id·터미널·markdown 패널이면 null —
 /// 아무것도 넣지 않고 디스패치가 지금처럼 답한다(§8.3 균일 응답 — 없는 id 에 표가 바뀌지 않으니 존재 oracle 이 생기지 않는다). L4 가 신원 판정을
 /// 지난 pane(`browser_pane`)이 있을 때만 부른다.
 pub fn fullAccessTarget(gpa: std.mem.Allocator, request_bytes: []const u8, snapshot: cs.CollectorSnapshot) std.mem.Allocator.Error!?u64 {
@@ -3767,7 +3772,8 @@ pub fn fullAccessTarget(gpa: std.mem.Allocator, request_bytes: []const u8, snaps
         else => return null,
     };
     const method = cp.parseMethod(req.method);
-    if (method.core != .browser or eq(method.rest, "list") or eq(method.rest, "open")) return null;
+    // close 는 grant 없이 인가한다(위 dispatch — 2026-11-17 A1) — 닫지 못한 close 가 전권을 남기지 않게.
+    if (method.core != .browser or eq(method.rest, "list") or eq(method.rest, "open") or eq(method.rest, "close")) return null;
     const id = readIdParam(req.params) catch return null;
     const dto = snapshot.find(id) orelse return null;
     return switch (dto.detail) {
@@ -3776,7 +3782,7 @@ pub fn fullAccessTarget(gpa: std.mem.Allocator, request_bytes: []const u8, snaps
     };
 }
 
-test "전권 대상: 제어할 수 있는 web 탭을 가리키는 browser.* 만 — list·open·터미널·markdown·없는 id·틀린 꼴·다른 네임스페이스는 null" {
+test "전권 대상: 제어할 수 있는 web 탭을 가리키는 browser.* 만 — list·open·close·터미널·markdown·없는 id·틀린 꼴·다른 네임스페이스는 null" {
     const a = testing.allocator;
     const click = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":12,\"selector\":\"h1\"}}";
     try testing.expectEqual(@as(?u64, 12), try fullAccessTarget(a, click, fx_engine));
@@ -3786,6 +3792,7 @@ test "전권 대상: 제어할 수 있는 web 탭을 가리키는 browser.* 만 
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.list\",\"params\":{\"id\":12}}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"https://e.test/\"}}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"id\":12}}", // 틀린 open(dispatch 가 invalid_params) — 남의 탭에 grant 를 넣지 않는다
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.close\",\"params\":{\"id\":12}}", // close 는 grant 없이(2026-11-17 A1 — 닫지 못한 close 가 전권을 남기지 않게)
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":10,\"selector\":\"h1\"}}", // 터미널
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":13,\"selector\":\"h1\"}}", // markdown
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":14,\"selector\":\"h1\"}}", // 파일 HTML 뷰
@@ -5991,11 +5998,23 @@ test "W9b③: browser.open 은 부른 pane(1g)이 대상 — pane 이 없으면 
     };
 }
 
-test "W9b③: browser.close 는 그 탭의 browser grant 가 있어야 op — 없으면 확인 모달 없이 unauthorized, WebKit 탭은 모달 전 -32008" {
+test "2026-11-17 A1: browser.close 는 grant 없이 — 신원 판정을 지난 pane 이면 어느 탭이든 op(표는 그대로), pane 없는 연결·없는 id 는 unauthorized, WebKit 탭은 -32008" {
     var grants: cpg.PaneGrantStore = .{};
     const close12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.close\",\"params\":{\"id\":12}}";
-    // grant 없음 — pane 이 있어도 needs_grant 가 아니라 unauthorized(남의 탭을 닫으려고 허락을 묻지 않는다).
-    switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, 10, &grants, 0)) {
+    // grant 가 없어도 — 사람의 탭·다른 pane 의 탭 모두. 앱이 닫는다(창의 마지막 탭·떠나기 확인은 앱이 답한다).
+    for ([_]u64{ 10, 99 }) |pane| switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, pane, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.close, op.method);
+            try testing.expectEqual(@as(u64, 12), op.surface_id);
+            try testing.expectEqual(pane, op.pane_grant.?.pane);
+            try testing.expectEqual(@as(u64, 0), op.pane_grant.?.id); // grant 로 인가한 것이 아니다
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(usize, 0), grants.len); // 표를 바꾸지 않는다
+    // pane 이 없는 연결(cap 만) — 균일 unauthorized.
+    switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, null, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
             try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
@@ -6006,22 +6025,19 @@ test "W9b③: browser.close 는 그 탭의 browser grant 가 있어야 op — �
         },
         else => return error.TestUnexpectedResult,
     }
-    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
-    switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, 10, &grants, 0)) {
+    // 없는 id·터미널 — 균일 unauthorized(존재를 가르지 않는다).
+    for ([_][]const u8{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.close\",\"params\":{\"id\":99}}", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.close\",\"params\":{\"id\":10}}" }) |req| switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
+        },
         .op => |op| {
-            defer testing.allocator.free(op.arg);
-            try testing.expectEqual(BrowserMethod.close, op.method);
-            try testing.expectEqual(@as(u64, 12), op.surface_id);
-            try testing.expectEqual(@as(u64, 10), op.pane_grant.?.pane); // 앱이 이 pane 이 연 탭인지 본다
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
         },
         else => return error.TestUnexpectedResult,
-    }
-    // 다른 pane 의 grant 로는 닫지 못한다.
-    switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, 99, &grants, 0)) {
-        .err => |e| testing.allocator.free(e),
-        else => return error.TestUnexpectedResult,
-    }
-    // WebKit 탭 — 확인 모달 전 -32008.
+    };
+    // WebKit 탭 — -32008(grant 없이도 같은 답).
     switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.close\",\"params\":{\"id\":11}}", fx_engine, &.{}, 10, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
@@ -6209,7 +6225,8 @@ test "W9c②: dialog·handleDialog 결과는 엔진이 준 알려진 필드만 �
         .{
             .req = dialog_req,
             .payload = "{\"dialogs\":[{\"token\":7,\"tab\":12,\"kind\":\"prompt\",\"message\":\"m\",\"origin\":\"https://a.test\",\"default_text\":\"d\",\"cause\":\"agent\",\"may_answer\":true,\"x\":1},{\"tab\":13,\"kind\":\"alert\"}]}",
-            .want = "\"result\":{\"dialogs\":[{\"token\":7,\"tab\":12,\"kind\":\"prompt\",\"message\":\"m\",\"origin\":\"https://a.test\",\"default_text\":\"d\",\"cause\":\"agent\",\"may_answer\":true},{\"tab\":13,\"kind\":\"alert\"}]}",
+            // 옛 `may_answer` 는 모르는 키처럼 버린다(2026-11-17 — 걷은 칸).
+            .want = "\"result\":{\"dialogs\":[{\"token\":7,\"tab\":12,\"kind\":\"prompt\",\"message\":\"m\",\"origin\":\"https://a.test\",\"default_text\":\"d\",\"cause\":\"agent\"},{\"tab\":13,\"kind\":\"alert\"}]}",
         },
         .{ .req = handle_req, .payload = "{\"ok\":true,\"kind\":\"alert\"}", .want = "\"result\":{\"ok\":true,\"kind\":\"alert\"}" },
         .{ .req = handle_req, .payload = "{\"ok\":true,\"kind\":\"before_unload\",\"continues\":true}", .want = "\"result\":{\"ok\":true,\"kind\":\"before_unload\",\"continues\":true}" },
@@ -6223,7 +6240,7 @@ test "W9c②: dialog·handleDialog 결과는 엔진이 준 알려진 필드만 �
         .{ .req = dialog_req, .payload = "{}" },
         .{ .req = dialog_req, .payload = "{\"dialogs\":[{\"kind\":\"alert\"}]}" },
         .{ .req = dialog_req, .payload = "{\"dialogs\":[{\"tab\":12,\"kind\":\"alert\",\"token\":\"7\"}]}" },
-        .{ .req = dialog_req, .payload = "{\"dialogs\":[{\"tab\":12,\"kind\":\"alert\",\"may_answer\":1}]}" },
+        .{ .req = dialog_req, .payload = "{\"dialogs\":[{\"tab\":12,\"kind\":\"alert\",\"cause\":1}]}" },
         .{ .req = handle_req, .payload = "{\"ok\":true}" },
         .{ .req = handle_req, .payload = "{\"ok\":\"y\",\"kind\":\"alert\"}" },
         .{ .req = handle_req, .payload = "[" },
@@ -7450,7 +7467,7 @@ test "W9d④ 변이: networkMock 인자 — 빈 methods 배열은 거절(0 은 �
 // ── W9e①: browser.emulate ──
 // 시험이 증명하는 것: 메서드 번호(op_kind 33 — Swift·앱의 wire)·이름·엔진(Chromium 만), 모달 전 검사의 차례(WebKit -32008 → 인자 -32602 + 까닭 →
 // grant 없는 clear·get 은 모달 없이 -32002 → set 은 needs_grant{browser_emulation}), browser grant 는 요구하지 않는다, op.arg 의 정규형, 앱의 거절
-// 까닭마다 코드(emulated_by_other_pane·resource_busy 는 -32603, needs_grant 는 -32002), browser.list 의 emulation 요약.
+// 까닭마다 코드(resource_busy 는 -32603, needs_grant 는 -32002), browser.list 의 emulation 요약.
 
 fn emuReq(comptime params: []const u8) []const u8 {
     return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.emulate\",\"params\":{\"id\":12," ++ params ++ "}}";
@@ -7523,11 +7540,10 @@ test "W9e①: emulate 는 33 — Chromium 만, 모달 전 검사의 차례(-3200
     try expectEmuErr(emuReq("\"action\":\"get\""), &other, .unauthorized, null);
 }
 
-test "W9e①: 앱의 거절 까닭은 까닭마다 코드 — 다른 pane 의 흉내·바꾸기 상한은 -32603, 권한은 -32002" {
+test "W9e①: 앱의 거절 까닭은 까닭마다 코드 — 바꾸기 상한은 -32603, 권한은 -32002" {
     const req = emuReq("\"action\":\"set\",\"timezone\":\"UTC\"");
     const Case = struct { payload: []const u8, code: cp.ErrorCode, reason: []const u8 };
     for ([_]Case{
-        .{ .payload = "{\"reason\":\"emulated_by_other_pane\",\"message\":\"m\"}", .code = .internal_error, .reason = "emulated_by_other_pane" },
         .{ .payload = "{\"reason\":\"resource_busy\",\"message\":\"m\"}", .code = .internal_error, .reason = "resource_busy" },
         .{ .payload = "{\"reason\":\"needs_grant\",\"message\":\"m\"}", .code = .unauthorized, .reason = "needs_grant" },
     }) |c| {

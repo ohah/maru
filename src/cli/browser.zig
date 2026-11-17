@@ -60,18 +60,18 @@ pub const browser_help =
     \\  reload  --surface <id>                     reload the page (Chromium tabs)
     \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
     \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
-    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites)
-    \\  close   --surface <id>                     close a tab this pane opened (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog)
+    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
+    \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
-    \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
+    \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
     \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
     \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a new file under the temp folder only; a binary body needs --out; Chromium tabs)
     \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; the tab title shows ◉ while recording)
-    \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; the tab title shows ⊘)
-    \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; the tab title shows ▣)
-    \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on the user's tabs the emulation applies only on the site the tab shows when you set it and its subdomains — other sites see the real values, and setting it again from another site moves it there; set on a tab that shows no web page (about:blank, a file) it applies on every site until you set it on a site; tabs you opened apply on every site)
-    \\  trace (start [--reload] [--duration 5s] [--no-screenshots] | stop [--out <file.json.gz>] [--json] | status | abort) --surface <id>   record a performance trace of a tab, the user's too (Chromium; 1-30 s, default 5 s; a hidden tab is kept rendering while it records); stop prints a summary, --out also writes the filtered trace (gzip JSON — open it in Chrome DevTools' Performance panel); never overwrites a file. `trace --surface <id> [--duration 5s] [--out f]` does start, wait and stop in one go. (`maru trace` is maru's own terminal trace tool — this is the page's.)
+    \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; the tab title shows ⊘); --remove, --rule, --clear and --strict also change what another pane set — the pane that changes something owns it
+    \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; the tab title shows ▣); --add, --remove, --rule, --clear and --strict also change what another pane set — the pane that changes something owns it
+    \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on the user's tabs the emulation applies only on the site the tab shows when you set it and its subdomains — other sites see the real values, and setting it again from another site moves it there; set on a tab that shows no web page (about:blank, a file) it applies on every site until you set it on a site; tabs you opened apply on every site; another pane's emulation can be changed or cleared — the pane that changes it owns it)
+    \\  trace (start [--reload] [--duration 5s] [--no-screenshots] | stop [--out <file.json.gz>] [--json] | status | abort) --surface <id>   record a performance trace of a tab, the user's too (Chromium; 1-30 s, default 5 s; a hidden tab is kept rendering while it records); stop prints a summary, --out also writes the filtered trace (gzip JSON — open it in Chrome DevTools' Performance panel); never overwrites a file. `trace --surface <id> [--duration 5s] [--out f]` does start, wait and stop in one go. stop, status and abort work on the tab's trace whoever started it (one result per tab). (`maru trace` is maru's own terminal trace tool — this is the page's.)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -594,7 +594,7 @@ pub const upload_navigated_note = "note: the files were set and the page started
 /// W9c③ 적대 리뷰 3 회차: 파일을 넣자 페이지(또는 그 팝업 가족)가 대화상자를 띄웠다(`dialog:true` — change 처리기의 alert 등). 넣기는 갔다 — 실패로
 /// 알리면 에이전트가 대화상자에 답한 뒤 다시 올려 모달이 또 뜨고 두 번 올라갔다. 그 대화상자는 대개 에이전트가 답해도 된다(넣기 바로 앞에 에이전트
 /// 시각을 적는다 — W9c②).
-pub const upload_dialog_note = "note: the files were set and the page showed a dialog right away (dialog: true) — its handler most likely received them, but maru could not read the file input; answer the dialog with maru browser handle-dialog if you may (see maru browser dialog), then check the page; do not upload again";
+pub const upload_dialog_note = "note: the files were set and the page showed a dialog right away (dialog: true) — its handler most likely received them, but maru could not read the file input; answer the dialog with maru browser handle-dialog (see maru browser dialog), then check the page; do not upload again";
 
 /// 한 번에 올리는 파일 수 상한 — 서버(`control_browser.max_upload_files`)와 같다(모달이 파일을 모두 보여야 한다).
 pub const max_upload_files = 10;
@@ -2676,7 +2676,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             // wait 이 찾은 것이 여럿과 맞는다(W9b②-3) — 같은 로케이터로 누르면 「여럿」 으로 실패한다.
             if (boolField(result.get("ambiguous"))) try w.writeAll("warning: ambiguous — the locator matches several elements; act with the matched ref, --exact or --nth\n");
             // 입력 뒤 페이지가 대화상자를 띄웠다(W9b③ 적대 리뷰 3 회차) — 입력은 갔다: 다시 하면 두 번 간다.
-            if (boolField(result.get("dialog"))) try w.writeAll("warning: the page opened a dialog right after the input — the input reached the page, do not repeat it; see it with maru browser dialog and answer it with maru browser handle-dialog if you may, otherwise the user answers it in that tab\n");
+            if (boolField(result.get("dialog"))) try w.writeAll("warning: the page opened a dialog right after the input — the input reached the page, do not repeat it; see it with maru browser dialog and answer it with maru browser handle-dialog\n");
         },
         // get-local-storage → {value}. 값은 페이지가 쓴 글 — 걸러 낸다(W9f 적대 리뷰 5 회차: OSC 52·화면 지우기·줄바꿈이 그대로 나갔다).
         .value => {
@@ -2703,7 +2703,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             try writePageText(gpa, w, strField(result.get("url")), false);
             try w.writeAll("\n");
         },
-        // W9c②: 대화상자마다 한 줄(종류·탭·번호·원인·답해도 되나·출처) + 글. 글은 페이지가 쓴 것이라 걸러 내고 줄바꿈은 보이는 표시로 —
+        // W9c②: 대화상자마다 한 줄(종류·탭·번호·원인·출처) + 글. 글은 페이지가 쓴 것이라 걸러 내고 줄바꿈은 보이는 표시로 —
         // 줄을 바꿔 다음 대화상자를 흉내 내지 못하게.
         .dialog => {
             const list = switch (result.get("dialogs") orelse std.json.Value{ .null = {} }) {
@@ -2717,7 +2717,6 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.writeAll("(no dialog)\n");
                 return true;
             }
-            var answerable = false;
             var any_full = false;
             for (list.items) |item| {
                 const o = switch (item) {
@@ -2731,13 +2730,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     continue;
                 };
                 any_full = true;
-                const may = boolField(o.get("may_answer"));
-                answerable = answerable or may;
                 try w.print(" token={d} cause=", .{token});
                 try writePageText(gpa, w, strField(o.get("cause")), false);
-                try w.print(" may_answer={s}", .{if (may) "yes" else "no"});
-                // 떠나기 확인은 「떠나기」 만 따로 막힐 수 있다(사용자가 그 문서에 입력했다 — 머무르기만).
-                if (o.get("may_leave")) |v| if (v == .bool and !v.bool and may) try w.writeAll(" (dismiss only — the user typed on this page)");
                 const origin = strField(o.get("origin"));
                 if (origin.len > 0) {
                     try w.writeAll(" origin=");
@@ -2752,9 +2746,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     try w.writeAll("\n");
                 };
             }
-            if (answerable) {
-                try w.writeAll("answer with: maru browser handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] --dialog <token>\n");
-            } else if (any_full) try w.writeAll("the user answers these in the tab (maru may not)\n");
+            if (any_full) try w.writeAll("answer with: maru browser handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] --dialog <token>\n");
         },
         .upload => {
             // {origin, files:[{name,size}], kept, navigated, dialog} — 이름도 표시 안전하게(제어·양방향 글자를 뺀다).
@@ -2918,6 +2910,7 @@ fn renderNetworkBlock(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *st
             try w.writeAll("]");
         };
         if (boolField(o.get("dormant"))) try w.writeAll(" [dormant — another site]");
+        if (boolField(o.get("other_pane"))) try w.writeAll(" [set by another pane]");
         try w.writeAll("\n");
     }
     for ([_][]const u8{ "added", "already", "removed" }) |key| if (result.get(key)) |v| if (v == .array and v.array.items.len > 0) {
@@ -3085,6 +3078,8 @@ fn renderEmulate(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
     };
     if (!boolField(result.get("active"))) try w.writeAll(" (off-site — not applied now)");
     if (eq(state, "waiting_renderer")) try w.writeAll(" (the page's renderer is gone — changes apply when the page loads again)");
+    // 2026-11-17 A2: 다른 pane 이 건 흉내 — 바꿀 수 있고, 바꾸면 이 pane 이 주인이 된다.
+    if (boolField(result.get("other_pane"))) try w.writeAll(" (set by another pane — changing it makes it yours)");
     try w.writeAll("\n");
     if (emu.get("viewport")) |v| if (v == .object) {
         const o = v.object;
@@ -3385,6 +3380,7 @@ fn renderNetworkMock(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std
             try w.writeAll("]");
         };
         if (boolField(o.get("dormant"))) try w.writeAll(" [dormant — another site]");
+        if (boolField(o.get("other_pane"))) try w.writeAll(" [set by another pane]");
         try w.writeAll("\n");
     }
     for ([_][]const u8{ "added", "replaced" }) |key| if (intField(result.get(key))) |n| try w.print("{s}: {d}\n", .{ key, n });
@@ -5206,18 +5202,18 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  reload  --surface <id>                     reload the page (Chromium tabs)
         \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
         \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
-        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites)
-        \\  close   --surface <id>                     close a tab this pane opened (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog)
+        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
+        \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
-        \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
+        \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
         \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
         \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a new file under the temp folder only; a binary body needs --out; Chromium tabs)
         \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; the tab title shows ◉ while recording)
-        \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; the tab title shows ⊘)
-        \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; the tab title shows ▣)
-        \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on the user's tabs the emulation applies only on the site the tab shows when you set it and its subdomains — other sites see the real values, and setting it again from another site moves it there; set on a tab that shows no web page (about:blank, a file) it applies on every site until you set it on a site; tabs you opened apply on every site)
-        \\  trace (start [--reload] [--duration 5s] [--no-screenshots] | stop [--out <file.json.gz>] [--json] | status | abort) --surface <id>   record a performance trace of a tab, the user's too (Chromium; 1-30 s, default 5 s; a hidden tab is kept rendering while it records); stop prints a summary, --out also writes the filtered trace (gzip JSON — open it in Chrome DevTools' Performance panel); never overwrites a file. `trace --surface <id> [--duration 5s] [--out f]` does start, wait and stop in one go. (`maru trace` is maru's own terminal trace tool — this is the page's.)
+        \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; the tab title shows ⊘); --remove, --rule, --clear and --strict also change what another pane set — the pane that changes something owns it
+        \\  network-mock --surface <id> (--add <pattern> [--status n] [--type t,..] [--method m,..] [--content-type t] [--header 'Name: value']... [--body <text> | --body-file <f> | --body-base64 <b64>] | --remove <pattern> | --rule <n>... | --clear | --list | --strict on|off)   answer the tab's requests matching a pattern with a response you give, on the site where you add it (pages and scripts too — they run as that site); service workers and shared workers never see mocks, nor does a shared worker's script (other tabs of the site share the worker; --type shared_worker is refused): --strict on makes the tab bypass that site's service worker, not shared workers (Chromium tabs; the tab title shows ▣); --add, --remove, --rule, --clear and --strict also change what another pane set — the pane that changes something owns it
+        \\  emulate --surface <id> ([--viewport WxH[@dpr][,mobile][,touch][,landscape] | --no-viewport] [--user-agent <ua> [--platform p] [--client-hints derive|none|<json>] | --no-user-agent] [--locale <tag> | --no-locale] [--timezone <iana> | --no-timezone] [--geolocation lat,lon[,acc] | --geolocation unavailable | --no-geolocation] [--media print|screen] [--color-scheme light|dark] [--reduced-motion reduce|no-preference] [--forced-colors active|none] [--contrast more|less|no-preference] [--no-media] [--vision <type> | --no-vision] [--cpu <1-20> | --no-cpu] [--network slow-3g|fast-3g|slow-4g|fast-4g|offline | --latency <ms> [--download <kbps>] [--upload <kbps>] | --no-network] [--reload] | --clear | --get)   make the tab look like another device to its pages and servers: screen (scaled to fit the pane), user agent and client hints, language, time zone, location, media features, color vision — only what you pass changes, --no-x clears it (Chromium tabs; cross-site iframes and service workers keep the real values; a location change or clear takes effect from the next page load — use --reload; the tab title shows ◫; --cpu and --network last while the caller runs — the calling agent, `maru browser repl` or `maru mcp`, or, typed directly at a shell prompt, that shell (until it exits or you clear them); on the user's tabs the emulation applies only on the site the tab shows when you set it and its subdomains — other sites see the real values, and setting it again from another site moves it there; set on a tab that shows no web page (about:blank, a file) it applies on every site until you set it on a site; tabs you opened apply on every site; another pane's emulation can be changed or cleared — the pane that changes it owns it)
+        \\  trace (start [--reload] [--duration 5s] [--no-screenshots] | stop [--out <file.json.gz>] [--json] | status | abort) --surface <id>   record a performance trace of a tab, the user's too (Chromium; 1-30 s, default 5 s; a hidden tab is kept rendering while it records); stop prints a summary, --out also writes the filtered trace (gzip JSON — open it in Chrome DevTools' Performance panel); never overwrites a file. `trace --surface <id> [--duration 5s] [--out f]` does start, wait and stop in one go. stop, status and abort work on the tab's trace whoever started it (one result per tab). (`maru trace` is maru's own terminal trace tool — this is the page's.)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -5567,7 +5563,7 @@ test "W9b③ 적대 리뷰 3 회차: 누른 뒤 페이지가 대화상자를 띄
     var buf: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"dialog\":true}}", .ok, &w));
-    try testing.expectEqualStrings("ok\nwarning: the page opened a dialog right after the input — the input reached the page, do not repeat it; see it with maru browser dialog and answer it with maru browser handle-dialog if you may, otherwise the user answers it in that tab\n", w.buffered());
+    try testing.expectEqualStrings("ok\nwarning: the page opened a dialog right after the input — the input reached the page, do not repeat it; see it with maru browser dialog and answer it with maru browser handle-dialog\n", w.buffered());
 }
 
 // ── W9f: repl ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -6018,11 +6014,11 @@ test "render: dialog(W9c②) 은 대화상자마다 종류·탭·번호·원인�
     {
         var w: std.Io.Writer = .fixed(&buf);
         const bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[" ++
-            "{\"token\":7,\"tab\":12,\"kind\":\"prompt\",\"message\":\"line1\\nline2\\u001b[31m\\u202e\",\"origin\":\"https://a.test\",\"default_text\":\"d\",\"cause\":\"agent\",\"may_answer\":true}," ++
+            "{\"token\":7,\"tab\":12,\"kind\":\"prompt\",\"message\":\"line1\\nline2\\u001b[31m\\u202e\",\"origin\":\"https://a.test\",\"default_text\":\"d\",\"cause\":\"agent\"}," ++
             "{\"tab\":13,\"kind\":\"alert\"}]}}";
         try testing.expect(try renderResponse(testing.allocator, bytes, .dialog, &w));
         try testing.expectEqualStrings(
-            "prompt tab=12 token=7 cause=agent may_answer=yes origin=https://a.test\n" ++
+            "prompt tab=12 token=7 cause=agent origin=https://a.test\n" ++
                 "  message: \"line1 ⏎ line2[31m\"\n" ++
                 "  default: \"d\"\n" ++
                 "alert tab=13 (no grant on that tab — not shown)\n" ++
@@ -6031,15 +6027,10 @@ test "render: dialog(W9c②) 은 대화상자마다 종류·탭·번호·원인�
         );
     }
     {
+        // 사람이 띄운 떠나기 확인도 답한다(사용자 결정 2026-11-17 — 원인은 정보로만, 「답해도 되나」 칸은 없다).
         var w: std.Io.Writer = .fixed(&buf);
-        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[{\"token\":3,\"tab\":5,\"kind\":\"before_unload\",\"message\":\"\",\"origin\":\"\",\"cause\":\"user\",\"may_answer\":false}]}}", .dialog, &w));
-        try testing.expectEqualStrings("before_unload tab=5 token=3 cause=user may_answer=no\n  message: \"\"\nthe user answers these in the tab (maru may not)\n", w.buffered());
-    }
-    {
-        // 떠나기 확인 — 답할 수는 있지만 사용자가 그 문서에 입력해 「떠나기」 는 막혔다(W9c② 적대 리뷰 1 회차).
-        var w: std.Io.Writer = .fixed(&buf);
-        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[{\"token\":4,\"tab\":5,\"kind\":\"before_unload\",\"message\":\"\",\"origin\":\"\",\"cause\":\"agent\",\"may_answer\":true,\"may_leave\":false}]}}", .dialog, &w));
-        try testing.expect(std.mem.indexOf(u8, w.buffered(), "may_answer=yes (dismiss only — the user typed on this page)") != null);
+        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[{\"token\":3,\"tab\":5,\"kind\":\"before_unload\",\"message\":\"\",\"origin\":\"\",\"cause\":\"user\"}]}}", .dialog, &w));
+        try testing.expectEqualStrings("before_unload tab=5 token=3 cause=user\n  message: \"\"\nanswer with: maru browser handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] --dialog <token>\n", w.buffered());
     }
 }
 

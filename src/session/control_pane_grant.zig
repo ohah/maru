@@ -270,9 +270,25 @@ pub const PaneGrantStore = struct {
 /// - 자리가 있는데 지금 호스트를 덮지 않으면(설정 `browser.agent-network-full` 을 끈 채 사용자가 탭을 몰아 좁혀진 자리 — `narrowAnyHost`) **지금
 ///   호스트**로 — 예전에 사용자가 모달에서 「허용」 했을 때와 같은 값이다(좁힘의 뜻 — 끈 설정 아래에서는 사이트마다 새 동의 — 을 지킨다). 지금 문서가
 ///   http(s) 가 아니면 넣지 않는다(덮을 호스트가 없다 — 그 요청은 디스패치가 지금처럼 답한다).
-/// 새 자리는 `birth=false`, 이미 있는 자리는 그 표지를 그대로 넘긴다 — 「탭과 함께 생긴 권한」(trace 등 에이전트 탭만의 것)은 `open` 이 따로 넣는다.
+/// 새 자리는 `birth=false`, 이미 있는 자리는 그 표지를 그대로 넘긴다 — 「탭과 함께 생긴 권한」(trace 등 에이전트 탭만의 것)은 `open` 이 따로 넣는다
+/// (철회 뒤 다시 넣는 것은 `fullAccessPlanFor` 의 `agent_tab`).
 /// 차례는 `full_access_scopes`(browser 가 먼저) — 표에 자리가 몇 개만 남았으면 넣는 쪽이 앞에서부터 들어가는 만큼 넣는다.
 pub fn fullAccessPlan(store: *const PaneGrantStore, pane: u64, target: u64, current_host: ?[]const u8, out: *[full_access_scopes.len]PaneGrant) []PaneGrant {
+    return fullAccessPlanFor(store, pane, target, current_host, false, out);
+}
+
+/// 태어날 때 grant 의 scope(에이전트가 `browser.open` 으로 연 탭에 함께 넣는 다섯 — 네트워크·본문·막기·가짜·흉내).
+pub fn birthScope(scope: capmod.ScopeClass) bool {
+    return switch (scope) {
+        .browser_network, .browser_network_body, .browser_network_block, .browser_network_mock, .browser_emulation => true,
+        else => false,
+    };
+}
+
+/// `fullAccessPlan` 에 더해 `agent_tab` — 그 탭이 그 pane 이 연 에이전트 탭이다(사용자 결정 2026-11-17 B: Browser Grants 철회 뒤에도 「에이전트가 연
+/// 탭」 은 남는다). 그러면 빈 자리의 태어날 때 scope 다섯을 태어날 때 grant(어느 호스트든·`birth`)로 넣는다 — 철회로 빠진 것이 다음 요청에서 표지
+/// 그대로 돌아온다(흉내는 다시 탭 전체, trace 는 `left_agent_control` 이 아니다). 이미 있는 자리는 지금처럼 그 표지를 넘긴다.
+pub fn fullAccessPlanFor(store: *const PaneGrantStore, pane: u64, target: u64, current_host: ?[]const u8, agent_tab: bool, out: *[full_access_scopes.len]PaneGrant) []PaneGrant {
     var n: usize = 0;
     for (full_access_scopes) |scope| {
         if (store.authorizes(pane, target, scope, current_host)) continue;
@@ -281,7 +297,7 @@ pub fn fullAccessPlan(store: *const PaneGrantStore, pane: u64, target: u64, curr
             // 태어날 때 grant 는 그 표지를 지닌 채 넓힌다 — 끄면 그 에이전트 탭의 trace 가 영영 `left_agent_control` 이 된다(적대 검증 R3 — 모달 시절엔
             // 사람이 허락할 때만, 이제는 아무 요청에서나 일어난다). `grant` 의 합치기가 `birth and birth` 라 여기서 넘겨야 남는다.
             out[n] = .{ .pane = pane, .target = target, .scope = scope, .host = GrantHost.init(host), .birth = existing.birth };
-        } else out[n] = .{ .pane = pane, .target = target, .scope = scope, .any_host = true };
+        } else out[n] = .{ .pane = pane, .target = target, .scope = scope, .any_host = true, .birth = agent_tab and birthScope(scope) };
         n += 1;
     }
     return out[0..n];
@@ -747,6 +763,28 @@ test "전권(적대 검증 R3): 좁혀진 태어날 때 grant 를 넓혀도 태�
     try testing.expect(store.authorizes(5, 11, .browser_network, "second.test"));
     // 보통 grant 는 그대로 보통이다(계획이 태어날 때 표지를 만들지 않는다).
     try testing.expect(!store.get(5, 11, .browser).?.birth);
+}
+
+test "2026-11-17 B: 에이전트 탭이면 철회로 빠진 태어날 때 scope 다섯을 태어날 때 grant 로 다시 — browser·쿠키는 보통, 이미 있는 보통 자리는 그대로, 다른 탭 플래그 없이는 보통" {
+    var store: PaneGrantStore = .{};
+    var out: [full_access_scopes.len]PaneGrant = undefined;
+    const plan = fullAccessPlanFor(&store, 5, 11, "bank.test", true, &out);
+    try testing.expectEqual(full_access_scopes.len, plan.len);
+    for (plan) |g| {
+        try testing.expect(g.any_host);
+        try testing.expectEqual(birthScope(g.scope), g.birth);
+        try store.grant(g);
+    }
+    try testing.expect(store.get(5, 11, .browser_emulation).?.birth);
+    try testing.expect(!store.get(5, 11, .browser).?.birth and !store.get(5, 11, .browser_storage).?.birth);
+    // 하나만 철회하면 그것만 태어날 때 grant 로 돌아온다.
+    store.revoke(5, 11, .browser_network_mock);
+    const again = fullAccessPlanFor(&store, 5, 11, "bank.test", true, &out);
+    try testing.expectEqual(@as(usize, 1), again.len);
+    try testing.expect(again[0].scope == .browser_network_mock and again[0].birth);
+    // 에이전트 탭이 아니면(다른 pane 의 요청 — 부른 쪽이 거짓을 넘긴다) 보통 grant.
+    for (fullAccessPlanFor(&store, 6, 11, "bank.test", false, &out)) |g| try testing.expect(!g.birth);
+    for (fullAccessPlan(&store, 7, 11, "bank.test", &out)) |g| try testing.expect(!g.birth);
 }
 
 test "전권: 보통 grant 상한은 쌍마다 일곱 — normalRoom 이 계획 전체가 들어갈지 미리 본다, 태어날 때 grant 는 세지 않는다" {

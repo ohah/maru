@@ -1706,7 +1706,10 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
     // W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽 탭으로(사용자 화면을 가로채지 않는다 — 사용자 결정 2026-10-12).
     // 에이전트의 장으로 열린 새 탭만(W9b③ 적대 리뷰 2 회차 — 사람이 에이전트 탭에서 연 새 탭은 사람의 탭이다).
     // 그 셸이 이미 끝났으면 등록하지 않는다 — 셸이 닫힐 때 치우는 표에 끝난 셸의 항목이 남았다(3 회차). 입력은 에이전트의 것이라 뒤쪽으로는 둔다.
-    const recorded = if (request.by_agent) pane.terms.items[opener_index].agent_opener else 0;
+    // 2026-11-17 A3(「에이전트는 사용자와 같은 힘」): 사용자 탭에서 에이전트가 누른 새 탭도 연다 — 연 탭이 에이전트 탭이면 그 주인, 아니면 장을 준
+    // pane(`request.agent_pane`)의 에이전트 탭이 된다(◈·뒤쪽·그 pane 의 상한 — 에이전트 탭에서 연 팝업과 같다).
+    const opener_agent = pane.terms.items[opener_index].agent_opener;
+    const recorded = if (!request.by_agent) 0 else if (opener_agent != 0) opener_agent else request.agent_pane;
     const alive = recorded != 0 and if (self.agent_pane_known_callback) |known| known(recorded) else term_ops.termBySurfaceId(self, recorded) != null;
     const agent_pane = if (alive) recorded else 0;
     // 그 pane 이 에이전트 탭을 더 가질 자리가 없으면 열지 않는다 — 보통 탭으로 열면 상한이 팝업으로 뚫렸다(적대 리뷰 1 회차). 부른 쪽이
@@ -1933,21 +1936,22 @@ pub const AgentCloseStart = enum {
     closed,
     /// 페이지에 물었다 — 창의 tick 이 닫거나(`osrCloseAskedTab`), 페이지가 떠나기 확인으로 묻는다.
     asking,
-    /// 이미 떠나기 확인이 떠 있다 — 사용자가 그 탭에서 정한다.
+    /// 이미 떠나기 확인이 떠 있다 — `browser.handleDialog` 로 답한다(사람도 그 탭에서 답할 수 있다).
     page_asks,
-    /// 그 pane 이 연 탭이 아니다.
-    not_owner,
+    /// 브라우저 탭이 아니다(터미널·파일 HTML 뷰 — 디스패치가 먼저 거르지만 여기서도 닫지 않는다).
+    not_browser,
     /// 그 창의 유일한 탭이다 — 닫으면 창이 닫힌다.
     only_tab,
     not_found,
 };
 
-/// W9b③: 에이전트가 자기가 연 탭을 닫는다 — 페이지에 묻는 닫기(사용자 결정 2026-10-10). 활성 탭 기준이 아니라 그 탭에(`closeAskingPage`
-/// 는 활성 pane·Term 을 본다). 창으로 번지지 않는다 — 창의 유일한 탭이면 닫지 않는다(완료 때 다시 본다 — `osrCloseAskedTab`).
-pub fn agentCloseTab(self: *AppSession, surface_id: u64, opener: u64) AgentCloseStart {
+/// W9b③: 에이전트가 탭을 닫는다 — 페이지에 묻는 닫기(사용자 결정 2026-10-10). 어느 브라우저 탭이든(사용자 결정 2026-11-17 「에이전트는 사용자와
+/// 같은 힘」 — 사람의 탭·다른 pane 이 연 탭도, 사람의 ⌘W 처럼). 활성 탭 기준이 아니라 그 탭에(`closeAskingPage` 는 활성 pane·Term 을 본다).
+/// 창으로 번지지 않는다 — 창의 유일한 탭이면 닫지 않는다(완료 때 다시 본다 — `osrCloseAskedTab`).
+pub fn agentCloseTab(self: *AppSession, surface_id: u64) AgentCloseStart {
     for (self.tabs.items, 0..) |tab, tab_index| for (tab.panes.items) |pane| for (pane.terms.items, 0..) |term, index| {
         if (term.surfaceId() != surface_id) continue;
-        if (opener == 0 or term.agent_opener != opener) return .not_owner;
+        if (!isBrowserTerm(term)) return .not_browser;
         if (self.tabs.items.len == 1 and tab.panes.items.len == 1 and pane.terms.items.len == 1) return .only_tab;
         if (web_osr.closeAskPhase(surface_id) == .asked) return .page_asks;
         if (web_osr.askCloseByAgent(self.allocator, surface_id, @intCast(app_session_mod.monotonicMs()))) return .asking;

@@ -14,8 +14,12 @@ maru browser handle-dialog --surface 12 --dismiss --dialog 3
 maru browser handle-dialog --surface 12 --accept --text "Seoul"
 ```
 
-- `dialog` lists what blocks the tab or its popups, including a file chooser, and whether you may answer each.
-- Answer only dialogs marked as yours to answer. The others are the user's: tell them, and wait.
+- `dialog` lists what blocks the tab or its popups, including a file chooser, and who caused each (`cause=agent`,
+  `user`, `ambiguous` or `unknown`).
+- Current Maru lets you answer any of them, the user's too. Answer a dialog the user caused, or one on a tab the
+  user is using, only when the task needs it, and tell the user. An older Maru marks some `may_answer=no` and
+  refuses them (`the user is answering this dialog`): leave those to the user.
+- A file chooser can only be dismissed (`--dismiss`). To put files into the page, dismiss it and use `upload`.
 - `--dialog <n>` picks one from the `dialog` list when there are several. `--text` fills a `prompt`.
 - After `click`, `type`, `press` or `hover`, `ok` plus a dialog warning means your input landed and the page
   reacted with a dialog. **Do not repeat the input** — answer the dialog, or let the user.
@@ -24,7 +28,8 @@ maru browser handle-dialog --surface 12 --accept --text "Seoul"
 
 `maru browser close --surface 12` prints `not closed: …` (exit 1) when the page asks before leaving. Read the
 question with `dialog`, then accept it with `handle-dialog` only if leaving is what the task wants (unsaved work
-on that page is lost).
+on that page is lost). Current Maru also accepts a leave-page question on a page the user typed on — that
+throws their input away, so do it only when the user asked (an older Maru allows only `--dismiss` there).
 
 ## Uploads
 

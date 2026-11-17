@@ -1,17 +1,20 @@
 //! Chromium 탭의 가짜 응답 규칙을 maru 가 쥐는 자리(W9d④ — docs/plans/web-osr-backend.md 「W9d④ 결정·실측」) — L2 순수.
 //!
-//! 탭 하나에 규칙은 모두 32 개(pane 마다 주인 — 다른 pane 의 규칙은 수만 보인다, 막기 32 와 따로). 규칙은 정규형 패턴·종류·메서드·**사이트**
+//! 탭 하나에 규칙은 모두 32 개(규칙마다 주인 pane, 막기 32 와 따로 — 사용자 결정 2026-11-17 A2: 어느 pane 이든 남의 규칙을 보고(`other_pane`)
+//! 바꾸고 지우고 엄격을 끄거나 옮긴다. 실제로 바꾼 호출의 pane 이 주인 — 같은 응답으로 다시 넣기·같은 사이트 다시 엄격 켬은 주인을 옮기지 않는다
+//! (W9d④ v2 검증 R13 의 뜻: 다시 넣은 pane 의 철회가 먼저 세운 pane 의 것을 지우지 않게). 철회는 그 순간 주인인 것만 거둔다). 규칙은 정규형 패턴·종류·메서드·**사이트**
 //! (추가한 때의 페이지 호스트 — 에이전트 탭, 또는 grant 호스트 — 사용자 탭)·**실행 사이트**(사이트에 묶인 grant 의 호스트 — 문서 가짜는 그
-//! 주소의 출처로 돈다: 그 사이트를 grant 가 덮을 때만, 실측 M25)·사람의 누름 예외(`human_nav_real` — 사용자 탭의 규칙, 사용자 결정 Q2)와 응답
+//! 주소의 출처로 돈다: 그 사이트를 grant 가 덮을 때만, 실측 M25)와 응답
 //! (상태·content_type·Location·허용 목록 머리·본문)을 쥔다. **본문의 원본은 maru 가 쥔다**(탭 4 MiB·앱 32 MiB — 규칙과 함께 지운다) — sidecar 로는
 //! 본문 번호로 따로 보내고(`web_osr_mock_pump`), sidecar 가 다시 뜨거나 브라우저가 새로 만들어지면 새 번호로 다시 보낸다. 바뀔 때마다 세대(`gen`)가
 //! 오르고 web_osr 가 규칙을 하나씩(`net_mock_rule`) 보내고 맺는다(`net_mock_commit`). 수는 sidecar 가 차이로 보내 여기서 누적한다. 주인의 mock·
 //! network·browser grant 중 하나라도 사라지거나 그 호스트가 규칙의 사이트를 더 덮지 않으면 그 규칙·엄격은 버린다(`sync` — 계획 §3·§10).
 //!
 //! 시험이 증명하는 것: add(같은 (패턴·종류·메서드)면 응답을 바꾸고 번호는 그대로 — replaced, 32 개, 탭 4 MiB·앱 32 MiB, 사이트 없는 페이지),
-//! remove(번호·패턴, 남의 규칙 — unknown_rule), clear(제 규칙만 — 엄격은 그대로), 엄격(사이트에 묶임), 초당 10 번, sync 의 버림 표(mock·network·
+//! remove(번호·패턴, 남의 규칙도 — 탭에 없는 번호만 unknown_rule), clear(탭의 모든 규칙 — 엄격은 그대로), 엄격(사이트에 묶임, 누구든), 초당 10 번,
+//! 주인 넘기기(다른 응답으로 바꾸면 부른 pane, 같은 응답이면 그대로), sync 의 버림 표(mock·network·
 //! browser grant·호스트), 본문 바이트 셈(바꾸기·지우기·sync 가 앱 셈을 돌려준다), sidecar 상태·수의 누적, wire 꼴(닫힌 칸을 지난다 — 머리·
-//! Location·본문 번호), 새 번호로 다시 보내기, 결과 JSON(다른 pane 은 수만, 설정 끔이면 서비스 워커 수를 숨긴다, 경고).
+//! Location·본문 번호), 새 번호로 다시 보내기, 결과 JSON(모든 규칙 — 남의 것은 `other_pane`, 설정 끔이면 서비스 워커 수를 숨긴다, 경고).
 
 const std = @import("std");
 const ws = @import("web_sidecar/root.zig");
@@ -37,7 +40,6 @@ pub const Rule = struct {
     site: cpg.GrantHost = .{},
     /// 실행 사이트(빈 = 어느 호스트든 grant — 묻지 않는다).
     exec_site: cpg.GrantHost = .{},
-    human_nav_real: bool = false,
     status: u16 = 200,
     /// 이 규칙이 쥔다(`freeResponse`).
     content_type: []u8 = &.{},
@@ -101,8 +103,6 @@ pub const Call = struct {
     site: []const u8 = "",
     /// 사이트에 묶인 grant 의 호스트(실행 사이트) — 어느 호스트든 grant 면 빈 글.
     exec_site: []const u8 = "",
-    /// 주인의 mock grant 가 탭과 함께 생긴 것이 아니다(사용자 탭 — Q2).
-    human_nav_real: bool = false,
     now_ms: i64 = 0,
 };
 
@@ -207,26 +207,20 @@ pub const Tab = struct {
         return true;
     }
 
-    fn findOwned(self: *Tab, owner: u64, id: u32) ?usize {
-        for (self.rules.items, 0..) |r, i| if (r.owner == owner and r.id == id) return i;
+    fn findId(self: *Tab, id: u32) ?usize {
+        for (self.rules.items, 0..) |r, i| if (r.id == id) return i;
         return null;
     }
 
-    fn existing(self: *const Tab, owner: u64, pat: []const u8, types: u32, methods: u8, site: *const cpg.GrantHost) ?usize {
-        for (self.rules.items, 0..) |*r, i| if (r.owner == owner and r.types == types and r.methods == methods and r.site.eql(site) and std.mem.eql(u8, r.pattern(), pat)) return i;
+    /// 같은 (패턴·종류·메서드·사이트)의 규칙 — 누가 넣었든(2026-11-17 A2: 다시 넣으면 그 규칙의 응답을 바꾼다).
+    fn existing(self: *const Tab, pat: []const u8, types: u32, methods: u8, site: *const cpg.GrantHost) ?usize {
+        for (self.rules.items, 0..) |*r, i| if (r.types == types and r.methods == methods and r.site.eql(site) and std.mem.eql(u8, r.pattern(), pat)) return i;
         return null;
     }
 
     /// 한 번의 바꾸기·보기. 거절이면 `fail` 에 까닭(아무것도 바뀌지 않는다).
     pub fn apply(self: *Tab, gpa: std.mem.Allocator, budget: *Budget, call: Call, fail: *Failure) error{ Rejected, OutOfMemory }!Outcome {
         var out: Outcome = .{};
-        // 엄격 모드도 규칙처럼 켠 pane 의 것이다 — 다른 pane 은 끄지도 가져가지도 못한다(W9d④ v2 검증 R13 SEVERE: 막기의 W9d③ v20b DEF-3 고침이
-        // 가짜로 오지 않아, 다른 pane 이 끄거나 다시 켜 주인이 됐고 그 pane 이 grant 를 잃자 처음 pane 의 엄격이 사라졌다). 주인의 grant 가 사라지면
-        // `sync` 가 거둔다. 거절은 1 초 10 번 자리를 쓰지 않는다(막기의 v20b2 R14 N2 와 같다 — 그래서 `rateOk` 앞).
-        if (call.action == .strict and self.strict_on and self.strict_owner != call.owner) {
-            fail.* = .{ .reason = "other_pane", .message = "strict mode on this tab was turned on by another pane — only that pane can change it" };
-            return error.Rejected;
-        }
         if (call.action != .list and !self.rateOk(call.now_ms)) {
             fail.* = .{ .reason = "resource_busy", .message = "too many mocking changes on this tab — at most 10 a second" };
             return error.Rejected;
@@ -235,8 +229,9 @@ pub const Tab = struct {
             .list => {},
             .add => try self.add(gpa, budget, call, fail, &out),
             .remove => {
-                for (call.rules, 0..) |id, i| if (self.findOwned(call.owner, id) == null) {
-                    fail.* = .{ .reason = "unknown_rule", .message = "no such rule of yours on this tab — list them with maru browser network-mock --list", .index = i };
+                // 남의 규칙도 지운다(2026-11-17 A2 — 지우기는 주인과 무관).
+                for (call.rules, 0..) |id, i| if (self.findId(id) == null) {
+                    fail.* = .{ .reason = "unknown_rule", .message = "no such rule on this tab — list them with maru browser network-mock --list", .index = i };
                     return error.Rejected;
                 };
                 var i: usize = 0;
@@ -244,7 +239,7 @@ pub const Tab = struct {
                     const r = &self.rules.items[i];
                     const by_id = std.mem.indexOfScalar(u32, call.rules, r.id) != null;
                     const by_pattern = call.pattern.len != 0 and std.mem.eql(u8, call.pattern, r.pattern());
-                    if (r.owner == call.owner and (by_id or by_pattern)) {
+                    if (by_id or by_pattern) {
                         out.removed.push(r.id);
                         self.drop(gpa, budget, i);
                         out.changed = true;
@@ -252,13 +247,11 @@ pub const Tab = struct {
                 }
             },
             .clear => {
-                var i: usize = 0;
-                while (i < self.rules.items.len) {
-                    if (self.rules.items[i].owner == call.owner) {
-                        out.removed.push(self.rules.items[i].id);
-                        self.drop(gpa, budget, i);
-                        out.changed = true;
-                    } else i += 1;
+                // 탭의 모든 규칙(누가 넣었든 — 2026-11-17 A2). 엄격은 따로 끈다(그대로).
+                while (self.rules.items.len > 0) {
+                    out.removed.push(self.rules.items[0].id);
+                    self.drop(gpa, budget, 0);
+                    out.changed = true;
                 }
             },
             .strict => {
@@ -269,7 +262,8 @@ pub const Tab = struct {
                         return error.Rejected;
                     }
                     const site: cpg.GrantHost = .init(call.site);
-                    // 여기 오면 엄격이 꺼졌거나 이 pane 이 주인이다(위의 `other_pane`) — 켜기·다른 사이트로 옮기기만.
+                    // 누구든 켜고 옮긴다(2026-11-17 A2 — 옛 `other_pane` 을 걷었다). 켠 pane 이 주인이 되는 것은 실제로 바뀔 때만(꺼졌거나 다른 사이트) —
+                    // 같은 사이트에서 다시 켜면 주인 그대로(W9d④ v2 검증 R13: 다시 켠 pane 의 철회가 처음 pane 의 엄격을 지웠다).
                     if (!self.strict_on or !self.strict_site.eql(&site)) {
                         self.strict_on = true;
                         self.strict_owner = call.owner;
@@ -293,7 +287,7 @@ pub const Tab = struct {
             return error.Rejected;
         }
         const site: cpg.GrantHost = .init(call.site);
-        const prev = self.existing(call.owner, call.pattern, call.types, call.methods, &site);
+        const prev = self.existing(call.pattern, call.types, call.methods, &site);
         if (prev == null and self.rules.items.len >= max_rules) {
             fail.* = .{ .reason = "too_many_rules", .message = "a tab holds at most 32 mock rules (all panes together)" };
             return error.Rejected;
@@ -318,6 +312,18 @@ pub const Tab = struct {
             }
             _ = hb.add(h.name, h.value);
         }
+        // 다른 pane 의 규칙을 같은 응답(실행 사이트까지)으로 다시 넣었다 — 바뀌는 것이 없으니 주인을 옮기지 않는다(2026-11-17 A2 — 다시 넣은 pane 의
+        // 철회가 먼저 세운 pane 의 규칙을 지우지 않게). 번호는 `replaced` 로 싣는다.
+        if (prev) |i| {
+            const old = &self.rules.items[i];
+            if (old.owner != call.owner and old.status == call.response.status and std.mem.eql(u8, old.content_type, call.response.content_type) and
+                std.mem.eql(u8, old.location, location) and std.mem.eql(u8, old.headers, hb.block().bytes) and std.mem.eql(u8, old.body, call.response.body) and
+                std.mem.eql(u8, old.exec_site.slice(), call.exec_site))
+            {
+                out.replaced = old.id;
+                return;
+            }
+        }
         const content_type = try gpa.dupe(u8, call.response.content_type);
         errdefer gpa.free(content_type);
         const loc = try gpa.dupe(u8, location);
@@ -333,7 +339,6 @@ pub const Tab = struct {
             .methods = call.methods,
             .site = site,
             .exec_site = .init(call.exec_site),
-            .human_nav_real = call.human_nav_real,
             .status = call.response.status,
             .content_type = content_type,
             .location = loc,
@@ -467,7 +472,9 @@ pub const Tab = struct {
             .id = r.id,
             .types = r.types,
             .methods = r.methods,
-            .flags = .{ .exec_site_bound = r.exec_site.slice().len != 0, .human_nav_real = r.human_nav_real },
+            // 사람의 누름 예외(`human_nav_real` — 옛 사용자 결정 Q2)는 maru 가 싣지 않는다: 사용자 결정 2026-11-17 A8 — 사용자 탭의 가짜도 사람이
+            // 누른 링크·폼의 주 문서를 바꾼다(에이전트 탭과 같다). sidecar 의 깃발·wire 칸은 남는다(바이트 꼴 — wire 판을 올리지 않는다).
+            .flags = .{ .exec_site_bound = r.exec_site.slice().len != 0, .human_nav_real = false },
             .site = r.site.slice(),
             .exec_site = r.exec_site.slice(),
             .pattern = r.pattern(),
@@ -523,15 +530,16 @@ pub const Tab = struct {
         try s.objectField("rules");
         try s.beginArray();
         for (self.rules.items) |*r| {
-            if (r.owner != owner) {
-                other += 1;
-                continue;
-            }
             try s.beginObject();
             try s.objectField("id");
             try s.write(r.id);
             try s.objectField("pattern");
             try s.write(r.pattern());
+            if (r.owner != owner) {
+                other += 1;
+                try s.objectField("other_pane");
+                try s.write(true);
+            }
             if (r.types != 0) {
                 var names: [24][]const u8 = undefined;
                 try s.objectField("types");
@@ -688,11 +696,11 @@ fn keeps(mock_grants: []const OwnerGrant, net_panes: []const u64, browser_panes:
 
 const testing = std.testing;
 
-fn mkCall(owner: u64, action: Action, opts: struct { pattern: []const u8 = "", types: u32 = 0, methods: u8 = 0, response: Response = .{}, rules: []const u32 = &.{}, on: ?bool = null, site: []const u8 = "a.test", exec_site: []const u8 = "", human: bool = false, now_ms: i64 = 0 }) Call {
-    return .{ .owner = owner, .action = action, .pattern = opts.pattern, .types = opts.types, .methods = opts.methods, .response = opts.response, .rules = opts.rules, .on = opts.on, .site = opts.site, .exec_site = opts.exec_site, .human_nav_real = opts.human, .now_ms = opts.now_ms };
+fn mkCall(owner: u64, action: Action, opts: struct { pattern: []const u8 = "", types: u32 = 0, methods: u8 = 0, response: Response = .{}, rules: []const u32 = &.{}, on: ?bool = null, site: []const u8 = "a.test", exec_site: []const u8 = "", now_ms: i64 = 0 }) Call {
+    return .{ .owner = owner, .action = action, .pattern = opts.pattern, .types = opts.types, .methods = opts.methods, .response = opts.response, .rules = opts.rules, .on = opts.on, .site = opts.site, .exec_site = opts.exec_site, .now_ms = opts.now_ms };
 }
 
-test "W9d④: add — 같은 (패턴·종류·메서드)면 응답을 바꾸고 번호는 그대로(replaced), 다른 pane·메서드는 따로, 32 개, 사이트 없는 페이지는 no_site" {
+test "W9d④·2026-11-17 A2: add — 같은 (패턴·종류·메서드)면 누가 넣었든 응답을 바꾸고 번호는 그대로(replaced — 다른 응답이면 부른 pane 이 주인, 같은 응답이면 그대로), 메서드는 따로, 32 개, 사이트 없는 페이지는 no_site" {
     var t: Tab = .{};
     var b: Budget = .{};
     defer t.deinit(testing.allocator, &b);
@@ -709,8 +717,22 @@ test "W9d④: add — 같은 (패턴·종류·메서드)면 응답을 바꾸고 
     try testing.expect(t.rules.items[0].body_id != first_body); // 새 본문은 새 번호
     try testing.expectEqual(@as(u64, 7), t.rules.items[0].hits);
     try testing.expectEqual(@as(usize, 4), b.app_bytes);
+    // 같은 pane 이 같은 응답으로 다시 넣으면 지금처럼 바꾼다(새 본문 번호 — 주인은 어차피 그대로).
     _ = try t.apply(testing.allocator, &b, mkCall(5, .add, .{ .pattern = "https://a.test/api", .methods = 1, .now_ms = 2 }), &fail);
-    _ = try t.apply(testing.allocator, &b, mkCall(6, .add, .{ .pattern = "https://a.test/api", .now_ms = 3 }), &fail);
+    // 다른 pane 이 같은 응답으로 다시 넣는다 — 바뀌지 않아 주인 그대로(본문 번호도 그대로).
+    const body_before = t.rules.items[0].body_id;
+    const gen_before = t.gen;
+    const same = try t.apply(testing.allocator, &b, mkCall(6, .add, .{ .pattern = "https://a.test/api", .response = .{ .status = 404, .body = "two!" }, .now_ms = 3 }), &fail);
+    try testing.expect(same.replaced.? == 1 and !same.changed and t.rules.items[0].owner == 5 and t.rules.items[0].body_id == body_before and t.gen == gen_before);
+    // 다른 응답이면 바꾸고 그 pane 이 주인.
+    const took = try t.apply(testing.allocator, &b, mkCall(6, .add, .{ .pattern = "https://a.test/api", .response = .{ .status = 200, .body = "six" }, .now_ms = 3 }), &fail);
+    try testing.expect(took.replaced.? == 1 and took.changed and t.rules.items[0].owner == 6);
+    try testing.expectEqual(@as(u64, 7), t.rules.items[0].hits);
+    // 실행 사이트만 달라도 바뀐다(공격 3-4 — 주인은 A 인 채 실행 사이트만 B 의 것이 되지 않게).
+    const exec = try t.apply(testing.allocator, &b, mkCall(5, .add, .{ .pattern = "https://a.test/api", .response = .{ .status = 200, .body = "six" }, .exec_site = "a.test", .now_ms = 3 }), &fail);
+    try testing.expect(exec.changed and t.rules.items[0].owner == 5);
+    try testing.expectEqualStrings("a.test", t.rules.items[0].exec_site.slice());
+    _ = try t.apply(testing.allocator, &b, mkCall(6, .add, .{ .pattern = "https://a.test/other", .now_ms = 3 }), &fail);
     try testing.expectEqual(@as(usize, 3), t.rules.items.len);
     try testing.expectError(error.Rejected, t.apply(testing.allocator, &b, mkCall(5, .add, .{ .pattern = "https://b.test/", .site = "", .now_ms = 4 }), &fail));
     try testing.expectEqualStrings("no_site", fail.reason);
@@ -756,7 +778,7 @@ test "W9d④: 본문 셈 — 탭 4 MiB(tab_bytes_exceeded)·앱 32 MiB(resource_
     try testing.expectEqual(@as(usize, 0), b.app_bytes);
 }
 
-test "W9d④: remove·clear·엄격·초당 10 번 — 남의 규칙은 지우지 못한다(index), 패턴으로, clear 는 제 것만(엄격 그대로), 엄격은 사이트에 묶임" {
+test "W9d④·2026-11-17 A2: remove·clear·엄격·초당 10 번 — 남의 규칙도 지운다(탭에 없는 번호만 unknown_rule — index), 패턴으로, clear 는 탭의 모든 규칙(엄격 그대로), 엄격은 사이트에 묶임" {
     var t: Tab = .{};
     var b: Budget = .{};
     defer t.deinit(testing.allocator, &b);
@@ -766,13 +788,14 @@ test "W9d④: remove·clear·엄격·초당 10 번 — 남의 규칙은 지우�
     _ = try t.apply(testing.allocator, &b, mkCall(6, .add, .{ .pattern = "https://a.test/z", .now_ms = 2 }), &fail);
     _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .now_ms = 3 }), &fail);
     try testing.expect(t.strict_on and t.strict_state == .sent);
-    try testing.expectError(error.Rejected, t.apply(testing.allocator, &b, mkCall(5, .remove, .{ .rules = &.{ 1, 3 }, .now_ms = 4 }), &fail));
+    try testing.expectError(error.Rejected, t.apply(testing.allocator, &b, mkCall(5, .remove, .{ .rules = &.{ 1, 9 }, .now_ms = 4 }), &fail));
     try testing.expectEqualStrings("unknown_rule", fail.reason);
     try testing.expectEqual(@as(?usize, 1), fail.index);
-    const r = try t.apply(testing.allocator, &b, mkCall(5, .remove, .{ .pattern = "https://a.test/y", .now_ms = 5 }), &fail);
+    const r = try t.apply(testing.allocator, &b, mkCall(6, .remove, .{ .pattern = "https://a.test/y", .now_ms = 5 }), &fail);
     try testing.expectEqualSlices(u32, &.{2}, r.removed.slice());
     const c = try t.apply(testing.allocator, &b, mkCall(5, .clear, .{ .now_ms = 6 }), &fail);
-    try testing.expectEqualSlices(u32, &.{1}, c.removed.slice());
+    try testing.expectEqualSlices(u32, &.{ 1, 3 }, c.removed.slice()); // pane 6 의 것도
+    try testing.expectEqual(@as(usize, 0), b.app_bytes);
     try testing.expect(t.strict_on);
     t.onState(.{ .browser = 1, .generation = t.gen, .ok = true, .strict = .on });
     try testing.expect(t.strict_state == .on);
@@ -804,19 +827,19 @@ test "W9d④: sync — 주인의 mock·network·browser grant 중 하나라도 �
     try testing.expect(t.sync(testing.allocator, &b, &.{.{ .pane = 5, .host = "other.test" }}, &.{5}, &.{5})); // 다른 호스트로 다시 허용
 }
 
-test "W9d④: wire 꼴 — 규칙 frame 들과 맺음은 닫힌 칸을 지난다(Location·머리·본문 번호·실행 사이트·사람 표시), 다시 보내면 본문마다 새 번호" {
+test "W9d④: wire 꼴 — 규칙 frame 들과 맺음은 닫힌 칸을 지난다(Location·머리·본문 번호·실행 사이트, 사람의 누름 예외는 늘 거짓 — A8), 다시 보내면 본문마다 새 번호" {
     var t: Tab = .{};
     var b: Budget = .{};
     defer t.deinit(testing.allocator, &b);
     var fail: Failure = undefined;
-    _ = try t.apply(testing.allocator, &b, mkCall(5, .add, .{ .pattern = "https://a.test/r", .types = 1 << 13, .response = .{ .status = 302, .headers = &.{ .{ .name = "Location", .value = "/next" }, .{ .name = "X-Mock", .value = "1" } } }, .exec_site = "a.test", .human = true }), &fail);
+    _ = try t.apply(testing.allocator, &b, mkCall(5, .add, .{ .pattern = "https://a.test/r", .types = 1 << 13, .response = .{ .status = 302, .headers = &.{ .{ .name = "Location", .value = "/next" }, .{ .name = "X-Mock", .value = "1" } } }, .exec_site = "a.test" }), &fail);
     _ = try t.apply(testing.allocator, &b, mkCall(5, .add, .{ .pattern = "https://a.test/doc", .response = .{ .content_type = "text/html; charset=utf-8", .body = "<p>x" }, .now_ms = 1 }), &fail);
     var buf: [ws.wire.max_frame_bytes]u8 = undefined;
     for (0..t.rules.items.len) |i| _ = try ws.codec.encode(.{ .net_mock_rule = t.ruleWire(7, i) }, &buf);
     const w0 = t.ruleWire(7, 0);
     try testing.expectEqualStrings("/next", w0.location);
     try testing.expectEqual(@as(u8, 1), w0.headers.count); // Location 은 제 칸으로
-    try testing.expect(w0.flags.exec_site_bound and w0.flags.human_nav_real);
+    try testing.expect(w0.flags.exec_site_bound and !w0.flags.human_nav_real); // 2026-11-17 A8 — 사람의 누름 예외는 싣지 않는다
     _ = try ws.codec.encode(.{ .net_mock_commit = t.commitWire(7) }, &buf);
     const old = t.rules.items[1].body_id;
     t.rules.items[1].body_queued = true;
@@ -827,7 +850,7 @@ test "W9d④: wire 꼴 — 규칙 frame 들과 맺음은 닫힌 칸을 지난다
     try testing.expect(t.bodyOf(2, old) == null); // 바뀐 번호 — 그때의 본문이 아니다
 }
 
-test "W9d④: 수의 누적과 결과 JSON — 다른 pane 은 수만, 설정 끔이면 서비스 워커 수를 숨긴다, 경고(서비스 워커·잠듦·ACAO 없음·실행 사이트·charset)" {
+test "W9d④: 수의 누적과 결과 JSON — 다른 pane 의 규칙도 보인다(other_pane — 2026-11-17 A2), 설정 끔이면 서비스 워커 수를 숨긴다, 경고(서비스 워커·잠듦·ACAO 없음·실행 사이트·charset)" {
     var t: Tab = .{};
     var b: Budget = .{};
     defer t.deinit(testing.allocator, &b);
@@ -848,8 +871,10 @@ test "W9d④: 수의 누적과 결과 JSON — 다른 pane 은 수만, 설정 �
         const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
         defer p.deinit();
         const o = p.value.object;
-        try testing.expectEqual(@as(usize, 2), o.get("rules").?.array.items.len);
+        try testing.expectEqual(@as(usize, 3), o.get("rules").?.array.items.len);
         try testing.expectEqual(@as(i64, 1), o.get("other_rules").?.integer);
+        try testing.expect(o.get("rules").?.array.items[2].object.get("other_pane").?.bool);
+        try testing.expect(o.get("rules").?.array.items[0].object.get("other_pane") == null);
         try testing.expectEqual(@as(i64, 123), o.get("bytes").?.object.get("app").?.integer);
         try testing.expectEqualStrings("sent", o.get("state").?.string);
         const r0 = o.get("rules").?.array.items[0].object;
@@ -868,24 +893,23 @@ test "W9d④: 수의 누적과 결과 JSON — 다른 pane 은 수만, 설정 �
     try testing.expect(!t.wantsNotice());
 }
 
-test "W9d④ 변이: 패턴으로 지우기는 제 규칙만, 엄격 켬은 사이트가 있어야·다른 pane·사이트로 옮긴다, 바꾸기는 앱 셈이 찬 때도 같은 크기면 된다, 지난 세대의 상태는 버린다, 적용 못 한 세대의 엄격은 failed, clearAll 은 엄격도 끈다" {
+test "W9d④ 변이: 패턴으로 지우기는 누구의 규칙이든(2026-11-17 A2), 엄격 켬은 사이트가 있어야·다른 pane 도 사이트로 옮긴다(주인이 된다), 바꾸기는 앱 셈이 찬 때도 같은 크기면 된다, 지난 세대의 상태는 버린다, 적용 못 한 세대의 엄격은 failed, clearAll 은 엄격도 끈다" {
     var t: Tab = .{};
     var b: Budget = .{};
     defer t.deinit(testing.allocator, &b);
     var fail: Failure = undefined;
     _ = try t.apply(testing.allocator, &b, mkCall(5, .add, .{ .pattern = "https://a.test/x", .response = .{ .body = "ab" } }), &fail);
-    _ = try t.apply(testing.allocator, &b, mkCall(6, .add, .{ .pattern = "https://a.test/x", .now_ms = 1 }), &fail);
+    _ = try t.apply(testing.allocator, &b, mkCall(6, .add, .{ .pattern = "https://a.test/x", .methods = 1, .now_ms = 1 }), &fail);
     const r = try t.apply(testing.allocator, &b, mkCall(5, .remove, .{ .pattern = "https://a.test/x", .now_ms = 2 }), &fail);
-    try testing.expectEqualSlices(u32, &.{1}, r.removed.slice());
-    try testing.expectEqual(@as(usize, 1), t.rules.items.len);
-    try testing.expectEqual(@as(u64, 6), t.rules.items[0].owner); // 다른 pane 의 같은 패턴은 남는다
+    try testing.expectEqualSlices(u32, &.{ 1, 2 }, r.removed.slice()); // 다른 pane 의 같은 패턴도
+    try testing.expectEqual(@as(usize, 0), t.rules.items.len);
     try testing.expectError(error.Rejected, t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .site = "", .now_ms = 3 }), &fail));
     try testing.expectEqualStrings("no_site", fail.reason);
     try testing.expect(!t.strict_on);
     _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .now_ms = 4 }), &fail);
-    // 다른 pane 은 가져가지 못하고(v2 R13 — `other_pane`), 주인은 다른 사이트로 옮긴다.
-    try testing.expectError(error.Rejected, t.apply(testing.allocator, &b, mkCall(6, .strict, .{ .on = true, .site = "b.test", .now_ms = 5 }), &fail));
-    try testing.expectEqualStrings("other_pane", fail.reason);
+    // 다른 pane 이 다른 사이트로 옮기면 그 pane 이 주인(2026-11-17 A2), 주인이 다시 옮겨 돌려받는다.
+    _ = try t.apply(testing.allocator, &b, mkCall(6, .strict, .{ .on = true, .site = "c.test", .now_ms = 5 }), &fail);
+    try testing.expectEqual(@as(u64, 6), t.strict_owner);
     _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .site = "b.test", .now_ms = 5 }), &fail);
     try testing.expectEqual(@as(u64, 5), t.strict_owner);
     try testing.expectEqualStrings("b.test", t.strict_site.slice());
@@ -951,30 +975,16 @@ test "W9d④ main 위로 옮김: 설정이 꺼지면 서비스 워커 수를 지
     try testing.expectEqual(@as(u64, 4), t.rules.items[0].hits);
 }
 
-test "W9d④ v2 R13: 가짜 엄격은 켠 pane 의 것 — 다른 pane 의 끔·켬(다른 사이트로도)은 other_pane(1 초 10 번 자리를 쓰지 않는다), 그 pane 이 grant 를 잃어도 남고, 주인이 잃으면 사라진다, 꺼진 뒤에는 누구든" {
+test "W9d④ v2 R13 → 2026-11-17 A2: 가짜 엄격은 누구든 끄고 옮긴다 — 같은 사이트에서 다시 켠 pane 은 주인이 되지 않아(자리는 쓴다) 그 pane 의 철회가 지우지 않는다, 옮긴 pane 이 주인, 철회는 그 순간의 주인 것만" {
     var t: Tab = .{};
     var b: Budget = .{};
     defer t.deinit(testing.allocator, &b);
     var fail: Failure = undefined;
     _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true }), &fail);
     const g0 = t.gen;
-    var now: i64 = 1;
-    for ([_]Call{
-        mkCall(6, .strict, .{ .on = false }),
-        mkCall(6, .strict, .{ .on = true }),
-        mkCall(6, .strict, .{ .on = true, .site = "b.test" }),
-    }) |c0| {
-        // 1 초 안에 열 번을 넘겨 보낸다 — 거절이 자리를 쓰면 주인의 다음 바꾸기가 resource_busy 가 된다.
-        for (0..4) |_| {
-            var c = c0;
-            c.now_ms = now;
-            try testing.expectError(error.Rejected, t.apply(testing.allocator, &b, c, &fail));
-            try testing.expectEqualStrings("other_pane", fail.reason);
-        }
-        now += 1;
-        try testing.expect(t.strict_on and t.strict_owner == 5 and t.gen == g0);
-        try testing.expectEqualStrings("a.test", t.strict_site.slice());
-    }
+    // pane 6 이 같은 사이트에서 다시 켠다 — 바뀌지 않는다: 주인 5, 세대 그대로.
+    const same = try t.apply(testing.allocator, &b, mkCall(6, .strict, .{ .on = true, .now_ms = 1 }), &fail);
+    try testing.expect(!same.changed and t.strict_owner == 5 and t.gen == g0);
     // pane 6 의 결과는 other_pane, pane 5 는 아니다.
     const j6 = try t.resultJson(testing.allocator, 6, .{}, "a.test", true, 0);
     defer testing.allocator.free(j6);
@@ -982,23 +992,25 @@ test "W9d④ v2 R13: 가짜 엄격은 켠 pane 의 것 — 다른 pane 의 끔·
     const j5 = try t.resultJson(testing.allocator, 5, .{}, "a.test", true, 0);
     defer testing.allocator.free(j5);
     try testing.expect(std.mem.indexOf(u8, j5, "other_pane") == null);
-    // pane 6 이 mock grant 를 잃어도(sync) pane 5 의 엄격은 남는다.
-    const both = [_]OwnerGrant{ .{ .pane = 5, .any_host = true }, .{ .pane = 6, .any_host = true } };
-    try testing.expect(!t.sync(testing.allocator, &b, &both, &.{ 5, 6 }, &.{ 5, 6 }));
+    // pane 6 이 mock grant 를 잃어도(sync) pane 5 의 엄격은 남는다(R13 — 다시 켠 pane 의 철회가 지웠다).
     try testing.expect(!t.sync(testing.allocator, &b, &.{.{ .pane = 5, .any_host = true }}, &.{ 5, 6 }, &.{ 5, 6 }));
     try testing.expect(t.strict_on and t.strict_owner == 5);
-    // 주인은 1 초 안에도 바꿀 수 있다(거절이 자리를 쓰지 않았다) — 다른 사이트로 옮긴다.
-    _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .site = "b.test", .now_ms = now }), &fail);
-    try testing.expect(t.strict_owner == 5);
+    // pane 6 이 다른 사이트로 옮긴다 — 주인 6. pane 5 가 grant 를 잃어도 남는다.
+    _ = try t.apply(testing.allocator, &b, mkCall(6, .strict, .{ .on = true, .site = "b.test", .now_ms = 2 }), &fail);
+    try testing.expect(t.strict_owner == 6);
     try testing.expectEqualStrings("b.test", t.strict_site.slice());
-    // 주인이 grant 를 잃으면 사라지고, 그 뒤에는 pane 6 이 켠다(주인이 된다).
+    try testing.expect(!t.sync(testing.allocator, &b, &.{.{ .pane = 6, .any_host = true }}, &.{ 5, 6 }, &.{ 5, 6 }));
+    try testing.expect(t.strict_on);
+    // pane 5 가 끈다(남의 엄격 — 된다).
+    const off = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = false, .now_ms = 3 }), &fail);
+    try testing.expect(off.changed and !t.strict_on);
+    // 다시 켠 pane 5 가 주인 — 주인이 grant 를 잃으면 사라진다.
+    _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .now_ms = 4 }), &fail);
     try testing.expect(t.sync(testing.allocator, &b, &.{.{ .pane = 6, .any_host = true }}, &.{ 5, 6 }, &.{ 5, 6 }));
     try testing.expect(!t.strict_on);
-    _ = try t.apply(testing.allocator, &b, mkCall(6, .strict, .{ .on = true, .now_ms = now + 1 }), &fail);
-    try testing.expect(t.strict_on and t.strict_owner == 6);
 }
 
-test "W9d④ v1 SEVERE-1: 허락 밖 프레임의 수(frame_not_mocked)는 주인 규칙에 누적되고(설정과 무관 — 이 탭의 요청), 바꾸기가 지키며, 결과에 그 수와 경고 cross_site_frame_not_mocked — 다른 pane 은 보지 않는다" {
+test "W9d④ v1 SEVERE-1: 허락 밖 프레임의 수(frame_not_mocked)는 주인 규칙에 누적되고(설정과 무관 — 이 탭의 요청), 바꾸기가 지키며, 결과에 그 수와 경고 cross_site_frame_not_mocked — 다른 pane 도 본다(2026-11-17 A2 — 모든 규칙이 보인다)" {
     var t: Tab = .{};
     var b: Budget = .{};
     defer t.deinit(testing.allocator, &b);
@@ -1025,5 +1037,5 @@ test "W9d④ v1 SEVERE-1: 허락 밖 프레임의 수(frame_not_mocked)는 주�
     try testing.expect(std.mem.indexOf(u8, names.items, "cross_site_frame_not_mocked") != null);
     const j6 = try t.resultJson(testing.allocator, 6, .{}, "a.test", true, 0);
     defer testing.allocator.free(j6);
-    try testing.expect(std.mem.indexOf(u8, j6, "frame_not_mocked") == null);
+    try testing.expect(std.mem.indexOf(u8, j6, "\"frame_not_mocked\":2") != null and std.mem.indexOf(u8, j6, "\"other_pane\":true") != null);
 }

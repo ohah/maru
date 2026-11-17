@@ -40,6 +40,15 @@ Maru's design, not a bug, and it means:
 - `close` refuses user tabs. Leave them as you found them (see "Leave nothing behind" in SKILL.md).
 - WebKit tabs (`engine=webkit`) and file views support fewer commands; you get `-32008`. Open a tab of your own with `open`.
 
+## Downloads
+
+A file a page downloads is saved to the user's `~/Downloads` (a name already there gets ` (1)`). In current Maru
+that includes files that can run (`.dmg`, `.pkg`, `.command`, `.sh` …) when the download follows your own action
+within about 3 seconds (`click`, `navigate`, `exec` …) or happens in a tab you opened; the user's download list
+shows them. A file that can run and that a user's page starts by itself, with nobody acting, is held for the user
+(an older Maru holds every such file you start). Download only what the task needs, and never open what you
+downloaded unless the user asked for that exact file.
+
 ## Cookies and storage
 
 `get-cookies`, `set-cookie`, `delete-cookie`, `get-local-storage`, `set-local-storage`, `remove-local-storage` and

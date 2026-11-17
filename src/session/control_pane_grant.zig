@@ -271,13 +271,23 @@ pub const PaneGrantStore = struct {
 ///   호스트**로 — 예전에 사용자가 모달에서 「허용」 했을 때와 같은 값이다(좁힘의 뜻 — 끈 설정 아래에서는 사이트마다 새 동의 — 을 지킨다). 지금 문서가
 ///   http(s) 가 아니면 넣지 않는다(덮을 호스트가 없다 — 그 요청은 디스패치가 지금처럼 답한다).
 /// 모두 `birth=false` 다 — 「탭과 함께 생긴 권한」(trace 등 에이전트 탭만의 것)은 `open` 이 따로 넣는다.
+/// 계획 가운데 새 자리를 먹는 것의 수 — 이미 있는 자리의 호스트만 바꾸는 항목(좁혀진 자리 넓히기)은 세지 않는다(적대 검증 R2 — 다 세면 표가
+/// 거의 찼을 때 자리 안의 갱신까지 `grants_full` 로 거절했다). 계획은 태어날 때 표지를 바꾸지 않으므로 보통 자리 수만 늘어난다.
+pub fn fullAccessFreshSlots(store: *const PaneGrantStore, plan: []const PaneGrant) usize {
+    var n: usize = 0;
+    for (plan) |g| n += @intFromBool(!store.hasGrant(g.pane, g.target, g.scope));
+    return n;
+}
+
 pub fn fullAccessPlan(store: *const PaneGrantStore, pane: u64, target: u64, current_host: ?[]const u8, out: *[full_access_scopes.len]PaneGrant) []PaneGrant {
     var n: usize = 0;
     for (full_access_scopes) |scope| {
         if (store.authorizes(pane, target, scope, current_host)) continue;
-        if (store.hasGrant(pane, target, scope)) {
+        if (store.get(pane, target, scope)) |existing| {
             const host = current_host orelse continue;
-            out[n] = .{ .pane = pane, .target = target, .scope = scope, .host = GrantHost.init(host) };
+            // 태어날 때 grant 는 그 표지를 지닌 채 넓힌다 — 끄면 그 에이전트 탭의 trace 가 영영 `left_agent_control` 이 된다(적대 검증 R3 — 모달 시절엔
+            // 사람이 허락할 때만, 이제는 아무 요청에서나 일어난다). `grant` 의 합치기가 `birth and birth` 라 여기서 넘겨야 남는다.
+            out[n] = .{ .pane = pane, .target = target, .scope = scope, .host = GrantHost.init(host), .birth = existing.birth };
         } else out[n] = .{ .pane = pane, .target = target, .scope = scope, .any_host = true };
         n += 1;
     }
@@ -729,6 +739,33 @@ test "전권: 좁혀진 자리(설정을 끈 채 사용자가 몬 탭)는 지금
         try testing.expect(x.scope != .browser_network);
         try testing.expect(x.any_host);
     }
+}
+
+test "전권(적대 검증 R3): 좁혀진 태어날 때 grant 를 넓혀도 태어날 때 표지가 남는다 — 그 에이전트 탭의 trace 가 계속 된다" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network, .any_host = true, .birth = true });
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_body, .any_host = true, .birth = true });
+    try testing.expect(store.narrowAnyHost(11, GrantHost.init("first.test")));
+    var out: [full_access_scopes.len]PaneGrant = undefined;
+    const plan = fullAccessPlan(&store, 5, 11, "second.test", &out);
+    for (plan) |g| try store.grant(g);
+    try testing.expect(store.get(5, 11, .browser_network).?.birth);
+    try testing.expect(store.get(5, 11, .browser_network_body).?.birth);
+    try testing.expect(store.authorizes(5, 11, .browser_network, "second.test"));
+    // 보통 grant 는 그대로 보통이다(계획이 태어날 때 표지를 만들지 않는다).
+    try testing.expect(!store.get(5, 11, .browser).?.birth);
+}
+
+test "전권(적대 검증 R2): 새 자리 수는 없는 scope 만 센다 — 좁혀진 자리의 호스트 바꾸기는 자리를 먹지 않는다" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network, .any_host = true });
+    try testing.expect(store.narrowAnyHost(11, GrantHost.init("first.test")));
+    var out: [full_access_scopes.len]PaneGrant = undefined;
+    const plan = fullAccessPlan(&store, 5, 11, "second.test", &out);
+    try testing.expectEqual(full_access_scopes.len, plan.len);
+    try testing.expectEqual(full_access_scopes.len - 1, fullAccessFreshSlots(&store, plan));
+    for (plan) |g| try store.grant(g);
+    try testing.expectEqual(@as(usize, 0), fullAccessFreshSlots(&store, fullAccessPlan(&store, 5, 11, "second.test", &out)));
 }
 
 test "전권: 보통 grant 상한은 쌍마다 일곱 — normalRoom 이 계획 전체가 들어갈지 미리 본다, 태어날 때 grant 는 세지 않는다" {

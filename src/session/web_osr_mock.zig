@@ -264,7 +264,8 @@ pub const Tab = struct {
                     const site: cpg.GrantHost = .init(call.site);
                     // 누구든 켜고 옮긴다(2026-11-17 A2 — 옛 `other_pane` 을 걷었다). 켠 pane 이 주인이 되는 것은 실제로 바뀔 때만(꺼졌거나 다른 사이트) —
                     // 같은 사이트에서 다시 켜면 주인 그대로(W9d④ v2 검증 R13: 다시 켠 pane 의 철회가 처음 pane 의 엄격을 지웠다).
-                    if (!self.strict_on or !self.strict_site.eql(&site)) {
+                    // 지금 엄격이 그 사이트를 이미 덮으면(하위 도메인) 바뀌지 않는다 — 막기와 같다(2026-11-17 A2 적대 검증 R-B1).
+                    if (!self.strict_on or !policy.hostCovers(self.strict_site.slice(), site.slice())) {
                         self.strict_on = true;
                         self.strict_owner = call.owner;
                         self.strict_site = site;
@@ -1008,6 +1009,19 @@ test "W9d④ v2 R13 → 2026-11-17 A2: 가짜 엄격은 누구든 끄고 옮긴�
     _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .now_ms = 4 }), &fail);
     try testing.expect(t.sync(testing.allocator, &b, &.{.{ .pane = 6, .any_host = true }}, &.{ 5, 6 }, &.{ 5, 6 }));
     try testing.expect(!t.strict_on);
+}
+
+test "2026-11-17 A2 적대 검증 R-B1: 가짜 엄격도 지금 엄격이 덮는 하위 도메인에서 다른 pane 이 다시 켜면 바뀌지 않는다 — 주인·사이트 그대로" {
+    var t: Tab = .{};
+    var b: Budget = .{};
+    defer t.deinit(testing.allocator, &b);
+    var fail: Failure = undefined;
+    _ = try t.apply(testing.allocator, &b, mkCall(5, .strict, .{ .on = true, .site = "a.test" }), &fail);
+    const sub = try t.apply(testing.allocator, &b, mkCall(6, .strict, .{ .on = true, .site = "www.a.test", .now_ms = 1 }), &fail);
+    try testing.expect(!sub.changed and t.strict_owner == 5);
+    try testing.expectEqualStrings("a.test", t.strict_site.slice());
+    try testing.expect(!t.sync(testing.allocator, &b, &.{.{ .pane = 5, .any_host = true }}, &.{5}, &.{5}));
+    try testing.expect(t.strict_on);
 }
 
 test "W9d④ v1 SEVERE-1: 허락 밖 프레임의 수(frame_not_mocked)는 주인 규칙에 누적되고(설정과 무관 — 이 탭의 요청), 바꾸기가 지키며, 결과에 그 수와 경고 cross_site_frame_not_mocked — 다른 pane 도 본다(2026-11-17 A2 — 모든 규칙이 보인다)" {

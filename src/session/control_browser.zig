@@ -3541,10 +3541,12 @@ pub fn browserOpFromRequest(
     // grant 를 쓰지 않는다: 신원 판정을 지난 pane(`pane_selector` — 1g)이면 인가하고, 전권도 close 에는 grant 를 넣지 않는다(`fullAccessTarget`) — 닫지
     // 못한 close(창의 마지막 탭·떠나기 확인 대기)가 그 탭의 일곱 scope 와 네트워크 지켜보기를 켜 두던 곁 효과를 없앤다. cap 만 든 연결은 pane 이
     // 없다 — 균일 unauthorized(앱도 pane 없이는 닫지 않는다).
-    if (bmethod == .close and !authorized) {
-        const pane = pane_selector orelse return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
-        authorized = true;
-        pane_grant = .{ .pane = pane, .target = target_id, .scope = .browser };
+    if (bmethod == .close) {
+        if (pane_selector) |pane| {
+            // cap 으로 이미 인가됐어도 pane 을 싣는다 — 앱은 pane 이 없는 close 를 거절한다(적대 검증 R-A4).
+            authorized = true;
+            if (pane_grant == null) pane_grant = .{ .pane = pane, .target = target_id, .scope = .browser };
+        } else if (!authorized) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
     }
     // W9d②: 본문 기록은 네트워크 기록 위에 선다 — 그 탭의 `browser_network` grant 가 지금 문서를 덮지 않으면 본문 모달을 띄우지 않고 먼저
     // 네트워크 권한을 받으라고 답한다(본문을 허락해도 그 요청을 볼 수 없다). 끄기는 본문 권한이 없으면 모달 없이 거절한다(끌 것이 없다).

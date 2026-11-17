@@ -128,7 +128,7 @@ pub const Request = union(enum) {
     console: struct { surface_id: u64, clear: bool },
     /// `browser open`(W9b③ — Chromium). 대상 탭이 없다 — 부른 pane 의 탭 줄 끝에 뒤쪽 탭으로 연다. 응답 {id, url, loaded}.
     open: struct { url: ?[]const u8, timeout_ms: ?u32 },
-    /// `browser close`(W9b③ — 그 pane 이 연 탭만). 응답 {closed, reason?}.
+    /// `browser close`(W9b③ — 어느 탭이든, 2026-11-17 A1). 응답 {closed, reason?}.
     close: struct { surface_id: u64 },
     /// `browser dialog`(W9c② — Chromium). 그 탭·팝업 가족에 떠 있는 대화상자. 응답 {dialogs:[…]}.
     dialog: struct { surface_id: u64 },

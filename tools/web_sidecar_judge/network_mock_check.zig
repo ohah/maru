@@ -908,8 +908,8 @@ fn tabPath(report: Report, host_path: [:0]const u8, root: []const u8) !void {
 
 // ── 사람·에이전트의 누름(Q2) ────────────────────────────────────────────────────────────────────────────────
 
-/// 사용자 결정 Q2(2026-10-21 「사용자 탭은 진짜로」): 사용자 탭 규칙(`human_nav_real`)은 사람이 누른 링크·폼으로 시작한 이동의 주 문서에 듣지
-/// 않는다. 에이전트의 DevTools 누름(사람 입력 없이)에는 듣는다. 에이전트 탭 규칙(UD2)은 둘 다 듣는다. 하위 자원은 사람 이동 뒤에도 가짜.
+/// sidecar 의 깃발 `human_nav_real`(옛 사용자 결정 Q2 2026-10-21 「사용자 탭은 진짜로」 — maru 는 2026-11-17 A8 부터 싣지 않는다, 이 판정은 sidecar
+/// 능력을 본다): 그 깃발의 규칙은 사람이 누른 링크·폼으로 시작한 이동의 주 문서에 듣지 않는다. 에이전트의 DevTools 누름(사람 입력 없이)에는 듣는다. 에이전트 탭 규칙(UD2)은 둘 다 듣는다. 하위 자원은 사람 이동 뒤에도 가짜.
 fn humanClicks(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     var host = try spawn(host_path, root, "mkq2", &.{env_log});
     defer stop(&host);

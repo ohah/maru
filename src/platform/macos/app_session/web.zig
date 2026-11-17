@@ -1709,7 +1709,9 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
     // 2026-11-17 A3(「에이전트는 사용자와 같은 힘」): 사용자 탭에서 에이전트가 누른 새 탭도 연다 — 연 탭이 에이전트 탭이면 그 주인, 아니면 장을 준
     // pane(`request.agent_pane`)의 에이전트 탭이 된다(◈·뒤쪽·그 pane 의 상한 — 에이전트 탭에서 연 팝업과 같다).
     const opener_agent = pane.terms.items[opener_index].agent_opener;
-    const recorded = if (!request.by_agent) 0 else if (opener_agent != 0) opener_agent else request.agent_pane;
+    // 장을 준 쪽(`grantAgentNewTabCredit`)이 이미 「표의 주인, 아니면 누른 pane」 을 정했다 — 그것을 먼저 쓴다(옛 장·주인이 닫힌 탭의 `agent_opener`
+    // 보다 — 적대 검증 R-A2).
+    const recorded = if (!request.by_agent) 0 else if (request.agent_pane != 0) request.agent_pane else opener_agent;
     const alive = recorded != 0 and if (self.agent_pane_known_callback) |known| known(recorded) else term_ops.termBySurfaceId(self, recorded) != null;
     const agent_pane = if (alive) recorded else 0;
     // 그 pane 이 에이전트 탭을 더 가질 자리가 없으면 열지 않는다 — 보통 탭으로 열면 상한이 팝업으로 뚫렸다(적대 리뷰 1 회차). 부른 쪽이
@@ -1940,6 +1942,8 @@ pub const AgentCloseStart = enum {
     page_asks,
     /// 브라우저 탭이 아니다(터미널·파일 HTML 뷰 — 디스패치가 먼저 거르지만 여기서도 닫지 않는다).
     not_browser,
+    /// 닫기 확인 모달이 떠 있거나 그 pane 에서 탭을 끄는 중이다 — 곧 닫으면 사람이 고른 닫기의 자리가 밀린다(다시 하면 된다).
+    busy,
     /// 그 창의 유일한 탭이다 — 닫으면 창이 닫힌다.
     only_tab,
     not_found,
@@ -1955,6 +1959,13 @@ pub fn agentCloseTab(self: *AppSession, surface_id: u64) AgentCloseStart {
         if (self.tabs.items.len == 1 and tab.panes.items.len == 1 and pane.terms.items.len == 1) return .only_tab;
         if (web_osr.closeAskPhase(surface_id) == .asked) return .page_asks;
         if (web_osr.askCloseByAgent(self.allocator, surface_id, @intCast(app_session_mod.monotonicMs()))) return .asking;
+        // 물을 페이지가 없어 곧 닫는다 — 물은 닫기의 끝(`osrCloseAskedTab`)과 같은 문지기(2026-11-17 A1 적대 검증 R-A1: 이제 보이지 않은 사람 탭도 이
+        // 길로 와, 사람이 고른 닫기 확인 모달이 쥔 자리를 밀었다).
+        switch (self.pending_confirm) {
+            .close => |target| if (target != .window) return .busy,
+            else => {},
+        }
+        if (tab_ops.tabDragTransaction(self, pane) != null) return .busy;
         term_ops.closeTermAt(self, tab_index, pane, index);
         self.workspaceChanged(.topology);
         self.metal_dirty = true;

@@ -2,9 +2,10 @@
 
 ## Who may send requests
 
-Maru accepts browser requests only from the foreground job of a Maru pane — your agent, started in that pane's
-shell. It refuses them from another terminal app, from tmux, screen or an editor's terminal inside the pane, and
-from a background `&` job while another job holds the terminal. A refusal is `-32002`; see [errors.md](errors.md).
+Maru accepts browser requests only from a Maru pane: its foreground job (your agent, started in that pane's shell)
+and that job's children, or tmux inside the pane. It refuses them from another terminal app, from screen, ssh or an
+editor's terminal inside the pane, and from a background `&` job while another job holds the terminal. A refusal
+is `-32002`; see [errors.md](errors.md). (An older Maru also refuses tmux inside the pane.)
 
 `maru browser list` works from anywhere (it only lists), so its success does not prove you are in a pane.
 The first `open` does.
@@ -14,18 +15,14 @@ The first `open` does.
 - `maru browser open --url https://example.com` opens a hidden tab behind the user's current tab in your pane and
   prints `opened <id> <url>`. The user's view and focus stay where they are. It waits for the first
   load (at most 25 s, `--timeout` to change).
-- The first `open` in a pane shows the user one dialog: the tabs you open would use their logged-in sites. The call waits
-  for the answer (2 minutes at most). If they allow it, your pane opens tabs without asking again until the pane
-  closes or the app restarts. If they decline, `open` fails with `agent_tabs_declined` and Maru does not ask again
-  while your pane is open — tell the user instead of retrying. The user can undo either answer in Maru's
-  Browser Grants menu. Agent tabs show ◈ in the tab bar.
-- Your pane owns it: commands work there without a dialog, on any site it goes to — except the cookie commands
-  and `clear-storage` (they ask once per site, on tabs you opened too) and `upload` (asks every time). Give those the
-  3-minute shell timeout.
+- Current Maru opens it without asking the user (an older build asks once per pane; if the user declines there,
+  `open` fails with `agent_tabs_declined` — tell the user instead of retrying). Agent tabs show ◈ in the tab bar.
+- Your pane owns it: every command works there, on any site it goes to. Give long calls (`trace`, a large `upload`)
+  a shell timeout of at least 3 minutes.
 - A pane holds at most 8 agent tabs, about 157 MB each. A ninth `open` fails until you `close` one.
   Pages you open with real clicks in a tab you opened (`target=_blank`, `window.open`) also become agent tabs and count.
 - Agent tabs are not remembered across an app restart, and become the user's tabs when your pane closes.
-  After that they are user tabs: controlling them asks again.
+  After that they are user tabs.
 
 **They use the user's real browser profile** — the same cookies and logins as the user's own tabs. This is
 Maru's design, not a bug, and it means:
@@ -37,10 +34,9 @@ Maru's design, not a bug, and it means:
 ## The user's tabs
 
 - `maru browser list` shows every tab: id, address, title, engine. Most of them are the user's.
-- The first command on a user's tab shows a confirmation dialog. If the user allows it, your pane controls that
-  tab while it lives — whichever site it moves to. The call waits for the answer (about 150 s at most), so give
-  it a shell timeout of at least 3 minutes.
-- Network, emulation and cookie commands ask again, once per site.
+- Current Maru does not ask the user before your commands on their tabs: your pane gets every command there, on any
+  site the tab moves to. Touch one only when the task is about that tab (SKILL.md section 5). An older Maru asks
+  first — give that call a shell timeout of at least 3 minutes.
 - `close` refuses user tabs. Leave them as you found them (see "Leave nothing behind" in SKILL.md).
 - WebKit tabs (`engine=webkit`) and file views support fewer commands; you get `-32008`. Open a tab of your own with `open`.
 
@@ -49,7 +45,6 @@ Maru's design, not a bug, and it means:
 `get-cookies`, `set-cookie`, `delete-cookie`, `get-local-storage`, `set-local-storage`, `remove-local-storage` and
 `clear-storage` act on the tab's current site.
 
-- The cookie commands and `clear-storage` ask once per site, on any tab.
 - They touch the user's real cookies for that site. `clear-storage` logs the user out of that site
   in every tab. Use these only when the task needs them, and never copy cookie or token values into your answer.
 

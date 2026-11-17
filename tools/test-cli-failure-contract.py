@@ -606,7 +606,7 @@ def check_scripted_endpoint(cli, root, env, control, run, record):
     p = run(['browser', 'network-record', '--surface', '1', '--on'], 1)
     assert reasoned in p.stdout and 'hint:' not in p.stdout + p.stderr, (p.returncode, p.stdout, p.stderr)
     p = run(['browser', 'get-url', '--surface', '1'], 1)
-    assert 'error: Unauthorized (-32002)' in p.stdout and hint in p.stdout and 'permission' in p.stdout, (p.returncode, p.stdout, p.stderr)
+    assert 'error: Unauthorized (-32002)' in p.stdout and hint in p.stdout and 'tmux inside the pane' in p.stdout and 'permission' not in p.stdout, (p.returncode, p.stdout, p.stderr)
     lines = [json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-06-18'}}),
              json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'browser_network_record', 'arguments': {'surface': 1, 'on': True}}}),
              json.dumps({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {'name': 'browser_get_url', 'arguments': {'surface': 1}}})]

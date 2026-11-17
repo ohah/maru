@@ -23,20 +23,21 @@ and exits 1. A parse error and "no instance" both exit 1 too — always read the
 
 | You see | Meaning | Do |
 |---|---|---|
-| `error: Unauthorized (-32002)` with `hint: maru does not say why it refused …` | The request did not come from the Maru pane's foreground job (another terminal, tmux or screen inside the pane, a background `&` job), **or** the tab lacks a permission the command needs (the user declined the dialog, or a command that never asks — `network-block` or `network-mock` with `--list`, `--remove` or `--clear`, `emulate` with `--get` or `--clear`, `network-record` with `--off` — before you held that permission), **or** the id is closed or unknown. Maru does not say which, on purpose. | Do not repeat. Run `maru browser list` to check the id. If you are inside tmux/screen, say so. If it was one of the commands that never ask, there is nothing of yours to list or clear there. Otherwise ask the user. |
+| `error: Unauthorized (-32002)` with `hint: maru does not say why it refused …` | The request did not come from a Maru pane (another terminal, screen or ssh inside the pane, a background `&` job, a program outside Maru), **or** the id is closed or unknown. An older Maru also refuses tmux inside the pane and tabs the user declined. Maru does not say which, on purpose. | Do not repeat. Run `maru browser list` to check the id. If you are outside a Maru pane, say so. Otherwise ask the user. |
 | `-32002` with a hint that only tabs this pane opened can be closed | `close` on a tab you did not open | Leave the user's tab open. |
-| `-32002` saying the tab needs its network permission first | `network-record`, `network-block` or `network-mock` before `network` was allowed on that tab (an older maru also prints the foreground hint under it — ignore that there) | Run `network` on that tab first. |
-| `-32002` saying a permission is gone, or that something works only on tabs the agent opened | The user took the permission back, or the command needs a tab you opened | Do not retry in a loop. Ask the user, or `open` a tab of your own. |
-| `error: the user declined the upload — nothing was uploaded (-32002)` | The user said no | Do not retry. Ask what they want. |
-| `error: the user declined browser tabs for this pane … (-32002)` from `open` | The user said no to tabs that use their logged-in sites; Maru does not ask again while your pane is open (the user can undo it in the Browser Grants menu) | Do not retry. Tell the user what you needed the browser for. |
-| `error: maru closed the connection without answering …` | No answer to a dialog in time (about 2 minutes), too many connections, or Maru quit | Ask the user whether a dialog showed up. Retry at most once. |
+| `-32002` saying the tab needs its network permission first | An older Maru: `network-record`, `network-block` or `network-mock` before `network` was allowed on that tab (it may also print the foreground hint under it — ignore that there) | Run `network` on that tab first. |
+| `-32002` saying a permission is gone, or that something works only on tabs the agent opened | The user revoked the tab in the Browser Grants menu (what you set there is gone), or the command needs a tab you opened | Do not retry in a loop. Ask the user, or `open` a tab of your own. |
+| `(-32603)` with `grants_full` | Maru keeps access for at most 64 pane-and-tab pairs | Close tabs you no longer need, then retry once. |
+| `error: the user declined the upload — nothing was uploaded (-32002)` | An older Maru: the user said no | Do not retry. Ask what they want. |
+| `error: the user declined browser tabs for this pane … (-32002)` from `open` | An older Maru: the user said no to tabs that use their logged-in sites | Do not retry. Tell the user what you needed the browser for. |
+| `error: maru closed the connection without answering …` | Too many connections, Maru quit, or (an older Maru) no answer to a dialog in time | Ask the user whether Maru is still running. Retry at most once. |
 
 ## While running
 
 | You see | Meaning | Do |
 |---|---|---|
 | `(-32003)` | The tab went away after you were allowed | Run `maru browser list` again. |
-| `(-32004)` from `open` saying the user did not answer | The first-open dialog got no answer in 2 minutes; nothing was opened | Tell the user, then run `open` once more when they are there. |
+| `(-32004)` from `open` saying the user did not answer | An older Maru: the first-open dialog got no answer; nothing was opened | Tell the user, then run `open` once more when they are there. |
 | `(-32004)` from `wait`, maybe with `hint: N matching element(s) are hidden` | The condition did not come true in time (at most 25 s) | Take a snapshot, then fix the condition or the locator. |
 | `(-32004)` from `click`, `type`, `press`, `hover` or `exec` | The page did not answer in time — the input or script **may already have run** | Do not repeat it. Take a snapshot and check what happened first. |
 | `(-32005)` | An `exec` result is over the limit | Return less, or use `--out` or `--max-result-bytes`. |

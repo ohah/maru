@@ -847,7 +847,8 @@ fn tabPath(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         try r.host.send(.{ .net_block = .{ .browser = 1, .generation = 2 } });
         r.pump(200);
     }
-    // D2 — 가짜만 있는 탭(막기 규칙 없음)에서 사용자가 친 주소·사용자 새로고침의 주 문서는 진짜, 그 페이지의 하위 자원은 가짜, 에이전트 이동은 가짜.
+    // 사용자 결정 2026-11-18 「그것까지 넓히기」: 사용자가 친 주소·사용자 새로고침의 주 문서도 가짜(옛 D2 예외 — 막기에만 남는다), 그 페이지의 하위
+    // 자원도 가짜, 에이전트 이동도 가짜.
     {
         try r.nav(1, uLoop(&u, "/m/maindoc"), true);
         var o2: [200]u8 = undefined;
@@ -860,7 +861,7 @@ fn tabPath(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         try r.action(1, .reload, false);
         var o5: [200]u8 = undefined;
         const agent = r.ev(1, "document.title", &o5);
-        report(std.mem.eql(u8, typed, "REAL") and starts(sub, "ok 200 application/json {\"mock\"") and std.mem.eql(u8, reload, "REAL") and std.mem.eql(u8, agent, "MOCKED-DOC"), "mock-user-nav-exempt", std.fmt.bufPrint(&d, "주소창 {s} · 하위 자원 {s} · 사용자 새로고침 {s} · 에이전트 새로고침 {s}(막기 규칙 없는 탭 — §13 P2-1)", .{ typed, sub, reload, agent }) catch "");
+        report(std.mem.eql(u8, typed, "MOCKED-DOC") and starts(sub, "ok 200 application/json {\"mock\"") and std.mem.eql(u8, reload, "MOCKED-DOC") and std.mem.eql(u8, agent, "MOCKED-DOC"), "mock-user-nav-mocked", std.fmt.bufPrint(&d, "주소창 {s} · 하위 자원 {s} · 사용자 새로고침 {s} · 에이전트 새로고침 {s}(2026-11-18 — 사용자 이동도 가짜)", .{ typed, sub, reload, agent }) catch "");
     }
     // 문이 떨어뜨린 요청도 가짜(기록 없이) — 쿠키 필터도. 100 개씩 여덟 번(한꺼번에 800 개면 탭의 처리기 자리 128 을 넘어 나머지는 설계대로 -12 다 —
     // 그것은 `mock-pool-busy` 가 본다).
@@ -1518,22 +1519,24 @@ fn fix4D2(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     try r.watch(1);
     const specs = [_]Spec{.{ .id = 1, .pattern = pat(&pb, "127.0.0.1", "/m/x4d2*"), .exec_site = "127.0.0.1", .human = true, .content_type = html, .body = "<!doctype html><title>MOCK-D2</title>m" }};
     const ok = try r.mock(1, &specs, "", true);
-    // 친 주소 + 곧 에이전트 eval — 셋 다 진짜(전에는 0/5).
-    var real: u32 = 0;
+    // 사용자 결정 2026-11-18 「그것까지 넓히기」: 친 주소·사용자 새로 고침의 주 문서도 가짜다(옛 D2 — 막기에만 남는다). 친 주소 + 곧 에이전트 eval —
+    // 셋 다 가짜(서버에 닿지 않는다).
+    var mocked: u32 = 0;
+    const srv_b = seen("/m/x4d2doc?b");
     for (0..3) |i| {
         try r.nav(1, uLoop(&u, "/p/sub?d2b"), false);
-        if (contains(try typedThenEval(&r, 1, uLoop(&u, std.fmt.bufPrint(&qb, "/m/x4d2doc?b{d}", .{i}) catch ""), 0, "1", &o), "REAL|")) real += 1;
+        if (contains(try typedThenEval(&r, 1, uLoop(&u, std.fmt.bufPrint(&qb, "/m/x4d2doc?b{d}", .{i}) catch ""), 0, "1", &o), "MOCK-D2")) mocked += 1;
     }
-    report(ok and real == 3, "mock-d2-typed+agent-eval", std.fmt.bufPrint(&d, "진짜 {d}/3", .{real}) catch "");
+    report(ok and mocked == 3 and seen("/m/x4d2doc?b") == srv_b, "mock-typed+agent-eval-mocked", std.fmt.bufPrint(&d, "가짜 {d}/3 · 서버 {d}", .{ mocked, seen("/m/x4d2doc?b") - srv_b }) catch "");
     // 떠나기 처리기(400 ms)가 도는 옛 문서 — 친 주소 + 100 ms 뒤 eval.
-    real = 0;
+    mocked = 0;
     for (0..2) |i| {
         try r.nav(1, uLoop(&u, "/x4/bu"), false);
-        if (contains(try typedThenEval(&r, 1, uLoop(&u, std.fmt.bufPrint(&qb, "/m/x4d2doc?c{d}", .{i}) catch ""), 100, "1", &o), "REAL|")) real += 1;
+        if (contains(try typedThenEval(&r, 1, uLoop(&u, std.fmt.bufPrint(&qb, "/m/x4d2doc?c{d}", .{i}) catch ""), 100, "1", &o), "MOCK-D2")) mocked += 1;
     }
-    report(real == 2, "mock-d2-typed+beforeunload+agent-eval", std.fmt.bufPrint(&d, "진짜 {d}/2", .{real}) catch "");
+    report(mocked == 2, "mock-typed+beforeunload+agent-eval-mocked", std.fmt.bufPrint(&d, "가짜 {d}/2", .{mocked}) catch "");
     // 사용자 새로 고침 + 곧 eval.
-    real = 0;
+    mocked = 0;
     try r.nav(1, uLoop(&u, "/m/x4d2doc?r"), true);
     for (0..3) |_| {
         const before = r.loads[1];
@@ -1541,39 +1544,25 @@ fn fix4D2(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         _ = r.call(1, "Runtime.evaluate", "{\"expression\":\"1\"}", 3000) catch null;
         _ = r.until(Run.loadsAt, 1, before + 1, wait_ms);
         r.pump(300);
-        if (contains(d2Doc(&r, 1, &o), "REAL|")) real += 1;
+        if (contains(d2Doc(&r, 1, &o), "MOCK-D2")) mocked += 1;
     }
-    report(real == 3, "mock-d2-reload+agent-eval", std.fmt.bufPrint(&d, "진짜 {d}/3", .{real}) catch "");
-    // 친 주소와 같은 주소로 곧 에이전트가 몬다 — (1) wire navigate(브라우저가 시작한 이동이라 사용자 이동을 대신한다): 그 사이 문서도 진짜(fail-safe
-    // 결정); (2) 옛 문서의 eval `location.href`(페이지 스크립트의 이동 — Chromium 은 사용자가 시작한 이동을 끊지 못하게 그 문서가 선 뒤로 미룬다, 실측):
-    // 사용자의 문서는 진짜로 서고(서버가 받고 가짜 표시 없음), 그 뒤 에이전트의 이동은 에이전트의 것(규칙대로 — 관찰).
+    report(mocked == 3, "mock-reload+agent-eval-mocked", std.fmt.bufPrint(&d, "가짜 {d}/3", .{mocked}) catch "");
+    // 친 주소와 같은 주소로 곧 에이전트가 몬다(옛 D2 의 다툼 — 이제 둘 다 가짜): wire navigate 와 eval 의 `location.href` 둘 다 가짜이고 서버에 닿지
+    // 않는다.
     {
         try r.nav(1, uLoop(&u, "/p/sub?d2f"), false);
         const before = r.loads[1];
         const target2 = uLoop(&ub, "/m/x4d2slowdoc?f");
+        const srv_f = seen("/m/x4d2slowdoc?f");
         try r.host.send(.{ .navigate = .{ .browser = 1, .url = target2, .user = true } });
         try r.host.send(.{ .navigate = .{ .browser = 1, .url = target2, .user = false } });
         _ = r.until(Run.loadsAt, 1, before + 1, wait_ms);
         r.pump(400);
         var o5: [200]u8 = undefined;
         const v2 = d2Doc(&r, 1, &o5);
-        report(contains(v2, "REAL|"), "mock-d2-same-url-agent-nav-real", std.fmt.bufPrint(&d, "친 주소 바로 뒤 같은 주소의 wire navigate(에이전트) — {s}", .{v2}) catch "");
-        try r.nav(1, uLoop(&u, "/p/sub?d2e"), false);
-        const target = uLoop(&ub, "/m/x4d2slowdoc?e"); // 느린 진짜(800 ms) — eval 이 옛 문서에서 돈다
-        var eb: [300]u8 = undefined;
-        const srv_e = seen("/m/x4d2slowdoc?e");
-        _ = try typedThenEval(&r, 1, target, 0, std.fmt.bufPrint(&eb, "location.href='{s}';location.pathname", .{target}) catch "1", &o);
-        r.pump(1500);
-        const v1b = d2Doc(&r, 1, &o);
-        // 사용자의 그 요청 — 끝났고 가짜가 아니다.
-        var user_real: u32 = 0;
-        var agent_mocked: u32 = 0;
-        for (r.reqs.items) |e| if (e.browser == 1 and e.ended and contains(e.url[0..e.url_len], "/m/x4d2slowdoc?e")) {
-            if (e.flags.mocked) agent_mocked += 1 else if (e.error_code == 0) user_real += 1;
-        };
-        report(seen("/m/x4d2slowdoc?e") - srv_e == 1 and user_real == 1, "mock-d2-typed+agent-eval-same-url-user-real", std.fmt.bufPrint(&d, "사용자 이동은 진짜로 섰다(서버 {d} · 진짜 끝 {d}) · 그 뒤 eval 의 같은 주소 이동(관찰): 가짜 끝 {d}, 지금 {s}", .{ seen("/m/x4d2slowdoc?e") - srv_e, user_real, agent_mocked, v1b }) catch "");
+        report(contains(v2, "MOCK-D2") and seen("/m/x4d2slowdoc?f") == srv_f, "mock-same-url-user-and-agent-nav-mocked", std.fmt.bufPrint(&d, "친 주소 바로 뒤 같은 주소의 wire navigate(에이전트) — {s} · 서버 {d}", .{ v2, seen("/m/x4d2slowdoc?f") - srv_f }) catch "");
     }
-    // 대조: 에이전트만의 이동·새 문서가 선 뒤의 에이전트 이동은 그대로 가짜.
+    // 에이전트만의 이동·사용자 문서가 선 뒤의 에이전트 이동·eval 의 location 도 그대로 가짜.
     {
         try r.nav(1, uLoop(&u, "/m/x4d2doc?g"), false);
         const agent_only = contains(d2Doc(&r, 1, &o), "MOCK-D2");
@@ -1587,7 +1576,7 @@ fn fix4D2(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         _ = r.until(Run.loadsAt, 1, r.loads[1] + 1, wait_ms);
         r.pump(300);
         const eval_nav = contains(d2Doc(&r, 1, &o), "MOCK-D2");
-        report(agent_only and after_settle and eval_nav, "mock-d2-agent-nav-still-mocked", std.fmt.bufPrint(&d, "대조: 에이전트 이동 {} · 사용자 문서가 선 뒤 같은 주소 {} · 토큰 없을 때 eval 의 location {}", .{ agent_only, after_settle, eval_nav }) catch "");
+        report(agent_only and after_settle and eval_nav, "mock-agent-nav-mocked", std.fmt.bufPrint(&d, "에이전트 이동 {} · 사용자 문서가 선 뒤 같은 주소 {} · eval 의 location {}", .{ agent_only, after_settle, eval_nav }) catch "");
     }
     // 막기(W9d③ 의 같은 경주 — 같은 표): 가짜 규칙을 지우고 막기 규칙.
     {

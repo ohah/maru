@@ -52,7 +52,7 @@ maru browser network-mock --surface 12 --add "https://api.example.com/v1/user" -
 - A site's service worker can answer requests before your rules see them; `--strict on` makes the tab bypass
   that site's service worker (not shared workers).
 - Service and shared workers never see mocks. Mocked pages and scripts run as that site.
-- Mocks also answer pages the user opens with a link or form on a user's tab (an older Maru leaves those real);
-  pages the user types or reaches with back, forward or reload stay real.
+- Mocks also answer pages the user opens in any way — a link, a form, a typed address, back, forward or reload (an
+  older Maru leaves those real). Blocking rules still let the user's typed, back, forward and reload pages through.
 - The tab title shows ⊘ while blocking and ▣ while mocking. **Remove your rules when done** — `--rule <n>` for
   yours, or `--clear` when no other pane uses the tab.

@@ -12,14 +12,14 @@
 //!   (`offset + len` — 모르는 덩어리의 조각도)를 조각마다 확인한다(maru 의 창 — 버린 조각도 창에서 빠져야 한다). 계획은 64 KiB 마다였지만 그러면
 //!   maru 가 보내다 그만둔 본문(규칙을 지움)의 마지막 64 KiB 미만이 영영 확인되지 않아 창이 줄어든다 — 조각마다면 새는 곳이 없다(frame 22 바이트).
 //! - **맞추기**(`decideTab` — 막기 다음, 막기가 이긴다): 종류·패턴·사이트(주 프레임 홉은 그 홉의 호스트, 하위 자원은 페이지 호스트 — 모르면
-//!   맞추지 않고 센다)·실행 출처(문서 종류는 묶인 사이트가 그 주소를 덮어야 — §5-2)·D2 예외(주 프레임)·사람의 누름(Q2 — 사용자 탭의 규칙만)·
+//!   맞추지 않고 센다)·실행 출처(문서 종류는 묶인 사이트가 그 주소를 덮어야 — §5-2)·사람의 누름(Q2 — 그 깃발의 규칙만; 사용자 이동 D2 는 가짜에 예외가 아니다 — 2026-11-18)·
 //!   메서드(패턴이 맞은 뒤에만 읽는다). 추가한 차례의 첫 규칙.
 //! - **처리기 풀**(M17 — CEF 는 처리기가 null 이면 진짜 네트워크로 보낸다): 앱 512·탭 128. 고르기 때 자리를 잡고(처리기가 놓일 때 돌려준다) 넘치면
 //!   `busy` 를 세고 부른 쪽이 `-12` 로 끝낸다(진짜로 보내지 않는다).
 //! - **수**: 규칙마다 원자 u32(포화), 탭마다 문 넘김·줄 수 없음·페이지 모름·서비스 워커 표시. 보내는 task 가 차이만 모은다.
 //!
 //! 시험이 증명하는 것: 준비와 맺음(빠진 규칙이면 거절·세대가 바뀌면 버림·0 개는 지움), 묶음 바꾸기와 readers·은퇴, 덩어리의 참조(묶음·준비·처리기)와
-//! 다시 쓰기, 조각의 차례·확인 간격·모르는 덩어리, 맞추기 표(종류·사이트·페이지 모름·실행 출처·D2·사람·메서드·첫 규칙·preload 빠짐·공유 워커 주 스크립트는 수만), 풀(앱·탭·
+//! 다시 쓰기, 조각의 차례·확인 간격·모르는 덩어리, 맞추기 표(종류·사이트·페이지 모름·실행 출처·사용자 이동도 맞음·사람·메서드·첫 규칙·preload 빠짐·공유 워커 주 스크립트는 수만), 풀(앱·탭·
 //! 돌려줌·잊은 탭), 수의 차이.
 
 const std = @import("std");
@@ -181,8 +181,6 @@ pub const Request = struct {
     main_nav: bool,
     /// 하위 자원의 페이지 호스트(`net_policy.pageHost` — 주 프레임 홉이면 쓰지 않는다).
     page_host: []const u8 = "",
-    /// D2 — 사용자 이동(주 프레임만).
-    user_exempt: bool = false,
     /// Q2 — 사람의 누름으로 시작한 이동(주 프레임만 — 사용자 탭의 규칙만 지나간다).
     human_exempt: bool = false,
     /// 요청을 낸 문맥(프레임·워커 — CEF 의 `request_initiator` 출처)의 호스트. 빈 글이면 모른다(문서가 아닌 요청은 실행 사이트에 묶인 규칙에 맞지
@@ -576,13 +574,13 @@ fn collect(set: *RuleSet, out: *msg.NetMockHits) void {
 
 /// 탭 길 요청의 답(막기 다음 — 막기가 맞았으면 부르지 않는다). 주 프레임 홉은 그 홉의 호스트를, 하위 자원은 페이지 호스트를 규칙 사이트가 덮어야
 /// 한다(모르면 `unknown_page`). 실행 사이트에 묶인 규칙은 그 가짜가 돌 출처 — 문서 종류는 그 주소, 그 밖은 요청을 낸 문맥(initiator) — 의 호스트를
-/// 덮어야 한다(§5-2·v1 SEVERE-1: 아니면 진짜, 그 규칙의 `frame_not_mocked` 를 올리고 다음 규칙을 본다). D2 사용자 이동의 주 문서는 맞지 않고, 사람의
-/// 누름의 주 문서는 사용자 탭의 규칙(`human_nav_real`)에 맞지 않는다. navigation preload(19·20)는 맞추지 않는다(M26). 공유 워커 주 스크립트(10)는
+/// 덮어야 한다(§5-2·v1 SEVERE-1: 아니면 진짜, 그 규칙의 `frame_not_mocked` 를 올리고 다음 규칙을 본다). 사용자 이동(D2 — 친 주소·뒤로·앞으로·새로 고침)의
+/// 주 문서도 맞는다(사용자 결정 2026-11-18 「그것까지 넓히기」 — 막기의 D2 예외는 그대로다), 사람의 누름의 주 문서는 `human_nav_real` 깃발의 규칙에
+/// 맞지 않는다(maru 는 2026-11-17 부터 그 깃발을 싣지 않는다). navigation preload(19·20)는 맞추지 않는다(M26). 공유 워커 주 스크립트(10)는
 /// 맞아도 가짜가 아니다(결정 A — 그 규칙의 `sw_not_mocked` 를 올린다). 메서드는 패턴이 맞은 뒤에만 `method_ctx.method()` 로 읽는다. 맞으면 그
 /// 규칙의 맞음 수를 올린다.
 pub fn decideTab(a: *const Acquired, req: Request, method_ctx: anytype) Verdict {
     if (req.resource_type == 19 or req.resource_type == 20) return .pass;
-    if (req.main_nav and req.user_exempt) return .pass;
     const parts = nb.splitUrl(u16, req.url) orelse return .pass;
     var hb: [msg.max_net_host_bytes]u8 = undefined;
     const url_host = urlHost(u16, req.url, &hb);
@@ -757,7 +755,7 @@ test "W9d④: 조각 — 차례대로만 받고, 처리한 바이트를 조각�
     try testing.expectEqual(@as(?u32, 5), t.chunk(.{ .browser = 7, .body_id = 3, .offset = 0, .total = 5, .bytes = "abcde" }).ack);
 }
 
-test "W9d④: 맞추기 — 종류·사이트(하위 자원은 페이지·주 프레임은 홉 호스트)·페이지 모름·실행 출처·D2·사람(사용자 탭 규칙만)·메서드(패턴 뒤에만 읽는다)·첫 규칙·preload 빠짐" {
+test "W9d④: 맞추기 — 종류·사이트(하위 자원은 페이지·주 프레임은 홉 호스트)·페이지 모름·실행 출처·사용자 이동도 맞음(2026-11-18)·사람(그 깃발의 규칙만)·메서드(패턴 뒤에만 읽는다)·첫 규칙·preload 빠짐" {
     var t: Table = .{};
     defer t.deinit(testing.allocator);
     _ = try installRules(&t, 1, &.{
@@ -784,10 +782,10 @@ test "W9d④: 맞추기 — 종류·사이트(하위 자원은 페이지·주 �
     try testing.expectEqual(Verdict.pass, decideTab(&a, .{ .url = &b, .resource_type = 3, .main_nav = false, .page_host = "a.test", .initiator_host = "b.test" }, NoMethod{}));
     try testing.expectEqual(Verdict.pass, decideTab(&a, .{ .url = &b, .resource_type = 3, .main_nav = false, .page_host = "a.test" }, NoMethod{}));
     try testing.expectEqual(@as(u32, 3), a.set.rules[2].frame_not_mocked.load(.monotonic)); // iframe 문서 하나 + 허락 밖 문맥 둘
-    // 주 프레임 홉 — 규칙 사이트가 그 홉의 호스트를 덮어야. D2 는 지나가고, 사람의 누름은 사용자 탭 규칙만 지나간다.
+    // 주 프레임 홉 — 규칙 사이트가 그 홉의 호스트를 덮어야. 사용자 이동(D2)도 맞고(2026-11-18 — 요청에 예외 칸이 없다), 사람의 누름은 그 깃발의
+    // 규칙만 지나간다.
     const doc = u16s("https://a.test/doc");
     try testing.expectEqual(@as(u32, 4), (decideTab(&a, .{ .url = &doc, .resource_type = 0, .main_nav = true }, NoMethod{})).mock.id);
-    try testing.expectEqual(Verdict.pass, decideTab(&a, .{ .url = &doc, .resource_type = 0, .main_nav = true, .user_exempt = true }, NoMethod{}));
     try testing.expectEqual(Verdict.pass, decideTab(&a, .{ .url = &doc, .resource_type = 0, .main_nav = true, .human_exempt = true }, NoMethod{}));
     try testing.expectEqual(@as(u32, 4), (decideTab(&a, .{ .url = &doc, .resource_type = 2, .main_nav = false, .page_host = "a.test", .human_exempt = true }, NoMethod{})).mock.id); // 하위 자원은 그대로
     t.release(testing.allocator, 70, &a, .unknown_page);

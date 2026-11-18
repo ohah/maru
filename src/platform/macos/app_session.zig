@@ -62220,8 +62220,8 @@ test "captureWorkspaceTab: 아직 넘기지 않은 복원 주소·열리지 않�
         try std.testing.expectEqual(@as(usize, 1), wp.browser_terms.len);
         try std.testing.expectEqualStrings("https://e.test/page", wp.browser_terms[0].url);
     }
-    // (e) 2026-11-18 「사람이 친 주소」: 본 주소가 있어도 오류 페이지면 주소창이 보이는 실패 주소를 저장한다(그 탭이 보이려던 주소) — http(s) 가
-    // 아닌 실패 주소는 받지 않아 앞 문서의 주소 그대로(다음 실행에 `file:` 등을 열지 않게).
+    // (e) 2026-11-18 「사람이 친 주소」: 오류 페이지면 엔진이 알린 보이는 주소(③ — 실 앱에서는 다음 tick 에 nav 상태 ① 로도)가 실패 주소다(그 탭이
+    // 보이려던 주소) — http(s) 가 아닌 실패 주소는 받지 않아 앞 문서의 주소 그대로(다음 실행에 `file:` 등을 열지 않게).
     web_osr.testApply(allocator, .{ .error_page = .{ .browser = sid, .error_code = -20, .blocked_rule = 1, .url = "https://e.test/blocked" } });
     {
         const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
@@ -67182,6 +67182,32 @@ test "P0-1: 보이는 Chromium 탭이면 터미널 링크를 그 탭으로 곧�
     try std.testing.expect(term.pending_url == null); // 복원 주소가 다음 tick 에 뒤따라 가 링크를 덮지 않는다
     try std.testing.expect(session.addr_navigate_pending == null); // 주소창 이동 대기도
     try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .terminal); // 포커스는 그대로(WebKit 과 같다)
+}
+
+test "collector(2026-11-18 「사람이 친 주소」, 적대 검증 A R2·B R17): Chromium 탭이 오류 페이지면 snapshot 의 url 은 주소창의 실패 주소, grant 호스트(targetHost)는 확정 문서의 호스트 — 페이지가 실패 이동으로 고른 호스트에 묶이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    _ = web_osr.setDecidedForTest(true);
+    const sid = try pane_ops.appendWebTermInActivePane(session, .browser);
+    try web_osr.testHold(allocator, sid);
+    web_osr.testRunning(sid);
+    web_osr.testApply(allocator, .{ .url_changed = .{ .browser = sid, .url = "https://a.test/page" } });
+    web_osr.testApply(allocator, .{ .error_page = .{ .browser = sid, .error_code = -105, .url = "https://bank.test/login" } });
+    if (web_osr.takeNavUpdate(sid)) |nav| web_ops.setWebNavState(session, sid, nav.can_go_back, nav.can_go_forward, nav.url);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+    var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+    try session.collectSessionInto(a, 100, .normal, &surfaces, &windows);
+    const snapshot: maru.session.CollectorSnapshot = .{ .surfaces = surfaces.items, .windows = windows.items };
+    const dto = snapshot.find(sid) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("https://bank.test/login", dto.detail.web.url.?);
+    try std.testing.expectEqualStrings("a.test", maru.session.control_browser.targetHost(snapshot, sid).?);
 }
 
 test "P0-1: 보이는 Chromium 탭이 아직 배치 전이면 링크를 그 탭의 첫 주소(pending_url)로 싣는다" {

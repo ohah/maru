@@ -9,7 +9,8 @@
 //!   af-reload      오류 페이지에서 새로 고침 → 같은 실패 주소로 다시 `error_page`
 //!   af-no-address  오류 페이지마다 `url_changed`·`page_started` 가 따라오지 않는다(maru 가 실패 주소를 지우지 않게 — 관찰을 단언으로)
 //!   af-back        뒤로 → `page_started`·`url_changed` 가 옛 문서의 주소로 온다(maru 는 여기서 실패 주소를 지운다)
-//!   af-noncommit   오류 페이지를 세우지 않는 실패(안전하지 않은 리다이렉트·알 수 없는 스킴)에서 무엇이 오는가(관찰)
+//!   af-conn-refused 진짜 접속 거부(닫은 포트)
+//!   af-noncommit   안전하지 않은 리다이렉트·알 수 없는 스킴·페이지가 스스로 간 실패 — 실은 주소는 그 오류 페이지의 주소이거나 빈 글뿐
 //!   af-aborted     문서 없이 끝난 이동(다운로드 — ERR_ABORTED)은 `error_page` 가 없다(주소창은 그대로 — Chrome 과 같다)
 
 const std = @import("std");
@@ -17,6 +18,7 @@ const protocol = @import("web_sidecar_protocol");
 const os = @import("os.zig");
 const Host = @import("host.zig").Host;
 const browsers_check = @import("browsers_check.zig");
+const http = @import("http.zig");
 const msg = protocol.message;
 
 pub const Report = *const fn (ok: bool, name: []const u8, detail: []const u8) void;
@@ -145,6 +147,13 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     follow += r.countFrom(a.from, .url_changed) + r.countFrom(a.from, .page_started);
     report(a.ep != null and std.mem.eql(u8, urlOf(&a.ep), refused), "af-refused", std.fmt.bufPrint(&d, "error_page {?d} · url {s}(가려던 {s} 이어야)", .{ if (a.ep) |e| e.code else null, urlOf(&a.ep), refused }) catch "");
 
+    // 진짜 접속 거부(바인드했다 닫은 포트 — ERR_CONNECTION_REFUSED).
+    var cb: [96]u8 = undefined;
+    const conn_refused = std.fmt.bufPrint(&cb, "http://127.0.0.1:{d}/af-conn-refused", .{try http.closedPort()}) catch unreachable;
+    const a2 = try r.failNav(conn_refused);
+    follow += r.countFrom(a2.from, .url_changed) + r.countFrom(a2.from, .page_started);
+    report(a2.ep != null and std.mem.eql(u8, urlOf(&a2.ep), conn_refused), "af-conn-refused", std.fmt.bufPrint(&d, "error_page {?d} · url {s}", .{ if (a2.ep) |x| x.code else null, urlOf(&a2.ep) }) catch "");
+
     // 풀리지 않는 호스트.
     const dns = "http://maru-af-test.invalid/af-dns";
     const b = try r.failNav(dns);
@@ -179,21 +188,29 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     try host.send(.{ .net_block = .{ .browser = browser_id, .generation = 2 } });
     r.pump(300);
 
-    report(follow == 0, "af-no-address", std.fmt.bufPrint(&d, "오류 페이지 다섯 뒤 1 초 안에 온 url_changed·page_started {d} 개(0 이어야 — 오면 maru 가 실패 주소를 곧 지운다)", .{follow}) catch "");
+    report(follow == 0, "af-no-address", std.fmt.bufPrint(&d, "오류 페이지 여섯 뒤 1 초 안에 온 url_changed·page_started {d} 개(0 이어야 — 오면 maru 가 실패 주소를 곧 지운다)", .{follow}) catch "");
 
-    // 뒤로 — 오류 페이지 항목들을 지나 처음 문서까지. 첫 뒤로가 다시 실패하는 항목이면 그것도 error_page.
+    // 뒤로 — 오류 페이지 항목들을 지나 처음 문서까지(뒤로마다 그 항목을 다시 불러 실패하면 error_page).
     const bk_from = r.n;
-    for (0..5) |_| {
+    for (0..8) |_| {
         try host.send(.{ .nav_action = .{ .browser = browser_id, .action = .back, .user = true } });
         r.pump(1500);
     }
     const back_url = r.lastUrlChanged(bk_from) orelse "(없음)";
-    report(r.countFrom(bk_from, .page_started) >= 1 and std.mem.endsWith(u8, back_url, "/title?t=af-start"), "af-back", std.fmt.bufPrint(&d, "뒤로 다섯 — page_started {d} · error_page {d} · 마지막 url_changed {s}", .{ r.countFrom(bk_from, .page_started), r.countFrom(bk_from, .error_page), back_url }) catch "");
+    report(r.countFrom(bk_from, .page_started) >= 1 and std.mem.endsWith(u8, back_url, "/title?t=af-start"), "af-back", std.fmt.bufPrint(&d, "뒤로 여덟(오류 항목 여섯을 지나 처음 문서까지 — 남는 뒤로는 갈 곳이 없다) — page_started {d} · error_page {d} · 마지막 url_changed {s}", .{ r.countFrom(bk_from, .page_started), r.countFrom(bk_from, .error_page), back_url }) catch "");
 
     // 오류 페이지를 세우지 않는 실패 — 옛 문서가 남으면 실패 주소를 싣지 않는다(주소 위장 막기). 안전하지 않은 리다이렉트(http → file:)·
     // 알 수 없는 스킴. 오류 페이지가 섰으면(Chromium 이 그렇게 끝내면) 그 주소를 싣는다 — 어느 쪽이든 싣는 주소는 프레임의 지금 주소와 같다.
-    for ([_][]const u8{ "/af-unsafe-redirect", "", "/af-js?scheme", "/af-js?refused" }) |path| {
+    const Case = struct { path: []const u8, shows: []const u8 };
+    for ([_]Case{
+        .{ .path = "/af-unsafe-redirect", .shows = "" }, // 리다이렉트 앞 주소의 오류 페이지(아래에서 채운다)
+        .{ .path = "", .shows = "maru-af-unknown-scheme:x" },
+        .{ .path = "/af-js?scheme", .shows = "maru-af-unknown-scheme:y" },
+        .{ .path = "/af-js?refused", .shows = "http://127.0.0.1:1/af-js-refused" },
+    }) |case| {
+        const path = case.path;
         const target = if (path.len > 0) browsers_check.url(&u, port, path) else "maru-af-unknown-scheme:x";
+        const shows = if (std.mem.eql(u8, path, "/af-unsafe-redirect")) target else case.shows;
         const nc_from = r.n;
         try host.send(.{ .navigate = .{ .browser = browser_id, .url = target, .user = true } });
         r.pump(3500);
@@ -201,7 +218,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
         for (r.events[nc_from..r.n]) |ev| if (ev.kind == .error_page) {
             ep_url = ev.url[0..ev.url_len];
         };
-        report(true, "af-noncommit(obs)", std.fmt.bufPrint(&d, "{s} → error_page url 「{s}」 · url_changed {d} · page_started {d} · 제목 {s}", .{ target, ep_url, r.countFrom(nc_from, .url_changed), r.countFrom(nc_from, .page_started), r.title() }) catch "");
+        // 실은 주소는 그 갈래의 오류 페이지가 선 주소이거나 빈 글뿐이다 — 다른 주소(옛 문서 위 위장)가 아니다. 프레임 주소 확인 자체는 순수 시험
+        // `dialog_table` 「wire 29」 이 지킨다(판정자로 잰 갈래는 모두 오류 페이지를 세웠다 — 옛 문서가 남는 갈래는 찾지 못했다).
+        const fine = std.mem.eql(u8, ep_url, "(error_page 없음)") or ep_url.len == 0 or std.mem.eql(u8, ep_url, shows);
+        report(fine, "af-noncommit", std.fmt.bufPrint(&d, "{s} → error_page url 「{s}」(빈 글이거나 {s} 이어야) · url_changed {d} · page_started {d} · 제목 {s}", .{ target, ep_url, shows, r.countFrom(nc_from, .url_changed), r.countFrom(nc_from, .page_started), r.title() }) catch "");
     }
 
     // 문서 없이 끝난 이동(다운로드).

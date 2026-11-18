@@ -152,6 +152,23 @@ fn fake(i: usize) *anyopaque {
     return @ptrCast(&fake_callbacks[i]);
 }
 
+// ── 실패한 이동의 주소(wire 29 — 사용자 결정 2026-11-18 「사람이 친 주소」) ─────────────────────────────────────────────
+
+/// `on_load_error` 의 실패 주소를 주소창에 보여도 되는가 — 주 프레임의 지금 주소(CEF `get_url`)가 실패 주소와 같을 때만(그 주소의 오류 페이지가
+/// 섰다). 오류 페이지를 세우지 않고 끝난 실패(옛 문서가 남는다)에 실으면 옛 문서 위 주소창에 페이지가 고른 주소가 뜬다(주소 위장).
+pub fn errorPageShows(frame_now: ?[]const u16, failed: []const u16) bool {
+    const now = frame_now orelse return false;
+    return failed.len > 0 and std.mem.eql(u16, now, failed);
+}
+
+/// 읽은 실패 주소(`library.readString` 이 `cap` 바이트 자리에 UTF-8 로 — 넘으면 코드 포인트 경계로 자른다)를 실을 꼴로 — 잘렸을 수 있거나
+/// (자리 끝 4 바이트 안까지 찼다) 주소 규칙(`fields.checkUrl`)에 걸리면 빈 글(걸린 주소를 실으면 `error_page` 전체가 보내지지 않는다).
+pub fn failedUrlToSend(text: []const u8, cap: usize) []const u8 {
+    if (text.len == 0 or text.len + 4 > cap) return "";
+    protocol.fields.checkUrl(text) catch return "";
+    return text;
+}
+
 test "requests get non-zero numbers, answers must match browser, number and kind, and a full table refuses" {
     var table: Table = .{};
     const a = table.add(7, .js, fake(0)).?;
@@ -199,4 +216,16 @@ test "numbering wraps past zero, and closing a browser takes only its requests" 
     try std.testing.expectEqual(@as(usize, 1), table.count());
     try std.testing.expectEqual(@as(BrowserId, 2), table.takeAny().?.browser);
     try std.testing.expect(table.takeAny() == null);
+}
+
+test "wire 29: 실패 주소는 주 프레임이 그 주소의 오류 페이지일 때만 — 옛 문서가 남았거나 프레임 주소를 모르면 싣지 않는다, 잘렸을 수 있거나 주소 규칙에 걸리면 빈 글" {
+    const u = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expect(errorPageShows(u("http://127.0.0.1:1/x"), u("http://127.0.0.1:1/x")));
+    try std.testing.expect(!errorPageShows(u("https://old.test/page"), u("https://bank.test:1/"))); // 옛 문서가 남았다 — 위장
+    try std.testing.expect(!errorPageShows(null, u("http://127.0.0.1:1/x")));
+    try std.testing.expect(!errorPageShows(u(""), u("")));
+    try std.testing.expectEqualStrings("http://a.test/x", failedUrlToSend("http://a.test/x", 64));
+    try std.testing.expectEqualStrings("", failedUrlToSend("", 64));
+    try std.testing.expectEqualStrings("", failedUrlToSend("http://a.test/xxxxxxxxx", 24)); // 자리 끝까지 찼다 — 잘렸을 수 있다
+    try std.testing.expectEqualStrings("", failedUrlToSend("http://a.test/\x01", 64)); // 주소 규칙(제어 문자)
 }

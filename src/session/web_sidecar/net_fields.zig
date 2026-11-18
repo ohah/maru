@@ -719,7 +719,7 @@ pub fn writeErrorPage(cursor: *Cursor, v: message.ErrorPage) Error!void {
     try fields.writeBrowser(cursor, v.browser);
     try cursor.writeU32(@bitCast(v.error_code));
     try cursor.writeU32(v.blocked_rule);
-    // wire 28: 실패한 주소 — 빈 글(길이 0)도 받는다(모르는 주소).
+    // wire 29: 실패한 주소 — 빈 글(길이 0)도 받는다(모르는 주소).
     try cursor.writeU32(@intCast(v.url.len));
     try cursor.writeBytes(v.url);
 }

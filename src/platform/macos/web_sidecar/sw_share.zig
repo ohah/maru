@@ -1,5 +1,5 @@
 //! 서비스 워커 길의 막기 판정(W9d③ D3(a) — docs/plans/web-osr-backend.md 「W9d③ 결정·실측」 §6.2). CEF 를 모른다 — 브라우저마다의 사실(그 출처를
-//! 보이는가·모르는가·쥔 규칙·사용자 이동)은 `network.zig` 가 IO 스레드에서 CEF 프레임 API 로 나열해 준다(실측 7–22 µs).
+//! 보이는가·모르는가·쥔 규칙)은 `network.zig` 가 IO 스레드에서 CEF 프레임 API 로 나열해 준다(실측 7–22 µs).
 //!
 //! 왜 「모든 탭」 인가(사용자 결정 D3 2026-10-21 — 서비스 워커는 켜 둔다): 서비스 워커는 출처 하나에 하나라 그 출처를 보이는 탭들이 나눠 쓴다.
 //! 서비스 워커가 대신 보낸 요청(공유 context 처리기 — 브라우저가 없다)은 어느 탭의 것인지 모른다 — 에이전트 탭의 규칙으로 막으면 같은 출처를
@@ -16,13 +16,13 @@
 //!         것으로 친다). 맞는 규칙이 없으면 **거부권**(보수 규칙 — P1-3·4: 그 프레임이 O 일 수 있고 그러면 막힐 요청의
 //!         주인이다). 거부하면 덮는 탭마다 「적용 안 됨」 으로 센다 — 말없이 지나가지 않는다. 그런 탭만 있으면(덮는 탭이 없으면) 막을 것도 셀 것도 없다.
 //!       · O 를 보이지 않고 모르는 것도 없는 탭은 빠진다.
-//!   - 그 탭의 진행 중 사용자 이동이 이 요청이면(서비스 워커가 그 이동을 대신 받아 온다 — 실측 sw3) 막지 않는다(D2 — P1-12).
+//!   - 사람의 이동도 예외가 없다(사용자 결정 2026-11-18 「막기도 넓히기」 — 옛 D2 P1-12 는 서비스 워커가 대신 받아 온 사람의 이동을 막지 않았다).
 //!   - 막지 못했는데 맞는 규칙을 쥔 탭이 있으면 「적용 안 됨」(`sw_not_applied`)을 센다.
 //! 출처를 보이는가(T(O) 의 몫)는 확정된 프레임 주소(나열)와 `on_before_browse` 가 적은 진행 중 이동(나열은 옮기는 중인 탭의 옛 주소를 보인다 —
 //! 실측 D3(i), P1-2)의 합이다. 나열은 (출처, 위상 세대)로 캐시한다 — UI 의 사건(이동 시작·주소·문서 시작·오류·프레임 떨어짐·만들어짐·닫힘)이
 //! 세대를 올린다(§12 P2-4 — 맞는 서비스 워커 요청이 쏟아져도 요청마다 나열하지 않게).
 //!
-//! 시험이 증명하는 것: 빈 T, 모두 쥠, 하나라도 규칙 없음·모름, 사용자 이동 예외, 「적용 안 됨」 의 대상, 탭의 몫(`role`), 캐시의 세대·출처·자리 넘김.
+//! 시험이 증명하는 것: 빈 T, 모두 쥠, 하나라도 규칙 없음·모름, 「적용 안 됨」 의 대상, 탭의 몫(`role`), 캐시의 세대·출처·자리 넘김.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -99,8 +99,6 @@ pub const TabFacts = struct {
     browser: BrowserId,
     /// 모르는 것이 있는 탭(거부권 몫이거나 모르는 프레임이 있는 보이는 탭) — 판정은 `rule_id` 만 본다(쥐었으면 덮였다, 아니면 거부).
     unknown: bool = false,
-    /// 이 탭의 진행 중 사용자 이동이 이 요청 주소다(D2).
-    user_nav: bool = false,
     /// 이 탭이 쥔 맞는 규칙(종류 없음·패턴·사이트가 그 탭의 맨 위 호스트 모두를 덮음)의 번호(0 = 없음)와 표 안의 자리(부른 쪽이 수를 올린다).
     rule_id: u32 = 0,
     rule_slot: u8 = 0,
@@ -109,8 +107,6 @@ pub const TabFacts = struct {
 pub const Outcome = enum {
     /// T(O) 가 비었다 — 막지 않고 세지 않는다.
     empty,
-    /// 사용자 이동이다(D2) — 막지 않는다.
-    user_nav,
     /// 모든 탭이 맞는 규칙을 쥐었다 — 막는다(탭마다 그 규칙의 `sw_hits`).
     block,
     /// 맞는 규칙을 쥔 탭이 있지만 규칙 없는 탭(모르는 탭 포함)이 있다 — 막지 않는다(규칙을 쥔 탭마다 `sw_not_applied`).
@@ -142,7 +138,6 @@ pub fn role(shows: bool, unknown: bool, ruled: bool, maybe: bool) Role {
 
 pub fn decide(facts: []const TabFacts) Outcome {
     if (facts.len == 0) return .empty;
-    for (facts) |f| if (f.user_nav) return .user_nav;
     var any_rule = false;
     var all = true;
     for (facts) |f| {
@@ -157,7 +152,7 @@ pub fn decide(facts: []const TabFacts) Outcome {
 
 const testing = std.testing;
 
-test "W9d③: 서비스 워커 길 — 빈 T 는 막지 않는다, 모두 쥐면 막는다, 규칙 없는·모르는 탭이 하나라도 있으면 「적용 안 됨」, 사용자 이동은 예외" {
+test "W9d③: 서비스 워커 길 — 빈 T 는 막지 않는다, 모두 쥐면 막는다, 규칙 없는·모르는 탭이 하나라도 있으면 「적용 안 됨」, 사람의 이동도 같다(2026-11-18)" {
     try testing.expectEqual(Outcome.empty, decide(&.{}));
     try testing.expectEqual(Outcome.block, decide(&.{ .{ .browser = 1, .rule_id = 3 }, .{ .browser = 2, .rule_id = 9 } }));
     try testing.expectEqual(Outcome.not_applied, decide(&.{ .{ .browser = 1, .rule_id = 3 }, .{ .browser = 2 } }));
@@ -167,7 +162,6 @@ test "W9d③: 서비스 워커 길 — 빈 T 는 막지 않는다, 모두 쥐면
     try testing.expectEqual(Outcome.block, decide(&.{.{ .browser = 1, .unknown = true, .rule_id = 3 }}));
     try testing.expectEqual(Outcome.block, decide(&.{ .{ .browser = 1, .unknown = true, .rule_id = 3 }, .{ .browser = 2, .rule_id = 4 } }));
     try testing.expectEqual(Outcome.not_applied, decide(&.{ .{ .browser = 1, .unknown = true, .rule_id = 3 }, .{ .browser = 0, .unknown = true } }));
-    try testing.expectEqual(Outcome.user_nav, decide(&.{ .{ .browser = 1, .rule_id = 3, .user_nav = true }, .{ .browser = 2, .rule_id = 3 } }));
 }
 
 test "W9d③ 2 차 검증 MED-A2-1: T(O) 의 몫 — 보이는 탭만 덮고, 보인다고 증명되지 않은 모르는 탭은 규칙을 쥐었으면 빠지고 아니면 거부권만" {

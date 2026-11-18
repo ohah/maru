@@ -10,7 +10,8 @@
 //! 막을 수 있다(실측 D3(ii)). 규칙처럼 사이트에 묶는다 — 주 프레임 `on_before_browse` 에서 바라는 값이 바뀌면 보낸다(그 이동에 듣는다 — 실측
 //! latch). W9d② 의 본문 기록과 Network 도메인을 나누므로 켜고 끄기는 `net_domain` 이 정한다(끔은 `bypass:false` 먼저 — sw2). W9d④ 의 가짜도
 //! 엄격을 켤 수 있다 — 도메인은 하나라 바람은 「막기 엄격 사이트 또는 가짜 엄격 사이트가 그 호스트를 덮는다」 이고(`syncStrict`), 상태는 각자 제
-//! 엄격 사이트가 있을 때만 알린다(`blockStrictState`·`mockStrictState`). 처리기 고르기의 예외 답(D2·Q2)은 `navExempt` 가 한 번 낸다.
+//! 엄격 사이트가 있을 때만 알린다(`blockStrictState`·`mockStrictState`). 처리기 고르기의 예외 답(Q2 — 가짜만)은 `navExempt` 가 한 번 낸다. 사람의 이동도 막는다(사용자 결정 2026-11-18
+//! 「막기도 넓히기」 — 옛 D2 예외의 토큰·다툼·멈춤을 걷었다).
 //!
 //! 스레드: 표·캐시는 이 파일의 뮤텍스 아래(IO 스레드와 UI 스레드). CEF 브라우저 목록은 따로 잠근다(나열은 참조를 잡아 잠금 밖에서). 엄격 모드·
 //! 관찰자 등록은 UI 스레드만. IO 스레드에서는 쓰지도 로그하지도 않는다(W9d① M6) — 수는 원자로 올리고 `network.zig` 의 보내는 task 가 모아 보낸다.
@@ -171,12 +172,11 @@ pub fn tabSelect(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request
     if (url.len == 0) return .{};
     var rt: u8 = @intCast(@min(@as(c_uint, @intCast(request.*.get_resource_type.?(request))), msg.max_net_resource_type));
     if (rt == 18) rt = 6; // `network.zig` 와 같은 바꾸기
-    const id = request.*.get_identifier.?(request);
     // 하위 프레임 이동도 주소를 잰다 — 막으면 그 프레임의 다음 문서(오류 페이지)를 알아본다(3 차 검증 MED-A3-1).
     const sub_nav = is_navigation != 0 and !main_nav;
     const canon = if (main_nav or sub_nav) table_mod.canonHash(u16, url) else 0;
     doLock();
-    var a = table.acquire(cef_id, id, main_nav, canon, nowMs()) orelse {
+    var a = table.acquire(cef_id) orelse {
         doUnlock();
         return .{};
     };
@@ -199,9 +199,8 @@ pub fn tabSelect(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request
     };
 }
 
-/// W9d④: 처리기 고르기의 예외 답 — 주 프레임 이동의 요청만 묻는다. D2(사용자 이동)는 막기 표의 토큰이 답하고(이 탭에 막기 규칙이 없어도
-/// 소비한다 — §13 P2-1, `net_block_table.consumeExempt`), Q2(사람의 누름)는 공용 표(`nav_exempt`)가 답한다. 처리기 고르기에서 한 번 부르고 그 답을
-/// 가짜가 쓴다(막기의 `tabSelect` 는 같은 번호로 다시 물어 같은 답을 얻는다).
+/// W9d④: 처리기 고르기의 예외 답 — 주 프레임 이동의 요청만 묻는다. Q2(사람의 누름 — 가짜만)는 공용 표(`nav_exempt`)가 답한다. 처리기
+/// 고르기에서 한 번 부르고 그 답을 가짜가 쓴다. 사람의 이동(옛 D2)은 예외가 아니다(2026-11-18 — 막기도, 가짜도).
 pub fn navExempt(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_navigation: c_int) nav_exempt.Exempt {
     if (is_navigation == 0 or frame == null or frame.*.is_main.?(frame) == 0) return .{};
     const raw = request.*.get_url.?(request);
@@ -209,14 +208,10 @@ pub fn navExempt(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request
     const canon = table_mod.canonHash(u16, units(raw));
     const cef_id = browser.*.get_identifier.?(browser);
     const id = request.*.get_identifier.?(request);
-    const now = nowMs();
-    doLock();
-    const user = table.consumeExempt(cef_id, id, true, canon, now);
-    doUnlock();
     const ex = nav_exempt.shared.acquire();
-    const human = ex.consume(cef_id, id, canon, now);
+    const human = ex.consume(cef_id, id, canon, nowMs());
     nav_exempt.shared.release();
-    return .{ .user = user, .human = human and !user };
+    return .{ .human = human };
 }
 
 /// 문을 지나지 못해(또는 번호 0 이라) 기록 없이 막았다 — 막은 묶음의 세대로 센다.
@@ -294,7 +289,6 @@ pub fn serviceWorkerSelect(request: [*c]c.cef_request_t, origin: []const u8) SwR
         forgot_nav: bool = false,
         /// 이 요청이 그 탭의 진행 중 주 프레임 이동 자체일 수 있다(§6.3 귀속 — 5 차 검증 LOW: 첫 사이트가 이동이 아님을 보이면 거짓).
         nav_itself: bool = false,
-        user_nav: bool = false,
         set: ?*table_mod.RuleSet = null,
         host_bufs: [2][msg.max_net_host_bytes]u8 = undefined,
         host_lens: [2]u8 = .{ 0, 0 },
@@ -311,7 +305,6 @@ pub fn serviceWorkerSelect(request: [*c]c.cef_request_t, origin: []const u8) SwR
             t.expire(now);
             for (t.pending[0..t.pending_len]) |*p| {
                 if (p.origin == o_hash) cd.shows = true;
-                if (p.main and p.user and p.url == canon) cd.user_nav = true;
             }
             // 진행 중 이동 표가 넘쳐 잊은 이동이 있다 — 그 이동은 규칙이 잠든 다른 사이트로 가는 중일 수 있어 규칙을 쥐었어도 빠지지 않는다(거부권).
             if (t.unknownPending(now)) {
@@ -357,7 +350,7 @@ pub fn serviceWorkerSelect(request: [*c]c.cef_request_t, origin: []const u8) SwR
         const role = sw_share.role(cd.shows, cd.unknown, cd.rule != null and !cd.forgot_nav, cd.maybe);
         if (role == .skip) continue;
         const rule = if (role == .veto) null else cd.rule; // 거부권 몫은 덮지 않는다
-        facts[m] = .{ .browser = cd.browser, .unknown = cd.unknown or cd.browser == 0, .user_nav = cd.user_nav, .rule_id = if (rule) |r| r.id else 0 };
+        facts[m] = .{ .browser = cd.browser, .unknown = cd.unknown or cd.browser == 0, .rule_id = if (rule) |r| r.id else 0 };
         rules[m] = rule;
         gens[m] = if (cd.set) |set| set.generation else 0;
         navs[m] = cd.nav_itself;
@@ -688,22 +681,6 @@ pub fn setFull(browser: BrowserId, cef_id: c_int, full: bool) void {
     doUnlock();
 }
 
-/// `navigate{user}` — D2 의 주소 토큰.
-pub fn userNavigate(browser: BrowserId, url: []const u8) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.userNavigate(browser, entry.cef_id, table_mod.canonHash(u8, url), nowMs());
-    doUnlock();
-}
-
-/// `nav_action{user}` — D2 의 다음 이동 토큰(그 갈래의 이동만 가져간다 — 뒤로·앞으로는 기록 이동, 새로 고침은 새로 고침).
-pub fn userNavAction(browser: BrowserId, kind: table_mod.NavKind) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.userNavAction(browser, entry.cef_id, kind, nowMs());
-    doUnlock();
-}
-
 /// W9d④ Q2: maru 가 보낸 사람 입력(마우스 누름·뗌·키·IME 확정 — 에이전트의 DevTools 입력은 maru 의 이 길을 지나지 않는다). 그 뒤 창 안에서
 /// 렌더러가 시작한 몸짓 이동은 사람의 것으로 묶인다(`nav_exempt`).
 pub fn humanInput(browser: BrowserId) void {
@@ -711,122 +688,6 @@ pub fn humanInput(browser: BrowserId) void {
     const t = nav_exempt.shared.acquire();
     defer nav_exempt.shared.release();
     t.humanInput(browser, entry.cef_id, nowMs());
-}
-
-// ── 사용자의 뒤로·앞으로가 주 프레임 문서를 옮기는가(3 차 검증 LOW-A3-4·4 차 검증 A-LOW) ─────────────────────────────────────
-
-/// 기록 항목을 훑는 방문자(UI 스레드만 — CEF 가 `get_navigation_entries` 안에서 곧 부른다).
-var entry_visitor: c.cef_navigation_entry_visitor_t = undefined;
-var entry_visitor_ready = false;
-const max_entries = 64;
-var entry_urls: [max_entries]u64 = undefined;
-var entry_seen: [max_entries]bool = undefined;
-var entry_current: ?usize = null;
-
-fn visitEntry(_: [*c]c.cef_navigation_entry_visitor_t, e: [*c]c.cef_navigation_entry_t, current: c_int, index: c_int, _: c_int) callconv(.c) c_int {
-    defer object.releaseArg(e);
-    if (e == null or index < 0 or index >= max_entries) return 1;
-    const i: usize = @intCast(index);
-    const u = e.*.get_url.?(e);
-    defer if (u != null) api().string_userfree_utf16_free(u);
-    entry_urls[i] = table_mod.canonHash(u16, units(u));
-    entry_seen[i] = true;
-    if (current != 0) entry_current = i;
-    return 1;
-}
-
-/// 기록의 지금 항목과 그 방향(`step` -1 뒤로·+1 앞으로)의 바로 옆 항목 주소. CEF 의 「지금」 은 진행 중인 기록 이동이 있으면 그 **대상** 항목이다
-/// (`NavigationController::GetCurrentEntryIndex` — 진행 중 항목) — 그래서 뒤로·앞으로를 시작한 **뒤** 읽으면 Chromium 이 고른 실제 대상(몸짓 없이
-/// 생긴 항목을 건너뛴 — 기록 조작 개입)이다. 항목을 읽지 못하면 null.
-pub fn historyAt(browser: [*c]c.cef_browser_t, step: i32) ?table_mod.HistoryAt {
-    if (!entry_visitor_ready) {
-        entry_visitor = object.zeroed(c.cef_navigation_entry_visitor_t);
-        object.staticRefCounted(&entry_visitor.base);
-        entry_visitor.visit = &visitEntry;
-        entry_visitor_ready = true;
-    }
-    const host = browser.*.get_host.?(browser);
-    if (host == null) return null;
-    defer object.release(host);
-    entry_seen = @splat(false);
-    entry_current = null;
-    host.*.get_navigation_entries.?(host, &entry_visitor, 0);
-    const cur = entry_current orelse return null;
-    var out: table_mod.HistoryAt = .{ .index = cur, .url = entry_urls[cur] };
-    const next = @as(i64, @intCast(cur)) + step;
-    if (next >= 0 and next < max_entries and entry_seen[@intCast(next)]) out.step_url = entry_urls[@intCast(next)];
-    return out;
-}
-
-/// 사용자의 뒤로·앞으로를 시작한 뒤 — 그 기록 이동이 주 프레임 문서를 옮기지 않으면(`net_block_table.historyTokenStays` 거짓 — iframe 만·같은 주소의
-/// 같은 문서) 몸짓 앞에 건 기록 토큰을 거둔다(3 차 검증 LOW-A3-4: 그 이동에는 `on_before_browse` 도 주 프레임 주소 확정도 없어 남은 토큰을 페이지의
-/// `history.go(-1)` 이 가져갔다). 4 차 검증 A-LOW: 전에는 이동을 시작하기 **전에** 바로 옆 항목만 보아, 몸짓 없이 같은 주소로 pushState 한 항목을
-/// 건너뛰어 그 앞 다른 문서로 가는 사용자의 뒤로가 토큰 없이 막혔다(실측 -20).
-pub fn settleHistoryToken(browser: BrowserId, before: ?table_mod.HistoryAt, after: ?table_mod.HistoryAt) void {
-    if (table_mod.historyTokenStays(before, after)) return;
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.dropHistoryToken(entry.cef_id);
-    doUnlock();
-}
-
-/// 다른 곳으로 가는 `nav_action{user:false}`(에이전트·복원·재생의 뒤로·앞으로)와 누구든 멈춤 — 남은 사용자 토큰을 거둔다(이 이동이 가져가지 않게
-/// — 20 회 검증 A LOW-3).
-pub fn agentNavigate(browser: BrowserId) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.agentNavigate(entry.cef_id);
-    doUnlock();
-}
-
-/// `navigate{user:false}` — 산 주소 토큰과 같은 주소면 다툼(둘 다 진짜), 아니면 거둔다(`net_block_table.agentNavigateTo` — W9d④ v1 SEVERE-2).
-pub fn agentNavigateTo(browser: BrowserId, url: []const u8) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.agentNavigateTo(entry.cef_id, table_mod.canonHash(u8, url), nowMs());
-    doUnlock();
-}
-
-/// `nav_action{reload, user:false}` — 산 새로 고침 토큰이 있으면 다툼(같은 문서), 아니면 거둔다(`net_block_table.agentReload`).
-pub fn agentReload(browser: BrowserId) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.agentReload(entry.cef_id, nowMs());
-    doUnlock();
-}
-
-/// 이동을 시작할 수 있는 에이전트의 DevTools 호출(`devtools.zig` — `devtools_table.startsNavigationCall`) — 사용자 토큰을 거두지 않고 다툼으로 둔다
-/// (`net_block_table.agentDevtoolsCall` — W9d④ v1 검증 SEVERE-2, 사용자 결정 2026-11-11 「고침」: 거두면 사용자가 친 주소·새로 고침이 겹친 에이전트의
-/// `Runtime.evaluate` 하나로 가짜·막힘이 됐다; W9d③ 의 같은 경주 — 4 차 검증 A-LOW 「다시 하면 지나간다」 — 도 함께 닫는다).
-pub fn agentDevtoolsCall(browser: BrowserId) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.agentDevtoolsCall(entry.cef_id, nowMs());
-    doUnlock();
-}
-
-/// 떠나기 확인이 그 탭에 떴다(`dialogs.ask`) — 살아 있는 사용자 토큰의 시계를 멈춘다(2 차 검증 LOW-A2-4 — `net_block_table.holdTokens`).
-pub fn beforeUnloadShown(browser: BrowserId, request: u32) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.holdTokens(entry.cef_id, request, nowMs());
-    doUnlock();
-}
-
-/// 대화상자에 답이 왔다 — 멈춘 떠나기 확인이면 떠나기는 토큰을 그만큼 늘리고 머무르기는 거둔다.
-pub fn dialogAnswered(browser: BrowserId, request: u32, accept: bool) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.releaseHold(entry.cef_id, request, accept, nowMs());
-    doUnlock();
-}
-
-/// 그 탭의 대화상자가 답 없이 치워졌다(maru 의 새 이동이 취소로 답함·상태 비우기·렌더러 죽음) — 멈춘 토큰은 거둔다(그 이동은 시작되지 않았다).
-pub fn dialogsDropped(browser: BrowserId) void {
-    const entry = browsers.state.registry.byId(browser) orelse return;
-    doLock();
-    table.releaseHold(entry.cef_id, 0, false, nowMs());
-    doUnlock();
 }
 
 // ── UI 스레드: 엄격 모드의 CDP ─────────────────────────────────────────────────────────────────────────
@@ -1033,9 +894,9 @@ fn keyOfUnits(u: []const u16) u64 {
     return @max(1, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(u)));
 }
 
-/// `on_before_browse`(주·하위 프레임, 홉마다) — 진행 중 이동·D2 토큰 묶기·엄격의 사이트 묶기. 목록 밖 브라우저도 적는다(§12 P1-4).
-/// W9d④: `user_gesture` — CEF 가 준 사용자 몸짓(렌더러가 시작한 링크·폼 이동). 주 프레임이고 D2 토큰이 가져가지 않은 이동이면 공용 표가 사람의
-/// 누름(Q2)인지 정해 그 주소에 묶는다. 엄격은 막기·가짜 엄격 사이트 어느 쪽이든 덮는가로 정한다.
+/// `on_before_browse`(주·하위 프레임, 홉마다) — 진행 중 이동·엄격의 사이트 묶기. 목록 밖 브라우저도 적는다(§12 P1-4).
+/// W9d④: `user_gesture` — CEF 가 준 사용자 몸짓(렌더러가 시작한 링크·폼 이동). 주 프레임이면 공용 표가 사람의 누름(Q2 — 가짜만)인지 정해 그
+/// 주소에 묶는다. 엄격은 막기·가짜 엄격 사이트 어느 쪽이든 덮는가로 정한다.
 pub fn beforeBrowse(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_redirect: c_int, user_gesture: c_int) void {
     if (browser == null or frame == null or request == null) return;
     addBrowser(browser);
@@ -1049,17 +910,16 @@ pub fn beforeBrowse(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, requ
     const host = table_mod.urlHost(u16, url, &hb);
     const canon = table_mod.canonHash(u16, url);
     doLock();
-    const nav = table_mod.NavKind.fromTransition(@bitCast(request.*.get_transition_type.?(request)));
-    const user = table.beforeBrowse(if (entry) |e| e.id else 0, cef_id, main, is_redirect != 0, nav, if (main) 0 else frameKey(frame), canon, table_mod.urlOriginHash(u16, url), host, nowMs());
+    table.beforeBrowse(if (entry) |e| e.id else 0, cef_id, main, is_redirect != 0, if (main) 0 else frameKey(frame), canon, table_mod.urlOriginHash(u16, url), host, nowMs());
     const strict = if (table.findCef(cef_id)) |t| t.anyStrict() else false;
     const covers = if (table.findCef(cef_id)) |t| t.strictCovers(host) else false;
     doUnlock();
     bumpTopology();
     if (main) {
         const ex = nav_exempt.shared.acquire();
-        const human = ex.beforeBrowse(if (entry) |e| e.id else 0, cef_id, is_redirect != 0, user_gesture != 0, user, canon, nowMs());
+        const human = ex.beforeBrowse(if (entry) |e| e.id else 0, cef_id, is_redirect != 0, user_gesture != 0, canon, nowMs());
         nav_exempt.shared.release();
-        if (std.c.getenv("MARU_WEB_TEST_MOCK_LOG") != null) std.debug.print("mock: obb b={d} redirect={d} gesture={d} user={} human={}\n", .{ cef_id, is_redirect, user_gesture, user, human });
+        if (std.c.getenv("MARU_WEB_TEST_MOCK_LOG") != null) std.debug.print("mock: obb b={d} redirect={d} gesture={d} human={}\n", .{ cef_id, is_redirect, user_gesture, human });
     }
     // 엄격 모드의 사이트 묶기 — 이 홉의 호스트를 엄격 사이트가 덮는가. 첫 홉에서 보낸 값은 그 이동에 듣는다(실측 latch). 리다이렉트 홉에서 보낸
     // 값은 이 이동에는 듣지 않는다(Chromium 은 서비스 워커 우회를 이동이 시작할 때 정한다 — 20 회 검증 A MED-1, 실측 2/2): 다음 이동을 위해 보내고,
@@ -1096,7 +956,7 @@ pub fn addressChanged(browser: [*c]c.cef_browser_t, url: [*c]const c.cef_string_
     const host = table_mod.urlHost(u16, units(url), &hb);
     const canon = table_mod.canonHash(u16, units(url));
     doLock();
-    table.committed(if (entry) |e| e.id else 0, cef_id, host, canon);
+    table.committed(if (entry) |e| e.id else 0, cef_id, host);
     // W9d④: 엄격의 바람은 막기·가짜 엄격 사이트 어느 쪽이든 — 그러나 어긋남의 수는 막기의 수(`net_block_hits`)라 막기 엄격이 켜졌을 때만 센다.
     const covers = if (table.findCef(cef_id)) |t| t.strictCovers(host) else false;
     const block_strict = if (table.findCef(cef_id)) |t| t.strict_site_len != 0 else false;

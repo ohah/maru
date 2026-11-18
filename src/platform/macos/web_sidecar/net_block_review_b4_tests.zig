@@ -175,7 +175,7 @@ test "B4-R12: 세대 무작위 걸음 4 천 판 — 바꾸기·비우기·IO 의
         var sent: [max_gen + 2]u64 = @splat(0); // 단 세대마다
         var gen: u32 = 1;
         try installGen(&t, gen, &.{1});
-        t.committed(7, 70, "a.test", 0);
+        t.committed(7, 70, "a.test");
         var held: [6]table_mod.Acquired = undefined;
         var held_gen: [6]u32 = undefined;
         var nh: usize = 0;
@@ -190,7 +190,7 @@ test "B4-R12: 세대 무작위 걸음 4 천 판 — 바꾸기·비우기·IO 의
                     } else try installGen(&t, gen, if (rnd.boolean()) &.{1} else &.{ 1, 2 });
                 },
                 2, 3 => if (nh < held.len) {
-                    if (t.acquire(70, 100 + steps, false, 0, 0)) |a| {
+                    if (t.acquire(70)) |a| {
                         held[nh] = a;
                         held_gen[nh] = a.set.generation;
                         nh += 1;
@@ -353,7 +353,7 @@ test "B4-R20 B-LOW-4: 한 요청의 맞추기 예산 — 별 많은 규칙 32 �
     const c = try table_mod.compile(gpa, v);
     defer if (c.set) |s| gpa.destroy(s);
     const set = c.set.?;
-    var a: table_mod.Acquired = .{ .set = set, .user_exempt = false };
+    var a: table_mod.Acquired = .{ .set = set };
     @memcpy(a.top_buf[0..6], "a.test");
     a.top_len = 6;
     const head = "https://a.test/";

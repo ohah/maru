@@ -291,7 +291,8 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
 
 /// 탭 길의 처리기 — 막기·가짜·지켜보기(인자의 참조는 부른 쪽이 놓는다).
 fn selectTab(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_navigation: c_int, initiator: [*c]const c.cef_string_t) [*c]c.cef_resource_request_handler_t {
-    // W9d④: 사용자 이동의 예외(D2·Q2) — 주 프레임 이동의 요청이면 규칙과 무관하게 공용 표가 소비한다(§13 P2-1). 막기는 D2·Q2 를, 가짜는 Q2 만 본다(2026-11-18 「그것까지 넓히기」 — 사용자 이동의 문서도 가짜).
+    // W9d④: 사람의 누름 예외(Q2 — 가짜만) — 주 프레임 이동의 요청이면 규칙과 무관하게 공용 표가 소비한다(§13 P2-1). 사람의 이동(옛 D2)은 막기·가짜
+    // 어느 쪽에도 예외가 아니다(2026-11-18 「그것까지 넓히기」·「막기도 넓히기」).
     const exempt = blocking.navExempt(browser, frame, request, is_navigation);
     // W9d③: 막기 — 요청 번호·지켜보기·문보다 **먼저**(speculation prefetch·prerender 는 번호 0 으로 온다 — 실측 J-B11; 번호를 먼저 보면 막을
     // 주소가 서버에 간다). 규칙이 없으면 원자 하나만 본다.

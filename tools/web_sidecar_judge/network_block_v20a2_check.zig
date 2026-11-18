@@ -1,15 +1,14 @@
 //! W9d③ 2 차 20 회 적대 검증 1–10 회차(검증자 A2 — 6077ecc4c 를 다시 쳤다)의 실제 CEF 판정 — `maru-web-judge --review-block-v20a2`(`--network-block`
 //! 에는 들지 않는다; docs/plans/web-osr-backend.md 「W9d③ 20 회 적대 검증」 의 2 차). 검증자의 `--a2-attack` 을 고친 뒤의 답으로 단언하게 옮겼다.
 //! 회차마다:
-//!   - R1·R2(`canon`): Chromium 의 URL 파서와 `url_canon.hash`(D2 의 친 주소 비교)·`net_block.parse`(맞을 수 없는 경로 거절)를 무작위로 대조, 앞부분
+//!   - R1·R2(`canon`): Chromium 의 URL 파서와 `url_canon.hash`(흉내 게이트의 대상 주소 비교 — 처음은 D2 의 친 주소)·`net_block.parse`(맞을 수 없는 경로 거절)를 무작위로 대조, 앞부분
 //!     꼴의 끝 점 조각(N-A2-1), 패턴이 거절하는 호스트 글자(`!$~+` — N-A2-2)는 Chromium 이 요청을 보내지 않아 규칙이 쓸모없음을 잰다.
 //!   - R5(`imp`): 서비스 워커가 가져오는 스크립트(importScripts·모듈 import)는 서비스 워커 길에서 막히고 `sw_hits` 로 센다(N-A2-5 — 문서).
 //!   - R6(`sw`): MED-A2-1 — 출처를 보이지 않는 「모르는」 규칙 탭은 T(O) 에서 빠진다(빈 T 는 막지 않음·무관한 탭에 「적용 안 됨」 없음), 보수 규칙의
 //!     거부권(규칙 없는 모르는 탭)은 그대로 센다.
 //!   - R8(`strict`): LOW-A2-2 — 엄격의 리다이렉트 어긋남은 닿은 문서마다 정확히 한 번(204·다운로드·멈춤 뒤의 같은 문서 이동은 0, 옛 문서의 pushState 가
 //!     낀 진짜 어긋남은 1).
-//!   - R10(`d2`): LOW-A2-3·LOW-A2-4·N-A2-3 — 에이전트의 CDP 기록 이동·새로 고침과 페이지의 이동은 사용자의 토큰을 가져가지 못하고, 늦게 답한 떠나기
-//!     확인 뒤의 사용자 이동은 예외, maru 가 보낼 수 있는 친 주소 꼴 12 가지가 모두 예외.
+//!   - R10(`d2` — D2 토큰)은 2026-11-18 「막기도 넓히기」 로 토큰과 함께 지웠다.
 //! 바꾼 것: 검증자의 고르기 변수 `A2_ONLY` 는 `V20A2_ONLY` 로, 시험 서버는 1 차 검증(A)의 끝점을 함께 쓴다.
 
 const std = @import("std");
@@ -83,19 +82,6 @@ fn seen(needle: []const u8) usize {
     _ = std.c.pthread_mutex_lock(&srv_lock);
     defer _ = std.c.pthread_mutex_unlock(&srv_lock);
     return std.mem.count(u8, srv_log.items, needle);
-}
-
-/// 그 글을 담은 마지막 요청 줄(`buf` 에 — 서비스 워커 표지 `sw=` 를 본다).
-fn lastSeen(needle: []const u8, buf: []u8) []const u8 {
-    _ = std.c.pthread_mutex_lock(&srv_lock);
-    defer _ = std.c.pthread_mutex_unlock(&srv_lock);
-    const at = std.mem.lastIndexOf(u8, srv_log.items, needle) orelse return "";
-    const start = (std.mem.lastIndexOfScalar(u8, srv_log.items[0..at], '\n') orelse 0);
-    const end = std.mem.indexOfScalarPos(u8, srv_log.items, at, '\n') orelse srv_log.items.len;
-    const line = srv_log.items[start..end];
-    const n = @min(line.len, buf.len);
-    @memcpy(buf[0..n], line[0..n]);
-    return buf[0..n];
 }
 
 fn reply(conn: c_int, status: []const u8, ctype: []const u8, extra: []const u8, body: []const u8) void {
@@ -191,9 +177,6 @@ fn serveParsed(conn: c_int, r: []const u8) error{Keep}!void {
         return reply(conn, "200 OK", html, "", "<!doctype html><title>slowpage</title>slow");
     }
     if (std.mem.eql(u8, path, "/x/lazy")) return reply(conn, "200 OK", html, "", "<!doctype html><title>lazy</title><div style='height:30000px'></div><iframe loading=lazy src='/p/sub?lz'></iframe>");
-    if (std.mem.eql(u8, path, "/p/ifrhist")) return reply(conn, "200 OK", html, "", "<!doctype html><title>ifrhist</title><iframe id=f src='/p/sub?f1'></iframe>");
-    if (std.mem.startsWith(u8, path, "/blk/h")) return reply(conn, "200 OK", html, "Cache-Control: no-store\r\n", "<!doctype html><title>blk-h</title><script>addEventListener('unload',()=>{});window.bc=new BroadcastChannel('a2')</script>h");
-    if (std.mem.startsWith(u8, path, "/blk/bu") or std.mem.eql(u8, path, "/p/bu")) return reply(conn, "200 OK", html, "", "<!doctype html><title>bu</title><script>addEventListener('beforeunload',e=>{e.preventDefault();e.returnValue='x'})</script>bu");
     if (std.mem.eql(u8, path, "/i/sw.js")) return reply(conn, "200 OK", "application/javascript", "", "importScripts('/blk/imp1.js');self.addEventListener('fetch',()=>{})");
     if (std.mem.eql(u8, path, "/i/swm.js")) return reply(conn, "200 OK", "application/javascript", "", "import '/blk/impm.js';self.addEventListener('fetch',()=>{})");
     if (std.mem.startsWith(u8, path, "/blk/impm")) return reply(conn, "200 OK", "application/javascript", "", "export{}");
@@ -609,7 +592,6 @@ fn only(name: []const u8) bool {
 pub fn run(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     try startServer();
     if (only("strict")) strictCounts(report, host_path, root) catch |err| report(false, "A2-strict", @errorName(err));
-    if (only("d2")) d2Tokens(report, host_path, root) catch |err| report(false, "A2-d2", @errorName(err));
     if (only("sw")) swShared(report, host_path, root) catch |err| report(false, "A2-sw", @errorName(err));
     if (only("imp")) swImports(report, host_path, root) catch |err| report(false, "A2-imp", @errorName(err));
     if (only("canon")) liveCanon(report, host_path, root) catch |err| report(false, "A2-canon", @errorName(err));
@@ -772,246 +754,6 @@ fn strictCounts(report: Report, host_path: [:0]const u8, root: []const u8) !void
     }
 }
 
-// ── R10: D2 tokens ─────────────────────────────────────────────────────────────────────────────────────────
-
-fn waitDialog(r: *Run, b: u64, from: usize, ms: u32) ?msg.JsDialog {
-    const deadline = os.nowMs() + ms;
-    while (os.nowMs() < deadline) {
-        for (r.dialogs.items[from..]) |dl| if (dl.browser == b) return dl;
-        const m = (r.host.next(50) catch null) orelse continue;
-        r.take(m);
-    }
-    for (r.dialogs.items[from..]) |dl| if (dl.browser == b) return dl;
-    return null;
-}
-
-/// The agent's `browser.back` (web_cdp_ops): Page.getNavigationHistory then Page.navigateToHistoryEntry(currentIndex - 1).
-fn cdpBack(r: *Run, b: u64) []const u8 {
-    const st = r.call(b, "Page.getNavigationHistory", "{}", 5000) catch null;
-    if (st == null or st.? != .ok) return "history-failed";
-    const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch return "history-unparsed";
-    defer parsed.deinit();
-    const ci = parsed.value.object.get("currentIndex") orelse return "no-index";
-    const entries = parsed.value.object.get("entries") orelse return "no-entries";
-    if (ci.integer < 1) return "at-start";
-    const id = entries.array.items[@intCast(ci.integer - 1)].object.get("id").?.integer;
-    var pb: [64]u8 = undefined;
-    const params = std.fmt.bufPrint(&pb, "{{\"entryId\":{d}}}", .{id}) catch return "fmt";
-    const st2 = r.call(b, "Page.navigateToHistoryEntry", params, 5000) catch null;
-    return if (st2 != null and st2.? == .ok) "sent" else "nav-failed";
-}
-
-/// The agent's `browser.reload` (web_cdp_ops): Page.reload.
-fn cdpReload(r: *Run, b: u64) []const u8 {
-    const st = r.call(b, "Page.reload", "{}", 5000) catch null;
-    return if (st != null and st.? == .ok) "sent" else "reload-failed";
-}
-
-fn d2Tokens(report: Report, host_path: [:0]const u8, root: []const u8) !void {
-    var host = try spawn(host_path, root, "a2_d2", &.{"MARU_WEB_TEST_BLOCK_LOG=1"});
-    defer stop(&host);
-    var r: Run = .{ .host = &host, .gpa = std.heap.c_allocator };
-    var u: [512]u8 = undefined;
-    var o: [600]u8 = undefined;
-    var o2: [600]u8 = undefined;
-    var d: [1400]u8 = undefined;
-    var p1: [128]u8 = undefined;
-    const rules = [_]msg.NetBlockRule{.{ .id = 1, .site = "127.0.0.1", .pattern = pat(&p1, "127.0.0.1", "/blk/*") }};
-
-    // T1: a user back that only moves an iframe leaves the history token; the agent's back within 1 s takes it.
-    // control (tab 2): the same without the user back — the agent's back to the blocked page is blocked.
-    {
-        try r.create(2, uLoop(&u, "/blk/h2"));
-        try r.nav(2, uLoop(&u, "/p/ifrhist?c"), false);
-        try r.watch(2);
-        _ = try r.block(2, &rules, "");
-        const c0 = seen("/blk/h2");
-        const sent = cdpBack(&r, 2);
-        r.pump(1500);
-        const cerr = r.lastError(2);
-        report(seen("/blk/h2") == c0, "A2-R10-iframe-back-control", std.fmt.bufPrint(&d, "agent back (CDP {s}) to /blk/h2 (no user gesture) → server +{d} · error page {?d} rule {?d}", .{ sent, seen("/blk/h2") - c0, if (cerr) |v| v.code else null, if (cerr) |v| v.rule else null }) catch "");
-    }
-    {
-        try r.create(1, uLoop(&u, "/blk/h1"));
-        try r.nav(1, uLoop(&u, "/p/ifrhist?a"), false);
-        // with a user gesture: Chrome's back button skips history entries added without one (history intervention — run 1 had none).
-        _ = r.evAs(1, "(document.getElementById('f').src='/p/sub?f2','ok')", &o, true);
-        r.pump(800);
-        const hl = r.ev(1, "String(history.length)", &o);
-        try r.watch(1);
-        _ = try r.block(1, &rules, "");
-        const c0 = seen("/blk/h1");
-        try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .back, .user = true } });
-        r.pump(300);
-        // 사이에 스크립트를 돌리지 않는다(에이전트의 Runtime 호출도 토큰을 거둔다 — 이 항목은 기록 이동 자체가 거두는지를 본다).
-        const sent = cdpBack(&r, 1);
-        r.pump(1500);
-        const after_user = r.ev(1, "location.pathname+location.search+' iframe='+(document.getElementById('f')?document.getElementById('f').contentWindow.location.search:'none')", &o2);
-        var ab: [200]u8 = undefined;
-        const after_user_copy = ab[0..@min(ab.len, after_user.len)];
-        @memcpy(after_user_copy, after_user[0..after_user_copy.len]);
-        const e = r.lastError(1);
-        var lb: [200]u8 = undefined;
-        const at = r.ev(1, "location.pathname+' '+document.title", &lb);
-        report(seen("/blk/h1") == c0, "A2-R10-iframe-back-token-steal", std.fmt.bufPrint(&d, "history.length {s} · user back moved only the iframe · agent back (CDP navigateToHistoryEntry {s}) 300 ms later → server +{d} · page {s} (after: {s}) · error page {?d} rule {?d} (want blocked: agent history navigations are not exempt)", .{ hl, sent, seen("/blk/h1") - c0, at, after_user_copy, if (e) |v| v.code else null, if (e) |v| v.rule else null }) catch "");
-    }
-    // T1b: 같은 것을 페이지가 — 사용자의 뒤로가 iframe 만 옮기고 400 ms 뒤 페이지의 `history.go(-1)` 이 주 프레임 기록 이동을 시작한다(스크립트는 사용자
-    // 몸짓 **앞에** 걸어 둔다 — 그 사이 Runtime 호출이 없게). 그 기록 이동은 사용자의 것이 아니다(iframe 기록 이동이 토큰을 거둔다).
-    {
-        try r.create(8, uLoop(&u, "/blk/h8"));
-        try r.nav(8, uLoop(&u, "/p/ifrhist?b"), false);
-        _ = r.evAs(8, "(document.getElementById('f').src='/p/sub?f2','ok')", &o, true);
-        r.pump(800);
-        try r.watch(8);
-        _ = try r.block(8, &rules, "");
-        const c0 = seen("/blk/h8");
-        _ = r.ev(8, "(setTimeout(()=>history.go(-1),400),'armed')", &o);
-        try r.host.send(.{ .nav_action = .{ .browser = 8, .action = .back, .user = true } });
-        r.pump(2000);
-        const e = r.lastError(8);
-        report(seen("/blk/h8") == c0, "A2-R10-iframe-back-page-history-steal", std.fmt.bufPrint(&d, "user back moved only the iframe, page history.go(-1) 400 ms later → server +{d} · error page {?d} rule {?d} (want blocked)", .{ seen("/blk/h8") - c0, if (e) |v| v.code else null, if (e) |v| v.rule else null }) catch "");
-    }
-
-    // T2: a typed fragment-only navigation leaves the 5 s URL token; the agent's reload of that URL takes it.
-    {
-        try r.create(3, uLoop(&u, "/p/sub?t3"));
-        try r.watch(3);
-        _ = try r.block(3, &rules, "");
-        try r.nav(3, uLoop(&u, "/blk/cur3"), true);
-        const typed = seen("/blk/cur3");
-        try r.host.send(.{ .navigate = .{ .browser = 3, .url = uLoop(&u, "/blk/cur3#frag"), .user = true } });
-        r.pump(300);
-        const c0 = seen("/blk/cur3");
-        const rs3 = cdpReload(&r, 3);
-        _ = r.until(Run.loadsAt, 3, r.loads[3] + 1, 5000);
-        r.pump(600);
-        const steal = seen("/blk/cur3") - c0;
-        var hb: [100]u8 = undefined;
-        const hash_now = r.ev(3, "document.title", &hb);
-        // control: same without the fragment step.
-        try r.create(4, uLoop(&u, "/p/sub?t4"));
-        try r.watch(4);
-        _ = try r.block(4, &rules, "");
-        try r.nav(4, uLoop(&u, "/blk/cur4"), true);
-        const typed4 = seen("/blk/cur4");
-        r.pump(300);
-        const c4 = seen("/blk/cur4");
-        _ = cdpReload(&r, 4);
-        _ = r.until(Run.loadsAt, 4, r.loads[4] + 1, 5000);
-        r.pump(600);
-        const ctrl = seen("/blk/cur4") - c4;
-        // variant: page-initiated navigation to the same URL (agent `exec`).
-        try r.host.send(.{ .navigate = .{ .browser = 4, .url = uLoop(&u, "/p/sub?t4b"), .user = true } });
-        r.pump(800);
-        try r.nav(4, uLoop(&u, "/blk/cur5"), true);
-        // 페이지의 같은 주소 이동은 친 `#x` **앞에** 걸어 둔다(그 사이 Runtime 호출이 없게 — 거두는 것은 같은 문서 확정이어야 한다).
-        _ = r.ev(4, "(setTimeout(()=>location.href=location.href.split('#')[0],600),'armed')", &o);
-        const c5 = seen("/blk/cur5");
-        try r.host.send(.{ .navigate = .{ .browser = 4, .url = uLoop(&u, "/blk/cur5#x"), .user = true } });
-        _ = r.until(Run.loadsAt, 4, r.loads[4] + 1, 5000);
-        r.pump(600);
-        const steal_page = seen("/blk/cur5") - c5;
-        report(steal == 0 and steal_page == 0, "A2-R10-fragment-url-token-steal", std.fmt.bufPrint(&d, "user typed /blk/cur3 (server {d}) then /blk/cur3#frag (title after the agent reload {s}) → agent reload (CDP Page.reload {s}) 300 ms later: server +{d} · control without the fragment step: typed {d}, agent reload +{d} · page-initiated location.href to the same URL after a typed #x: server +{d} (want 0 everywhere: only the user's own navigation is exempt)", .{ typed, hash_now, rs3, steal, typed4, ctrl, steal_page }) catch "");
-    }
-
-    // T3: a beforeunload dialog that the user answers late — the user's own navigation should still be exempt.
-    {
-        try r.create(5, uLoop(&u, "/p/bu"));
-        var gb: [32]u8 = undefined;
-        _ = r.evAs(5, "1", &gb, true);
-        try r.watch(5);
-        _ = try r.block(5, &rules, "");
-        const Variant = struct { label: []const u8, wait: u32, path: []const u8 };
-        const vs = [_]Variant{
-            .{ .label = "typed, answered after 200 ms", .wait = 200, .path = "/blk/bu1" },
-            .{ .label = "typed, answered after 6 s", .wait = 6000, .path = "/blk/bu2" },
-        };
-        for (vs) |v| {
-            // back to a beforeunload page with sticky activation
-            if (!std.mem.eql(u8, v.path, "/blk/bu1")) {
-                try r.nav(5, uLoop(&u, "/p/bu?again"), true);
-                _ = r.evAs(5, "1", &gb, true);
-            }
-            const from = r.dialogs.items.len;
-            const c0 = seen(v.path);
-            try r.host.send(.{ .navigate = .{ .browser = 5, .url = uLoop(&u, v.path), .user = true } });
-            const dl = waitDialog(&r, 5, from, 3000);
-            if (dl) |q| {
-                r.pump(v.wait);
-                try r.host.send(.{ .dialog_reply = .{ .browser = 5, .request = q.request, .accept = true } });
-            }
-            _ = r.until(Run.loadsAt, 5, r.loads[5] + 1, 5000);
-            r.pump(600);
-            const e = r.lastError(5);
-            report(seen(v.path) > c0, "A2-R10-beforeunload-typed", std.fmt.bufPrint(&d, "{s}: dialog {s} · server +{d} · last error page {?d} rule {?d} (want exempt: the user's typed navigation)", .{ v.label, if (dl) |q| @tagName(q.kind) else "none", seen(v.path) - c0, if (e) |q| q.code else null, if (e) |q| q.rule else null }) catch "");
-        }
-        // reload of a blocked-URL page with beforeunload (loaded before the rule).
-        try r.create(6, uLoop(&u, "/blk/bu3"));
-        try r.watch(6);
-        _ = try r.block(6, &rules, "");
-        const RV = struct { label: []const u8, wait: u32 };
-        for ([_]RV{ .{ .label = "user reload, answered after 200 ms", .wait = 200 }, .{ .label = "user reload, answered after 1.5 s", .wait = 1500 } }) |v| {
-            _ = r.evAs(6, "1", &gb, true);
-            const from = r.dialogs.items.len;
-            const c0 = seen("/blk/bu3");
-            try r.host.send(.{ .nav_action = .{ .browser = 6, .action = .reload, .user = true } });
-            const dl = waitDialog(&r, 6, from, 3000);
-            if (dl) |q| {
-                r.pump(v.wait);
-                try r.host.send(.{ .dialog_reply = .{ .browser = 6, .request = q.request, .accept = true } });
-            }
-            _ = r.until(Run.loadsAt, 6, r.loads[6] + 1, 5000);
-            r.pump(600);
-            const e = r.lastError(6);
-            report(seen("/blk/bu3") > c0, "A2-R10-beforeunload-reload", std.fmt.bufPrint(&d, "{s}: dialog {s} · server +{d} · last error page {?d} rule {?d} (want exempt)", .{ v.label, if (dl) |q| @tagName(q.kind) else "none", seen("/blk/bu3") - c0, if (e) |q| q.code else null, if (e) |q| q.rule else null }) catch "");
-            // a blocked reload shows the error page — reload the real page again for the next variant (user typed — exempt)
-            if (seen("/blk/bu3") == c0) try r.nav(6, uLoop(&u, "/blk/bu3"), true);
-        }
-    }
-
-    // T4: typed forms that Chromium rewrites (beyond the nine of LOW-4).
-    {
-        try r.create(7, uLoop(&u, "/p/sub?t7"));
-        try r.watch(7);
-        _ = try r.block(7, &rules, "");
-        const Form = struct { label: []const u8, url: []const u8, token: []const u8 };
-        var fb: [14][200]u8 = undefined;
-        const forms = [_]Form{
-            .{ .label = "control exact", .url = std.fmt.bufPrint(&fb[0], "http://127.0.0.1:{d}/blk/tf0", .{port}) catch unreachable, .token = "/blk/tf0" },
-            .{ .label = "uppercase scheme and host", .url = std.fmt.bufPrint(&fb[1], "HTTP://127.0.0.1:{d}/blk/tf1", .{port}) catch unreachable, .token = "/blk/tf1" },
-            .{ .label = "invalid escape %zz", .url = std.fmt.bufPrint(&fb[2], "http://127.0.0.1:{d}/blk/tf2%zz", .{port}) catch unreachable, .token = "/blk/tf2" },
-            .{ .label = "brackets [x]", .url = std.fmt.bufPrint(&fb[3], "http://127.0.0.1:{d}/blk/tf3[x]", .{port}) catch unreachable, .token = "/blk/tf3" },
-            .{ .label = "escaped host 127.0.0.%31", .url = std.fmt.bufPrint(&fb[4], "http://127.0.0.%31:{d}/blk/tf4", .{port}) catch unreachable, .token = "/blk/tf4" },
-            .{ .label = "apostrophe in query", .url = std.fmt.bufPrint(&fb[5], "http://127.0.0.1:{d}/blk/tf5?a'b", .{port}) catch unreachable, .token = "/blk/tf5" },
-            .{ .label = "leading-zero port", .url = std.fmt.bufPrint(&fb[6], "http://127.0.0.1:0{d}/blk/tf6", .{port}) catch unreachable, .token = "/blk/tf6" },
-            .{ .label = "escaped dot segment /%2e/", .url = std.fmt.bufPrint(&fb[7], "http://127.0.0.1:{d}/blk/tf7/%2e/x", .{port}) catch unreachable, .token = "/blk/tf7/x" },
-            .{ .label = "pipe in query", .url = std.fmt.bufPrint(&fb[8], "http://127.0.0.1:{d}/blk/tf8?q=a|b", .{port}) catch unreachable, .token = "/blk/tf8" },
-            .{ .label = "lowercase escape %7e", .url = std.fmt.bufPrint(&fb[9], "http://127.0.0.1:{d}/blk/tf9%7e", .{port}) catch unreachable, .token = "/blk/tf9" },
-            .{ .label = "space + fragment", .url = std.fmt.bufPrint(&fb[10], "http://127.0.0.1:{d}/blk/t f10#x y", .{port}) catch unreachable, .token = "/blk/t%20f10" },
-            .{ .label = "trailing-dot host", .url = std.fmt.bufPrint(&fb[11], "http://127.0.0.1.:{d}/blk/tf11", .{port}) catch unreachable, .token = "/blk/tf11" },
-            .{ .label = "backslash dot-dot", .url = std.fmt.bufPrint(&fb[12], "http://127.0.0.1:{d}/blk/tf12\\..\\tf12b", .{port}) catch unreachable, .token = "/blk/tf12b" },
-            .{ .label = "escaped host letters %31%32%37.0.0.1", .url = std.fmt.bufPrint(&fb[13], "http://%31%32%37.0.0.1:{d}/blk/tf13", .{port}) catch unreachable, .token = "/blk/tf13" },
-        };
-        var lost: usize = 0;
-        for (forms) |f| {
-            const c0 = seen(f.token);
-            try r.host.send(.{ .navigate = .{ .browser = 7, .url = f.url, .user = true } });
-            _ = r.until(Run.loadsAt, 7, r.loads[7] + 1, 5000);
-            r.pump(400);
-            var e1: [600]u8 = undefined;
-            const s = seen(f.token) - c0;
-            if (s == 0) lost += 1;
-            var lb: [600]u8 = undefined;
-            const line = lastSeen(f.token, &lb);
-            report(s > 0, "A2-R10-typed-form", std.fmt.bufPrint(&d, "{s} ({s}) → server +{d} · line '{s}' · ends {s}", .{ f.label, f.url, s, std.mem.trim(u8, line, "\n"), endsForA2(&r, f.token, &e1) }) catch "");
-            // reset to a neutral page (user — exempt anyway)
-            try r.nav(7, uLoop(&u, "/p/sub?t7r"), true);
-        }
-        // maru 의 주소창은 `scheme://…` 만 보낸다(`app_scheme.resolveNavUrl`) — `http:/…`·`http:…` 꼴은 검증자의 1 판에서 뺐다.
-        report(lost == 0, "A2-R10-typed-summary", std.fmt.bufPrint(&d, "forms {d}: lost the exemption (blocked) {d}", .{ forms.len, lost }) catch "");
-    }
-}
-
 fn endsForA2(r: *Run, needle: []const u8, dd: []u8) []const u8 {
     var w: std.Io.Writer = .fixed(dd);
     for (r.reqs.items) |e| if (std.mem.indexOf(u8, e.url[0..e.url_len], needle) != null) {
@@ -1148,7 +890,7 @@ fn swImports(report: Report, host_path: [:0]const u8, root: []const u8) !void {
     report(seen("/blk/imp1.js") == 0 and seen("/blk/impm.js") == 0 and h2.sw_hits >= 2, "A2-R5-sw-importScripts", std.fmt.bufPrint(&d, "sanity page fetch /blk/sanity {s} (hits {d}) · classic SW importScripts('/blk/imp1.js'): register {s} · server {d} · hits {d}→{d} sw_hits {d} unrecorded {d} · ends {s} · module SW import '/blk/impm.js': {s} · server {d} · hits →{d} sw_hits {d} · ends {s}", .{ sanity, h0.hits, reg, seen("/blk/imp1.js"), h0.hits, h1.hits, h1.sw_hits, r.unrecorded[1], endsForA2(&r, "imp1", &e1), regm, seen("/blk/impm.js"), h2.hits, h2.sw_hits, endsForA2(&r, "impm", &e2) }) catch "");
 }
 
-// ── R2/R1: Chromium's own URL parser vs url_canon.hash (D2) and net_block.parse (patterns) ─────────────────────
+// ── R2/R1: Chromium's own URL parser vs url_canon.hash (the emulation gate's target address — once D2's) and net_block.parse (patterns) ─────────────────────
 
 fn evAlloc(r: *Run, b: u64, expr: []const u8) ?std.json.Parsed(std.json.Value) {
     var aw: std.Io.Writer.Allocating = .init(r.gpa);

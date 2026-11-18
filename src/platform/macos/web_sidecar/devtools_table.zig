@@ -129,80 +129,6 @@ pub fn targetParamsAllowed(method: []const u8, params: []const u8) bool {
 /// 인자 없는 `getTargetInfo` 의 인자 글이 가질 수 있는 크기의 위 끝(공백을 넉넉히) — 넘으면 `begin` 에서 곧 막는다.
 const target_params_max: u32 = 64;
 
-/// 에이전트의 이 DevTools 호출이 주 프레임 이동을 시작할 수 있는가(W9d③ 2 차 검증 LOW-A2-3) — 그러면 sidecar 가 그 탭의 산 사용자 D2 토큰을
-/// **다툼**으로 둔다(W9d④ v1 검증 SEVERE-2 부터 — 전에는 거뒀고, 그러면 겹친 `Runtime.evaluate` 하나로 사용자가 친 주소·새로 고침이 막힘·가짜가
-/// 됐다: `net_block_table.agentDevtoolsCall`). 에이전트의 뒤로·앞으로·새로 고침은 wire `nav_action` 이 아니라 CDP `Page.navigateToHistoryEntry`·
-/// `Page.reload` 다 — 실측: 사용자의 iframe 만 옮긴 뒤로·조각만 다른 친 주소가 남긴 토큰을 그것이 가져갔다(그 둘은 따로 거둔다 — 기록 토큰 정리·
-/// 같은 문서 확정). 누르기·키·스크립트도 링크·폼·`location` 으로 이동을 시작할 수 있고, 페이지의
-/// 처리기를 부르는 호출(3 차 검증 N-A3-3 — scroll·focus·input·DOM 바꾸기·`Emulation.*` 등)도 같다.
-/// **허용 목록을 뒤집었다**(4 차 검증 A-LOW: 「거두는 목록」 에 `Page.handleJavaScriptDialog`(멈춘 스크립트를 잇는다)·`Page.setWebLifecycleState`
-/// (freeze·resume 처리기)·`CSS.setStyleTexts`(transitionend·관찰자 처리기)·`Animation.seekAnimations`·`DOMStorage.setDOMStorageItem`(다른 문서의
-/// storage 처리기)·`ServiceWorker.dispatchSyncEvent`·`skipWaiting`(controllerchange — 흔히 `location.reload()`)이 빠져 있었다 — 새 메서드가 생겨도
-/// 빠진다): 아래 **읽기**(처리기를 부르지도 스크립트를 잇지도 않는다)만 다툼 없이 두고 나머지는 모두 다툼으로 둔다. 대가(v1 SEVERE-2 뒤): 다툼의
-/// 창 안에서 에이전트가 같은 주소·같은 갈래로 몬 이동도 사용자 것으로 지나간다(막힘·가짜 없이 — 사용자 쪽 fail-safe).
-pub fn startsNavigation(method: []const u8) bool {
-    for (read_only_methods) |m| {
-        if (std.mem.eql(u8, method, m)) return false;
-    }
-    return true;
-}
-
-/// 다 모인 호출 하나(메서드와 인자)가 토큰을 거둘 호출인가 — 이름(`startsNavigation`)에 더해, 읽기 목록의 메서드라도 인자 때문에 페이지 스크립트를
-/// 돌리면 거둔다(5 차 검증 LOW: `Page.captureScreenshot{captureBeyondViewport:true}` 는 화면 밖까지 찍으려 보기 크기를 늘렸다 되돌려 페이지의
-/// `resize` 처리기를 두 번 돌렸다 — 실측 resize +4, clip 이 있어도). 인자를 읽지 못하면(JSON 이 아니다·같은 열쇠 둘·값의 꼴이 다르다) 거둔다.
-/// 목록에 남은 다른 메서드는 인자로도 스크립트를 돌리지 않는다(실측 — `read_only_methods` 의 주석). 인자와 무관하게 페이지 스크립트를 돌리는
-/// 메서드는 인자를 볼 것 없이 목록 밖이다(6 차 검증 LOW: `Runtime.getProperties`). `gpa` 는 인자 풀기에만 잠깐 쓴다.
-pub fn startsNavigationCall(gpa: std.mem.Allocator, method: []const u8, params: []const u8) bool {
-    if (startsNavigation(method)) return true;
-    if (!std.mem.eql(u8, method, "Page.captureScreenshot") or params.len == 0) return false;
-    const Shot = struct { captureBeyondViewport: ?bool = null };
-    const parsed = std.json.parseFromSlice(Shot, gpa, params, .{ .ignore_unknown_fields = true }) catch return true;
-    defer parsed.deinit();
-    return parsed.value.captureBeyondViewport orelse false;
-}
-
-/// 토큰을 남기는 에이전트의 DevTools 호출 — 페이지의 처리기를 부르지 않는 읽기(maru 의 snapshot·찾기·화면 찍기·저장소 읽기·DevTools kick
-/// `Page.captureScreenshot` 이 쓰는 것과 같은 꼴). 넣을 때의 기준: 페이지 스크립트를 돌리거나 잇지 않고, DOM·스타일·저장소·기록·창을 바꾸지 않는다.
-/// **페이지의 JS 값을 설명하는 메서드는 넣지 않는다** — V8 은 값의 설명을 만들며 늦은 접근자로 페이지 함수를 부를 수 있다(6 차 검증 LOW: 전에 든
-/// `Runtime.getProperties` 는 아직 읽지 않은 Error 값마다 그 `stack` 의 꼴을 만들며 페이지의 `Error.prepareStackTrace` 를 한 번씩 돌렸다 —
-/// `ownProperties`·`generatePreview` 와 무관하게, `window` 에도, 실측 2/2. 그래서 뺐다 — 거둔다. maru 의 흐름은 getProperties 를 쓰지 않는다).
-/// **페이지가 건너뛰게 한 하위 트리의 스타일·배치를 강제하는 메서드도 넣지 않는다** — 강제하면 그 안의 글꼴·그림·`<object>` 를 요청해 페이지의
-/// `document.fonts` 이벤트·`<object>` onload·PerformanceObserver 처리기가 돈다(7 차 검증 LOW-1: 전에 든 `DOM.getBoxModel` 이 `content-visibility:hidden`
-/// 하위 트리 안의 노드에서 요청·marks +10, 실측 2/2. 같은 갈래를 목록의 다른 메서드에 쟀더니 `CSS.getComputedStyleForNode` 도 +10 — 둘 다 뺐다,
-/// 거둔다. maru 의 흐름은 둘 다 쓰지 않는다). 같은 노드에서 `DOM.getContentQuads`·`describeNode`·`getOuterHTML`·`resolveNode`·`Accessibility.*`
-/// (`getRootAXNode`·`getChildAXNodes` 는 켠 뒤)·`Page.getLayoutMetrics`, 화면 안 c-v:hidden 점의 `DOM.getNodeForLocation` 은 +0 이다(판정
-/// `A7-R1b-read-list-skipped-subtree`). 화면 밖 `content-visibility:auto`·`hidden=until-found`·닫힌 `<details>` 의 하위 트리는 CEF 154 가 넣은 뒤 곧
-/// 스타일·배치해(자원을 받는다 — 실측) 강제할 것이 남지 않고, `display:none` 하위 트리는 페이지 JS 의 강제로도 요청이 없다 — 그 넷에서도 모두 +0.
-/// `Runtime.releaseObject(Group)`·`terminateExecution` 은 읽기는 아니지만 남긴다 — maru 가 대화상자가 닫힌 뒤로 미뤄 보내는 정리라 사용자의 떠나기
-/// 확인 답과 같은 때에 온다(거두면 그 사용자의 이동이 막힌다); 멈춤은 페이지 스크립트를 끊을 뿐 이동을 시작하지 않는다. 놓기 자체는 처리기를 부르지
-/// 않지만 **GC 뒤 페이지의 `FinalizationRegistry` 콜백이 돌 수 있다**(7 차 검증 LOW-3: 페이지가 놓고 DevTools 만 쥔 객체를 놓으면 다음 GC 뒤 그 콜백이
-/// 돌았다, 실측 2/2 — 시점은 GC 가 정한다) — 남는 틈, 페이지 타이머와 같은 등급(3·4 차의 문서화된 틈).
-/// 인자도 본다(5 차 검증 LOW — `startsNavigationCall`): 화면 찍기의 `captureBeyondViewport:true` 는 보기 크기를 바꿔 `resize` 처리기를 돌린다 — 거둔다.
-/// 남은 메서드의 인자는 훑어 보았다(CDP 1.3): DOM 의 `depth`·`pierce`·`includeShadowDOM`·`includeUserAgentShadowDOM`·`ignorePointerEventsNone`·선택자,
-/// Accessibility 의 `depth`·`frameId`·이름·역할, 화면 찍기의 `clip`(보기 크기가 아닌 보기 변환)·`fromSurface`·`format`·`quality`·`optimizeForSpeed`,
-/// 쿠키·저장소의 `urls`·출처는 배치·스타일 계산·읽기뿐이다(배치는 `ResizeObserver`·`IntersectionObserver` 를 부르지 않는다 — 그것은 렌더 차례에 돈다).
-/// **숨은 탭에서는 화면 찍기가 렌더 차례를 한 번 돈다**(7 차 검증 LOW-2: kick 꼴도 `{}` 도 숨은 탭의 rAF·ResizeObserver·IntersectionObserver 를
-/// 한 번씩 돌렸다, +3 실측 2/2 — 숨은 탭은 스스로는 부르지 않는다) — 남는 틈, 페이지 타이머와 같은 등급. kick 은 그 목적 자체가 숨은 탭의 rAF 를
-/// 돌리는 것이라(W9b②-3 — 숨은 탭에서 rAF 로 나타나는 요소) 목록에서 뺄 수 없다. 숨은 탭은 사용자가 몰지 않는다.
-/// 실측(CEF 154): 판정 `A5-R10-read-only-runs-no-script`(getter·Proxy 트랩·custom element getter·resize·scroll·visualViewport·IntersectionObserver
-/// 를 단 **보이는 탭** — kick 꼴·화면 밖 clip·clip scale 2 포함 marks 0, 화면 밖까지 찍기만 resize +2·visualViewport resize +3 씩)과 판정
-/// `A6-R10-read-list-lazy-accessors`(getProperties 와 같은 갈래 — 읽지 않은 Error·`Error.captureStackTrace` 를 단 요소·`Symbol.toStringTag`
-/// getter·`toJSON`·`Symbol.toPrimitive`, 그리고 ElementInternals·aria-labelledby·label·shadow·slot 을 거치는 접근성 이름 계산, custom element
-/// 콜백, DOM 원형 getter 를 페이지가 덮어쓴 것, Mutation·Resize·Intersection 감시자, beforematch·화면 밖 content-visibility(auto·hidden 하위 트리의
-/// 노드에 읽기)·details toggle·늦은 그림 — 을 단 페이지에서 남은 메서드 모두(`DOM.resolveNode`·`describeNode`·`Accessibility.*` 포함, 도메인을 켜야
-/// 답하는 둘은 켠 뒤에도) marks 0, 같은 페이지의 getProperties 는 +3). `Network.getResponseBody` 는 실제 요청 번호로도 쟀다 — 에이전트에게
-/// `Network.enable` 은 막혀 있으나 maru 의 응답 본문 기록(W9d② `net_record`)이 켠 탭에서는 같은 DevTools 세션이라 문서 요청의 번호(`Page.getFrameTree`
-/// 의 `loaderId`)로 그 본문을 읽는다: marks 0(받아 둔 본문을 읽을 뿐 렌더러에 닿지 않는다).
-pub const read_only_methods = [_][]const u8{
-    "Accessibility.getFullAXTree", "Accessibility.getPartialAXTree", "Accessibility.queryAXTree", "Accessibility.getChildAXNodes",
-    "Accessibility.getRootAXNode", "DOM.getDocument",                "DOM.querySelector",         "DOM.querySelectorAll",
-    "DOM.describeNode",            "DOM.resolveNode",                "DOM.getContentQuads",       "DOM.getOuterHTML",
-    "DOM.getAttributes",           "DOM.getNodeForLocation",         "Page.captureScreenshot",    "Page.getLayoutMetrics",
-    "Page.getFrameTree",           "Page.getNavigationHistory",      "Page.getResourceTree",      "Runtime.releaseObject",
-    "Runtime.releaseObjectGroup",  "Runtime.terminateExecution",     "Network.getCookies",        "Network.getResponseBody",
-    "Storage.getCookies",          "Storage.getUsageAndQuota",       "Target.getTargetInfo",      "Browser.getVersion",
-};
-
 pub const AddResult = union(enum) {
     /// 모르는 호출 — 버린다(이미 실패로 답했다).
     unknown,
@@ -483,50 +409,6 @@ test "W9d②: Network.enable·Network.disable·Fetch.* 는 보내지 않는다(�
     for ([_][]const u8{ "Target.attachToTarget", "Target.attachToBrowserTarget", "Target.sendMessageToTarget", "Target.setAutoAttach", "Target.autoAttachRelated", "Target.exposeDevToolsProtocol", "Target.createTarget", "Target.createBrowserContext", "Target.getTargets" }) |m| try std.testing.expect(forbiddenMethod(m));
     try std.testing.expect(!forbiddenMethod("Target.getTargetInfo"));
     try std.testing.expect(!forbiddenMethod("TargetX.attachToTarget"));
-    // 2 차 검증 LOW-A2-3: 이동을 시작할 수 있는 호출은 사용자 토큰을 거둔다 — 읽기는 아니다.
-    for ([_][]const u8{ "Page.reload", "Page.navigateToHistoryEntry", "Page.navigate", "Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText", "Runtime.evaluate", "Runtime.callFunctionOn" }) |m| try std.testing.expect(startsNavigation(m));
-    for ([_][]const u8{ "Page.getNavigationHistory", "Page.captureScreenshot", "DOM.getDocument", "Accessibility.getFullAXTree", "Target.getTargetInfo" }) |m| try std.testing.expect(!startsNavigation(m));
-    // 3 차 검증 N-A3-3: 에이전트의 fill·type·press·upload 가 보내는 DOM 호출(처리기를 부른다)과 DOM 을 바꾸는 호출, 스크립트·창 흉내도 거둔다 — maru 가
-    // 보내는 읽기(DOM·Accessibility·Page 의 get·찍기·세계 만들기, Runtime 의 놓기·멈춤)는 아니다.
-    for ([_][]const u8{ "DOM.focus", "DOM.scrollIntoViewIfNeeded", "DOM.setFileInputFiles", "DOM.setOuterHTML", "DOM.setAttributeValue", "DOM.removeNode", "DOM.moveTo", "Page.setDocumentContent", "Runtime.runScript", "Debugger.resume", "Emulation.setDeviceMetricsOverride" }) |m| try std.testing.expect(startsNavigation(m));
-    for ([_][]const u8{ "DOM.resolveNode", "DOM.describeNode", "DOM.querySelector", "DOM.getContentQuads", "Accessibility.queryAXTree", "Page.getFrameTree", "Page.getLayoutMetrics", "Runtime.releaseObjectGroup", "Runtime.terminateExecution" }) |m| try std.testing.expect(!startsNavigation(m));
-    // 4 차 검증 A-LOW: 읽기 허용 목록 밖은 모두 거둔다 — 모르는 이름(`Page.reloadX`), 읽기가 아닌 세계 만들기·저장소 지우기(쿠키 change 처리기)도.
-    for ([_][]const u8{ "Page.reloadX", "Page.createIsolatedWorld", "Storage.clearDataForOrigin" }) |m| try std.testing.expect(startsNavigation(m));
-    // 5 차 검증 LOW: 인자도 본다 — 화면 밖까지 찍기(보기 크기를 바꿔 resize 처리기를 돌린다)와 읽지 못하는 인자는 거두고, kick 꼴·clip·빈 인자는 남긴다.
-    const gpa = std.testing.allocator;
-    for ([_][]const u8{
-        "{\"captureBeyondViewport\":true}",
-        "{\"captureBeyondViewport\":true,\"clip\":{\"x\":0,\"y\":2900,\"width\":800,\"height\":200,\"scale\":1}}",
-        "{\"format\":\"png\",\"captureBeyondViewport\":true}",
-        "{\"captureBeyond\\u0056iewport\":true}", // 이스케이프한 열쇠도 같은 열쇠다
-        "{\"captureBeyondViewport\":false,\"captureBeyondViewport\":true}", // 같은 열쇠 둘 — 읽지 못한다
-        "{\"captureBeyondViewport\":1}",
-        "not json",
-    }) |p| {
-        if (!startsNavigationCall(gpa, "Page.captureScreenshot", p)) std.debug.print("남긴 인자: {s}\n", .{p});
-        try std.testing.expect(startsNavigationCall(gpa, "Page.captureScreenshot", p));
-    }
-    for ([_][]const u8{
-        "",
-        "{}",
-        message.devtools_kick_params,
-        "{\"captureBeyondViewport\":false}",
-        "{\"captureBeyondViewport\":null}",
-        "{\"clip\":{\"x\":0,\"y\":2900,\"width\":800,\"height\":200,\"scale\":1}}",
-        "{\"clip\":{\"x\":0,\"y\":0,\"width\":100,\"height\":100,\"scale\":2},\"fromSurface\":false}",
-    }) |p| try std.testing.expect(!startsNavigationCall(gpa, "Page.captureScreenshot", p));
-    // 이름이 거두는 호출은 인자와 무관하게, 읽기의 다른 메서드는 인자와 무관하게 남긴다(인자로 스크립트를 돌리지 않는다).
-    try std.testing.expect(startsNavigationCall(gpa, "Page.reload", ""));
-    try std.testing.expect(!startsNavigationCall(gpa, "DOM.describeNode", "{\"nodeId\":1,\"depth\":-1,\"pierce\":true}"));
-    // 6 차 검증 LOW: getProperties 는 읽기 목록 밖이다(Error 값의 설명이 페이지의 `Error.prepareStackTrace` 를 부른다) — 인자와 무관하게 거둔다.
-    try std.testing.expect(startsNavigationCall(gpa, "Runtime.getProperties", "{\"objectId\":\"1\",\"ownProperties\":false,\"accessorPropertiesOnly\":true,\"generatePreview\":true}"));
-    try std.testing.expect(!startsNavigationCall(gpa, "DOM.getDocument", "{\"depth\":-1,\"pierce\":true,\"captureBeyondViewport\":true}"));
-    // 7 차 검증 LOW-1: 건너뛴 하위 트리의 스타일·배치를 강제하는 둘은 읽기 목록 밖이다 — 인자와 무관하게 거둔다. 같은 노드의 getContentQuads 는 남긴다.
-    for ([_][]const u8{ "DOM.getBoxModel", "CSS.getComputedStyleForNode" }) |m| {
-        try std.testing.expect(startsNavigationCall(gpa, m, "{\"nodeId\":15}"));
-        try std.testing.expect(startsNavigationCall(gpa, m, ""));
-    }
-    try std.testing.expect(!startsNavigationCall(gpa, "DOM.getContentQuads", "{\"nodeId\":15}"));
     // 3 차 검증 N-B3-f: 탭의 DevTools 를 멈추게 한 브라우저 명령.
     try std.testing.expect(forbiddenMethod("Browser.executeBrowserCommand"));
     try std.testing.expect(!forbiddenMethod("Browser.getVersion"));

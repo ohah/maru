@@ -243,12 +243,13 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
     if (frame == null) return fail(writer, value.browser, .unknown_browser, "browser has no main frame");
     object.release(frame);
     // W9e① 거꾸로 경주 게이트: 흉내가 걸린 사이트 안 문서에서 밖으로 가면 지움의 답을 받은 뒤(최대 100 ms) 낸다(`emulation.gateNav`).
-    if (@import("emulation.zig").gateNav(entry, .{ .action = .navigate, .user = value.user }, value.url)) return;
-    startNavigate(entry, value.url, value.user);
+    if (@import("emulation.zig").gateNav(entry, .{ .action = .navigate }, value.url)) return;
+    startNavigate(entry, value.url);
 }
 
-/// 주소 이동을 낸다(곧, 또는 게이트가 연 뒤 — `emulation.openGate`).
-pub fn startNavigate(entry: *const registry_mod.Entry, url_text: []const u8, user: bool) void {
+/// 주소 이동을 낸다(곧, 또는 게이트가 연 뒤 — `emulation.openGate`). 사람이 친 이동도 에이전트의 이동과 같다 — 막기·가짜 규칙에 예외가 없다
+/// (사용자 결정 2026-11-18 「막기도 넓히기」; wire 의 `user` 는 사람의 탭 사용으로만 센다 — `human_use.touchOf`).
+pub fn startNavigate(entry: *const registry_mod.Entry, url_text: []const u8) void {
     const browser = browserOf(entry);
     const frame = browser.*.get_main_frame.?(browser);
     if (frame == null) return;
@@ -256,10 +257,6 @@ pub fn startNavigate(entry: *const registry_mod.Entry, url_text: []const u8, use
     var url = std.mem.zeroes(c.cef_string_t);
     library.setString(state.api, &url, url_text);
     defer state.api.string_utf16_clear(&url);
-    // W9d③ D2: 사용자가 친 이동 — 그 주소의 이동 한 번은 막기 규칙이 막지 않는다(토큰은 `on_before_browse` 가 그 이동에 묶는다).
-    // 사용자 것이 아닌 이동은 남은 토큰을 거둔다 — 친 주소와 같은 주소면 다툼으로 남긴다(둘 다 진짜 — W9d④ v1 SEVERE-2). 게이트가 미룬 이동은
-    // 낼 때 건다(토큰의 1 초 창이 기다림에 먹히지 않게 — 공격 A18).
-    if (user) @import("blocking.zig").userNavigate(entry.id, url_text) else @import("blocking.zig").agentNavigateTo(entry.id, url_text);
     frame.*.load_url.?(frame, &url); // W9e②: 사람의 이동은 `noteHumanInput` 이 이미 셌다(`human_use.touchOf`)
 }
 
@@ -280,9 +277,9 @@ fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
             .reload, .stop => .reload,
         };
         // W9e① 거꾸로 경주 게이트(`emulation.gateNav`) — 새로고침은 게이트하지 않지만 기다리는 줄이 있으면 그 뒤에 선다.
-        if (emulation.gateNav(entry, .{ .action = action, .user = value.user }, "")) return;
+        if (emulation.gateNav(entry, .{ .action = action }, "")) return;
     }
-    startNavAction(entry, value.action, value.user);
+    startNavAction(entry, value.action);
 }
 
 /// 페이지 찾기(P0-2). CEF `find` 는 대소문자 무시(`matchCase=0` — WebKit 탭의 찾기와 같은 규칙), `findNext=1`: 글이 바뀌었거나 멈춘 뒤면
@@ -314,39 +311,16 @@ fn findStop(value: protocol.message.FindStop) void {
     host.*.stop_finding.?(host, @intFromBool(!value.keep_selection));
 }
 
-/// 뒤로·앞으로·새로고침·멈춤을 낸다(곧, 또는 게이트가 연 뒤 — `emulation.openGate`).
-pub fn startNavAction(entry: *const registry_mod.Entry, action: protocol.message.NavActionKind, user: bool) void {
+/// 뒤로·앞으로·새로고침·멈춤을 낸다(곧, 또는 게이트가 연 뒤 — `emulation.openGate`). 사람의 것도 에이전트의 것과 같다(막기·가짜에 예외가 없다 —
+/// 2026-11-18).
+pub fn startNavAction(entry: *const registry_mod.Entry, action: protocol.message.NavActionKind) void {
     const browser = browserOf(entry);
-    // W9d③ D2: 사용자의 뒤로·앞으로·새로고침 — 그 몸짓이 시작한 주 프레임 이동 하나(1 초 — 같은 갈래만)는 막기 규칙이 막지 않는다. 갈 곳이 없는
-    // 뒤로·앞으로는 이동을 시작하지 않으므로 토큰도 걸지 않는다(20 회 검증 A LOW-3: 남은 토큰을 1 초 안의 에이전트 이동이 가져갔다).
-    // 3 차 검증 LOW-A3-4·4 차 검증 A-LOW: 주 프레임 주소가 그대로인 기록 이동(iframe 만·같은 주소의 같은 문서)은 주 프레임 이동을 시작하지 않는다 —
-    // 토큰은 이동 앞에 걸고(그 `on_before_browse` 가 곧 올 수 있다), 이동을 시작한 뒤 Chromium 이 고른 실제 대상(건너뛰는 항목 너머)을 읽어 거둔다.
-    // 멈춤은 몸짓의 이동을 끝낸다 — 누가 눌렀든 남은 토큰을 거둔다(3 차 검증 LOW-A3-3: 토큰은 이동이 시작될 때까지 기다리므로). 게이트가 미룬
-    // 이동은 낼 때 건다(공격 A18 — 지금과 같은 차례).
-    const blocking = @import("blocking.zig");
-    const step: i32 = if (action == .back) -1 else 1;
-    var history_token = false;
-    var history_before: ?@import("net_block_table.zig").HistoryAt = null;
-    if (action == .stop) {
-        blocking.agentNavigate(entry.id);
-    } else if (user) switch (action) {
-        .back, .forward => if ((if (action == .back) browser.*.can_go_back.?(browser) else browser.*.can_go_forward.?(browser)) != 0) {
-            history_before = blocking.historyAt(browser, step);
-            blocking.userNavAction(entry.id, .history);
-            history_token = true;
-        },
-        .reload => blocking.userNavAction(entry.id, .reload),
-        .stop => {},
-    } else if (action == .reload) {
-        blocking.agentReload(entry.id); // 같은 문서 — 산 새로 고침 토큰은 다툼으로 남긴다(W9d④ v1 SEVERE-2)
-    } else blocking.agentNavigate(entry.id); // 사용자 것이 아닌 다른 곳으로 가는 이동은 남은 토큰을 거둔다
     switch (action) {
         .back => browser.*.go_back.?(browser),
         .forward => browser.*.go_forward.?(browser),
         .reload => browser.*.reload.?(browser),
         .stop => browser.*.stop_load.?(browser),
     }
-    if (history_token) blocking.settleHistoryToken(entry.id, history_before, blocking.historyAt(browser, step));
 }
 
 /// 모두 닫기를 요청한다. 열린 브라우저가 없으면 바로 루프를 끝낸다.

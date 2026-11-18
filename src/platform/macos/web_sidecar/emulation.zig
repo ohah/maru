@@ -1033,7 +1033,7 @@ const Target = struct {
     }
 };
 
-/// 그 이동이 갈 문서. 뒤로·앞으로는 기록의 지금 항목(진행 중 기록 이동이 있으면 그 대상 — `blocking.historyAt` 과 같다) ± 1 의 주소 — 그 방향에 항목이
+/// 그 이동이 갈 문서. 뒤로·앞으로는 기록의 지금 항목(진행 중 기록 이동이 있으면 그 대상 — CEF `NavigationController::GetCurrentEntryIndex`) ± 1 의 주소 — 그 방향에 항목이
 /// 없으면 모름(이동이 없다). 몸짓 없이 생긴 항목을 Chromium 이 건너뛰는 개입은 CEF 가 알리지 않는다(남는 틈 — 공격 A3). 새로고침은 게이트하지 않는다
 /// (사이트 안 문서 — 밖으로 리다이렉트하면 그 홉이 지운다).
 fn targetOf(reg: *const registry_mod.Entry, step: emu_plan.GateStep, url: []const u8) Target {
@@ -1317,11 +1317,11 @@ fn openGate(e: *Entry, why: []const u8) void {
 
 fn startStep(reg: *const registry_mod.Entry, step: emu_plan.GateStep, url: []const u8) void {
     switch (step.action) {
-        .navigate => browsers.startNavigate(reg, url, step.user),
-        .back => browsers.startNavAction(reg, .back, step.user),
-        .forward => browsers.startNavAction(reg, .forward, step.user),
-        .reload => browsers.startNavAction(reg, .reload, step.user),
-        // CEF 의 메뉴 명령(`MENU_ID_BACK`·`FORWARD`)이 하는 일과 같다 — 막기 토큰 없이(지금과 같다).
+        .navigate => browsers.startNavigate(reg, url),
+        .back => browsers.startNavAction(reg, .back),
+        .forward => browsers.startNavAction(reg, .forward),
+        .reload => browsers.startNavAction(reg, .reload),
+        // CEF 의 메뉴 명령(`MENU_ID_BACK`·`FORWARD`)이 하는 일과 같다.
         .menu_back, .menu_forward => {
             const b = browserOf(reg);
             if (step.action == .menu_back) b.*.go_back.?(b) else b.*.go_forward.?(b);

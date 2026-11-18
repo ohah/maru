@@ -5240,9 +5240,18 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   탭 UD2 와 같다). sidecar 의 판정·wire 칸은 남는다(바이트 꼴 — wire 판 그대로). D2(사람이 친 주소·뒤로·앞으로·새로 고침의 문서는 진짜)도 가짜에서는
   다음 날 걷었다 — 아래 「A8 넓히기」.
 - **A8 넓히기(사용자 결정 2026-11-18 「그것까지 넓히기」, `feat/browser-mock-all-navs`)**: 사람이 시작한 어떤 이동도 가짜에 진짜로 남지 않는다 —
-  sidecar `net_mock_table.decideTab` 이 사용자 이동 토큰(D2)을 보지 않는다(요청의 `user_exempt` 칸을 걷었다). 막기의 D2 는 그대로다(결정은 가짜만).
+  sidecar `net_mock_table.decideTab` 이 사용자 이동 토큰(D2)을 보지 않는다(요청의 `user_exempt` 칸을 걷었다). 막기의 D2 는 그대로다(결정은 가짜만 — 같은 날 아래 「막기도 넓히기」 로 걷었다).
   판정자 `--network-mock` 의 옛 D2 판정을 「가짜·서버에 닿지 않음」 으로 뒤집고 사람의 뒤로·앞으로를 더했다(옛 판정자를 새 sidecar 에 돌리면 정확히 옛 D2 판정 여섯이 FAIL — 기록 `$S/agent_equal/mock_all/`). 격리
   앱 재실측: 사람이 주소창에 친 `m.html`·새로 고침 단추·뒤로 단추가 고치기 전 셋 다 진짜(서버에 닿음), 고친 뒤 셋 다 가짜(서버에 닿지 않음).
+- **막기도 넓히기(사용자 결정 2026-11-18 「막기도 넓히기」, `feat/browser-block-all-navs`)**: 막기 규칙도 사람이 친 주소·뒤로·앞으로·새로 고침·누른
+  링크·폼의 주 프레임 문서를 막는다 — 모든 탭. 옛 D2 예외와 그 장치를 sidecar 에서 모두 지웠다: 몸짓의 토큰(`navigate{user}`·`nav_action{user}` 가 걸고
+  `on_before_browse` 가 묶고 IO 가 소비), 에이전트의 이동·DevTools 호출이 만드는 「다툼」 과 그 읽기 허용 목록(`devtools_table.read_only_methods`·
+  `startsNavigationCall`), 떠나기 확인의 멈춤, 기록 토큰 거두기(`historyAt`), 서비스 워커 길의 사용자 이동 예외(`sw_share` 의 `user_nav`), Q2 표의
+  「사용자 이동이 이긴다」. wire 의 `user` 칸은 그대로(사람의 탭 사용 — `human_use.touchOf`). 순수 시험 581 → 560(토큰·다툼·읽기 목록의 시험 21 을 지우고
+  사람 이동도 막는 시험 하나를 더했다). 사람이 보는 것: Chromium 오류 페이지 「… is blocked」(서비스 워커 사이트는 -2), 주소창은 옛 주소, ⊘, 탭·규칙
+  세대마다 한 번 알림. 갇히지 않는다(규칙은 추가한 사이트에 묶인다). 판정자: `--network-block`·`--network-mock`·`--review-block-v20*` 의 D2 판정을 뜻
+  있게 뒤집거나(규칙 주소 문서를 규칙 **앞에** 확정한 뒤 사람의 새로 고침·뒤로) 토큰 장치만 재던 것을 지웠다. 격리 앱 재실측: 고치기 전 사람의 새로 고침·
+  친 주소·뒤로가 진짜(서버에 닿음), 고친 뒤 셋 다 막힘(오류 페이지, 서버에 닿지 않음) — 기록 `$S/agent_equal/block_all/`.
 - **A2 주인 넘기기**: 막기 규칙·막기 엄격·가짜 규칙·가짜 엄격·탭의 흉내·탭의 trace 는 각각 주인 pane 이 하나. 어느 pane 이든 바꾸고 지운다 — **실제로
   바꾼 호출의 pane 이 주인**, 그대로 두는 호출(같은 규칙·같은 응답(실행 사이트까지)·같은 사이트 엄격·같은 값의 흉내)은 주인을 옮기지 않는다. 철회·pane
   닫힘은 그 순간 주인인 것만 거둔다 — 20 회 검증 B DEF-3·W9d④ v2 R13(다시 켠 pane 이 주인이 되고 그 pane 의 철회가 처음 pane 의 엄격을 지웠다)을 이

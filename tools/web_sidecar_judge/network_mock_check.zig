@@ -24,7 +24,7 @@
 //!   같은 공유 워커에 붙어도 진짜)·mock-shw-script-after-close(만든 탭을 닫은 뒤 새 연결도 진짜)·mock-block-strict-union(막기 엄격만 켜도 가짜가 서비스 워커 아래 탭 길로 듣는다, 상태는 각자의 엄격만)·
 //!   mock-record-body-mixed(W9d② 기록 중 같은 주소를 가짜(fetch)·진짜(img)로 함께 — 진짜 기록에 가짜 본문이 붙지 않는다).
 //! 적대 검증 SEVERE 넷 고침(`mkfix4f`·`mkfix4d`·`mkfix4c` — 2026-11-11, `MOCK_ONLY=fix4`): mock-xframe-*·mock-sameframe-mocked(허락 밖 iframe 의 요청은 모두 진짜),
-//!   mock-typed·reload·same-url-*(사용자 이동 × 에이전트 DevTools 호출 — 2026-11-18 부터 둘 다 가짜)·block-d2-*(막기의 다툼 — 그대로), mock-churn-no-traffic(요청 없는 바꾸기) — 파일 끝의 설명.
+//!   mock-typed·reload·same-url-*(사용자 이동 × 에이전트 DevTools 호출 — 2026-11-18 부터 둘 다 가짜)·block-typed-reload+agent-eval-blocked·block-agent-nav-blocked(막기도 2026-11-18 부터 사람의 이동을 막는다 — 다툼이 사라졌다), mock-churn-no-traffic(요청 없는 바꾸기) — 파일 끝의 설명.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -1376,9 +1376,10 @@ fn portChecks(report: Report, host_path: [:0]const u8, root: []const u8) !void {
 // mock-xframe-*(v1 SEVERE-1 — 사용자 결정 「허락 밖 iframe 요청은 모두 진짜」): 맨 위 127.0.0.1(사이트 grant 127.0.0.1 — 실행 사이트도) 아래 다른 사이트
 //   iframe(localhost)이 부른 스크립트·grant 사이트 주소의 스크립트·이미지·fetch·전용 워커는 모두 진짜이고 서버가 받으며 규칙의 frame_not_mocked 로
 //   센다, 그 iframe 은 localhost 쿠키를 읽지 못한다(검증자의 쿠키 읽기 재현); 같은 사이트 iframe 의 같은 다섯은 가짜(대조).
-// block-d2-*(v1 SEVERE-2 — 사용자 결정 「고침」): 사용자가 친 주소·새로 고침(떠나기 처리기가 도는 옛 문서 포함) 바로 뒤의 에이전트
-//   `Runtime.evaluate` 는 그 이동을 막힘으로 만들지 않는다, 대조로 에이전트만의 이동은 그대로 막힘. 가짜(mock-typed·reload·same-url-*·agent-nav-mocked)는
-//   2026-11-18 「그것까지 넓히기」 로 사용자 이동도 가짜다 — 같은 경주에서 사용자의 문서·겹친 에이전트 이동 모두 가짜이고 서버에 닿지 않는다.
+// block-typed-reload+agent-eval-blocked·block-agent-nav-blocked(v1 SEVERE-2 의 막기 쪽 — 그때 「고침」 은 다툼으로 사용자의 이동을 지나가게 했다;
+//   2026-11-18 「막기도 넓히기」 로 사용자가 친 주소·새로 고침(떠나기 처리기가 도는 옛 문서 포함)의 주 문서도 겹친 에이전트 eval 과 무관하게 막힌다,
+//   새로 고침은 규칙 앞에 에이전트가 확정한 규칙 주소 문서에서 잰다). 가짜(mock-typed·reload·same-url-*·agent-nav-mocked)는 「그것까지 넓히기」 로
+//   사용자 이동도 가짜다 — 같은 경주에서 사용자의 문서·겹친 에이전트 이동 모두 가짜이고 서버에 닿지 않는다.
 // mock-churn-no-traffic(v2 SEVERE-1 R11): 요청 없이 512 KiB 본문 규칙을 160 번 바꿔도 맺음이 모두 되고 페이지는 마지막 본문을 받으며 host 의
 //   footprint 가 자라지 않는다(은퇴 묶음을 바꿀 때 곧 거둔다).
 
@@ -1587,7 +1588,8 @@ fn fix4D2(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         const eval_nav = contains(d2Doc(&r, 1, &o), "MOCK-D2");
         report(agent_only and after_settle and eval_nav, "mock-agent-nav-mocked", std.fmt.bufPrint(&d, "에이전트 이동 {} · 사용자 문서가 선 뒤 같은 주소 {} · eval 의 location {}", .{ agent_only, after_settle, eval_nav }) catch "");
     }
-    // 막기(W9d③ 의 같은 경주 — 같은 표): 가짜 규칙을 지우고 막기 규칙.
+    // 막기(W9d③ 의 같은 경주): 가짜 규칙을 지우고 막기 규칙. 막기도 넓히기(사용자 결정 2026-11-18): 친 주소·새로 고침의 주 문서도 막힌다 — 겹친
+    // 에이전트 eval 과 무관하게(다툼이 사라졌다). 새로 고침은 규칙 **앞에** 에이전트가 확정한 규칙 주소 문서에서(계획 공격 3-MED-2).
     {
         try r.host.send(.{ .net_mock_commit = .{ .browser = 1, .generation = r.gen + 1, .count = 0 } });
         r.gen += 1;
@@ -1597,30 +1599,39 @@ fn fix4D2(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         v.rules[0] = .{ .id = 91, .site = "127.0.0.1", .pattern = pat(&bp, "127.0.0.1", "/m/x4b*") };
         try r.host.send(.{ .net_block = v });
         r.pump(300);
-        var breal: u32 = 0;
+        var bblocked: u32 = 0;
+        const srv_typed = seen("/m/x4bdoc?");
         for (0..3) |i| {
             try r.nav(1, uLoop(&u, "/p/sub?bb"), false);
-            if (contains(try typedThenEval(&r, 1, uLoop(&u, std.fmt.bufPrint(&qb, "/m/x4bdoc?{d}", .{i}) catch ""), 0, "1", &o), "REAL|")) breal += 1;
+            if (!contains(try typedThenEval(&r, 1, uLoop(&u, std.fmt.bufPrint(&qb, "/m/x4bdoc?{d}", .{i}) catch ""), 0, "1", &o), "REAL|")) bblocked += 1;
         }
         try r.nav(1, uLoop(&u, "/x4/bu"), false);
-        if (contains(try typedThenEval(&r, 1, uLoop(&u, "/m/x4bdoc?bu"), 100, "1", &o), "REAL|")) breal += 1;
-        try r.nav(1, uLoop(&u, "/m/x4bdoc?r"), true);
-        const typed_ok = contains(d2Doc(&r, 1, &o), "REAL|");
-        var rreal: u32 = 0;
+        if (!contains(try typedThenEval(&r, 1, uLoop(&u, "/m/x4bdoc?bu"), 100, "1", &o), "REAL|")) bblocked += 1;
+        const typed_srv = seen("/m/x4bdoc?") - srv_typed;
+        // 규칙을 잠깐 비우고 에이전트가 규칙 주소 문서를 확정한 뒤 규칙을 다시 건다.
+        try r.host.send(.{ .net_block = .{ .browser = 1, .generation = 2 } });
+        r.pump(300);
+        try r.nav(1, uLoop(&u, "/m/x4bdoc?r"), false);
+        const pre_ok = contains(d2Doc(&r, 1, &o), "REAL|");
+        v.generation = 3;
+        try r.host.send(.{ .net_block = v });
+        r.pump(300);
+        const srv_r = seen("/m/x4bdoc?r");
+        var rblocked: u32 = 0;
         for (0..2) |_| {
             const before = r.loads[1];
             try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .reload, .user = true } });
             _ = r.call(1, "Runtime.evaluate", "{\"expression\":\"1\"}", 3000) catch null;
             _ = r.until(Run.loadsAt, 1, before + 1, wait_ms);
             r.pump(300);
-            if (contains(d2Doc(&r, 1, &o), "REAL|")) rreal += 1;
+            if (!contains(d2Doc(&r, 1, &o), "REAL|")) rblocked += 1;
         }
-        report(breal == 4 and typed_ok and rreal == 2, "block-d2-typed-reload+agent-eval", std.fmt.bufPrint(&d, "막기 규칙 — 친 주소 + eval 진짜 {d}/4(떠나기 처리기 하나 포함) · 새로 고침 + eval 진짜 {d}/2", .{ breal, rreal }) catch "");
+        report(bblocked == 4 and typed_srv == 0 and pre_ok and rblocked == 2 and seen("/m/x4bdoc?r") == srv_r, "block-typed-reload+agent-eval-blocked", std.fmt.bufPrint(&d, "막기 규칙 — 친 주소 + eval 막힘 {d}/4(떠나기 처리기 하나 포함, 서버 {d}) · (규칙 앞에 확정 {}) 새로 고침 + eval 막힘 {d}/2(서버 {d})", .{ bblocked, typed_srv, pre_ok, rblocked, seen("/m/x4bdoc?r") - srv_r }) catch "");
         const before_srv = seen("/m/x4bdoc?agent");
         try r.nav(1, uLoop(&u, "/m/x4bdoc?agent"), false);
         const agent_view = d2Doc(&r, 1, &o);
-        report(!contains(agent_view, "REAL|") and seen("/m/x4bdoc?agent") == before_srv, "block-d2-agent-nav-still-blocked", std.fmt.bufPrint(&d, "대조: 에이전트 이동은 막힌다 — {s} · 서버 {d}", .{ agent_view, seen("/m/x4bdoc?agent") - before_srv }) catch "");
-        try r.host.send(.{ .net_block = .{ .browser = 1, .generation = 2 } });
+        report(!contains(agent_view, "REAL|") and seen("/m/x4bdoc?agent") == before_srv, "block-agent-nav-blocked", std.fmt.bufPrint(&d, "에이전트 이동도 막힌다 — {s} · 서버 {d}", .{ agent_view, seen("/m/x4bdoc?agent") - before_srv }) catch "");
+        try r.host.send(.{ .net_block = .{ .browser = 1, .generation = 4 } });
         r.pump(200);
     }
 }

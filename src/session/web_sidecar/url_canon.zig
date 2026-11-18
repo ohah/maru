@@ -1,7 +1,8 @@
 //! 주소의 Chromium 꼴(GURL 정규화)을 흉내 낸 순수 규칙(W9d③ 20 회 검증 — docs/plans/web-osr-backend.md 「W9d③ 결정·실측」) — sidecar 와 maru 가
 //! 같은 파일을 쓴다. 쓰는 곳이 둘이다:
-//!   - **D2 토큰의 주소 비교**(`hash` — sidecar `net_block_table.canonHash`): 사용자가 주소창에 친 글(u8)과 `on_before_browse` 가 주는 GURL 꼴(u16)이
-//!     같은 이동이면 같은 값이어야 한다. 전에는 스킴·호스트 소문자·기본 포트·빈 경로만 맞춰, Chromium 이 고쳐 쓰는 꼴(빈칸 → `%20`, `/x/../y` →
+//!   - **주소 비교**(`hash` — sidecar `net_block_table.canonHash`): maru 가 보낸 이동 주소(u8 — 사용자가 친 글일 수 있다)와 `on_before_browse`·기록
+//!     항목이 주는 GURL 꼴(u16)이 같은 이동이면 같은 값이어야 한다(흉내의 거꾸로 경주 게이트의 대상 주소 — `emulation.targetOf`; 처음 쓴 곳은 막기의
+//!     옛 D2 토큰이었다 — 2026-11-18 「막기도 넓히기」 로 걷었다). 전에는 스킴·호스트 소문자·기본 포트·빈 경로만 맞춰, Chromium 이 고쳐 쓰는 꼴(빈칸 → `%20`, `/x/../y` →
 //!     `/y`, `"` → `%22`, `\` → `/`, `a.test?q` → `a.test/?q`, `127.1` → `127.0.0.1`)을 친 사용자의 이동이 막혔다(20 회 검증 A LOW-4 — 9 꼴 중 6 꼴).
 //!     그래서 같은 함수를 **양쪽에** 쓴다: GURL 꼴은 이미 정규라 그대로 지나가고(멱등), 친 글은 GURL 이 하는 대로 고쳐진다. 고칠지 애매한 글자
 //!     (`{`·`}`·`|`·`^`·쿼리의 `'`)는 양쪽에서 똑같이 `%XX` 로 바꾸므로 GURL 이 어느 쪽을 택해도 같은 값이 된다. 남은 틈(문서화): 국제화 호스트
@@ -201,7 +202,7 @@ pub fn ipv6Text(groups: [8]u16, buf: *[39]u8) []const u8 {
     return w.buffered();
 }
 
-// ── 주소 해시(D2) ────────────────────────────────────────────────────────────────────────────────────────
+// ── 주소 해시 ────────────────────────────────────────────────────────────────────────────────────────
 
 fn isHexUnit(comptime T: type, u: T) bool {
     return u <= 0x7f and std.ascii.isHex(@intCast(u));
@@ -541,7 +542,7 @@ fn same(typed: []const u8, comptime gurl: []const u8) !void {
     try testing.expectEqual(b, hash(u8, 1, gurl).?);
 }
 
-test "W9d③ 20 회 검증 A LOW-4: 사용자가 친 아홉 꼴과 Chromium 이 고쳐 쓴 꼴(GURL)이 같은 값 — 그래서 그 이동이 D2 예외를 받는다" {
+test "W9d③ 20 회 검증 A LOW-4: 사용자가 친 아홉 꼴과 Chromium 이 고쳐 쓴 꼴(GURL)이 같은 값 — 같은 이동으로 읽힌다(옛 D2 예외 — 지금은 흉내 게이트의 대상 주소)" {
     try same("HTTP://A.TEST:80/x", "http://a.test/x");
     try same("https://a.test", "https://a.test/");
     try same("https://a.test/x#frag", "https://a.test/x#frag");

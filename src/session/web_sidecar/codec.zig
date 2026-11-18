@@ -132,7 +132,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .navigate => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeUrl(&cursor, value.url);
-            try cursor.writeByte(@intFromBool(value.user)); // W9d③ D2
+            try cursor.writeByte(@intFromBool(value.user)); // 사람의 이동(옛 D2 — 지금은 사람의 탭 사용만)
         },
         .shutdown => {},
         .frame_channel => |value| {
@@ -142,7 +142,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .nav_action => |value| {
             try writeBrowser(&cursor, value.browser);
             try cursor.writeByte(@backingInt(value.action));
-            try cursor.writeByte(@intFromBool(value.user)); // W9d③ D2
+            try cursor.writeByte(@intFromBool(value.user)); // 사람의 이동(옛 D2 — 지금은 사람의 탭 사용만)
         },
         .mouse => |value| {
             if (!fields.validClickCount(value)) return error.InvalidClickCount;
@@ -535,7 +535,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             .nav_action = .{
                 .browser = try readBrowser(&cursor),
                 .action = std.enums.fromInt(NavActionKind, try cursor.readByte()) orelse return error.UnknownNavAction,
-                .user = try readBool(&cursor), // W9d③ D2
+                .user = try readBool(&cursor), // 사람의 이동(옛 D2 — 지금은 사람의 탭 사용만)
             },
         },
         .mouse => blk: {

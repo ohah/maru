@@ -53,6 +53,8 @@ maru browser network-mock --surface 12 --add "https://api.example.com/v1/user" -
   that site's service worker (not shared workers).
 - Service and shared workers never see mocks. Mocked pages and scripts run as that site.
 - Mocks also answer pages the user opens in any way — a link, a form, a typed address, back, forward or reload (an
-  older Maru leaves those real). Blocking rules still let the user's typed, back, forward and reload pages through.
+  older Maru leaves those real). Blocking rules also block pages the user opens in any way on the rule's site (an older
+  Maru lets the user's typed, back, forward and reload pages through); the user sees Chromium's "blocked" page and can
+  still go to other sites.
 - The tab title shows ⊘ while blocking and ▣ while mocking. **Remove your rules when done** — `--rule <n>` for
   yours, or `--clear` when no other pane uses the tab.

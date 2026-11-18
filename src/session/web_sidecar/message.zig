@@ -211,6 +211,9 @@ pub const Tag = enum(u8) {
     /// 낼 때는 지금 일치의 선택까지 지우고(`keep_selection` 거짓), 닫힌 오버레이에서 ⌘G 가 찾은 뒤에는 칠한 것만 지우고 그 일치를 선택으로
     /// 남긴다(참 — WebKit 탭의 ⌘G 처럼 어디인지는 남고 노란 칠은 남지 않는다). 그 뒤의 늦은 답은 sidecar 가 버린다.
     find_stop = 143,
+    /// 사이트 권한 목록을 묻는다(2026-11-18 — 사람의 「Site Permissions…」 창). `reset_kind` 가 있으면 먼저 그 출처의 그 종류를 기본(묻기)으로 되돌린다
+    /// (CEF `set_content_setting(…, DEFAULT)`). 답은 `site_permissions_list` 하나.
+    site_permissions = 144,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
@@ -271,6 +274,9 @@ pub const Tag = enum(u8) {
     /// 찾기의 답(P0-2 — CEF `on_find_result`). 일치 수와 지금 일치의 차례(1 부터, 일치가 없으면 0)·마지막 답인가. Chromium 은 수를 세는
     /// 동안 여러 번 답한다. sidecar 는 **그 탭의 지금 찾기**의 답만 보낸다(앞 질의의 늦은 답·멈춘 뒤의 답은 버린다 — `find.zig`).
     find_result = 86,
+    /// 사이트 권한 목록(2026-11-18) — Chromium 이 출처마다 기억한 허용·차단(`profile.content_settings.exceptions` — 사람의 답과 에이전트의 답이
+    /// 같은 자리에 같은 모양으로 있다). `site_permissions` 의 답.
+    site_permissions_list = 87,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -1056,6 +1062,61 @@ pub const FindStop = struct {
     browser: BrowserId,
     /// 지금 일치를 선택으로 남긴다(CEF `clearSelection` 의 반대).
     keep_selection: bool = false,
+};
+
+/// 사이트 권한의 종류(2026-11-18 — 「Site Permissions…」 창). sidecar 의 표가 Chromium 의 설정 이름·CEF 형으로 잇는다(`site_settings.zig`).
+pub const SitePermissionKind = enum(u8) {
+    notifications = 1,
+    geolocation = 2,
+    camera = 3,
+    microphone = 4,
+    midi_sysex = 5,
+    local_fonts = 6,
+    window_management = 7,
+    clipboard = 8,
+    idle_detection = 9,
+    sensors = 10,
+    camera_pan_tilt_zoom = 11,
+    automatic_downloads = 12,
+    storage_access = 13,
+    ar = 14,
+    vr = 15,
+    hand_tracking = 16,
+    keyboard_lock = 17,
+    pointer_lock = 18,
+};
+
+/// 기억한 결정 — Chromium 의 `CONTENT_SETTING_ALLOW`(1)·`BLOCK`(2)과 같은 값.
+pub const SitePermissionSetting = enum(u8) { allow = 1, block = 2 };
+
+pub const SitePermissions = struct {
+    request: u32,
+    /// 0 이 아니면 목록 전에 그 출처의 그 종류를 지운다.
+    reset_kind: u8 = 0,
+    reset_origin: []const u8 = "",
+};
+
+pub const max_site_permission_entries = 100;
+
+pub const SitePermissionEntry = struct {
+    kind: SitePermissionKind,
+    setting: SitePermissionSetting,
+    /// `scheme://host[:port]`(비지 않음 — `fields.checkOrigin`).
+    origin: []const u8,
+};
+
+pub const SitePermissionsList = struct {
+    request: u32,
+    /// 실을 수 있었던 결정의 수 — `count` 보다 크면 상한에서 잘렸다.
+    total: u32,
+    /// 이 표에 싣지 않은 결정의 수(와일드카드·임베드 패턴, 출처 꼴이 아님, 수가 아닌 값) — 창이 「표에 없는 결정」 으로 알린다.
+    unlisted: u32,
+    count: u8 = 0,
+    entries: [max_site_permission_entries]SitePermissionEntry = undefined,
+
+    pub fn slice(self: *const SitePermissionsList) []const SitePermissionEntry {
+        return self.entries[0..self.count];
+    }
 };
 
 /// 찾기의 답(P0-2 — `find_result`).
@@ -2110,6 +2171,7 @@ pub const Message = union(Tag) {
     trace: Trace,
     find: Find,
     find_stop: FindStop,
+    site_permissions: SitePermissions,
     main_frame_navigating: BrowserId,
     console_message: ConsoleMessage,
     error_page: ErrorPage,
@@ -2131,6 +2193,7 @@ pub const Message = union(Tag) {
     trace_data: TraceData,
     trace_frames: TraceFrames,
     find_result: FindResult,
+    site_permissions_list: SitePermissionsList,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

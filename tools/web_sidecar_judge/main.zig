@@ -41,6 +41,7 @@ const permissions_check = @import("permissions_check.zig");
 const popup_check = @import("popup_check.zig");
 const tooltip_check = @import("tooltip_check.zig");
 const find_check = @import("find_check.zig"); // P0-2
+const site_perms_check = @import("site_perms_check.zig"); // 사이트 권한 창(2026-11-18)
 const contextmenu_check = @import("contextmenu_check.zig");
 const drag_check = @import("drag_check.zig");
 const newtab_check = @import("newtab_check.zig");
@@ -539,6 +540,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         findChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--site-perms")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        sitePermsChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--permissions")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
@@ -583,6 +592,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     inputChecks(host_path, profile_e);
     dialogChecks(host_path, profile_root);
     permissionChecks(host_path, profile_root);
+    sitePermsChecks(host_path, profile_root);
     popupChecks(host_path, profile_root);
     tooltipChecks(host_path, profile_root);
     findChecks(host_path, profile_root);
@@ -885,6 +895,14 @@ fn tooltipChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var profile_buf: [1024]u8 = undefined;
     const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/j", .{profile_root}, 0) catch return report(false, "tooltip", "프로필 경로가 길다", .{});
     tooltip_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "tooltip", "{s}", .{@errorName(err)});
+}
+
+/// 사이트 권한 판정(2026-11-18) — 프로필은 `<뿌리>/sp`(새 프로필이라 목록이 빈 데서 시작한다).
+fn sitePermsChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "site-perms", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/sp", .{profile_root}, 0) catch return report(false, "site-perms", "프로필 경로가 길다", .{});
+    site_perms_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "site-perms", "{s}", .{@errorName(err)});
 }
 
 /// 페이지 찾기 판정(P0-2) — 프로필은 `<뿌리>/fd`.

@@ -69,7 +69,7 @@ const wait_ms = 15_000;
 const size: message.ViewSize = .{ .width = 640, .height = 400, .scale = 2 };
 
 /// 받은 요청(출처는 다음 `next` 에서 무효라 복사해 둔다).
-const Asked = struct {
+pub const Asked = struct {
     request: RequestId = 0,
     kinds: u32 = 0,
     media: u8 = 0,
@@ -83,7 +83,7 @@ const Asked = struct {
 };
 
 /// 한 번 청한 결과 — 요청이 왔으면 `asked`, 요청 없이 페이지가 끝났으면 `title`.
-const Outcome = struct {
+pub const Outcome = struct {
     asked: ?Asked = null,
     title_buf: [128]u8 = undefined,
     title_len: usize = 0,
@@ -197,7 +197,7 @@ fn helperChurn(host_pid: c_int, ms: u32) Churn {
 }
 
 /// `/perm?a=<action>` 을 열고 눌러 청한다. 요청이 오면 거기서 멈춘다(답은 호출자가).
-fn ask(host: *Host, u: []u8, port: u16, action: []const u8) !Outcome {
+pub fn ask(host: *Host, u: []u8, port: u16, action: []const u8) !Outcome {
     var path_buf: [64]u8 = undefined;
     try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, std.fmt.bufPrint(&path_buf, "/perm?a={s}", .{action}) catch unreachable) } });
     var ready_buf: [64]u8 = undefined;
@@ -212,14 +212,14 @@ fn ask(host: *Host, u: []u8, port: u16, action: []const u8) !Outcome {
 }
 
 /// 답하고 페이지의 결과 제목을 돌려준다.
-fn answer(host: *Host, action: []const u8, request: RequestId, result: message.PermissionResult) !Outcome {
+pub fn answer(host: *Host, action: []const u8, request: RequestId, result: message.PermissionResult) !Outcome {
     try host.send(.{ .permission_reply = .{ .browser = id, .request = request, .result = result } });
     var outcome: Outcome = .{};
     waitResult(host, action, false, &outcome);
     return outcome;
 }
 
-fn endsWith(outcome: *const Outcome, suffix: []const u8) bool {
+pub fn endsWith(outcome: *const Outcome, suffix: []const u8) bool {
     return std.mem.endsWith(u8, outcome.title(), suffix);
 }
 
@@ -230,7 +230,7 @@ fn fontsListed(outcome: *const Outcome) bool {
 }
 
 /// 요청 없이 끝났는가(기억한 답).
-fn silent(outcome: *const Outcome) bool {
+pub fn silent(outcome: *const Outcome) bool {
     return outcome.asked == null;
 }
 
@@ -408,7 +408,7 @@ fn notificationChecks(report: Report, host: *Host, u: []u8, port: u16, origin: [
 }
 
 /// 판정 시작 전 새 브라우저를 만든다.
-fn start(host_path: [:0]const u8, profile_arg: [:0]const u8, u: []u8, port: u16) !Host {
+pub fn start(host_path: [:0]const u8, profile_arg: [:0]const u8, u: []u8, port: u16) !Host {
     var host = try Host.spawn(host_path, profile_arg);
     errdefer host.send(.shutdown) catch {};
     try browsers_check.handshake(&host);

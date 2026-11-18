@@ -28,6 +28,7 @@ test {
     _ = @import("net_block_review_a7_tests.zig"); // W9d③ 7 차 검증 A7 탐침
     _ = @import("nav_exempt.zig"); // W9d④ Q2 사람 입력 창
     _ = @import("net_mock_table.zig"); // W9d④ 가짜 규칙 묶음·본문 덩어리
+    _ = @import("site_pattern.zig"); // 사이트 권한 패턴(2026-11-18)
     _ = @import("emu_plan.zig"); // W9e① 기기 흉내 계획
     _ = @import("geo_slot.zig"); // W9e① 위치 한 칸
     _ = @import("proc_share.zig"); // W9e② CPU 조건의 프로세스 나눔 판정

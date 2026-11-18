@@ -103,6 +103,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .nav_action => |value| navAction(value, writer),
         .find => |value| find(value, writer), // P0-2
         .find_stop => |value| findStop(value),
+        .site_permissions => |value| @import("site_settings.zig").apply(value), // 사람의 「Site Permissions…」 창(2026-11-18)
         .frame_channel => |value| frameChannel(value, writer),
         .context_menu_command => |value| context_menus.onCommand(value),
         .popup_reserve => |value| new_tab.onReserve(value.browser),

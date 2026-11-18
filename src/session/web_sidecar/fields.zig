@@ -586,6 +586,79 @@ pub fn readFindResult(cursor: *ReadCursor) Error!message.FindResult {
     return value;
 }
 
+/// 사이트 권한 묻기(2026-11-18): request(0 아님) · 지울 종류(0 = 없음) · 지울 출처(종류가 있으면 비지 않은 출처, 없으면 빈 글).
+pub fn checkSitePermissions(value: message.SitePermissions) Error!void {
+    if (value.request == 0) return error.InvalidSitePermissions;
+    if (value.reset_kind == 0) {
+        if (value.reset_origin.len != 0) return error.InvalidSitePermissions;
+        return;
+    }
+    _ = std.enums.fromInt(message.SitePermissionKind, value.reset_kind) orelse return error.InvalidSitePermissions;
+    if (value.reset_origin.len == 0) return error.InvalidSitePermissions;
+    try checkOrigin(value.reset_origin);
+}
+
+pub fn writeSitePermissions(cursor: *Cursor, value: message.SitePermissions) Error!void {
+    try checkSitePermissions(value);
+    try cursor.writeU32(value.request);
+    try cursor.writeByte(value.reset_kind);
+    try writeOrigin(cursor, value.reset_origin);
+}
+
+pub fn readSitePermissions(cursor: *ReadCursor) Error!message.SitePermissions {
+    const value: message.SitePermissions = .{
+        .request = try cursor.readU32(),
+        .reset_kind = try cursor.readByte(),
+        .reset_origin = try readOrigin(cursor),
+    };
+    try checkSitePermissions(value);
+    return value;
+}
+
+/// 사이트 권한 목록의 닫힌 칸 — request 0 아님, 행 수는 상한·`total` 을 넘지 않는다, 행마다 아는 종류·결정과 비지 않은 출처.
+pub fn checkSitePermissionsList(value: *const message.SitePermissionsList) Error!void {
+    if (value.request == 0) return error.InvalidSitePermissions;
+    if (value.count > message.max_site_permission_entries or value.count > value.total) return error.InvalidSitePermissions;
+    for (value.slice()) |e| {
+        if (e.origin.len == 0) return error.InvalidSitePermissions;
+        try checkOrigin(e.origin);
+    }
+}
+
+/// `site_permissions_list`: request · total · unlisted · count(u8) · 행마다 종류(u8) · 결정(u8) · 출처.
+pub fn writeSitePermissionsList(cursor: *Cursor, value: *const message.SitePermissionsList) Error!void {
+    try checkSitePermissionsList(value);
+    try cursor.writeU32(value.request);
+    try cursor.writeU32(value.total);
+    try cursor.writeU32(value.unlisted);
+    try cursor.writeByte(value.count);
+    for (value.slice()) |e| {
+        try cursor.writeByte(@backingInt(e.kind));
+        try cursor.writeByte(@backingInt(e.setting));
+        try writeOrigin(cursor, e.origin);
+    }
+}
+
+pub fn readSitePermissionsList(cursor: *ReadCursor) Error!message.SitePermissionsList {
+    var value: message.SitePermissionsList = .{
+        .request = try cursor.readU32(),
+        .total = try cursor.readU32(),
+        .unlisted = try cursor.readU32(),
+    };
+    const count = try cursor.readByte();
+    if (count > message.max_site_permission_entries) return error.InvalidSitePermissions;
+    for (0..count) |i| {
+        value.entries[i] = .{
+            .kind = std.enums.fromInt(message.SitePermissionKind, try cursor.readByte()) orelse return error.InvalidSitePermissions,
+            .setting = std.enums.fromInt(message.SitePermissionSetting, try cursor.readByte()) orelse return error.InvalidSitePermissions,
+            .origin = try readOrigin(cursor),
+        };
+    }
+    value.count = count;
+    try checkSitePermissionsList(&value);
+    return value;
+}
+
 /// bootstrap 이름은 1~127 바이트의 출력 가능한 ASCII(공백 제외)만 받는다 — 이름이 곧 신뢰 경계의 주소라 느슨하게 받지 않는다.
 fn validService(name: []const u8) bool {
     if (name.len == 0 or name.len > wire.max_service_bytes) return false;

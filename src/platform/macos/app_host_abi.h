@@ -32,7 +32,8 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* v262: user decision 2026-11-16 (full agent access) — grant scope wire 7 and the four agent-tabs denial/title exports are removed. */
 /* v263: P0-3 — maru_macos_control_tick (the browser-control clock work that ran at the top of take_browser_op). */
 /* v264: browser.permission — maru_macos_app_session_take_osr_agent_allow (agent-allowed permission requests, answered through the sheet's Allow path). */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 264u
+/* v265: site permissions window — maru_macos_site_permissions_* (Chromium's remembered per-site allow/block, view and reset). */
+#define MARU_MACOS_APP_HOST_ABI_VERSION 265u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);
@@ -1107,6 +1108,31 @@ int32_t maru_macos_downloads_answer_ask(uint64_t key, uint32_t kind, const uint8
 /* 목록 창의 문장(현재 UI 언어 — 정적, 해제하지 않는다). 0 창 제목, 1~11 상태(준비 중·보류·받는 중·중단·완료·취소·실패·탭 닫힘·
    엔진 재시작·너무 많음·파일 없음), 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록, 19 저장할 곳 고르기(v220). */
 const char *maru_macos_downloads_text(uint32_t kind);
+/* v265: 사이트 권한 창(앱 메뉴 「Site Permissions…」 — 사용자 결정 2026-11-18) — Chromium 이 출처마다 기억한 허용·차단(사람의 답과
+   에이전트의 답이 같은 자리에 같은 모양이다). 앱 전역. refresh 는 목록을 묻는다(엔진이 꺼져 있으면 띄운다). state 0 아직·1 묻는 중·2 받음·
+   3 엔진 없음. 세대가 바뀌면 행을 다시 읽는다. kind 는 종류(1 알림 …), setting 1 허용·2 차단. 출처·보이는 출처·종류 이름은 UTF-8(길이로). */
+typedef struct MaruSitePermissionRow {
+    uint32_t kind;
+    uint32_t setting;
+    uint32_t origin_len;
+    uint32_t display_len;
+    uint32_t label_len;
+    uint32_t reserved;
+    uint8_t origin[256];
+    uint8_t display[256];
+    uint8_t label[128]; /* 종류 이름(현재 UI 언어) */
+} MaruSitePermissionRow;
+void maru_macos_site_permissions_refresh(void);
+uint64_t maru_macos_site_permissions_generation(void);
+uint32_t maru_macos_site_permissions_state(void);
+uint32_t maru_macos_site_permissions_count(void);
+int32_t maru_macos_site_permissions_row(uint32_t index, MaruSitePermissionRow *out);
+/* 그 (종류, 출처) 행을 지운다(기본 「묻기」로) — 지금 표에 없으면 0(그 사이 목록에서 빠졌다). 출처는 행의 origin 그대로. 지운 뒤의 목록이 온다. */
+int32_t maru_macos_site_permissions_reset(uint32_t kind, const uint8_t *origin, size_t origin_len);
+/* 문장(현재 UI 언어 — 정적): 0 창 제목·1 사이트·2 권한·3 허용·4 차단·5 지우기·6 빈 목록·7 엔진 없음·8 불러오는 중·9 안내. */
+const char *maru_macos_site_permissions_text(uint32_t which);
+/* 표 밑 줄(더 있다·표에 없는 결정 — 수가 든 문장, 없으면 0 바이트). 쓴 바이트 수. */
+size_t maru_macos_site_permissions_footer(uint8_t *out, size_t cap);
 /* `show_downloads` 액션(⇧⌘J·메뉴·팔레트)이 목록 창을 청했으면 1(one-shot). */
 int32_t maru_macos_app_session_take_show_downloads_request(MaruAppHostSession *session);
 /* v217(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다. */

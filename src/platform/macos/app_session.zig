@@ -373,7 +373,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // v262: user decision 2026-11-16 (full agent access — no browser permission prompts) removes grant scope wire 7 and maru_macos_control_agent_tabs_{denied_count,denied_at,pane_title} / clear_agent_tabs_denial.
 // v263: P0-3 maru_macos_control_tick (browser-control clock work — wake sleeping Chromium ops, expire, reap, prune — moved out of take_browser_op).
 // v264: browser.permission — maru_macos_app_session_take_osr_agent_allow (an agent-allowed permission request; Swift answers it through the same path as the sheet's Allow button).
-pub const abi_version: u32 = 264;
+// v265: site permissions window — maru_macos_site_permissions_{refresh,generation,state,count,row,reset,text,footer}.
+pub const abi_version: u32 = 265;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,

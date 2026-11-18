@@ -958,7 +958,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  28, 0, // v28, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  29, 0, // v29, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -1314,14 +1314,14 @@ test "P0-2 find: 셋이 왕복하고 방향이 맞다 — 한글·상한 정확�
 
     var buf: [64]u8 = undefined;
     var len = try encode(.{ .find = .{ .browser = 1, .request = 2, .forward = true, .text = "ab" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 26, 'M', 'W', 'E', 'B', 0, 28, 142, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 0, 0, 0, 2, 'a', 'b' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 26, 'M', 'W', 'E', 'B', 0, 29, 142, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 0, 0, 0, 2, 'a', 'b' }, buf[0..len]);
     len = try encode(.{ .find_stop = .{ .browser = 1, .keep_selection = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 16, 'M', 'W', 'E', 'B', 0, 28, 143, 0, 0, 0, 0, 0, 0, 0, 1, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 16, 'M', 'W', 'E', 'B', 0, 29, 143, 0, 0, 0, 0, 0, 0, 0, 1, 1 }, buf[0..len]);
     len = try encode(.{ .find_result = .{ .browser = 1, .request = 2, .count = 3, .active = 1, .final = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 28, 'M', 'W', 'E', 'B', 0, 28, 86, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 1, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 28, 'M', 'W', 'E', 'B', 0, 29, 86, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 1, 1 }, buf[0..len]);
 }
 
-test "사이트 권한: 둘이 왕복하고 방향이 맞다 — 지우기 있는·없는 묻기, 행 0·상한, 바이트 배치 골든(버전 28)" {
+test "사이트 권한: 둘이 왕복하고 방향이 맞다 — 지우기 있는·없는 묻기, 행 0·상한, 바이트 배치 골든(버전 29)" {
     const q = (try roundTrip(.{ .site_permissions = .{ .request = 3 } })).site_permissions;
     try std.testing.expect(q.request == 3 and q.reset_kind == 0 and q.reset_origin.len == 0);
     const r = (try roundTrip(.{ .site_permissions = .{ .request = 4, .reset_kind = @backingInt(message_mod.SitePermissionKind.geolocation), .reset_origin = "https://maps.example:8443" } })).site_permissions;
@@ -1344,11 +1344,11 @@ test "사이트 권한: 둘이 왕복하고 방향이 맞다 — 지우기 있�
 
     var buf: [128]u8 = undefined;
     var len = try encode(.{ .site_permissions = .{ .request = 2, .reset_kind = 1, .reset_origin = "a://b" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 28, 144, 0, 0, 0, 2, 1, 0, 0, 0, 5, 'a', ':', '/', '/', 'b' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 29, 144, 0, 0, 0, 2, 1, 0, 0, 0, 5, 'a', ':', '/', '/', 'b' }, buf[0..len]);
     var one: message_mod.SitePermissionsList = .{ .request = 2, .total = 1, .unlisted = 3, .count = 1 };
     one.entries[0] = .{ .kind = .camera, .setting = .block, .origin = "a://b" };
     len = try encode(.{ .site_permissions_list = one }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 28, 87, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 3, 1, 3, 2, 0, 0, 0, 5, 'a', ':', '/', '/', 'b' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 29, 87, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 3, 1, 3, 2, 0, 0, 0, 5, 'a', ':', '/', '/', 'b' }, buf[0..len]);
 }
 
 test "사이트 권한: 닫힌 칸은 양쪽에서 거절하고, 한 바이트씩 망가뜨려도 풀린 값은 규칙을 지킨다" {
@@ -2371,6 +2371,7 @@ test "W9c① 적대 리뷰 1 회차: 콘솔 프레임을 무작위로 망가뜨�
         .{ .console_message = .{ .browser = 3, .dropped_other = 4, .has_entry = false } },
         .{ .console_message = .{ .browser = 3, .dropped_old = 4, .dropped_old_back = 1, .has_entry = false } },
         .{ .error_page = .{ .browser = 3, .error_code = -105 } },
+        .{ .error_page = .{ .browser = 3, .error_code = -105, .url = "http://a.test/\xed\x95\x9c?q=1" } }, // wire 29: 실패 주소
     };
     var buf: [max_frame_bytes]u8 = undefined;
     var ok: usize = 0;
@@ -2617,13 +2618,13 @@ test "W9d②: 본문 기록 넷이 왕복하고 방향이 맞다 — net_begin �
     inline for (.{ Tag.net_body_data, Tag.net_body_end, Tag.net_record_state }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d②: 본문 frame 의 바이트 배치 골든(버전 28 — 사이트 권한이 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
+test "W9d②: 본문 frame 의 바이트 배치 골든(버전 29 — 실패 주소가 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
     var buf: [128]u8 = undefined;
     var len = try encode(.{ .net_record = .{ .browser = 0x0102, .on = true, .session = 0x0a0b0c0d } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 28, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 29, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
     len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 2, .request = 3, .state = .captured, .flags = .{ .redecoded = true, .credentialed = true }, .size = 0x0100, .decoded = 0x0200 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 28, 75, // 머리
+        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 29, 75, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, // session
         0, 0, 0, 0, 0, 0, 0, 3, // request
@@ -2632,9 +2633,9 @@ test "W9d②: 본문 frame 의 바이트 배치 골든(버전 28 — 사이트 �
         0, 0, 0, 0, 0, 0, 2, 0, // decoded
     }, buf[0..len]);
     len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 2, .request = 3, .offset = 4, .bytes = "hi" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 28, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 29, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
     len = try encode(.{ .net_record_state = .{ .browser = 1, .session = 2, .status = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 28, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 29, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
 }
 
 test "W9d②: 본문의 닫힌 칸은 양쪽에서 거절한다 — 세션·요청 0, 빈·큰 조각, 본문 상한 넘는 끝, 잡지 않은 본문의 크기·글 표시, 켬과 세션 어긋남" {
@@ -2739,7 +2740,7 @@ test "W9d②: 본문 frame 을 무작위로 망가뜨려도 풀기는 무너지�
 
 // ── 요청 막기(W9d③) ─────────────────────────────────────────────────────────────────────────────────────
 // 시험이 증명하는 것: 막기 셋(`net_block`·`net_block_state`·`net_block_hits`)과 바뀐 칸(`net_end` 의 막기 표시·규칙 번호, `error_page` 의 오류 번호·
-// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 28 — 배치는 23 과 같다), 닫힌 칸(규칙 수·번호 0·중복·종류
+// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 29 — 배치는 23 과 같다), 닫힌 칸(규칙 수·번호 0·중복·종류
 // 마스크·호스트·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 막기 frame(규칙 32 개·사이트·패턴 상한)이
 // frame 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 막기 규칙이 사용자 탭의 요청을 막는다
 // (maru 와 sidecar 가 같은 규칙을 봐야 하고, sidecar 가 보낸 수는 공격 입력으로 다룬다).
@@ -2783,13 +2784,13 @@ test "W9d③: 막기 셋과 바뀐 칸이 왕복하고 방향이 맞다 — 규�
     inline for (.{ Tag.net_block_state, Tag.net_block_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d③: 막기 frame 의 바이트 배치 골든(버전 28 — 사이트 권한이 올렸다, 배치는 23 과 같다) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
+test "W9d③: 막기 frame 의 바이트 배치 골든(버전 29 — 실패 주소가 올렸다; error_page 는 끝에 주소 칸, 나머지 배치는 23 과 같다) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
     var buf: [256]u8 = undefined;
     var v: message_mod.NetBlock = .{ .browser = 1, .generation = 0x0102, .strict_site = "a.t", .count = 1 };
     v.rules[0] = .{ .id = 5, .types = 0x10, .site = "a.t", .pattern = "https://a.t/x" };
     var len = try encode(.{ .net_block = v }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 28, 136, // 머리
+        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 29, 136, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         3, 'a', '.', 't', // 엄격 사이트
@@ -2800,12 +2801,12 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 28 — 사이트 �
         0, 13, 'h', 't', 't', 'p', 's', ':', '/', '/', 'a', '.', 't', '/', 'x', // 패턴
     }, buf[0..len]);
     len = try encode(.{ .net_block_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 28, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 29, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
     var hits: message_mod.NetBlockHits = .{ .browser = 1, .generation = 9, .unrecorded = 2, .skipped_unknown_page = 3, .strict_redirect_missed = 4, .strict_redirect_bypassed = 5, .sw_shared_with_unruled_tab = true, .count = 1 };
     hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_hits = 7, .sw_not_applied = 8 };
     len = try encode(.{ .net_block_hits = hits }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 28, 78, // 머리
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 29, 78, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 9, // 세대
         0, 0, 0, 2, 0, 0, 0, 3, // 기록 없이 막음·페이지 모름
@@ -2815,7 +2816,7 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 28 — 사이트 �
     }, buf[0..len]);
     len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .received = 0, .time_ms = 3, .flags = .{ .blocked = true }, .rule_id = 5 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 28, 72, // 머리
+        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 29, 72, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 0, 0, 0, 0, 2, // request
         2, // failed
@@ -2826,11 +2827,34 @@ test "W9d③: 막기 frame 의 바이트 배치 골든(버전 28 — 사이트 �
         0, 0, 0, 5, // 규칙
     }, buf[0..len]);
     len = try encode(.{ .error_page = .{ .browser = 1, .error_code = -20, .blocked_rule = 5 } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 28, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 27, 'M', 'W', 'E', 'B', 0, 29, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5, 0, 0, 0, 0 }, buf[0..len]);
+    // wire 29: 실패한 주소.
+    len = try encode(.{ .error_page = .{ .browser = 1, .error_code = -105, .url = "http://x/" } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 36, 'M', 'W', 'E', 'B', 0, 29, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0x97, 0, 0, 0, 0, 0, 0, 0, 9, 'h', 't', 't', 'p', ':', '/', '/', 'x', '/' }, buf[0..len]);
     len = try encode(.{ .navigate = .{ .browser = 1, .url = "a:", .user = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 28, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 29, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
     len = try encode(.{ .nav_action = .{ .browser = 1, .action = .reload, .user = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 28, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 29, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
+}
+
+test "wire 29: error_page 의 실패 주소 — 왕복(빈 글·마지막 홉·상한 정확히), 제어 문자·잘못된 UTF-8·상한 넘침은 양쪽에서 거절한다" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("", (try roundTrip(.{ .error_page = .{ .browser = 3, .error_code = -105 } })).error_page.url);
+    try std.testing.expectEqualStrings("http://127.0.0.1:1/af-hop", (try roundTrip(.{ .error_page = .{ .browser = 3, .error_code = -312, .url = "http://127.0.0.1:1/af-hop" } })).error_page.url);
+    const full = "http://a/" ++ array_repeat.repeat("x", wire.max_url_bytes - "http://a/".len);
+    try std.testing.expectEqual(wire.max_url_bytes, (try roundTrip(.{ .error_page = .{ .browser = 3, .error_code = -2, .url = full } })).error_page.url.len);
+    for ([_][]const u8{ "http://a/\x01", "http://a/\xff", full ++ "x" }) |bad| {
+        try std.testing.expect(std.meta.isError(encode(.{ .error_page = .{ .browser = 3, .error_code = -2, .url = bad } }, &buf)));
+    }
+    // 손으로 만든 frame — 주소 바이트를 제어 문자로 바꾸면 decoder 도 거절한다.
+    const len = try encode(.{ .error_page = .{ .browser = 3, .error_code = -2, .url = "http://a/z" } }, &buf);
+    var bad = buf;
+    bad[len - 1] = 0x07;
+    try std.testing.expect(std.meta.isError(decodeExact(bad[0..len])));
+    // 길이 칸이 상한을 넘으면 본문을 읽기 전에 거절한다.
+    var long = buf;
+    std.mem.writeInt(u32, long[len - 14 ..][0..4], @intCast(wire.max_url_bytes + 1), .big);
+    try std.testing.expect(std.meta.isError(decodeExact(long[0..len])));
 }
 
 test "W9d③: 막기의 닫힌 칸은 양쪽에서 거절한다 — 규칙 33 개·번호 0·중복·모르는 종류 비트·서비스 워커 종류·대문자 사이트·풀리지 않는 패턴·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝, 양수 오류" {
@@ -2951,7 +2975,7 @@ test "W9d③: 막기 frame 을 무작위로 망가뜨려도 풀기는 무너지�
 
 // ── 가짜 응답(W9d④) ─────────────────────────────────────────────────────────────────────────────────────
 // 시험이 증명하는 것: 가짜 여섯(`net_mock_rule`·`net_mock_body`·`net_mock_commit`·`net_mock_state`·`net_mock_ack`·`net_mock_hits`)과 바뀐 칸(`net_end`
-// 의 `mocked`·`mock_redirected`, `net_begin` 둘째 표시의 `mocked`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 28 — 배치는 24 와 같다), 닫힌 칸(번호 0·
+// 의 `mocked`·`mock_redirected`, `net_begin` 둘째 표시의 `mocked`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 29 — 배치는 24 와 같다), 닫힌 칸(번호 0·
 // 차례·종류·메서드·표시와 실행 사이트의 짝·정규형 패턴·상태·본문 번호와 길이·본문 금지 상태·content_type·그려지는 종류·Location·허용 목록 밖
 // 머리·Location 머리, 조각 범위, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 규칙 frame(머리 32 개·8 KiB·Location 2 KiB·패턴 512)이 frame
 // 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 가짜 응답은 그 사이트로서 페이지에 들어간다
@@ -3020,11 +3044,11 @@ test "W9d④: 가짜 여섯과 바뀐 칸이 왕복하고 방향이 맞다 — �
     inline for (.{ Tag.net_mock_state, Tag.net_mock_ack, Tag.net_mock_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 28 — 사이트 권한이 올렸다, 배치는 24 와 같다) — net_mock_rule·net_mock_body·net_mock_commit·net_mock_state·net_mock_ack·net_mock_hits·net_end" {
+test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 29 — 실패 주소가 올렸다, 배치는 24 와 같다) — net_mock_rule·net_mock_body·net_mock_commit·net_mock_state·net_mock_ack·net_mock_hits·net_end" {
     var buf: [256]u8 = undefined;
     var len = try encode(.{ .net_mock_rule = .{ .browser = 1, .generation = 0x0102, .index = 0, .id = 5, .types = 0, .methods = 1, .flags = .{ .exec_site_bound = true }, .site = "a.t", .exec_site = "a.t", .pattern = "https://a.t/x", .status = 302, .body_id = 0, .body_len = 0, .content_type = "text/html", .location = "/y" } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 81, 'M', 'W', 'E', 'B', 0, 28, 137, // 머리
+        0, 0, 0, 81, 'M', 'W', 'E', 'B', 0, 29, 137, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         0, // index
@@ -3042,25 +3066,25 @@ test "W9d④: 가짜 frame 의 바이트 배치 골든(버전 28 — 사이트 �
         0, 0, 0, // 머리 없음
     }, buf[0..len]);
     len = try encode(.{ .net_mock_body = .{ .browser = 1, .body_id = 2, .offset = 3, .total = 9, .bytes = "ab" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 28, 138, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 9, 0, 2, 'a', 'b' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 31, 'M', 'W', 'E', 'B', 0, 29, 138, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 9, 0, 2, 'a', 'b' }, buf[0..len]);
     len = try encode(.{ .net_mock_commit = .{ .browser = 1, .generation = 2, .count = 3, .strict_site = "a.t" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 24, 'M', 'W', 'E', 'B', 0, 28, 139, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3, 3, 'a', '.', 't' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 24, 'M', 'W', 'E', 'B', 0, 29, 139, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3, 3, 'a', '.', 't' }, buf[0..len]);
     len = try encode(.{ .net_mock_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .on } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 28, 79, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 1 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 29, 79, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 1 }, buf[0..len]);
     len = try encode(.{ .net_mock_ack = .{ .browser = 1, .body_id = 2, .received = 0x010000 } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 28, 80, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 0, 0 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 29, 80, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 0, 0 }, buf[0..len]);
     var hits: message_mod.NetMockHits = .{ .browser = 1, .unrecorded = 2, .busy = 3, .skipped_unknown_page = 4, .page_controlled = true, .count = 1 };
     hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_not_mocked = 7, .frame_not_mocked = 8 };
     len = try encode(.{ .net_mock_hits = hits }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 45, 'M', 'W', 'E', 'B', 0, 28, 81, // 머리
+        0, 0, 0, 45, 'M', 'W', 'E', 'B', 0, 29, 81, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 1, 1, // 기록 없이·줄 수 없음·페이지 모름·서비스 워커·항목 수
         0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, // 규칙 5 의 수(맞음·서비스 워커·허락 밖 프레임 — v1 SEVERE-1)
     }, buf[0..len]);
     len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .success, .received = 0, .time_ms = 3, .flags = .{ .mocked = true, .mock_redirected = true }, .rule_id = 5, .mock_body_id = 0x0607 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 28, 72, // 머리
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 29, 72, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 0, 0, 0, 0, 2, // request
         0, // success
@@ -3302,11 +3326,11 @@ test "W9e①: 흉내 둘이 왕복하고 방향이 맞다 — 무리 모두·cli
     try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.emulation_state.direction());
 }
 
-test "W9e①: 흉내 frame 의 바이트 배치 골든(버전 28 — 배치는 W9e② 가 CPU·네트워크 칸 넷과 풀림 셋을 끝에 더한 26 과 같다) — emulation·emulation_state" {
+test "W9e①: 흉내 frame 의 바이트 배치 골든(버전 29 — 배치는 W9e② 가 CPU·네트워크 칸 넷과 풀림 셋을 끝에 더한 26 과 같다) — emulation·emulation_state" {
     var buf: [256]u8 = undefined;
     var len = try encode(.{ .emulation = .{ .browser = 1, .generation = 0x0102, .flags = .{ .viewport = true, .timezone = true }, .width = 390, .height = 844, .dsf = 2, .timezone = "UTC" } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 94, 'M', 'W', 'E', 'B', 0, 28, 140, // 머리
+        0, 0, 0, 94, 'M', 'W', 'E', 'B', 0, 29, 140, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 1, 2, // generation
         0x00, 0x82, // 표시(viewport·timezone)
@@ -3329,7 +3353,7 @@ test "W9e①: 흉내 frame 의 바이트 배치 골든(버전 28 — 배치는 W
     }, buf[0..len]);
     len = try encode(.{ .emulation_state = .{ .browser = 1, .generation = 2, .on_site = true, .alive = true, .fit_scale = 0.5, .active_mask = 0x0009, .failed_mask = 0x0002, .reason = .cdp_error } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 36, 'M', 'W', 'E', 'B', 0, 28, 82, // 머리
+        0, 0, 0, 36, 'M', 'W', 'E', 'B', 0, 29, 82, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, // generation
         1, 1, 0, // 사이트 안·살아 있음·기다림 없음
@@ -3546,7 +3570,7 @@ test "W9e① 변이: 흉내 닫힌 칸의 경계 — DEL·`;`·앞 쉼표·ICU �
 
 // ── 성능 trace·CPU·네트워크 조건(W9e②) ───────────────────────────────────────────────────────────────────
 // 시험이 증명하는 것: 흉내의 새 칸(CPU 배수·네트워크 지연·처리량·오프라인)과 상태의 풀림(무리·까닭)이 왕복하고, trace 넷(`trace`·`trace_state`·
-// `trace_data`·`trace_frames`)이 왕복하며 방향이 맞다, 바이트 배치가 골든과 같다(버전 28 — 배치는 26 과 같다), 닫힌 칸(CPU 1 이하·20 넘음·NaN·-0·표시 없는 값,
+// `trace_data`·`trace_frames`)이 왕복하며 방향이 맞다, 바이트 배치가 골든과 같다(버전 29 — 배치는 26 과 같다), 닫힌 칸(CPU 1 이하·20 넘음·NaN·-0·표시 없는 값,
 // 오프라인의 수치·네트워크 표시 없는 오프라인, 처리량 1..15·상한 넘음, 지연 상한 넘음, 풀림의 무리 밖·까닭 짝·걸린 무리와 겹침·네트워크를
 // 「CPU 나눔」 으로 풂, trace 세대 0·길이 범위·`start` 밖의 표시, 상태마다 까닭·시작 전 바이트, 조각 크기·16 MiB 끝, 프레임 id 수·글자·남은 칸)
 // 은 양쪽에서 거절한다, 가장 큰 trace frame 이 frame 상한 안이다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 —
@@ -3580,13 +3604,13 @@ test "W9e②: 흉내의 CPU·네트워크·오프라인과 상태의 풀림이 �
     inline for (.{ Tag.trace_state, Tag.trace_data, Tag.trace_frames }) |tag| try std.testing.expectEqual(message_mod.Direction.to_maru, tag.direction());
 }
 
-test "W9e②: trace frame 의 바이트 배치 골든(버전 28 — 배치는 26 과 같다) — trace·trace_state·trace_data·trace_frames" {
+test "W9e②: trace frame 의 바이트 배치 골든(버전 29 — 배치는 26 과 같다) — trace·trace_state·trace_data·trace_frames" {
     var buf: [256]u8 = undefined;
     var len = try encode(.{ .trace = .{ .browser = 1, .generation = 2, .action = .start, .duration_ms = 5000, .screenshots = true } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 26, 'M', 'W', 'E', 'B', 0, 28, 141, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 0, 0, 0x13, 0x88, 1, 0 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 26, 'M', 'W', 'E', 'B', 0, 29, 141, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 0, 0, 0x13, 0x88, 1, 0 }, buf[0..len]);
     len = try encode(.{ .trace_state = .{ .browser = 1, .generation = 2, .state = .done, .reason = .duration, .focus_emulated = true, .covered_ms = 5000, .gz_bytes = 0x010203, .frames = 3 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 34, 'M', 'W', 'E', 'B', 0, 28, 83, // 머리
+        0, 0, 0, 34, 'M', 'W', 'E', 'B', 0, 29, 83, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, // generation
         4, 2, 1, // done·duration·focus 흉내(잃은 자료 없음)
@@ -3605,11 +3629,11 @@ test "W9e②: trace frame 의 바이트 배치 골든(버전 28 — 배치는 26
     buf[prefix_len + common_len + 14] = 0x10 | 8;
     try std.testing.expectError(error.InvalidTrace, decodeExact(buf[0..len]));
     len = try encode(.{ .trace_data = .{ .browser = 1, .generation = 2, .offset = 7, .bytes = "ab" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 27, 'M', 'W', 'E', 'B', 0, 28, 84, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 7, 0, 2, 'a', 'b' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 27, 'M', 'W', 'E', 'B', 0, 29, 84, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 7, 0, 2, 'a', 'b' }, buf[0..len]);
     var fr: message_mod.TraceFrames = .{ .browser = 1, .generation = 2, .count = 1 };
     fr.ids[0] = "A1";
     len = try encode(.{ .trace_frames = fr }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 28, 85, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2, 'A', '1' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 29, 85, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2, 'A', '1' }, buf[0..len]);
 }
 
 test "W9e②: CPU·네트워크·풀림·trace 의 닫힌 칸은 양쪽에서 거절한다" {

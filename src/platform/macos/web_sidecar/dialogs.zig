@@ -281,8 +281,37 @@ pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
     @import("network.zig").documentStarted(id);
     // W9d③: 막기 규칙이 막은 이동인가 — 실패 주소의 해시로(탭 길 -20·서비스 워커 길 -2 모두, §6.3). 진행 중 이동도 지운다.
     const blocked_rule = @import("blocking.zig").loadError(browser, failed_url);
+    // 사용자 결정 2026-11-18 「사람이 친 주소」: 실패한 주소를 싣는다 — 주 프레임이 정말 그 주소의 오류 페이지가 되었을 때만(`errorPageUrl`).
+    var ub: [protocol.wire.max_url_bytes]u8 = undefined;
+    const shown = errorPageUrl(frame, failed_url, &ub);
     // W9c①: 콘솔의 문서 경계 — maru 에 알리고(`error_page`) 떠난 출처를 기억한다.
-    @import("console.zig").errorPage(id, @intCast(error_code), blocked_rule);
+    @import("console.zig").errorPage(id, @intCast(error_code), blocked_rule, shown);
+}
+
+fn unitsOf(value: [*c]const c.cef_string_t) []const u16 {
+    if (value == null or value.*.str == null) return &.{};
+    return @as([*]const u16, @ptrCast(value.*.str))[0..value.*.length];
+}
+
+/// 주소창에 보일 실패 주소(`error_page.url` — wire 28). 주 프레임의 지금 주소(CEF `get_url`)가 실패 주소와 같을 때만 — 그 주소의 오류 페이지가
+/// 섰다는 뜻이다. 오류 페이지를 세우지 않고 끝난 실패(옛 문서가 남는다)에 실으면 옛 문서 위 주소창에 페이지가 고른 주소가 뜬다(주소 위장 —
+/// 계획 공격 4). 읽지 못하거나 잘리거나 주소 규칙(`fields.checkUrl`)에 걸리면 빈 글(maru 는 옛 주소를 그대로 보인다) — 걸린 주소를 실으면
+/// `error_page` 전체가 보내지지 않는다(계획 공격 8).
+fn errorPageUrl(frame: [*c]c.cef_frame_t, failed_url: [*c]const c.cef_string_t, out: []u8) []const u8 {
+    const now = frame.*.get_url.?(frame);
+    defer if (now != null) browsers.state.api.string_userfree_utf16_free(now);
+    const failed = unitsOf(failed_url);
+    const committed = now != null and std.mem.eql(u16, unitsOf(now), failed);
+    if (std.c.getenv("MARU_WEB_TEST_ERRPAGE_LOG") != null) {
+        var fb: [512]u8 = undefined;
+        var nb: [512]u8 = undefined;
+        std.debug.print("errpage: failed={s} frame={s} committed={}\n", .{ library.readString(browsers.state.api, failed_url, &fb), if (now != null) library.readString(browsers.state.api, now, &nb) else "(null)", committed });
+    }
+    if (!committed or failed.len == 0) return "";
+    const text = library.readString(browsers.state.api, failed_url, out);
+    if (text.len == 0 or text.len == out.len) return "";
+    protocol.fields.checkUrl(text) catch return "";
+    return text;
 }
 
 /// 렌더러가 죽었다 — 그 페이지의 JS 대화상자는 답할 곳이 없다(CEF 가 상태 비우기를 부르지 않을 수 있다 — 적대 검증). 콜백을

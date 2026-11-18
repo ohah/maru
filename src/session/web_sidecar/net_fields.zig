@@ -711,6 +711,7 @@ pub fn readBlockHits(cursor: *ReadCursor) Error!message.NetBlockHits {
 /// `error_page` — 오류 번호는 음수(ERR_ABORTED 는 sidecar 가 보내지 않지만 받는 쪽은 가르지 않는다).
 pub fn checkErrorPage(v: message.ErrorPage) Error!void {
     if (v.error_code >= 0) return error.InvalidNetwork;
+    if (v.url.len > 0) try fields.checkUrl(v.url);
 }
 
 pub fn writeErrorPage(cursor: *Cursor, v: message.ErrorPage) Error!void {
@@ -718,10 +719,16 @@ pub fn writeErrorPage(cursor: *Cursor, v: message.ErrorPage) Error!void {
     try fields.writeBrowser(cursor, v.browser);
     try cursor.writeU32(@bitCast(v.error_code));
     try cursor.writeU32(v.blocked_rule);
+    // wire 28: 실패한 주소 — 빈 글(길이 0)도 받는다(모르는 주소).
+    try cursor.writeU32(@intCast(v.url.len));
+    try cursor.writeBytes(v.url);
 }
 
 pub fn readErrorPage(cursor: *ReadCursor) Error!message.ErrorPage {
-    const v: message.ErrorPage = .{ .browser = try fields.readBrowser(cursor), .error_code = @bitCast(try cursor.readU32()), .blocked_rule = try cursor.readU32() };
+    var v: message.ErrorPage = .{ .browser = try fields.readBrowser(cursor), .error_code = @bitCast(try cursor.readU32()), .blocked_rule = try cursor.readU32() };
+    const len = try cursor.readU32();
+    if (len > wire.max_url_bytes) return error.UrlTooLarge;
+    v.url = try cursor.readBytes(len);
     try checkErrorPage(v);
     return v;
 }

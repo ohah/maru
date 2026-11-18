@@ -159,6 +159,21 @@ fn handle(conn: c_int) void {
     if (std.mem.startsWith(u8, path, "/img/")) return image(conn, path["/img/".len..]);
     if (std.mem.eql(u8, path, "/dl/tone.wav")) return tone(conn);
     if (std.mem.startsWith(u8, path, "/dl/f/")) return download(conn, path["/dl/f/".len..]);
+    // 실패한 이동의 주소(`addr_failed_check`): 실패하는 주소로 가는 리다이렉트(마지막 홉), 안전하지 않은 리다이렉트(http → file:).
+    if (std.mem.eql(u8, path, "/af-redirect")) return redirect(conn, "http://127.0.0.1:1/af-hop");
+    if (std.mem.eql(u8, path, "/af-unsafe-redirect")) return redirect(conn, "file:///etc/hosts");
+    // 페이지가 스스로(렌더러) 실패하는 주소로 간다 — 알 수 없는 스킴(오류 페이지를 세우지 않을 수 있다 — 옛 문서가 남으면 실패 주소를 싣지 않아야)·
+    // 거절되는 주소.
+    if (std.mem.eql(u8, path, "/af-js")) {
+        const to = if (std.mem.indexOf(u8, target, "scheme") != null) "maru-af-unknown-scheme:y" else "http://127.0.0.1:1/af-js-refused";
+        var bb: [256]u8 = undefined;
+        const body = std.fmt.bufPrint(&bb, "<!doctype html><title>af-js</title><script>setTimeout(function(){{location.href='{s}'}},300)</script>", .{to}) catch return;
+        var hb: [200]u8 = undefined;
+        const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{body.len}) catch return;
+        _ = std.c.write(conn, head.ptr, head.len);
+        _ = std.c.write(conn, body.ptr, body.len);
+        return;
+    }
 
     var body_buf: [8192]u8 = undefined;
     const flaky_image = std.mem.eql(u8, path, "/flaky.svg") and flaky_requests.fetchAdd(1, .monotonic) > 0;
@@ -170,6 +185,12 @@ fn handle(conn: c_int) void {
     const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nCache-Control: no-store\r\n{s}Connection: close\r\n\r\n", .{ content_type, body.len, csp }) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
     _ = std.c.write(conn, body.ptr, body.len);
+}
+
+fn redirect(conn: c_int, location: []const u8) void {
+    var hb: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(&hb, "HTTP/1.1 302 Found\r\nLocation: {s}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{location}) catch return;
+    _ = std.c.write(conn, head.ptr, head.len);
 }
 
 /// W10a 판정의 받을 파일(`download_check.zig`) — 첨부로 내려 보낸다.

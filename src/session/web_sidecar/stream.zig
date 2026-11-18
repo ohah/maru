@@ -389,7 +389,7 @@ test "W9d③ v20b R14e: 막기 frame 의 방향 — maru 쪽은 net_block 을, s
     try std.testing.expect((try at_sidecar_ok.next()).? == .net_block);
     var hits: message_mod.NetBlockHits = .{ .browser = 3, .count = 1 };
     hits.entries[0] = .{ .rule_id = 1, .hits = 1 };
-    for ([_]Message{ .{ .net_block_state = .{ .browser = 3, .generation = 1, .ok = true } }, .{ .net_block_hits = hits }, .{ .error_page = .{ .browser = 3, .error_code = -20, .blocked_rule = 1 } } }) |m| {
+    for ([_]Message{ .{ .net_block_state = .{ .browser = 3, .generation = 1, .ok = true } }, .{ .net_block_hits = hits }, .{ .error_page = .{ .browser = 3, .error_code = -20, .blocked_rule = 1 } }, .{ .error_page = .{ .browser = 3, .error_code = -20, .blocked_rule = 1, .url = "http://a.test/blk" } } }) |m| {
         len = try encode(m, &buf);
         var at_sidecar = StreamingDecoder.init(.to_sidecar);
         _ = try at_sidecar.feed(buf[0..len]);

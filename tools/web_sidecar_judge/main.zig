@@ -42,6 +42,7 @@ const popup_check = @import("popup_check.zig");
 const tooltip_check = @import("tooltip_check.zig");
 const find_check = @import("find_check.zig"); // P0-2
 const site_perms_check = @import("site_perms_check.zig"); // 사이트 권한 창(2026-11-18)
+const addr_failed_check = @import("addr_failed_check.zig"); // 실패한 이동의 주소(2026-11-18)
 const contextmenu_check = @import("contextmenu_check.zig");
 const drag_check = @import("drag_check.zig");
 const newtab_check = @import("newtab_check.zig");
@@ -548,6 +549,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         sitePermsChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--addr-failed")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        addrFailedChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--permissions")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
@@ -596,6 +605,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     popupChecks(host_path, profile_root);
     tooltipChecks(host_path, profile_root);
     findChecks(host_path, profile_root);
+    addrFailedChecks(host_path, profile_root);
     contextMenuChecks(host_path, profile_root);
     dragChecks(host_path, profile_root);
     newTabChecks(host_path, profile_root);
@@ -911,6 +921,14 @@ fn findChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var profile_buf: [1024]u8 = undefined;
     const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/fd", .{profile_root}, 0) catch return report(false, "find", "프로필 경로가 길다", .{});
     find_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "find", "{s}", .{@errorName(err)});
+}
+
+/// 실패한 이동의 주소 판정(사용자 결정 2026-11-18 「사람이 친 주소」) — 프로필은 `<뿌리>/af`.
+fn addrFailedChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "addr-failed", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/af", .{profile_root}, 0) catch return report(false, "addr-failed", "프로필 경로가 길다", .{});
+    addr_failed_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "addr-failed", "{s}", .{@errorName(err)});
 }
 
 /// 팝업 판정(W6a) — 프로필은 `<뿌리>/i`.

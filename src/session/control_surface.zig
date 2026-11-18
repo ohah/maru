@@ -168,8 +168,12 @@ pub const EditorMeta = struct {
 
 /// web surface 전용 메타(§3). collector가 WKWebView 상태에서 채운다(Phase 4·5, 여긴 스키마만).
 pub const WebMeta = struct {
-    /// 현재 URL. 없으면 생략.
+    /// 현재 URL — 주소창에 보이는 주소(Chromium 탭이 오류 페이지면 실패한 주소 — 2026-11-18). 없으면 생략.
     url: ?[]const u8 = null,
+    /// 확정된 문서 주소(보안 판단 — grant 호스트 `control_browser.targetHost`). `doc_url_set` 이면 `url` 대신 이것을 쓴다(Chromium 탭 — 오류
+    /// 페이지는 실패 주소의 문서가 아니다: 페이지가 실패 이동으로 고른 호스트에 grant·모달·규칙 사이트가 묶이지 않게, 계획 공격 1). 직렬화하지 않는다.
+    doc_url: ?[]const u8 = null,
+    doc_url_set: bool = false,
     /// 패널 종류(markdown|browser).
     panel_kind: PanelKind,
     /// 로딩 중인가.

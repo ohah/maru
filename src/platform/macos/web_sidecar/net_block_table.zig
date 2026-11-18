@@ -892,7 +892,7 @@ pub const Table = struct {
     }
 
     /// 에이전트·복원의 `navigate`(그 주소의 정규 꼴 해시) — 산 주소 토큰과 **같은 주소**면 거두지 않고 다툼으로 둔다(v1 SEVERE-2: 사용자가 친 주소
-    /// 바로 뒤 에이전트가 같은 주소로 몰면 그 이동이 사용자의 것을 대신해 사용자가 친 주소에서 에이전트의 가짜를 봤다 — 같은 곳이면 둘 다 진짜).
+    /// 바로 뒤 에이전트가 같은 주소로 몰면 그 이동이 사용자의 것을 대신해 사용자가 친 주소에서 에이전트의 가짜를 봤다 — 같은 곳이면 둘 다 진짜). 2026-11-18 부터 가짜는 사용자 이동도 바꾸므로 이 다툼은 막기에만 뜻이 있다.
     /// 다른 주소면 `agentNavigate` 와 같다.
     pub fn agentNavigateTo(self: *Table, cef_id: c_int, url_canon: u64, now_ms: i64) void {
         const t = self.findCef(cef_id) orelse return;

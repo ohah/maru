@@ -651,7 +651,9 @@ pub const OsrDialogShown = struct { surface_id: u64, token: u64 };
 
 fn tickOsrDialog(self: *AppSession) void {
     if (self.osr_dialog) |shown| {
-        if (web_osr.dialogPending(shown.surface_id, shown.token) != null) return;
+        // 에이전트가 허용한 요청(`browser.permission`)도 사라진 것처럼 거둔다 — 답은 창이 사람의 허용과 같은 길로 낸다(`takeOsrAgentAllow`).
+        // sheet 의 단추가 두 번째 답을 내지 않게(계획 공격 A1).
+        if (web_osr.dialogPending(shown.surface_id, shown.token)) |d| if (d.agent == .none) return;
         // 떠 있던(또는 띄우려던) 요청이 사라졌다 — Swift 가 가져가기 전이면 그냥 거두고, 띄웠으면 닫게 한다.
         self.osr_dialog = null;
         if (self.osr_dialog_ready) {
@@ -882,6 +884,15 @@ pub fn takeOsrLocation(self: *AppSession) ?OsrDialogShown {
 
 pub const LocationStatus = enum(u32) { position = 0, unavailable = 1, blocked = 2 };
 
+pub const OsrAgentAllow = struct { surface_id: u64, token: u64, kinds: u32, media: u8 };
+
+/// 에이전트가 허용한 권한 요청 하나(모든 탭에서 — 이 창이 맡는다). Swift 가 사람의 허용 단추와 같은 함수로 답한다(macOS 권한 → 위치면 좌표 →
+/// `osrPermissionReply`·`osrLocationReply`).
+pub fn takeOsrAgentAllow(self: *AppSession) ?OsrAgentAllow {
+    const next = web_osr.nextAgentAllow(@intFromPtr(self)) orelse return null;
+    return .{ .surface_id = next.surface_id, .token = next.token, .kinds = next.kinds, .media = next.media };
+}
+
 /// W5b2: sheet 가 닫혔지만 답은 나중에 온다(위치 — macOS 위치 창·좌표를 기다린다). 이 창의 표시만 풀어 다른 탭의 대화상자가
 /// 기다리지 않게 한다(요청은 이 창이 맡은 채 남아 같은 탭의 다음 요청은 답을 기다린다 — 적대 검증).
 pub fn osrDialogRelease(self: *AppSession, surface_id: u64, token: u64) void {
@@ -896,8 +907,9 @@ pub fn osrLocationReply(self: *AppSession, surface_id: u64, token: u64, status: 
         return false;
     };
     const remembered = d.remembered;
-    // W9e② v20c N3: sheet 의 답은 사람이 그 탭을 쓴 것이다(trace 를 버리고 조건을 푼다). 기억된 요청은 sheet 없이 maru 가 답한다.
-    const by: web_osr.ReplyBy = if (remembered) .program else .human;
+    // W9e② v20c N3: sheet 의 답은 사람이 그 탭을 쓴 것이다(trace 를 버리고 조건을 푼다). 기억된 요청은 sheet 없이 maru 가 답한다. 에이전트가
+    // 허용한 요청은 에이전트의 답이다(`browser.permission`).
+    const by: web_osr.ReplyBy = if (d.agent != .none) .agent else if (remembered) .program else .human;
     const answered = switch (status) {
         .position => web_osr.replyLocation(self.allocator, surface_id, token, position, .accept, by),
         .unavailable => web_osr.replyLocation(self.allocator, surface_id, token, null, .accept, by),
@@ -909,7 +921,9 @@ pub fn osrLocationReply(self: *AppSession, surface_id: u64, token: u64, status: 
 
 /// 답했으면 true — 요청이 이미 사라졌으면(이동·닫힘) false(Swift 는 그때 macOS 안내를 띄우지 않는다).
 pub fn osrPermissionReply(self: *AppSession, surface_id: u64, token: u64, result: ws.message.PermissionResult) bool {
-    const answered = web_osr.replyPermission(self.allocator, surface_id, token, result, .human);
+    // 에이전트가 허용한 요청이면 에이전트의 답이다(sheet 가 아니라 창이 대신 낸 답 — `takeOsrAgentAllow`).
+    const by: web_osr.ReplyBy = if (web_osr.dialogPending(surface_id, token)) |d| (if (d.agent != .none) .agent else .human) else .human;
+    const answered = web_osr.replyPermission(self.allocator, surface_id, token, result, by);
     clearShown(self, surface_id, token);
     return answered;
 }
@@ -3756,6 +3770,56 @@ test "W9e② v20c N3: sheet 진입(대화상자·파일·권한·위치)은 답�
         _ = osrLocationReply(&app, tab, remembered, .unavailable, .{ .latitude = 0, .longitude = 0, .accuracy = 1 });
         try std.testing.expectEqual(@as(?bool, false), web_osr.test_last_reply_user);
     }
+}
+
+test "에이전트가 허용한 권한 요청(2026-11-18): 떠 있던 sheet 는 사라진 것처럼 거두고(사람의 단추가 두 번째 답을 내지 않게), 창이 낸 답은 에이전트 것 — user 거짓" {
+    const gpa = std.testing.allocator;
+    const tab: u64 = 900_733;
+    try web_osr.testHold(gpa, tab);
+    web_osr.testRunning(tab);
+    defer {
+        web_osr.destroy(gpa, tab);
+        web_osr.testForget(gpa);
+    }
+    const all = struct {
+        fn granted(_: ?*const anyopaque, _: u64) bool {
+            return true;
+        }
+    };
+    const access: web_osr.DialogAccess = .{ .granted = all.granted };
+    var app: AppSession = undefined;
+    app.allocator = gpa;
+    app.osr_dialog_dismiss = false;
+    // 알림 요청 — 이 창이 sheet 를 띄웠다(Swift 가 가져갔다).
+    web_osr.testApply(gpa, .{ .permission_request = .{ .browser = tab, .request = 1, .origin = "https://news.example", .kinds = ws.message.PermissionKind.notifications.bit() } });
+    const t1 = web_osr.testDialogToken(tab).?;
+    web_osr.markDialogShown(tab, t1, @intFromPtr(&app));
+    app.osr_dialog = .{ .surface_id = tab, .token = t1 };
+    app.osr_dialog_ready = false;
+    tickOsrDialog(&app);
+    try std.testing.expect(app.osr_dialog != null and !app.osr_dialog_dismiss); // 아직 기다린다 — 그대로
+    _ = try web_osr.agentAnswerPermission(gpa, tab, null, .allow, access);
+    tickOsrDialog(&app);
+    try std.testing.expect(app.osr_dialog == null and takeOsrDialogDismiss(&app)); // sheet 를 거둔다
+    try std.testing.expect(web_osr.dialogPending(tab, t1) != null); // 요청은 남는다 — 창이 답한다
+    const taken = takeOsrAgentAllow(&app).?;
+    try std.testing.expect(taken.surface_id == tab and taken.token == t1 and taken.kinds == ws.message.PermissionKind.notifications.bit());
+    try std.testing.expect(takeOsrAgentAllow(&app) == null);
+    web_osr.test_last_reply_user = null;
+    try std.testing.expect(osrPermissionReply(&app, tab, t1, .accept));
+    try std.testing.expectEqual(@as(?bool, false), web_osr.test_last_reply_user);
+    // 위치 — 띄우기 전(가져가기 전)이면 그냥 거둔다, 창이 낸 좌표 답도 에이전트 것.
+    web_osr.testApply(gpa, .{ .permission_request = .{ .browser = tab, .request = 2, .origin = "https://map.example", .kinds = ws.message.PermissionKind.geolocation.bit() } });
+    const t2 = web_osr.testDialogToken(tab).?;
+    app.osr_dialog = .{ .surface_id = tab, .token = t2 };
+    app.osr_dialog_ready = true;
+    _ = try web_osr.agentAnswerPermission(gpa, tab, t2, .allow, access);
+    tickOsrDialog(&app);
+    try std.testing.expect(app.osr_dialog == null and !app.osr_dialog_ready and !takeOsrDialogDismiss(&app));
+    _ = takeOsrAgentAllow(&app).?;
+    web_osr.test_last_reply_user = null;
+    try std.testing.expect(osrLocationReply(&app, tab, t2, .position, .{ .latitude = 1, .longitude = 2, .accuracy = 3 }));
+    try std.testing.expectEqual(@as(?bool, false), web_osr.test_last_reply_user);
 }
 
 test "permission sheet text lists each asked permission once and notes remembering only for prompts" {

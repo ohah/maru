@@ -211,6 +211,16 @@ pub const BrowserMethod = enum {
     /// 있으면 그 자리·이름, 없으면 `~/Downloads`; 있는 파일은 덮어쓰지 않는다 — 번호), `discard`·`cancel`·`resume`. `path` 는 `save` 에만, 절대 경로
     /// (`agentSavePathOk`). 부른 pane(1g)이 있어야 한다. op.arg=`{key, action, path?}` 정규형. **op_kind=37**.
     download,
+    /// `browser.permissions {id}`(Chromium 전용 — 사용자 결정 2026-11-18) → `{permissions:[{request, tab, origin, permissions:[…], shown, answering}]}` —
+    /// 그 탭의 팝업 가족에 떠 있는 권한 요청(알림·위치·카메라·마이크·화면 …). `dialog` 와 같은 자리·같은 볼 수 있음(grant 있는 탭은 전부, 나머지 가족 탭은
+    /// `{tab}`). JS 대화상자와 가른 까닭: 사람의 단추가 셋(허용·차단·닫기)이고 차단·닫기의 결과가 다르다, 번호 없는 `handleDialog --accept` 가 권한을
+    /// 허용하면 놀란다. 곧 답한다. op.arg 빈 것. **op_kind=38**.
+    permissions,
+    /// `browser.permission {id, answer:"allow"|"block"|"dismiss", request?}`(Chromium 전용 — 사용자 결정 2026-11-18) → `{ok:true, answer, outcome, request,
+    /// tab}`. 사람의 sheet 단추와 같다 — 허용·차단은 Chromium 이 그 사이트에 기억한다(미디어는 기억하지 않는다), 닫기는 기억하지 않는다. 모든 종류. `request`
+    /// 가 없으면 그 탭 자신의 첫 요청. 허용은 사람의 허용과 같은 길(macOS 권한·위치 좌표)로 가 끝을 기다린다(`outcome`). op.arg=`{answer, request?}`.
+    /// **op_kind=39**.
+    permission,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -255,6 +265,8 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "show")) return .show;
     if (eq(rest, "downloads")) return .downloads;
     if (eq(rest, "download")) return .download;
+    if (eq(rest, "permissions")) return .permissions;
+    if (eq(rest, "permission")) return .permission;
     return null;
 }
 
@@ -299,6 +311,8 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .show => "show",
         .downloads => "downloads",
         .download => "download",
+        .permissions => "permissions",
+        .permission => "permission",
     };
 }
 
@@ -309,7 +323,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show, .downloads, .download => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show, .downloads, .download, .permissions, .permission => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
@@ -318,7 +332,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
         // W9d①: 네트워크 목록·자세히(CEF 자원 요청 처리기 — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show, .downloads, .download => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show, .downloads, .download, .permissions, .permission => true,
             else => false,
         },
     };
@@ -1660,6 +1674,51 @@ pub fn serializeHandleDialogArg(gpa: std.mem.Allocator, p: HandleDialogParams) s
         if (p.dialog) |d| {
             s.objectField("dialog") catch |e| break :blk e;
             s.write(d) catch |e| break :blk e;
+        }
+        s.endObject() catch |e| break :blk e;
+    }) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+/// `browser.permission` 의 답(사용자 결정 2026-11-18) — 사람의 sheet 단추 셋과 같다.
+pub const PermissionAnswer = enum { allow, block, dismiss };
+/// `browser.permission` params. `request` 는 `browser.permissions` 가 준 번호(0 은 없다).
+pub const PermissionParams = struct { answer: PermissionAnswer, request: ?u64 };
+
+pub fn parsePermissionsParams(params: ?std.json.Value) ParamError!void {
+    const obj = try paramsObject(params);
+    try onlyKeys(obj, &.{"id"});
+}
+
+pub fn parsePermissionParams(params: ?std.json.Value) ParamError!PermissionParams {
+    const obj = try paramsObject(params);
+    try onlyKeys(obj, &.{ "id", "answer", "request" });
+    const answer = switch (obj.get("answer") orelse return error.InvalidParams) {
+        .string => |a| std.meta.stringToEnum(PermissionAnswer, a) orelse return error.InvalidParams,
+        else => return error.InvalidParams,
+    };
+    const request: ?u64 = if (obj.get("request")) |v| switch (v) {
+        .integer => |i| if (i < 1 or i > max_safe_integer) return error.InvalidParams else @intCast(i),
+        .null => null,
+        else => return error.InvalidParams,
+    } else null;
+    return .{ .answer = answer, .request = request };
+}
+
+/// JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
+const max_safe_integer: i64 = 9_007_199_254_740_991;
+
+pub fn serializePermissionArg(gpa: std.mem.Allocator, p: PermissionParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |e| break :blk e;
+        s.objectField("answer") catch |e| break :blk e;
+        s.write(@tagName(p.answer)) catch |e| break :blk e;
+        if (p.request) |r| {
+            s.objectField("request") catch |e| break :blk e;
+            s.write(r) catch |e| break :blk e;
         }
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -3040,7 +3099,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid tab payload", null),
         },
         // W9c②: 앱이 준 `{"dialogs":[…]}`·`{"ok","kind","continues"?}` 을 검사해 알려진 필드만 싣는다.
-        .dialog, .handle_dialog => serializeDialogResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
+        .dialog, .handle_dialog, .permissions, .permission => serializeDialogResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid dialog payload", null),
         },
@@ -3231,6 +3290,9 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
                 for (int_keys) |k| if (item.object.get(k)) |v| if (v != .integer or v.integer <= 0) return error.InvalidDialogPayload;
                 for (str_keys) |k| if (item.object.get(k)) |v| if (v != .string) return error.InvalidDialogPayload;
             }
+            // 같은 가족에 떠 있는 권한 요청의 수(2026-11-18) — 대화상자만 본 에이전트도 `browser.permissions` 를 알게. 없으면 싣지 않는다.
+            const perms = o.get("permission_requests");
+            if (perms) |v| if (v != .integer or v.integer <= 0) return error.InvalidDialogPayload;
             (blk: {
                 beginResult(&s, id) catch |e| break :blk e;
                 s.objectField("dialogs") catch |e| break :blk e;
@@ -3245,6 +3307,56 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
                     s.endObject() catch |e| break :blk e;
                 }
                 s.endArray() catch |e| break :blk e;
+                if (perms) |v| {
+                    s.objectField("permission_requests") catch |e| break :blk e;
+                    s.write(v.integer) catch |e| break :blk e;
+                }
+                endResult(&s) catch |e| break :blk e;
+            }) catch return error.OutOfMemory;
+        },
+        .permissions => {
+            const list = o.get("permissions") orelse return error.InvalidDialogPayload;
+            if (list != .array) return error.InvalidDialogPayload;
+            for (list.array.items) |item| {
+                if (item != .object) return error.InvalidDialogPayload;
+                const tab = item.object.get("tab") orelse return error.InvalidDialogPayload;
+                if (tab != .integer or tab.integer <= 0) return error.InvalidDialogPayload;
+                if (item.object.get("request")) |v| if (v != .integer or v.integer <= 0) return error.InvalidDialogPayload;
+                if (item.object.get("origin")) |v| if (v != .string) return error.InvalidDialogPayload;
+                for ([_][]const u8{ "shown", "answering" }) |k| if (item.object.get(k)) |v| if (v != .bool) return error.InvalidDialogPayload;
+                if (item.object.get("permissions")) |v| {
+                    if (v != .array) return error.InvalidDialogPayload;
+                    for (v.array.items) |name| if (name != .string) return error.InvalidDialogPayload;
+                }
+            }
+            (blk: {
+                beginResult(&s, id) catch |e| break :blk e;
+                s.objectField("permissions") catch |e| break :blk e;
+                s.beginArray() catch |e| break :blk e;
+                for (list.array.items) |item| {
+                    s.beginObject() catch |e| break :blk e;
+                    for ([_][]const u8{ "request", "tab", "origin", "permissions", "shown", "answering" }) |k| if (item.object.get(k)) |v| {
+                        s.objectField(k) catch |e| break :blk e;
+                        s.write(v) catch |e| break :blk e;
+                    };
+                    s.endObject() catch |e| break :blk e;
+                }
+                s.endArray() catch |e| break :blk e;
+                endResult(&s) catch |e| break :blk e;
+            }) catch return error.OutOfMemory;
+        },
+        .permission => {
+            const ok = o.get("ok") orelse return error.InvalidDialogPayload;
+            const answer = o.get("answer") orelse return error.InvalidDialogPayload;
+            const outcome = o.get("outcome") orelse return error.InvalidDialogPayload;
+            if (ok != .bool or answer != .string or outcome != .string) return error.InvalidDialogPayload;
+            for ([_][]const u8{ "request", "tab" }) |k| if (o.get(k)) |v| if (v != .integer or v.integer <= 0) return error.InvalidDialogPayload;
+            (blk: {
+                beginResult(&s, id) catch |e| break :blk e;
+                for ([_][]const u8{ "ok", "answer", "outcome", "request", "tab" }) |k| if (o.get(k)) |v| {
+                    s.objectField(k) catch |e| break :blk e;
+                    s.write(v) catch |e| break :blk e;
+                };
                 endResult(&s) catch |e| break :blk e;
             }) catch return error.OutOfMemory;
         },
@@ -3805,6 +3917,12 @@ pub fn browserOpFromRequest(
             break :blk try gpa.dupe(u8, "");
         },
         .handle_dialog => try serializeHandleDialogArg(gpa, parseHandleDialogParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        // 권한 요청(사용자 결정 2026-11-18) — 보기는 {id}만, 답하기는 `{answer, request?}`.
+        .permissions => blk: {
+            parsePermissionsParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+            break :blk try gpa.dupe(u8, "");
+        },
+        .permission => try serializePermissionArg(gpa, parsePermissionParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         // W9c③: 업로드 — `{선택자 필드, files}`. 확인 모달은 실행 계층이 매번 띄운다(여기서 인가된 것은 「그 탭을 다뤄도 된다」 뿐이다).
         .upload => blk: {
             var why: UploadParamsWhy = .{};
@@ -5113,8 +5231,8 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const webkit = arr.items[0].object;
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
-    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload·show 등 18 개는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 18 - 2), webkit.get("methods").?.array.items.len);
+    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload·show·downloads·download·permissions·permission 등 22 개는 Chromium 전용 — WebKit 은 걷어낼 예정).
+    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 18 - 2 - 2), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
@@ -5122,7 +5240,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
     // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console. W9c③: upload.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock", "networkMock", "emulate", "trace", "show" };
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock", "networkMock", "emulate", "trace", "show", "permissions", "permission" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -6549,6 +6667,106 @@ test "W9c②: dialog·handleDialog 결과는 엔진이 준 알려진 필드만 �
         .{ .req = handle_req, .payload = "{\"ok\":true}" },
         .{ .req = handle_req, .payload = "{\"ok\":\"y\",\"kind\":\"alert\"}" },
         .{ .req = handle_req, .payload = "[" },
+    };
+    for (bad) |c| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
+    }
+}
+
+// ── 2026-11-18: 에이전트가 권한 요청에 답한다(browser.permissions·permission) ─────────────────────────────────────────────
+
+test "권한 요청: permissions·permission 은 download 뒤(38·39) — Chromium 만, browser scope, 엄격 키·답 셋·번호 1..2^53-1, 정규형 arg" {
+    try testing.expectEqual(@as(u8, 38), @as(u8, @backingInt(BrowserMethod.permissions)));
+    try testing.expectEqual(@as(u8, 39), @as(u8, @backingInt(BrowserMethod.permission)));
+    try testing.expectEqualStrings("permissions", browserMethodWireName(.permissions));
+    try testing.expectEqual(BrowserMethod.permission, parseBrowserMethod("permission").?);
+    try testing.expect(engineSupports(.chromium, .permissions) and engineSupports(.chromium, .permission));
+    try testing.expect(!engineSupports(.webkit, .permissions) and !engineSupports(.webkit, .permission));
+    try testing.expectEqual(capmod.ScopeClass.browser, capmod.methodRequiredScope("browser.permission").?);
+    var grants: cpg.PaneGrantStore = .{};
+    // WebKit 탭 — 모달 전 -32008.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":11,\"answer\":\"allow\"}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    const ok_cases = [_]struct { bytes: []const u8, method: BrowserMethod, arg: []const u8 }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permissions\",\"params\":{\"id\":12}}", .method = .permissions, .arg = "" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"allow\"}}", .method = .permission, .arg = "{\"answer\":\"allow\"}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"block\",\"request\":9007199254740991}}", .method = .permission, .arg = "{\"answer\":\"block\",\"request\":9007199254740991}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"dismiss\",\"request\":null}}", .method = .permission, .arg = "{\"answer\":\"dismiss\"}" },
+    };
+    for (ok_cases) |c| switch (try dispatchBrowser(testing.allocator, c.bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(c.method, op.method);
+            try testing.expectEqual(@as(u64, 12), op.surface_id);
+            try testing.expectEqualStrings(c.arg, op.arg);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    const bad = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"deny\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"allow\",\"request\":0}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"allow\",\"request\":9007199254740992}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"allow\",\"request\":\"3\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"allow\",\"kinds\":[\"camera\"]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permissions\",\"params\":{\"id\":12,\"all\":true}}",
+    };
+    for (bad) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+}
+
+test "권한 요청: permissions·permission 결과와 dialog 의 permission_requests 는 알려진 필드만 — 모양이 틀리면 internal_error" {
+    const list_req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.permissions\",\"params\":{\"id\":12}}";
+    const answer_req = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.permission\",\"params\":{\"id\":12,\"answer\":\"allow\"}}";
+    const dialog_req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.dialog\",\"params\":{\"id\":12}}";
+    const cases = [_]struct { req: []const u8, payload: []const u8, want: []const u8 }{
+        .{ .req = list_req, .payload = "{\"permissions\":[]}", .want = "\"result\":{\"permissions\":[]}" },
+        .{
+            .req = list_req,
+            .payload = "{\"permissions\":[{\"answering\":false,\"shown\":true,\"permissions\":[\"camera\",\"microphone\"],\"origin\":\"https://meet.test\",\"tab\":12,\"request\":7,\"x\":1},{\"tab\":13}]}",
+            .want = "\"result\":{\"permissions\":[{\"request\":7,\"tab\":12,\"origin\":\"https://meet.test\",\"permissions\":[\"camera\",\"microphone\"],\"shown\":true,\"answering\":false},{\"tab\":13}]}",
+        },
+        .{ .req = answer_req, .payload = "{\"outcome\":\"answered\",\"answer\":\"allow\",\"ok\":true,\"tab\":12,\"request\":7,\"y\":2}", .want = "\"result\":{\"ok\":true,\"answer\":\"allow\",\"outcome\":\"answered\",\"request\":7,\"tab\":12}" },
+        .{ .req = dialog_req, .payload = "{\"dialogs\":[],\"permission_requests\":2}", .want = "\"result\":{\"dialogs\":[],\"permission_requests\":2}" },
+    };
+    for (cases) |c| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, c.want) != null);
+    }
+    const bad = [_]struct { req: []const u8, payload: []const u8 }{
+        .{ .req = list_req, .payload = "{}" },
+        .{ .req = list_req, .payload = "{\"permissions\":[{\"request\":7}]}" },
+        .{ .req = list_req, .payload = "{\"permissions\":[{\"tab\":12,\"permissions\":\"camera\"}]}" },
+        .{ .req = list_req, .payload = "{\"permissions\":[{\"tab\":12,\"permissions\":[1]}]}" },
+        .{ .req = list_req, .payload = "{\"permissions\":[{\"tab\":12,\"shown\":1}]}" },
+        .{ .req = list_req, .payload = "{\"permissions\":[{\"tab\":12,\"request\":0}]}" },
+        .{ .req = answer_req, .payload = "{\"ok\":true,\"answer\":\"allow\"}" },
+        .{ .req = answer_req, .payload = "{\"ok\":true,\"answer\":\"allow\",\"outcome\":3}" },
+        .{ .req = answer_req, .payload = "{\"ok\":true,\"answer\":\"allow\",\"outcome\":\"answered\",\"tab\":\"12\"}" },
+        .{ .req = dialog_req, .payload = "{\"dialogs\":[],\"permission_requests\":0}" },
     };
     for (bad) |c| {
         const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);

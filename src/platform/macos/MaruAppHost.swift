@@ -8668,6 +8668,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsrDatalist() // W6m②: 키 대상 Chromium 탭의 제안 목록을 칸 아래 네이티브 창으로 — sheet 를 붙인 뒤에 본다(sheet 위에 남지 않게).
             drainDownloads() // W10a: Chromium 탭 다운로드 — 목록 창을 고치고, 새 다운로드·⇧⌘J 에 창을 낸다.
             drainOsrLocation() // W5b2: 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다.
+            drainOsrAgentAllow() // 에이전트가 허용한 권한 요청 — 사람의 허용 단추와 같은 길(macOS 권한·위치 좌표)로 답한다.
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
@@ -10475,25 +10476,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             switch response {
             case .alertFirstButtonReturn:
                 alert.window.orderOut(nil) // 이어서 macOS 안내 sheet 를 띄울 수 있다
-                self.ensureMacAccess(Self.osrDevices(kinds: kinds, media: media)) { [weak self, weak window] blocked in
-                    guard let self, let window else { return }
-                    // W5b2: 위치는 Maru 가 좌표를 구해 허용 **전에** 건다(허용 뒤에 걸면 기다리던 요청이 실패한다 — 실측).
-                    if blocked == nil, kinds & 0x100 != 0 {
-                        // 답은 좌표가 오면 한다 — 그동안 이 창의 다른 대화상자가 기다리지 않게 표시를 푼다.
-                        if let session = self.surfaceOwning(window)?.appSession { maru_macos_app_session_osr_dialog_release(session, sid, token) }
-                        self.osrLocation.fetch { [weak self, weak window] status, location in
-                            guard let self, let window else { return }
-                            let answered = self.replyOsrLocation(window: window, sid: sid, token: token, status: status, location: location)
-                            if status == MARU_OSR_LOCATION_BLOCKED, answered, window.isVisible { self.showMacAccessBlocked(window: window, device: .location) }
-                        }
-                        return
-                    }
-                    // macOS 가 막았으면 「못 물음」 — 사용자는 사이트를 허용했다(차단이나 닫기로 기억·embargo 가 쌓이지 않게).
-                    let answered = self.replyOsrPermission(window: window, sid: sid, token: token,
-                                                           result: blocked == nil ? MARU_OSR_PERMISSION_ACCEPT : MARU_OSR_PERMISSION_IGNORE)
-                    // 기다리는 사이 요청이 사라졌으면(이동·닫힘) 안내하지 않는다.
-                    if let blocked, answered, window.isVisible { self.showMacAccessBlocked(window: window, device: blocked) }
-                }
+                self.allowOsrPermission(window: window, sid: sid, token: token, kinds: kinds, media: media, guide: true)
             case .alertSecondButtonReturn:
                 self.replyOsrPermission(window: window, sid: sid, token: token, result: MARU_OSR_PERMISSION_DENY)
             case .abort: // 종료로 치웠다(W6k) — 기억하지도 쌓지도 않는다
@@ -10503,6 +10486,44 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         }
         Self.guardOsrSheetInput(alert, field: nil)
+    }
+
+    /// 권한 요청의 허용 — sheet 의 허용 단추와 에이전트의 `browser.permission --allow`(`drainOsrAgentAllow`)가 같은 길이다: 장치마다 macOS 권한을
+    /// 받고(처음이면 macOS 가 사용자에게 묻는다), 위치면 좌표를 구해 허용 전에 건다. `guide` 면 macOS 가 막았을 때 시스템 설정 안내 sheet 를 띄운다 —
+    /// 사람이 누른 허용만(에이전트의 허용에 사람이 누르지 않은 안내가 갑자기 뜨지 않게 — 에이전트는 결과 `macos_blocked` 로 안다).
+    private func allowOsrPermission(window: NSWindow, sid: UInt64, token: UInt64, kinds: UInt32, media: UInt32, guide: Bool) {
+        ensureMacAccess(Self.osrDevices(kinds: kinds, media: media)) { [weak self, weak window] blocked in
+            guard let self, let window else { return }
+            // W5b2: 위치는 Maru 가 좌표를 구해 허용 **전에** 건다(허용 뒤에 걸면 기다리던 요청이 실패한다 — 실측).
+            if blocked == nil, kinds & 0x100 != 0 {
+                // 답은 좌표가 오면 한다 — 그동안 이 창의 다른 대화상자가 기다리지 않게 표시를 푼다.
+                if let session = self.surfaceOwning(window)?.appSession { maru_macos_app_session_osr_dialog_release(session, sid, token) }
+                self.osrLocation.fetch { [weak self, weak window] status, location in
+                    guard let self, let window else { return }
+                    let answered = self.replyOsrLocation(window: window, sid: sid, token: token, status: status, location: location)
+                    if guide, status == MARU_OSR_LOCATION_BLOCKED, answered, window.isVisible { self.showMacAccessBlocked(window: window, device: .location) }
+                }
+                return
+            }
+            // macOS 가 막았으면 「못 물음」 — 사용자는 사이트를 허용했다(차단이나 닫기로 기억·embargo 가 쌓이지 않게).
+            let answered = self.replyOsrPermission(window: window, sid: sid, token: token,
+                                                   result: blocked == nil ? MARU_OSR_PERMISSION_ACCEPT : MARU_OSR_PERMISSION_IGNORE)
+            // 기다리는 사이 요청이 사라졌으면(이동·닫힘) 안내하지 않는다.
+            if guide, let blocked, answered, window.isVisible { self.showMacAccessBlocked(window: window, device: blocked) }
+        }
+    }
+
+    /// 에이전트가 허용한 권한 요청(`browser.permission --allow`) — 이 창이 맡아 사람의 허용과 같은 길로 답한다. 떠 있던 sheet 는 Zig 가 이미
+    /// 거뒀다(`take_osr_dialog_dismiss`). 종료 중에는 가져가지 않는다(W6k — 종료를 그만두면 이어서 답한다).
+    private func drainOsrAgentAllow() {
+        guard let session = appSession, let window else { return }
+        guard !quitConfirmPending, !osrDialogsHeldForExit, !osrQuitRequested else { return }
+        var request = MaruAppHostOsrAgentAllow()
+        while maru_macos_app_session_take_osr_agent_allow(session, &request) != 0 {
+            Self.testNote("agent-allow-taken kinds=\(request.permission_kinds) media=\(request.permission_media)")
+            allowOsrPermission(window: window, sid: request.surface_id, token: request.token, kinds: request.permission_kinds,
+                               media: request.permission_media, guide: false)
+        }
     }
 
     // ── W5b2: 위치 ──

@@ -5898,3 +5898,18 @@ take 안에서** 나갔다 — P1 이 그 take·drain 을 지우면 함께 사�
   사람에게 저장 창을 띄우지 않는다, 그 폴더를 사람의 저장 창 기본 폴더로 기억하지 않는다). ABI 는 탭 op 자리(`isTabOp`)에서 곧 답한다. CLI `downloads`·`download`,
   MCP `browser_downloads`·`browser_download`, 플러그인(0.1.13).
 - **남은 틈**: 폴더는 만들지 않는다(사람의 저장 창은 「새 폴더」 가 있다), 목록 정리(`remove`·끝난 행 지우기)는 두지 않았다, 받기 시작은 페이지 동작이라 op 이 없다.
+### 권한 요청 — `browser.permissions`·`browser.permission`(2026-11-18, 완료)
+
+사용자 결정(2026-11-18 「에이전트 op 셋 더하기」의 셋째): 에이전트가 **모든 종류**(위치·카메라·마이크·화면 공유·알림 …)의 권한 요청에 허용·차단 둘 다 답하고, 에이전트의
+허용은 사람의 답과 똑같이 기억된다(사이트마다, 같은 프로필). `dialog` 에 접을지 따로 둘지는 최소 놀람으로 고르라 했다 — **따로 둔다**(사람의 단추가 셋이고 차단·닫기의
+결과가 다르다, 번호 없는 `handle-dialog --accept` 가 카메라를 허용하면 안 된다, CDP·Playwright 도 가른다). 대신 `dialog` 가 그 수(`permission_requests`)를 싣는다. 계약은
+[`browser.*` 코어](../control-plane-browser.md) `browser.permissions`·`browser.permission` 행이 소유한다.
+
+- **재실측(착수 전, 격리 앱)**: 사용자 탭에서 에이전트가 누른 `Notification.requestPermission()` 의 sheet 가 떴고, `maru browser dialog` 는 `(no dialog)`,
+  `handle-dialog --accept` 는 「no dialog is showing」 — 에이전트는 페이지가 기다리는 것을 볼 수도 답할 수도 없었다.
+- **구현**: L2 `permissions`(op_kind 38)·`permission`(39 — `{answer, request?}`), 앱 `web_osr.permissionList`·`agentAnswerPermission`(차단·닫기는 곧 `replyPermission` —
+  `ReplyBy.agent`, 허용은 `Dialog.agent = allow_pending`)·`nextAgentAllow`(창이 맡는다 — 맡은 창이 닫히면 되돌린다)·`takeAgentOutcome`(끝의 고리), `tickOsrDialog` 가 에이전트가
+  허용한 요청의 sheet 를 거둔다, Swift 는 sheet 의 허용 처리기를 `allowOsrPermission` 으로 빼 사람·에이전트가 같은 길(macOS 권한 → 위치 좌표 → 답)을 탄다(에이전트 길은
+  macOS 안내 sheet 를 띄우지 않는다). ABI 264(`maru_macos_app_session_take_osr_agent_allow`). L4 는 대화상자 자리(`answerDialogOp`)에서 곧 답하고 허용의 끝은 탭 op 목록이
+  10 초까지 기다린다(`outcome`). CLI `browser permissions`·`browser permission`, MCP `browser_permissions`·`browser_permission`, 플러그인 `dialogs-and-uploads.md` 의 절(0.1.15).
+- **남은 틈**: 사람이 기억된 사이트 허용을 보고 되돌릴 UI 는 다음 PR(사용자 결정 「만들기」), 사람이 허용을 눌러 macOS 를 기다리는 사이 에이전트가 답하면 먼저 간 답이 이긴다.

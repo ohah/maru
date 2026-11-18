@@ -505,7 +505,8 @@ const MethodCtx = struct {
     }
 };
 
-/// 탭 길의 답(막기가 맞지 않은 요청 — 막기가 이긴다). `exempt` — 공용 예외 표의 답(D2·Q2). `initiator` — CEF 의 `request_initiator`(요청을 낸
+/// 탭 길의 답(막기가 맞지 않은 요청 — 막기가 이긴다). `exempt` — 공용 예외 표의 답 — 가짜는 Q2(사람의 누름, 그 깃발의 규칙만)만 본다: 사용자 이동(D2)의 문서도 가짜가 된다(사용자 결정 2026-11-18
+/// 「그것까지 넓히기」 — 막기는 D2 를 그대로 지나간다). `initiator` — CEF 의 `request_initiator`(요청을 낸
 /// 프레임·워커의 출처 — 프레임 주소는 IO 스레드에서 비거나 낡았다, `network.zig` M4): 실행 사이트에 묶인 규칙은 문서가 아닌 요청을 그 출처의
 /// 호스트를 grant 가 덮을 때만 바꾼다(v1 SEVERE-1). 없거나 읽지 못하면 모르는 문맥(진짜).
 pub fn tabSelect(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_navigation: c_int, initiator: [*c]const c.cef_string_t, exempt: nav_exempt.Exempt) Pick {
@@ -536,7 +537,7 @@ pub fn tabSelect(browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request
     var ihb: [msg.max_net_host_bytes]u8 = undefined;
     const initiator_host: []const u8 = if (main_nav) "" else net_policy.hostOfUrl16(units(initiator), &ihb);
     var mbuf: [msg.max_net_method_bytes]u8 = undefined;
-    const verdict = table_mod.decideTab(&a, .{ .url = url, .resource_type = rt, .main_nav = main_nav, .page_host = page, .user_exempt = exempt.user, .human_exempt = exempt.human, .initiator_host = initiator_host }, MethodCtx{ .request = request, .buf = &mbuf });
+    const verdict = table_mod.decideTab(&a, .{ .url = url, .resource_type = rt, .main_nav = main_nav, .page_host = page, .human_exempt = exempt.human, .initiator_host = initiator_host }, MethodCtx{ .request = request, .buf = &mbuf });
     switch (verdict) {
         .mock => |rule| {
             const head = std.mem.eql(u8, (MethodCtx{ .request = request, .buf = &mbuf }).method(), "HEAD");

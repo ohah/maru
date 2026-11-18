@@ -5,7 +5,7 @@
 //! `User-Agent`·client hints(·`Accept-Language`)를 넣는다(값은 `emu_plan.Inject` — 커밋 뒤 Chromium 이 낼 머리와 같은 꼴).
 //!
 //! - 어느 요청인가: 그 탭(CEF 브라우저 번호)의 주 프레임 문서 요청이고, 주소의 정규 해시가 UI 스레드가 `on_before_browse` 에서 적은 그 홉의 주소와
-//!   같을 때만(`net_block_table.canonHash` — 사용자 이동 예외 `nav_exempt` 와 같은 짝짓기). 리다이렉트 홉마다 `on_before_browse` 가 먼저 새 홉을
+//!   같을 때만(`net_block_table.canonHash` — 사람의 누름 표 `nav_exempt` 와 같은 짝짓기). 리다이렉트 홉마다 `on_before_browse` 가 먼저 새 홉을
 //!   적는다 — 안→안 홉은 그 주소로 다시 넣고, 안→밖 홉은 UI 스레드가 이미 거뒀다(주소도 다르다).
 //! - 넣은 머리는 다음 홉에 남지 않는다: Chromium 이 리다이렉트 홉마다 UA·client hints·Accept-Language 를 다시 셈해 이 처리기 앞에 둔다(실측 CEF 154 —
 //!   밖 → 안 302 → 밖의 밖 홉 머리가 넣기 전 그대로 진짜; 판정 `emu-site-bound-hop-headers` 가 지킨다). 그래서 되돌림 기록을 두지 않는다.

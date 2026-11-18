@@ -205,23 +205,9 @@ fn serveParsed(conn: c_int, r: []const u8) error{Keep}!void {
             "<iframe id=f src='http://127.0.0.1:{d}/x/blank?a6first' width=20 height=20></iframe>", .{ p, p }) catch return;
         return reply(conn, "200 OK", html, "", body);
     }
-    if (std.mem.eql(u8, path, "/a6/err")) return reply(conn, "200 OK", html, "", "<!doctype html><title>a6err</title><div id=c>c</div><div id=d>d</div><script>" ++
-        "Error.prepareStackTrace=(e,s)=>{fetch('/a6/mark?pst-'+e.message);return 'pst'};" ++
-        "const c=document.getElementById('c');c.e1=new Error('e1');" ++
-        "const e2=new Error('e2');Object.defineProperty(e2,'stack',{get(){fetch('/a6/mark?sget');return 's'},configurable:true});c.e2=e2;" ++
-        "class MyErr extends Error{};c.e4=new MyErr('e4');" ++
-        "c.e5={get x(){fetch('/a6/mark?plain');return 1}};" ++
-        "const d=document.getElementById('d');d.e6=new Error('e6');d.e7=[new Error('e7')];" ++
-        "window.e8=new Error('e8');" ++
-        "</script>");
     // 9 차: 렌더러가 죽은 동안의 바꾸기 — 서비스 워커 없는 문서(규칙·기록 판).
     if (std.mem.eql(u8, path, "/a9/top")) return reply(conn, "200 OK", html, "", "<!doctype html><title>a9top</title>a9top");
     if (std.mem.eql(u8, path, "/z/204")) return reply(conn, "204 No Content", "text/plain", "", "");
-    // 6 차 고침: 읽기 목록 밖으로 뺀 getProperties 가 토큰을 거두는가 — `/a5/bu600` 의 600 ms beforeunload 에 아직 읽지 않은 Error 와 prepareStackTrace.
-    if (std.mem.eql(u8, path, "/a6/errbu")) return reply(conn, "200 OK", html, "", "<!doctype html><title>a6errbu</title><script>" ++
-        "addEventListener('beforeunload',()=>{const t=performance.now();while(performance.now()-t<600){}});" ++
-        "Error.prepareStackTrace=(e,s)=>{fetch('/a6/mark?pst-'+e.message);return 'pst'};window.e9=new Error('tok');</script>a6errbu");
-    if (std.mem.eql(u8, path, "/a6/img")) return reply(conn, "200 OK", "image/svg+xml", "", svg);
     if (std.mem.eql(u8, path, "/a6/dl")) return reply(conn, "200 OK", "application/octet-stream", "Content-Disposition: attachment; filename=a6.bin\r\n", "bin");
     if (std.mem.eql(u8, path, "/a6/204")) return reply(conn, "204 No Content", "text/plain", "", "");
     // ── A5 endpoints (fifth-pass verifier A5 on 7f0333fa9) ──
@@ -238,7 +224,6 @@ fn serveParsed(conn: c_int, r: []const u8) error{Keep}!void {
         for (0..n) |i| w.print("<iframe src='http://127.0.0.1:{d}/blkifr?a5{s}-{d}' width=20 height=20></iframe>", .{ p, k, if (same) 0 else i }) catch return;
         return reply(conn, "200 OK", html, "", w.buffered());
     }
-    if (std.mem.eql(u8, path, "/a5/bu600")) return reply(conn, "200 OK", html, "", "<!doctype html><title>bu600</title><script>addEventListener('beforeunload',()=>{const t=performance.now();while(performance.now()-t<600){}})</script>bu600");
     if (std.mem.eql(u8, path, "/a5/swtop")) {
         const body = std.fmt.bufPrint(&bb, "<!doctype html><title>a5swtop</title><script>window.ictl='none';addEventListener('message',e=>{{if(typeof e.data==='string'&&e.data.startsWith('ctl:'))window.ictl=e.data}});" ++
             "window.go=(nav,fu)=>{{frames[0].postMessage({{fu}},'*');location.href=nav}}</script><iframe src='http://localhost:{d}/s4/a5ifr'></iframe>", .{p}) catch return;
@@ -259,7 +244,6 @@ fn serveParsed(conn: c_int, r: []const u8) error{Keep}!void {
         _ = usleep(8_000_000);
         return reply(conn, "200 OK", html, "Access-Control-Allow-Origin: *\r\n", "<!doctype html><title>s4hang</title>hang");
     }
-    if (std.mem.eql(u8, path, "/a4/same0")) return reply(conn, "200 OK", html, "", "<!doctype html><title>same0</title><script>history.pushState({},'',location.href)</script>same0");
     // ── A3 endpoints (third-pass verifier A3 — rounds 1, 2, 6, 8, 10 on 8485a891e) ──
     if (std.mem.eql(u8, path, "/a3/close")) return; // closes without a response (ERR_EMPTY_RESPONSE)
     if (std.mem.eql(u8, path, "/a3/ifr")) {
@@ -1808,14 +1792,6 @@ fn grabStr(hay: []const u8, key: []const u8, out: []u8) []const u8 {
     return out[0..n];
 }
 
-fn grabInt(hay: []const u8, key: []const u8) i64 {
-    const i = std.mem.indexOf(u8, hay, key) orelse return -1;
-    const rest = hay[i + key.len ..];
-    var e: usize = 0;
-    while (e < rest.len and rest[e] >= '0' and rest[e] <= '9') e += 1;
-    return std.fmt.parseInt(i64, rest[0..e], 10) catch -1;
-}
-
 fn sendBlock(r: *Run, b: u64, strict_site: []const u8) !u32 {
     r.gen += 1;
     var v: msg.NetBlock = .{ .browser = b, .generation = r.gen, .strict_site = strict_site, .count = 1 };
@@ -2018,81 +1994,6 @@ fn a6mainerr(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         r.pump(800);
     }
 }
-
-/// A7-tok(7 차 고침): 사용자의 새로 고침 토큰이 살아 있는 동안(600 ms beforeunload) 에이전트의 `DOM.getBoxModel`·`CSS.getComputedStyleForNode`
-/// (건너뛴 하위 트리를 강제한다 — 읽기 목록 밖)가 토큰을 거두는가 — 거뒀다(그 새로 고침은 규칙대로 막혔다). 대조: 호출 없음·같은 노드의
-/// `DOM.getContentQuads`(읽기 — maru 의 흐름)는 남긴다. W9d④ v1 SEVERE-2 부터는 거두지 않는다(다툼) — 어느 갈래든 사용자의 새로 고침은 지나간다.
-fn a7tok(report: Report, host_path: [:0]const u8, root: []const u8) !void {
-    var host = try spawn(host_path, root, "a7_tok", &.{});
-    defer stop(&host);
-    var tok_run: Run = .{ .host = &host, .gpa = std.heap.c_allocator };
-    const r = &tok_run;
-    var u: [512]u8 = undefined;
-    var d: [1400]u8 = undefined;
-    var p1: [128]u8 = undefined;
-    const rules = [_]msg.NetBlockRule{.{ .id = 1, .site = "127.0.0.1", .pattern = pat(&p1, "127.0.0.1", "/a6/errbu*") }};
-    const Arm = struct { label: []const u8, method: []const u8, enable: []const u8, exempt: bool, tab: u64 };
-    for ([_]Arm{
-        .{ .label = "control: user reload, no DevTools call", .method = "", .enable = "", .exempt = true, .tab = 1 },
-        .{ .label = "DOM.getContentQuads(body) (read list)", .method = "DOM.getContentQuads", .enable = "", .exempt = true, .tab = 2 },
-        .{ .label = "DOM.getBoxModel(body)", .method = "DOM.getBoxModel", .enable = "", .exempt = false, .tab = 3 },
-        .{ .label = "CSS.getComputedStyleForNode(body)", .method = "CSS.getComputedStyleForNode", .enable = "CSS.enable", .exempt = false, .tab = 4 },
-    }) |v| {
-        var qb: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&qb, "/a6/errbu?a7tok{d}", .{v.tab}) catch unreachable;
-        r.create(v.tab, uLoop(&u, path)) catch |e| {
-            report(false, "A7-R1-read-list-token", @errorName(e));
-            continue;
-        };
-        r.pump(500);
-        r.watch(v.tab) catch {};
-        const ok = r.block(v.tab, &rules, "") catch false;
-        // 대상(nodeId)·도메인 켬은 새로 고침 전에 — 그 호출들은 사용자의 새로 고침보다 앞이라 토큰과 무관하다.
-        var pb: [200]u8 = undefined;
-        var params: []const u8 = "";
-        if (v.enable.len != 0) {
-            _ = r.call(v.tab, "DOM.enable", "{}", 5000) catch null;
-            _ = r.call(v.tab, v.enable, "{}", 5000) catch null;
-        }
-        if (v.method.len != 0) {
-            _ = r.call(v.tab, "DOM.getDocument", "{\"depth\":1}", 5000) catch null;
-            const root_id = grabInt(r.result.items, "\"nodeId\":");
-            _ = r.call(v.tab, "DOM.querySelector", std.fmt.bufPrint(&pb, "{{\"nodeId\":{d},\"selector\":\"body\"}}", .{root_id}) catch "", 5000) catch null;
-            const body_id = grabInt(r.result.items, "\"nodeId\":");
-            params = std.fmt.bufPrint(&pb, "{{\"nodeId\":{d}}}", .{body_id}) catch "";
-        }
-        r.pump(300);
-        const c0 = seen(path);
-        const e0 = r.errors.items.len;
-        r.host.send(.{ .nav_action = .{ .browser = v.tab, .action = .reload, .user = true } }) catch {};
-        var st_name: []const u8 = "none";
-        var answered = v.method.len == 0;
-        if (v.method.len != 0) {
-            const st = r.call(v.tab, v.method, params, 5000) catch null;
-            st_name = if (st) |x| @tagName(x) else "timeout";
-            answered = st != null and st.? == .ok;
-        }
-        r.pump(2500);
-        const e = errOf(r, v.tab, e0);
-        const reached = seen(path) - c0;
-        // 남기는 대조(읽기)는 호출이 실제로 답해야 한다 — 답하지 않은 호출이 「남겼다」 로 지나가지 않게.
-        // W9d④ v1 SEVERE-2: 읽기 목록 밖 호출도 거두지 않는다 — 사용자의 새로 고침은 어느 갈래든 지나간다.
-        const pass = ok and reached >= 1 and e == null and (answered or !v.exempt);
-        report(pass, "A7-R1-read-list-token", std.fmt.bufPrint(&d, "{s}: ruled {} (rule 1 /a6/errbu*) · user reload + call {s} → server +{d} · error page {?d} rule {?d} (want {s})", .{ v.label, ok, st_name, reached, if (e) |q| q.code else null, if (e) |q| q.rule else null, if (v.exempt) "exempt — the token stays" else "exempt — the call contests the token, it does not take it (W9d④ v1 SEVERE-2, user decision 2026-11-11)" }) catch "");
-        r.host.send(.{ .destroy_browser = v.tab }) catch {};
-        r.pump(300);
-    }
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════
-// A8: eighth-pass verifier on f36d51e93 (`--review-block-v20h`, `A8_ONLY=tgt,hid`). 7 차 고침 뒤 읽기 목록(28 개)에 남은 메서드를 고친 이가
-// 쓰지 않은 강제 계산·로드 갈래로 잰다: 화면 밖 늦은 iframe·그림, c-v:hidden 안의 iframe(바로·늦게), shadow `:host` 스타일, `font-display`,
-// `media=print` 스타일시트, `image-set`·`srcset`(x·w), 열린 `<dialog>`·`popover`(상위 레이어)를 c-v:hidden 안에, 닫힌 dialog·popover, `contain:size`,
-// 닫힌 `<select>`(기본·base-select)·`<details>`, 숨긴(display:none)·안 보이는(visibility:hidden)·화면 밖 iframe. 그리고 숨은 탭에서 렌더 차례를 돌리는가.
-// 자원 이름은 `?X<대상>-<무엇>-TAG` — 탭마다 TAG 가 달라 그 탭의 요청만 센다. 페이지 스크립트는 `/a8/mark?<이름>-TAG`.
-// 회귀 판정으로 남긴다(기대값은 8 차 2 판 a8r2 — 199/0): 읽기는 모두 +0, 답의 꼴은 단계마다 맞춘다(오류가 정답인 것 — 늦은 iframe 안쪽 노드, `fromSurface:false`),
-// 숨은 탭은 다시 보이면 > 0·kick > 0 을 단언한다. 숨은 탭의 `queryAXTree` 는 렌더 차례를 기다려 5 초 안에 답하지 않는다 — 보이게 하면 ok(문서화된 동작).
-// ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 fn a8want(name: []const u8) bool {
     const v = std.c.getenv("A8_ONLY") orelse return true;

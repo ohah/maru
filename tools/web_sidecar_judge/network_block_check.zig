@@ -10,7 +10,8 @@
 //!   block-ws-untouched(WebSocket 은 처리기를 지나지 않는다)·block-prefetch·block-speculation-id0(번호 0 의 prefetch·prerender 요청)·
 //!   block-page-context(다른 사이트에 묶인 규칙은 잠든다, 그 사이트 페이지의 다른 사이트 iframe 과 떠난 문서의 비콘에는 듣는다)·block-url-forms(조각·
 //!   사용자 정보는 막힘, 경로 대소문자·`%2F` 는 문서화된 빠져나가기)·block-types(종류 단 규칙)·block-user-nav-blocked(주소창 이동·사용자 뒤로·
-//!   새로고침·리다이렉트 홉도 막힘 — 막기도 넓히기 2026-11-18, 새로 고침·뒤로는 규칙 앞에 확정한 규칙 주소 문서에서)·block-gate-flood(문이 떨어뜨린 요청도 막힘 —
+//!   새로고침·리다이렉트 홉도 막힘 — 막기도 넓히기 2026-11-18, 새로 고침·뒤로는 규칙 앞에 확정한 규칙 주소 문서에서)·block-human-click-blocked
+//!   (사람이 누른 링크도 막힘)·block-gate-flood(문이 떨어뜨린 요청도 막힘 —
 //!   서버 0, 수)·block-devtools-guard·block-memcache-bfcache(관측)·block-hits(수의 차이).
 //! 서비스 워커 길(`blksw`): block-sw-all-ruled·shared-not-applied·types-skip·empty-T·midnav·new-browser·popup·partition·cache-storage,
 //!   block-navigate-op(서비스 워커 길로 막힌 이동은 -2 이지만 규칙이 붙는다)·block-user-nav-blocked-sw(사람이 친 이동도 그 길에서 막힌다).
@@ -183,6 +184,8 @@ fn serveParsed(conn: c_int, r: []const u8) error{Keep}!void {
     const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'/>";
     if (std.mem.eql(u8, path, "/p/sub")) return reply(conn, "200 OK", html, "", "<!doctype html><title>sub</title><body>sub</body>");
     if (std.mem.eql(u8, path, "/p/userpage")) return reply(conn, "200 OK", html, "", "<!doctype html><title>userpage</title><img src='/blk/userimg'>");
+    // 막기도 넓히기(2026-11-18): 사람이 누를 링크 — 페이지 전체가 `/blk/clicked` 로 가는 링크다(block-human-click-blocked).
+    if (std.mem.eql(u8, path, "/p/blklink")) return reply(conn, "200 OK", html, "", "<!doctype html><title>blklink</title><body style='margin:0'><a href='/blk/clicked' style='display:block;position:absolute;inset:0'>go</a></body>");
     if (std.mem.eql(u8, path, "/blk/userpage")) return reply(conn, "200 OK", html, "", "<!doctype html><title>blk-userpage</title><img id=i src='/blk/userimg'>");
     if (std.mem.eql(u8, path, "/blk/s.js")) return reply(conn, "200 OK", "application/javascript", "", "window.sran=1");
     if (std.mem.eql(u8, path, "/blk/c.css")) return reply(conn, "200 OK", "text/css", "", "body{}");
@@ -757,6 +760,21 @@ fn tabPath(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         r.pump(600);
         const forward = seen("/p/sub?r5") == 2;
         report(typed and hop and pre and reload and back, "block-user-nav-blocked", std.fmt.bufPrint(&d, "주소창 {} · 리다이렉트 홉 {} · (규칙 앞에 확정 {}) 새로 고침 {} · 뒤로 {} · 앞으로(규칙 밖 — 관찰) {} — 서버 userpage {d}·usertarget {d}·userdoc {d}", .{ typed, hop, pre, reload, back, forward, seen("/blk/userpage"), seen("/blk/usertarget"), seen("/blk/userdoc?pre") }) catch "");
+    }
+    // 막기도 넓히기: 사람이 누른 링크(maru 의 마우스 — 사람의 누름 예외 Q2 는 가짜에만 있고 막기에는 처음부터 없었다)도 막힌다. 적대 검증 B R17 의
+    // 살아남은 변이(막기의 탭 길에 Q2 의 사람 예외를 다시 넣음)를 잡는다.
+    {
+        try r.nav(1, uLoop(&u, "/p/blklink"), false);
+        r.pump(300);
+        const e0 = r.errors.items.len;
+        const before = r.loads[1];
+        try r.host.send(.{ .set_focus = .{ .browser = 1, .value = true } });
+        try r.host.send(.{ .mouse = .{ .browser = 1, .kind = .down, .point = .{ .x = 50, .y = 40 }, .click_count = 1 } });
+        try r.host.send(.{ .mouse = .{ .browser = 1, .kind = .up, .point = .{ .x = 50, .y = 40 }, .click_count = 1 } });
+        _ = r.until(Run.loadsAt, 1, before + 1, wait_ms);
+        r.pump(600);
+        const ep = r.lastError(1);
+        report(seen("/blk/clicked") == 0 and r.errors.items.len > e0 and ep != null and ep.?.rule == 1, "block-human-click-blocked", std.fmt.bufPrint(&d, "사람이 누른 링크 /blk/clicked — error_page {?d}·규칙 {?d} · 서버 {d}", .{ if (ep) |v| v.code else null, if (ep) |v| v.rule else null, seen("/blk/clicked") }) catch "");
     }
     // 메모리 캐시·bfcache(관측 — 처리기를 지나지 않는다).
     {

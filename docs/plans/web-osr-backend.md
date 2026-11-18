@@ -5247,7 +5247,7 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   링크·폼의 주 프레임 문서를 막는다 — 모든 탭. 옛 D2 예외와 그 장치를 sidecar 에서 모두 지웠다: 몸짓의 토큰(`navigate{user}`·`nav_action{user}` 가 걸고
   `on_before_browse` 가 묶고 IO 가 소비), 에이전트의 이동·DevTools 호출이 만드는 「다툼」 과 그 읽기 허용 목록(`devtools_table.read_only_methods`·
   `startsNavigationCall`), 떠나기 확인의 멈춤, 기록 토큰 거두기(`historyAt`), 서비스 워커 길의 사용자 이동 예외(`sw_share` 의 `user_nav`), Q2 표의
-  「사용자 이동이 이긴다」. wire 의 `user` 칸은 그대로(사람의 탭 사용 — `human_use.touchOf`). 순수 시험 581 → 560(토큰·다툼·읽기 목록의 시험 21 을 지우고
+  「사용자 이동이 이긴다」. wire 의 `user` 칸은 그대로(사람의 탭 사용 — `human_use.touchOf`). 순수 시험 581 → 560(토큰·다툼·읽기 목록의 시험 22 를 지우고
   사람 이동도 막는 시험 하나를 더했다). 사람이 보는 것: Chromium 오류 페이지 「… is blocked」(서비스 워커 사이트는 -2), 주소창은 옛 주소, ⊘, 탭·규칙
   세대마다 한 번 알림. 갇히지 않는다(규칙은 추가한 사이트에 묶인다). 판정자: `--network-block`·`--network-mock`·`--review-block-v20*` 의 D2 판정을 뜻
   있게 뒤집거나(규칙 주소 문서를 규칙 **앞에** 확정한 뒤 사람의 새로 고침·뒤로) 토큰 장치만 재던 것을 지웠다. 격리 앱 재실측: 고치기 전 사람의 새로 고침·

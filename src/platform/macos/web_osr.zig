@@ -3187,6 +3187,130 @@ fn removeDialog(gpa: std.mem.Allocator, s: *Surface, token: u64) void {
     };
 }
 
+// ── 사이트 권한 창(2026-11-18 — 사용자 결정 「만들기」) ───────────────────────────────────────────────────────────────────────
+// 사람이 Chromium 이 출처마다 기억한 허용·차단을 보고 지운다(앱 메뉴 「Site Permissions…」 — Swift `SitePermissionsWindow`). 표는 sidecar 가
+// 프로필에서 읽어 보낸다(`site_settings.zig` — `profile.content_settings.exceptions`). 사람의 답과 에이전트의 답은 같은 자리에 같은 모양이라 똑같이 보인다.
+
+pub const SitePermState = enum(u32) { idle = 0, waiting = 1, ready = 2, engine_off = 3 };
+
+pub const SitePermRow = struct {
+    kind: ws.message.SitePermissionKind,
+    setting: ws.message.SitePermissionSetting,
+    /// sidecar 가 준 출처(지울 때 그대로 돌려준다).
+    origin: []u8,
+    /// 보이는 출처 — 기본 포트(`https` 443·`http` 80)를 뗀다.
+    display: []const u8,
+};
+
+var site_perm_rows: std.ArrayList(SitePermRow) = .empty;
+var site_perm_request: u32 = 0;
+var site_perm_state: SitePermState = .idle;
+var site_perm_generation: u64 = 0;
+var site_perm_total: u32 = 0;
+var site_perm_unlisted: u32 = 0;
+
+/// 창이 앞으로 왔다 — 지금 목록을 묻는다. 엔진이 꺼져 있으면 띄운다(사이트 권한은 프로필에 있다 — 탭이 없어도 본다).
+pub fn sitePermissionsRefresh(gpa: std.mem.Allocator) void {
+    sitePermSend(gpa, 0, "", monotonicNow());
+}
+
+/// 사람이 그 행의 「지우기」 를 눌렀다 — 행은 (종류, 출처)로 찾는다: 지금 표에 그 행이 없으면(그 사이 목록이 바뀌어 빠졌다) 하지 않는다. 번호·세대로
+/// 고르면 창이 키가 되며 다시 묻는 순간(그 누름이 창을 키로 만든다) 세대가 올라 첫 누름이 버려졌다(적대 리뷰 1 회차). 지운 뒤의 목록이 온다.
+/// 위치를 지우면 maru 의 (탭, 출처) 기록도 지운다 — 다음 요청은 sheet 로 묻는다.
+pub fn sitePermissionReset(gpa: std.mem.Allocator, kind: ws.message.SitePermissionKind, origin: []const u8) bool {
+    const row = for (site_perm_rows.items) |r| {
+        if (r.kind == kind and std.mem.eql(u8, r.origin, origin)) break r;
+    } else return false;
+    if (row.kind == .geolocation) forgetLocationOrigin(gpa, row.origin);
+    var origin_buf: [ws.fields.max_origin_bytes]u8 = undefined;
+    @memcpy(origin_buf[0..row.origin.len], row.origin);
+    sitePermSend(gpa, @backingInt(row.kind), origin_buf[0..row.origin.len], monotonicNow());
+    return true;
+}
+
+fn sitePermSend(gpa: std.mem.Allocator, reset_kind: u8, reset_origin: []const u8, now_ms: i64) void {
+    gpa_ref = gpa;
+    if (!enabled() or latched != null) return sitePermEngineOff();
+    if (state == .off) start(gpa, now_ms);
+    if (state == .off or state == .failed) return sitePermEngineOff();
+    site_perm_request +%= 1;
+    if (site_perm_request == 0) site_perm_request = 1;
+    if (!trySend(gpa, .{ .site_permissions = .{ .request = site_perm_request, .reset_kind = reset_kind, .reset_origin = reset_origin } })) return sitePermEngineOff();
+    site_perm_state = .waiting;
+    site_perm_generation +%= 1;
+}
+
+fn sitePermEngineOff() void {
+    site_perm_state = .engine_off;
+    site_perm_generation +%= 1;
+}
+
+fn acceptSitePermissions(gpa: std.mem.Allocator, v: *const ws.message.SitePermissionsList) void {
+    clearSitePermRows(gpa);
+    for (v.slice()) |e| {
+        const origin = gpa.dupe(u8, e.origin) catch break;
+        site_perm_rows.append(gpa, .{ .kind = e.kind, .setting = e.setting, .origin = origin, .display = displayOrigin(origin) }) catch {
+            gpa.free(origin);
+            break;
+        };
+    }
+    // 차례: 출처, 그다음 종류(같은 사이트의 결정이 모인다).
+    std.mem.sort(SitePermRow, site_perm_rows.items, {}, struct {
+        fn less(_: void, a: SitePermRow, b: SitePermRow) bool {
+            const o = std.mem.order(u8, a.display, b.display);
+            return if (o != .eq) o == .lt else @backingInt(a.kind) < @backingInt(b.kind);
+        }
+    }.less);
+    site_perm_total = v.total;
+    site_perm_unlisted = v.unlisted;
+    site_perm_state = .ready;
+    site_perm_generation +%= 1;
+}
+
+fn clearSitePermRows(gpa: std.mem.Allocator) void {
+    for (site_perm_rows.items) |r| gpa.free(r.origin);
+    site_perm_rows.clearRetainingCapacity();
+}
+
+/// 기본 포트를 뗀 출처(순수 — 시험한다). `https://a.example:443` → `https://a.example`, `http://h:80` → `http://h`.
+pub fn displayOrigin(origin: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, origin, "https://") and std.mem.endsWith(u8, origin, ":443")) return origin[0 .. origin.len - 4];
+    if (std.mem.startsWith(u8, origin, "http://") and std.mem.endsWith(u8, origin, ":80")) return origin[0 .. origin.len - 3];
+    return origin;
+}
+
+pub fn sitePermissionsGeneration() u64 {
+    return site_perm_generation;
+}
+
+pub fn sitePermissionsState() SitePermState {
+    // 기다리는 사이 엔진이 멈췄다(되풀이 실패로 쉼·띄우지 못함) — 답은 오지 않는다.
+    if (site_perm_state == .waiting and (state == .failed or state == .off or latched != null)) return .engine_off;
+    return site_perm_state;
+}
+
+pub fn sitePermissionsRows() []const SitePermRow {
+    return site_perm_rows.items;
+}
+
+/// 싣지 못한 수 — (상한에 잘린 수, 표에 없는 결정 수).
+pub fn sitePermissionsHidden() struct { more: u32, unlisted: u32 } {
+    const shown: u32 = @intCast(site_perm_rows.items.len);
+    return .{ .more = if (site_perm_total > shown) site_perm_total - shown else 0, .unlisted = site_perm_unlisted };
+}
+
+/// 시험 전용 — 표를 비운다.
+pub fn testResetSitePermissions(gpa: std.mem.Allocator) void {
+    if (!builtin.is_test) @compileError("test only");
+    clearSitePermRows(gpa);
+    site_perm_rows.deinit(gpa);
+    site_perm_rows = .empty;
+    site_perm_request = 0;
+    site_perm_state = .idle;
+    site_perm_total = 0;
+    site_perm_unlisted = 0;
+}
+
 /// 그 탭에서 다음에 띄울 요청(아직 아무 창도 안 띄운 첫 요청). 앞 요청이 떠 있으면 null — 한 탭은 하나씩. 기억된 위치
 /// 요청(W5b2)은 sheet 가 없으니 건너뛴다(`nextLocation`).
 pub fn nextDialog(surface_id: u64) ?*const Dialog {
@@ -6885,6 +7009,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             if (receiver) |*r| send(gpa, .{ .frame_channel = .{ .service = r.serviceName(), .token = r.token } });
             if (process) |*p| _ = lsp_process.write(p, gpa, outbox_pending.items) catch false;
             outbox_pending.clearRetainingCapacity();
+            // 사이트 권한 창이 목록을 기다리는 중에 sidecar 가 다시 떴다 — 옛 sidecar 의 답은 오지 않는다. 지금 묻는다(지우기는 다시 내지 않는다 —
+            // 사람이 목록을 보고 다시 고른다).
+            if (site_perm_state == .waiting) sitePermSend(gpa, 0, "", now_ms);
         },
         .browser_created => |id| if (blk: {
             // W10b: 브라우저가 만들어졌다 — CEF 초기화(프로필 잠금)가 끝났다는 뜻이라 이 sidecar 가 프로필을 잡았다. handshake 는
@@ -7208,6 +7335,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             forgetDrag(s);
         },
         .tooltip_changed => |v| if (surfaces.getPtr(v.browser)) |s| setTooltip(gpa, s, v.text),
+        // 사이트 권한 창(2026-11-18): 마지막에 낸 번호의 답만(늦게 온 옛 목록이 새 목록을 덮지 않게).
+        .site_permissions_list => |*v| if (v.request != 0 and v.request == site_perm_request) acceptSitePermissions(gpa, v),
         // P0-2: 그 탭의 지금 찾기의 답만(멈춘 뒤·다시 낸 뒤의 늦은 답은 번호가 다르다).
         .find_result => |v| if (surfaces.getPtr(v.browser)) |s| if (v.request != 0 and v.request == s.find_request) {
             s.find_generation +%= 1;
@@ -7323,7 +7452,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .emulation, .trace, .find, .find_stop, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .net_mock_rule, .net_mock_body, .net_mock_commit, .emulation, .trace, .find, .find_stop, .site_permissions, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 
@@ -13936,4 +14065,75 @@ test "agent permission: 목록은 가족의 요청(기억된 위치 빼고, 사�
     try std.testing.expect(frames[5].permission_reply.request == 5 and frames[5].permission_reply.result == .deny and !frames[5].permission_reply.user);
     try std.testing.expect(frames[6].permission_reply.request == 6 and frames[6].permission_reply.result == .ignore);
     try std.testing.expect(frames[7].permission_reply.request == 7 and frames[7].permission_reply.result == .dismiss and !frames[7].permission_reply.user);
+}
+
+// ── 사이트 권한 창(2026-11-18) ──────────────────────────────────────────────────────────────────────────────────
+
+test "사이트 권한: 묻기·답의 사본·세대, 옛 번호의 답은 버린다, 지우기는 표에 있는 (종류, 출처)만 — 다시 묻는 중에도(위치는 maru 기록도), 엔진 없음, 보이는 출처" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    const old_decided = decided;
+    decided = true;
+    defer decided = old_decided;
+    defer testResetSitePermissions(gpa);
+    defer forgetAllLocations(gpa);
+    defer testTeardown(gpa);
+    try std.testing.expectEqual(SitePermState.idle, sitePermissionsState());
+    const g0 = sitePermissionsGeneration();
+    sitePermissionsRefresh(gpa);
+    try std.testing.expectEqual(SitePermState.waiting, sitePermissionsState());
+    try std.testing.expect(sitePermissionsGeneration() != g0);
+    var frames: [4]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    const first = frames[0].site_permissions.request;
+    try std.testing.expect(first != 0 and frames[0].site_permissions.reset_kind == 0);
+    outbox_pending.clearRetainingCapacity();
+    // 다시 묻는다 — 옛 번호의 답은 버린다.
+    sitePermissionsRefresh(gpa);
+    const second = first + 1;
+    var stale: ws.message.SitePermissionsList = .{ .request = first, .total = 1, .unlisted = 0, .count = 1 };
+    stale.entries[0] = .{ .kind = .camera, .setting = .allow, .origin = "https://old.example" };
+    apply(gpa, .{ .site_permissions_list = stale }, 0);
+    try std.testing.expectEqual(@as(usize, 0), sitePermissionsRows().len);
+    var list: ws.message.SitePermissionsList = .{ .request = second, .total = 5, .unlisted = 2, .count = 3 };
+    list.entries[0] = .{ .kind = .midi_sysex, .setting = .block, .origin = "https://b.example:443" };
+    list.entries[1] = .{ .kind = .geolocation, .setting = .allow, .origin = "https://a.example:443" };
+    list.entries[2] = .{ .kind = .notifications, .setting = .allow, .origin = "https://b.example:443" };
+    apply(gpa, .{ .site_permissions_list = list }, 0);
+    try std.testing.expectEqual(SitePermState.ready, sitePermissionsState());
+    const rows = sitePermissionsRows();
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    // 출처, 그다음 종류 차례 — 기본 포트는 보이지 않는다(지울 때는 받은 그대로).
+    try std.testing.expectEqualStrings("https://a.example", rows[0].display);
+    try std.testing.expectEqualStrings("https://a.example:443", rows[0].origin);
+    try std.testing.expect(rows[1].kind == .notifications and rows[2].kind == .midi_sysex);
+    try std.testing.expectEqual(@as(u32, 2), sitePermissionsHidden().more);
+    try std.testing.expectEqual(@as(u32, 2), sitePermissionsHidden().unlisted);
+    // 지우기 — 세대가 지금 것이 아니면 하지 않는다. 위치는 maru 의 (탭, 출처) 기록도.
+    allowLocation(gpa, 7, "https://a.example:443");
+    const g = sitePermissionsGeneration();
+    outbox_pending.clearRetainingCapacity();
+    _ = g;
+    try std.testing.expect(!sitePermissionReset(gpa, .camera, "https://a.example:443")); // 표에 없는 (종류, 출처)
+    try std.testing.expect(!sitePermissionReset(gpa, .geolocation, "https://a.example")); // 보이는 출처가 아니라 받은 그대로로 찾는다
+    try std.testing.expectEqual(@as(usize, 0), outbox_pending.items.len);
+    sitePermissionsRefresh(gpa); // 창이 키가 되며 다시 물어도(세대가 오른다) 그 행은 아직 표에 있다 — 지운다
+    outbox_pending.clearRetainingCapacity();
+    try std.testing.expect(sitePermissionReset(gpa, .geolocation, "https://a.example:443"));
+    try std.testing.expect(!locationAllowed(7, "https://a.example:443"));
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    try std.testing.expectEqual(@as(u8, @backingInt(ws.message.SitePermissionKind.geolocation)), frames[0].site_permissions.reset_kind);
+    try std.testing.expectEqualStrings("https://a.example:443", frames[0].site_permissions.reset_origin);
+    try std.testing.expectEqual(SitePermState.waiting, sitePermissionsState());
+    // 기다리는 사이 엔진이 멈췄다 — 엔진 없음.
+    state = .failed;
+    try std.testing.expectEqual(SitePermState.engine_off, sitePermissionsState());
+    sitePermissionsRefresh(gpa);
+    try std.testing.expectEqual(SitePermState.engine_off, sitePermissionsState());
+    state = .running;
+    try std.testing.expectEqualStrings("http://h", displayOrigin("http://h:80"));
+    try std.testing.expectEqualStrings("http://h:8080", displayOrigin("http://h:8080"));
+    try std.testing.expectEqualStrings("https://h:8443", displayOrigin("https://h:8443"));
+    try std.testing.expectEqualStrings("http://h:443", displayOrigin("http://h:443"));
 }

@@ -5921,4 +5921,23 @@ take 안에서** 나갔다 — P1 이 그 take·drain 을 지우면 함께 사�
   허용한 요청의 sheet 를 거둔다, Swift 는 sheet 의 허용 처리기를 `allowOsrPermission` 으로 빼 사람·에이전트가 같은 길(macOS 권한 → 위치 좌표 → 답)을 탄다(에이전트 길은
   macOS 안내 sheet 를 띄우지 않는다). ABI 264(`maru_macos_app_session_take_osr_agent_allow`). L4 는 대화상자 자리(`answerDialogOp`)에서 곧 답하고 허용의 끝은 탭 op 목록이
   10 초까지 기다린다(`outcome`). CLI `browser permissions`·`browser permission`, MCP `browser_permissions`·`browser_permission`, 플러그인 `dialogs-and-uploads.md` 의 절(0.1.15).
-- **남은 틈**: 사람이 기억된 사이트 허용을 보고 되돌릴 UI 는 다음 PR(사용자 결정 「만들기」), 사람이 허용을 눌러 macOS 를 기다리는 사이 에이전트가 답하면 먼저 간 답이 이긴다.
+- **남은 틈**: 사람이 기억된 사이트 허용을 보고 되돌릴 UI 는 아래 「사이트 권한 창」 이 만들었다, 사람이 허용을 눌러 macOS 를 기다리는 사이 에이전트가 답하면 먼저 간 답이 이긴다.
+
+### 사이트 권한 창 — 앱 메뉴 「Site Permissions…」(2026-11-18, 완료)
+
+사용자 결정(2026-11-18 「만들기」): 사람이 Chromium 이 사이트마다 기억한 권한 결정(출처 × 종류의 허용·차단)을 보고 지운다(기본 「묻기」로). 에이전트의 결정
+(`browser.permission`)도 같은 자리에 같은 모양으로 있어 똑같이 보인다.
+
+- **재실측(착수 전)**: 프로필 설정 `profile.content_settings.exceptions.<종류>` 에 `"<출처>,*": {"setting": 1|2}` 로 있다(에이전트가 답한 알림 1·MIDI 2·글꼴 1·위치 1 —
+  닫기는 남지 않고 `permission_autoblocking_data` 의 `dismiss_count` 로 쌓인다). 판정자 `--site-perms` 가 CEF 로 읽고(`get_preference`) 지울 수 있음을 쟀다
+  (`set_content_setting(…, DEFAULT)` 뒤 다시 청하면 다시 묻는다).
+- **자리**: 앱 메뉴의 「Browser Grants」 바로 아래 「Site Permissions…」 → 따로 된 창. 설정 화면(⌘,)은 config 파일 칸이고 이 기록은 config 가 아니다(프로필의 Chromium 것,
+  행마다 지우기). 「Browser Grants」 가 「누가 무엇을 할 수 있나」 를 사람이 되돌리는 자리다 — 사이트가 받은 권한도 같은 종류의 되돌림. 행이 많고 출처가 길어
+  서브메뉴보다 창이 맞고, 다운로드 창(⇧⌘J)이라는 같은 꼴의 앱 전역 창이 있다.
+- **구현**: wire 28 — `site_permissions`(144, `{request, reset_kind, reset_origin}` — 지울 것이 있으면 먼저 지우고 목록)·`site_permissions_list`(87, `{request, total, unlisted,
+  행 100 까지}`), 닫힌 enum `SitePermissionKind`(18 종류). sidecar `site_settings.zig`(종류 → 설정 이름·CEF 형 표, 출처 꼴의 1차 + `*` 2차 + 수 1·2 만 — 나머지는
+  `unlisted`). maru `web_osr` 의 `sitePermissionsRefresh`·`sitePermissionReset`(세대가 맞을 때만, 위치는 maru 의 (탭, 출처) 기록도 지운다)·옛 번호의 답 버림·
+  sidecar 가 다시 뜨면 다시 묻기, 엔진이 꺼져 있으면 띄운다(사이트 권한은 프로필에 있다 — 탭이 없어도 본다). ABI 265 `maru_macos_site_permissions_*`. Swift
+  `SitePermissionsWindow`(사이트·권한·허용/차단·지우기, 안내 줄, 밑 줄), 이 창이 키면 메뉴의 터미널 동작을 막고 ⌘W 는 이 창을 닫는다. 문장은 Zig i18n(`sp_*`).
+- **남은 틈**: 닫기를 되풀이해 Chromium 이 잠깐 막은 사이트(embargo — `permission_autoblocking_data`)는 표에 없고 여기서 풀 수 없다, 와일드카드·임베드 패턴은 수만
+  보인다, 탭 없이 창을 열면 띄운 sidecar 는 앱이 끝날 때까지 남는다(다음 탭이 쓴다), 표는 100 행까지.

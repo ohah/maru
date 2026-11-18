@@ -8667,6 +8667,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
             drainOsrDatalist() // W6m②: 키 대상 Chromium 탭의 제안 목록을 칸 아래 네이티브 창으로 — sheet 를 붙인 뒤에 본다(sheet 위에 남지 않게).
             drainDownloads() // W10a: Chromium 탭 다운로드 — 목록 창을 고치고, 새 다운로드·⇧⌘J 에 창을 낸다.
+            drainSitePermissions() // 사이트 권한 창(2026-11-18) — 세대가 바뀌면 다시 그린다.
             drainOsrLocation() // W5b2: 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다.
             drainOsrAgentAllow() // 에이전트가 허용한 권한 요청 — 사람의 허용 단추와 같은 길(macOS 권한·위치 좌표)로 답한다.
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
@@ -9913,6 +9914,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 } else {
                     Self.testReport("dl-miss")
                 }
+            case "siteperms":
+                // 사이트 권한 창 — 상태·행(보이는 출처|종류|결정)·밑 줄. 창이 없으면 연다(메뉴와 같은 길).
+                if sitePermissionsWindow == nil { menuSitePermissions(nil) }
+                drainSitePermissions()
+                if let sp = sitePermissionsWindow {
+                    Self.testReport("siteperms state=\(sp.state.rawValue) count=\(sp.rows.count) window=\(sp.window.isVisible)")
+                    for (index, row) in sp.rows.enumerated() { Self.testReport("sitepermrow \(index)|\(row.display)|\(row.kind)|\(row.setting)|\(row.label)") }
+                }
+            case "sitepermopen":
+                menuSitePermissions(nil)
+            case "sitepermreset" where line.count >= 2:
+                // 그 행의 「지우기」(창의 단추와 같은 길). 창·행이 없으면 sp-miss.
+                if let index = Int(line[1]), sitePermissionsWindow?.testRemove(index: index) == true {} else { Self.testReport("sp-miss") }
+            case "sitepermsnap" where line.count >= 2:
+                // 사이트 권한 창 내용을 그 경로에 PNG 로(창 view 를 그린다 — 화면을 찍지 않는다).
+                drainSitePermissions()
+                Self.testReport(sitePermissionsWindow?.testSnapshot(to: line[1]) == true ? "sitepermsnap ok" : "sp-miss")
             case "dlwinsnap" where line.count >= 2:
                 // W10a: 다운로드 목록 창 내용을 그 경로에 PNG 로(창이 없거나 안 보이면 dl-miss).
                 Self.testReport(downloadsWindow?.testSnapshot(to: line[1]) == true ? "dlwinsnap ok" : "dl-miss")
@@ -11008,6 +11026,63 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // ── W10a: Chromium 탭 다운로드 목록 창 ──
     // 목록은 Zig 가 앱 전역으로 쥔다(`web_downloads.zig`). 창은 하나 — 처음 필요할 때 만든다. tick 은 창마다 돌지만 세대 비교만 해 싸다.
     private var downloadsWindow: OsrDownloadsWindow?
+    // ── 사이트 권한 창(2026-11-18) ──
+    private var sitePermissionsWindow: SitePermissionsWindow?
+    private var sitePermissionsSeenGeneration: UInt64 = .max
+    private var sitePermissionsSeenTitle = ""
+    private var sitePermissionsWindowIsKey: Bool {
+        guard let sp = sitePermissionsWindow, let key = NSApp.keyWindow else { return false }
+        return Self.sheetRoot(key) === sp.window
+    }
+
+    private func ensureSitePermissionsWindow() -> SitePermissionsWindow {
+        if let window = sitePermissionsWindow { return window }
+        let window = SitePermissionsWindow(text: { String(cString: maru_macos_site_permissions_text($0)) })
+        window.onRemove = { row in
+            let bytes = Array(row.origin.utf8)
+            _ = bytes.withUnsafeBufferPointer { maru_macos_site_permissions_reset(row.kind, $0.baseAddress, $0.count) }
+        }
+        window.onBecameKey = { maru_macos_site_permissions_refresh() }
+        sitePermissionsWindow = window
+        return window
+    }
+
+    @objc func menuSitePermissions(_ sender: Any?) {
+        _ = sender
+        let window = ensureSitePermissionsWindow()
+        maru_macos_site_permissions_refresh()
+        drainSitePermissions()
+        window.showFront()
+    }
+
+    private func readSitePermissionRows() -> [SitePermissionsWindow.Row] {
+        let count = maru_macos_site_permissions_count()
+        var rows: [SitePermissionsWindow.Row] = []
+        var raw = MaruSitePermissionRow()
+        for index in 0..<count {
+            guard maru_macos_site_permissions_row(index, &raw) != 0 else { continue }
+            let origin = withUnsafeBytes(of: raw.origin) { String(decoding: $0.prefix(Int(raw.origin_len)), as: UTF8.self) }
+            let display = withUnsafeBytes(of: raw.display) { String(decoding: $0.prefix(Int(raw.display_len)), as: UTF8.self) }
+            let label = withUnsafeBytes(of: raw.label) { String(decoding: $0.prefix(Int(raw.label_len)), as: UTF8.self) }
+            rows.append(.init(kind: raw.kind, setting: raw.setting, origin: origin, display: display, label: label))
+        }
+        return rows
+    }
+
+    /// 창이 있으면 세대가 바뀔 때(또는 UI 언어가 바뀔 때) 다시 그린다.
+    private func drainSitePermissions() {
+        guard let window = sitePermissionsWindow else { return }
+        let generation = maru_macos_site_permissions_generation()
+        let title = String(cString: maru_macos_site_permissions_text(0))
+        guard generation != sitePermissionsSeenGeneration || title != sitePermissionsSeenTitle else { return }
+        sitePermissionsSeenGeneration = generation
+        sitePermissionsSeenTitle = title
+        var buf = [UInt8](repeating: 0, count: 512)
+        let len = buf.withUnsafeMutableBufferPointer { maru_macos_site_permissions_footer($0.baseAddress, $0.count) }
+        let footer = String(decoding: buf.prefix(len), as: UTF8.self)
+        let state = SitePermissionsWindow.State(rawValue: maru_macos_site_permissions_state()) ?? .idle
+        window.update(generation: generation, state: state, rows: readSitePermissionRows(), footer: footer)
+    }
     private var downloadsSeenGeneration: UInt64 = 0
     private var downloadsSeenShow: UInt64 = 0
     private var downloadsShowPending = false
@@ -13535,6 +13610,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let browserGrantsItem = NSMenuItem(title: "Browser Grants", action: nil, keyEquivalent: "")
         browserGrantsItem.submenu = browserGrantsMenu
         app.addItem(browserGrantsItem)
+        // Site Permissions…(사용자 결정 2026-11-18 「만들기」) — Chromium 이 사이트마다 기억한 허용·차단(사람·에이전트의 답)을 보고 지우는 창.
+        // 「Browser Grants」 바로 아래: 누가 무엇을 할 수 있나를 사람이 되돌리는 자리. 단축키 없음.
+        app.addItem(nativeMenuItem("Site Permissions\u{2026}", #selector(menuSitePermissions(_:)), key: "", target: self))
         app.addItem(.separator())
         app.addItem(nativeMenuItem("Hide maru", #selector(NSApplication.hide(_:)), key: "h"))
         app.addItem(nativeMenuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option]))
@@ -13701,6 +13779,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if key == "select_all", Self.forwardEditToSheet(#selector(NSText.selectAll(_:)), sender) { return }
         // W10a: 다운로드 목록 창이 키면 메뉴의 터미널 동작을 그 창에 보내지 않는다 — 활성 surface 는 키 터미널 창이 없으면 첫 창으로
         // 떨어져 ⌘W 가 첫 창의 탭(받는 중인 웹 탭일 수도)을 닫았다(설계 적대 검토). ⌘W 는 그 창을 닫는다.
+        // 사이트 권한 창도 같다 — ⌘W 는 그 창을 닫고, 터미널 동작은 보내지 않는다.
+        if let sp = sitePermissionsWindow, sitePermissionsWindowIsKey {
+            if key == "close_focused" || key == "close_term" || key == "close_tab" { sp.window.performClose(nil) }
+            return
+        }
         if let downloads = downloadsWindow, downloadsWindowIsKey, key != "show_downloads" {
             // 목록 창이면 ⌘W 는 그 창을 닫는다 — 저장 창이 붙어 있으면 아무것도 하지 않는다(저장 창은 저장·취소로 닫는다).
             if (key == "close_focused" || key == "close_term" || key == "close_tab"), downloads.window.attachedSheet == nil {
@@ -13856,7 +13939,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     @objc private func menuCut(_ sender: Any?) {
         // 저장 창(sheet)이 키면 그 창에 먼저 — 목록 창에 붙은 저장 창의 이름 칸에서도 편집 키가 먹게(5 회차).
         if Self.forwardEditToSheet(#selector(NSText.cut(_:)), sender) { return }
-        if downloadsWindowIsKey { return }
+        if downloadsWindowIsKey || sitePermissionsWindowIsKey { return }
         // 웹 패널이 first responder면 WebKit이 자기 편집 영역에서 잘라낸다(표준 cut: — 편집기 자신의 되돌리기
         // 기록에 남는다). 터미널에는 잘라내기가 없다(읽기 전용 화면) — 복사만 하고 지우지 않는다.
         if firstResponderWebPanel() != nil {
@@ -13870,7 +13953,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     @objc private func menuCopy(_ sender: Any?) {
         // 저장 창(sheet)이 키면 그 창에 먼저 — 목록 창에 붙은 저장 창의 이름 칸에서도 편집 키가 먹게(5 회차).
         if Self.forwardEditToSheet(#selector(NSText.copy(_:)), sender) { return }
-        if downloadsWindowIsKey { return }
+        if downloadsWindowIsKey || sitePermissionsWindowIsKey { return }
         if isSessionHostAutoReconnectSmokeMode {
             sessionHostAutoReconnectCopyMenuActions += 1
         }
@@ -13887,7 +13970,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     @objc private func menuPaste(_ sender: Any?) {
         // 저장 창(sheet)이 키면 그 창에 먼저 — 목록 창에 붙은 저장 창의 이름 칸에서도 편집 키가 먹게(5 회차).
         if Self.forwardEditToSheet(#selector(NSText.paste(_:)), sender) { return }
-        if downloadsWindowIsKey { return }
+        if downloadsWindowIsKey || sitePermissionsWindowIsKey { return }
         // 웹 포커스면 WebKit이 편집 영역(CM6 등)에 붙여넣도록 표준 paste:를 넘긴다(read·HTML은 삽입 대상이 없어
         // no-op). 아니면 터미널 PTY 붙여넣기.
         if firstResponderWebPanel() != nil {
@@ -14004,7 +14087,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// SIGKILL로 죽어 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상의 수동 회복. 화면은 보존(비파괴). Zig가 단일 출처.
     @objc private func menuResetTerminal(_ sender: Any?) {
         _ = sender
-        if downloadsWindowIsKey { return }
+        if downloadsWindowIsKey || sitePermissionsWindowIsKey { return }
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reset_input_modes(session)
     }

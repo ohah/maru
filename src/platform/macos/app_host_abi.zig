@@ -204,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 264), abi_version);
+    try std.testing.expectEqual(@as(u32, 265), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -5878,6 +5878,119 @@ pub export fn maru_macos_downloads_text(kind: u32) [*:0]const u8 {
         else => return "",
     };
     return maru.i18n.t(key).ptr;
+}
+
+// ── v265: 사이트 권한 창(사용자 결정 2026-11-18 「만들기」) ──
+
+pub export fn maru_macos_site_permissions_refresh() void {
+    const gpa = session_mod.web_osr.gpaRef() orelse allocator;
+    session_mod.web_osr.sitePermissionsRefresh(gpa);
+}
+
+pub export fn maru_macos_site_permissions_generation() u64 {
+    return session_mod.web_osr.sitePermissionsGeneration();
+}
+
+pub export fn maru_macos_site_permissions_state() u32 {
+    return @backingInt(session_mod.web_osr.sitePermissionsState());
+}
+
+pub export fn maru_macos_site_permissions_count() u32 {
+    return @intCast(session_mod.web_osr.sitePermissionsRows().len);
+}
+
+pub export fn maru_macos_site_permissions_row(index: u32, out: ?*c.MaruSitePermissionRow) i32 {
+    const row = out orelse return 0;
+    const rows = session_mod.web_osr.sitePermissionsRows();
+    if (index >= rows.len) return 0;
+    const r = rows[index];
+    row.kind = @backingInt(r.kind);
+    row.setting = @backingInt(r.setting);
+    row.origin_len = @intCast(@min(r.origin.len, row.origin.len));
+    @memcpy(row.origin[0..row.origin_len], r.origin[0..row.origin_len]);
+    row.display_len = @intCast(@min(r.display.len, row.display.len));
+    @memcpy(row.display[0..row.display_len], r.display[0..row.display_len]);
+    const label = maru.i18n.t(sitePermissionKindKey(r.kind));
+    row.label_len = @intCast(@min(label.len, row.label.len));
+    @memcpy(row.label[0..row.label_len], label[0..row.label_len]);
+    return 1;
+}
+
+pub export fn maru_macos_site_permissions_reset(kind: u32, origin: ?[*]const u8, origin_len: usize) i32 {
+    const gpa = session_mod.web_osr.gpaRef() orelse allocator;
+    const k = std.enums.fromInt(maru.session.web_sidecar.message.SitePermissionKind, std.math.cast(u8, kind) orelse return 0) orelse return 0;
+    const ptr = origin orelse return 0;
+    if (origin_len == 0 or origin_len > maru.session.web_sidecar.fields.max_origin_bytes) return 0;
+    return @intFromBool(session_mod.web_osr.sitePermissionReset(gpa, k, ptr[0..origin_len]));
+}
+
+pub export fn maru_macos_site_permissions_text(which: u32) [*:0]const u8 {
+    const key: maru.i18n.Key = switch (which) {
+        0 => .sp_window_title,
+        1 => .sp_column_site,
+        2 => .sp_column_permission,
+        3 => .sp_allowed,
+        4 => .sp_blocked,
+        5 => .sp_button_remove,
+        6 => .sp_empty,
+        7 => .sp_engine_off,
+        8 => .sp_loading,
+        9 => .sp_note,
+        else => return "",
+    };
+    return maru.i18n.t(key).ptr;
+}
+
+pub export fn maru_macos_site_permissions_footer(out: ?[*]u8, cap: usize) usize {
+    const dst = out orelse return 0;
+    return sitePermissionsFooter(dst[0..cap]).len;
+}
+
+/// 표 밑 줄 — 상한에 잘린 수와 표에 없는 결정의 수(없으면 빈 글).
+fn sitePermissionsFooter(buf: []u8) []const u8 {
+    const hidden = session_mod.web_osr.sitePermissionsHidden();
+    var n: usize = 0;
+    var tmp: [256]u8 = undefined;
+    if (hidden.more > 0) {
+        const line = maru.i18n.format(&tmp, maru.i18n.t(.sp_more), &.{.{ .d = hidden.more }});
+        const take = @min(line.len, buf.len);
+        @memcpy(buf[0..take], line[0..take]);
+        n = take;
+    }
+    if (hidden.unlisted > 0) {
+        const line = maru.i18n.format(&tmp, maru.i18n.t(.sp_unlisted), &.{.{ .d = hidden.unlisted }});
+        if (n > 0 and n + 2 <= buf.len) {
+            @memcpy(buf[n..][0..2], "  ");
+            n += 2;
+        }
+        const take = @min(line.len, buf.len - n);
+        @memcpy(buf[n..][0..take], line[0..take]);
+        n += take;
+    }
+    return buf[0..n];
+}
+
+fn sitePermissionKindKey(kind: maru.session.web_sidecar.message.SitePermissionKind) maru.i18n.Key {
+    return switch (kind) {
+        .notifications => .sp_kind_notifications,
+        .geolocation => .sp_kind_geolocation,
+        .camera => .sp_kind_camera,
+        .microphone => .sp_kind_microphone,
+        .midi_sysex => .sp_kind_midi_sysex,
+        .local_fonts => .sp_kind_local_fonts,
+        .window_management => .sp_kind_window_management,
+        .clipboard => .sp_kind_clipboard,
+        .idle_detection => .sp_kind_idle_detection,
+        .sensors => .sp_kind_sensors,
+        .camera_pan_tilt_zoom => .sp_kind_camera_pan_tilt_zoom,
+        .automatic_downloads => .sp_kind_automatic_downloads,
+        .storage_access => .sp_kind_storage_access,
+        .ar => .sp_kind_ar,
+        .vr => .sp_kind_vr,
+        .hand_tracking => .sp_kind_hand_tracking,
+        .keyboard_lock => .sp_kind_keyboard_lock,
+        .pointer_lock => .sp_kind_pointer_lock,
+    };
 }
 
 /// 받는 중(끝나지 않은) 다운로드 수.

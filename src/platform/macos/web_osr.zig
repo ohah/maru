@@ -13889,6 +13889,7 @@ test "agent permission: 목록은 가족의 요청(기억된 위치 빼고, 사�
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 3, .origin = site, .kinds = geo } }, 0);
     const t_geo = testLastDialog(7).token;
     _ = try agentAnswerPermission(gpa, 7, t_geo, .allow, acc.access());
+    try std.testing.expect(nextDialog(7) == null); // 띄운 적 없는 요청도 — 에이전트가 허용했으면 sheet 로 띄우지 않는다
     _ = nextAgentAllow(12).?;
     try std.testing.expect(replyLocation(gpa, 7, t_geo, null, .accept, .agent));
     try std.testing.expectEqual(AgentOutcome.no_location, takeAgentOutcome(t_geo).?.outcome);

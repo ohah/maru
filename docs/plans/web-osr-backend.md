@@ -5884,3 +5884,17 @@ take 안에서** 나갔다 — P1 이 그 take·drain 을 지우면 함께 사�
   배치가 sidecar 로 간 뒤 답한다). CLI `browser show`·MCP `browser_show`·플러그인(0.1.10).
 - **남은 틈**: 막는 동안 친 키는 말없이 버려진다(WebKit 탭을 고른 뒤와 같은 길 — 알림은 두지 않았다), 화면 밖 워크스페이스의 pane 은 탭 줄 스크롤을 맞추지 않는다
   (그 배치가 없다), 다른 창의 `visible:true` 는 창이 가려졌는지 모른다.
+
+### 다운로드 — `browser.downloads`·`browser.download`(2026-11-18, 완료)
+
+사용자 결정(2026-11-17 「에이전트 op 셋 더하기」의 둘째): 목록은 앱 전체, 보류(늦은 실행 파일의 자동 보류 포함 — 보류 자체는 그대로 자동) 풀기·버리기·그만두기·다시 받기,
+저장 자리·이름은 사람의 저장 창처럼 어디든 — 있는 파일은 절대 덮어쓰지 않는다, 묻기 모드의 저장 창·행에도 답한다. 계약은 [`browser.*` 코어](../control-plane-browser.md)
+`browser.downloads`·`browser.download` 행.
+
+- **재실측(착수 전, 격리 앱)**: 사용자 탭이 4 초 뒤 스스로 `.command` 로 가면 보류된다(`~/Downloads` 없음) — pane 의 에이전트는 `downloads`·`download` 가 `unknown
+  subcommand` 라 볼 수도 풀 수도 없었다.
+- **구현**: L2 `control_browser` 의 `downloads`(36)·`download`(37) — `open` 처럼 부른 pane 이 대상, 엄격 키, 자리의 꼴(`agentSavePathOk`). 앱 `web_downloads.agentAct`
+  (사람의 `act`·`answerAsk` 와 같은 길, 자리는 늘 `replace=false`)·`agentListJson`, `Entry.agent_chosen`·`save_failed`(에이전트가 고른 폴더에 쓸 수 없으면 보류로 —
+  사람에게 저장 창을 띄우지 않는다, 그 폴더를 사람의 저장 창 기본 폴더로 기억하지 않는다). ABI 는 탭 op 자리(`isTabOp`)에서 곧 답한다. CLI `downloads`·`download`,
+  MCP `browser_downloads`·`browser_download`, 플러그인(0.1.13).
+- **남은 틈**: 폴더는 만들지 않는다(사람의 저장 창은 「새 폴더」 가 있다), 목록 정리(`remove`·끝난 행 지우기)는 두지 않았다, 받기 시작은 페이지 동작이라 op 이 없다.

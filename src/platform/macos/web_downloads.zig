@@ -164,6 +164,12 @@ pub const Entry = struct {
     finalizing: bool = false,
     /// 결정 전(보류·묻는 중)에 받아 둔 양이 상한을 넘어 멈췄다(Chromium 은 결정 전에도 끝까지 받아 둔다 — 실측 `dl-ask-wait`).
     stopped_waiting: bool = false,
+    /// 에이전트가 고른 자리다(`agentAct` 의 `save` + 경로). 그 폴더에 쓸 수 없으면 사람에게 저장 창을 띄우지 않고 보류로 되돌리고(`save_failed`),
+    /// 그 폴더를 사람의 다음 저장 창이 여는 곳으로 기억하지 않는다.
+    agent_chosen: bool = false,
+    /// 에이전트가 고른 자리에 쓸 수 없었다(없는 폴더·권한·TCC 거절 — `save_failed_long` 이면 경로가 길었다). 다음 받기가 지운다.
+    save_failed: bool = false,
+    save_failed_long: bool = false,
     /// 받으려 한 곳(주소의 호스트 — 보류 행에 보인다, Chrome 처럼; data: 처럼 호스트가 없으면 비었다).
     origin_buf: [128]u8 = undefined,
     origin_len: usize = 0,
@@ -817,7 +823,15 @@ pub fn reapPrepared() void {
                 }
                 continue;
             }
-            if (!p.ok and e.chosen) {
+            if (!p.ok and e.agent_chosen) {
+                // 에이전트가 고른 폴더에 쓸 수 없었다 — 사람에게 저장 창을 띄우지 않고 보류로 되돌린다(에이전트가 다른 자리로 다시 하거나 사람이
+                // 목록에서 받는다 — 사용자 결정 2026-11-17 「사람처럼 어디든」 의 실패 길).
+                e.state = .held;
+                e.chosen = false;
+                e.agent_chosen = false;
+                e.save_failed = true;
+                e.save_failed_long = p.too_long;
+            } else if (!p.ok and e.chosen) {
                 // 고른 폴더에 쓸 수 없었다(권한·읽기 전용·TCC 거절) — 다시 고르게 한다(설계 공격 M3).
                 e.state = .asking;
                 e.ask_claimed = false;
@@ -837,7 +851,7 @@ pub fn reapPrepared() void {
                 e.part_ino = p.part_ino;
                 e.state = .active;
                 // 고른 폴더에 쓸 수 있었다 — 다음 저장 창이 여기서 연다(쓸 수 없던 폴더를 다시 열지 않게 — 8 회차).
-                if (e.chosen) rememberDir(e.finalPath());
+                if (e.chosen and !e.agent_chosen) rememberDir(e.finalPath()); // 에이전트의 자리는 사람의 저장 창 기본 폴더로 기억하지 않는다
                 queue(e.key, .decide_path);
             }
             changed();
@@ -1124,6 +1138,8 @@ pub fn act(key: u64, action: Action) bool {
         },
         .accept => {
             if (e.state != .held) return false;
+            e.save_failed = false;
+            e.save_failed_long = false;
             if (ask_enabled) {
                 // 묻기 — 받기를 누른 목록 창이 저장 창을 띄운다(Swift 가 곧바로 `claimAsk`).
                 e.state = .asking;
@@ -1306,6 +1322,9 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
             e.name_len = name.len;
             e.risky = isRisky(name);
             e.chosen = true;
+            e.agent_chosen = false;
+            e.save_failed = false;
+            e.save_failed_long = false;
             e.replace = replace;
             e.ask_retry = false;
             e.ask_retry_long = false;
@@ -1321,6 +1340,135 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
     }
     changed();
     return true;
+}
+
+// ── 에이전트(`browser.downloads`·`browser.download` — 사용자 결정 2026-11-17) ───────────────────────────────────────────
+// 사람의 목록 창(단추)·저장 창과 같은 힘: 목록은 앱 전체, 보류(늦은 실행 파일의 자동 보류 포함)·묻는 행을 받기·버리기, 받는 중을 그만두기·끊긴 것을
+// 다시 받기. 다른 점 하나 — **있는 파일을 덮어쓰지 않는다**(저장 창은 「바꿀까요?」 에 바꾸기를 고를 수 있다): 에이전트의 자리는 늘 `replace=false` 라
+// 그 이름이 있으면 번호가 붙는다(`prepareChosen`, 완료 때도 `RENAME_EXCL`). 미리 있는지 메인 스레드에서 보지 않는다(보호 폴더면 TCC 가 막는다).
+
+pub const AgentAction = enum { save, discard, cancel, resume_download };
+pub const AgentError = error{
+    /// 그런 번호가 없다(끝나 정리됐거나 틀린 번호).
+    NoSuchDownload,
+    /// 그 상태에서는 못 한다(예: 받는 중인 행을 받기).
+    WrongState,
+    /// 고른 경로의 꼴(폴더·이름)이 틀렸다.
+    BadPath,
+    /// 받을 준비(작업 스레드)를 시작하지 못했다 — 행은 실패로 끝났다.
+    CannotStart,
+};
+
+/// 에이전트의 동작 하나. 바뀐 뒤의 상태를 돌려준다(그만두기·다시 받기는 엔진이 확인할 때 바뀐다 — 그때까지 지금 상태).
+pub fn agentAct(key: u64, action: AgentAction, path: ?[]const u8) AgentError!State {
+    const e = entryOfKey(key) orelse return error.NoSuchDownload;
+    switch (action) {
+        .save => {
+            if (e.state != .held and e.state != .asking) return error.WrongState;
+            // 묻는 행에 저장 창이 떠 있으면 Swift 가 그 창을 거둔다(행이 묻는 중이 아니게 되면 — `drainDownloadAsk`).
+            e.ask_claimed = false;
+            e.ask_since_ms = 0;
+            e.ask_nudged = false;
+            e.ask_retry = false;
+            e.ask_retry_long = false;
+            e.save_failed = false;
+            e.save_failed_long = false;
+            e.replace = false; // 덮어쓰지 않는다
+            if (path) |p| {
+                const slash = std.mem.lastIndexOfScalar(u8, p, '/') orelse return error.BadPath;
+                const dir = if (slash == 0) "/" else p[0..slash];
+                const raw_name = p[slash + 1 ..];
+                if (p.len > max_path_bytes or raw_name.len == 0) return error.BadPath;
+                var name_buf: [max_name_bytes]u8 = undefined;
+                const clean = sanitizeChosenName(raw_name, &name_buf); // 사람의 저장 창과 같은 다듬기(`:`·끝 점·길이)
+                if (clean.len == 0) return error.BadPath;
+                @memcpy(e.name_buf[0..clean.len], clean);
+                e.name_len = clean.len;
+                e.risky = isRisky(clean);
+                e.chosen = true;
+                e.agent_chosen = true;
+                e.state = .preparing;
+                if (!startPrepareIn(e, dir, true, false)) return failStart(e);
+            } else {
+                // 자리 없이 — 보통 다운로드처럼 ~/Downloads(번호). 묻기 모드여도 그렇다(에이전트가 그 행에 답했다).
+                e.chosen = false;
+                e.agent_chosen = false;
+                e.state = .preparing;
+                if (!startPrepare(e)) return failStart(e);
+            }
+        },
+        .discard => switch (e.state) {
+            .held, .asking => {
+                e.ask_claimed = false;
+                e.ask_since_ms = 0;
+                e.ask_nudged = false;
+                e.state = .canceled;
+                queue(key, .decide_cancel);
+            },
+            else => return error.WrongState,
+        },
+        .cancel => if (!act(key, .cancel)) return error.WrongState,
+        .resume_download => if (!act(key, .resume_download)) return error.WrongState,
+    }
+    changed();
+    return e.state;
+}
+
+fn failStart(e: *Entry) AgentError {
+    e.state = .failed;
+    e.agent_chosen = false;
+    queue(e.key, .decide_cancel);
+    changed();
+    return error.CannotStart;
+}
+
+/// 에이전트의 목록(앱 전체 — 사람의 목록 창과 같은 행, 같은 차례). 글(이름·출처)은 페이지가 정한 것이다 — JSON 으로만 싣는다(CLI 가 거른다).
+pub fn agentListJson(gpa: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |err| break :blk err;
+        s.objectField("downloads") catch |err| break :blk err;
+        s.beginArray() catch |err| break :blk err;
+        for (entries.items) |*e| {
+            s.beginObject() catch |err| break :blk err;
+            s.objectField("key") catch |err| break :blk err;
+            s.write(e.key) catch |err| break :blk err;
+            s.objectField("tab") catch |err| break :blk err;
+            s.write(e.browser) catch |err| break :blk err;
+            s.objectField("name") catch |err| break :blk err;
+            s.write(e.displayName()) catch |err| break :blk err;
+            s.objectField("origin") catch |err| break :blk err;
+            s.write(e.origin_buf[0..e.origin_len]) catch |err| break :blk err;
+            s.objectField("state") catch |err| break :blk err;
+            s.write(@tagName(e.state)) catch |err| break :blk err;
+            s.objectField("risky") catch |err| break :blk err;
+            s.write(e.risky) catch |err| break :blk err;
+            s.objectField("received") catch |err| break :blk err;
+            s.write(e.received) catch |err| break :blk err;
+            s.objectField("total") catch |err| break :blk err;
+            s.write(e.total) catch |err| break :blk err;
+            if (e.final_len > 0) {
+                s.objectField("path") catch |err| break :blk err;
+                s.write(e.finalPath()) catch |err| break :blk err;
+            }
+            if (e.state == .asking and e.ask_claimed) {
+                s.objectField("panel_open") catch |err| break :blk err;
+                s.write(true) catch |err| break :blk err;
+            }
+            if (e.save_failed) {
+                s.objectField("save_failed") catch |err| break :blk err;
+                s.write(if (e.save_failed_long) "the path is too long" else "maru could not write in that folder (missing, not writable or not allowed)") catch |err| break :blk err;
+            }
+            s.endObject() catch |err| break :blk err;
+        }
+        s.endArray() catch |err| break :blk err;
+        s.objectField("ask") catch |err| break :blk err;
+        s.write(ask_enabled) catch |err| break :blk err;
+        s.endObject() catch |err| break :blk err;
+    }) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
 }
 
 pub fn clearFinished() void {
@@ -1747,6 +1895,124 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     _ = std.c.pthread_mutex_unlock(&prepared_mutex);
     reapPrepared();
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_asking_too_long), statusText(entryOfKey(4).?, &line));
+}
+
+fn waitPreparedForTest(n: usize) void {
+    var waited: u32 = 0;
+    while (waited < 300) : (waited += 1) {
+        _ = std.c.pthread_mutex_lock(&prepared_mutex);
+        const got = prepared.items.len;
+        _ = std.c.pthread_mutex_unlock(&prepared_mutex);
+        if (got >= n) return;
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+}
+
+// 에이전트의 다운로드 동작(사용자 결정 2026-11-17 — 사람의 목록 창·저장 창과 같은 힘, 다만 있는 파일은 덮어쓰지 않는다). 보류(늦은 실행 파일 포함)·묻는
+// 행을 받고(자리 없이 → ~/Downloads, 자리 → 그 폴더·다듬은 이름·번호), 버리고, 그만두고, 다시 받는다. 에이전트가 고른 폴더에 쓸 수 없으면 사람에게
+// 저장 창을 띄우지 않고 보류로 되돌린다.
+test "agent: save a held or asking row (default place, or a chosen place that never replaces), discard, cancel, resume, wrong states" {
+    resetForTest();
+    defer resetForTest();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    test_downloads_dir = root;
+    defer test_downloads_dir = null;
+    // 늦은 실행 파일의 자동 보류 — 에이전트가 풀 수 있다(자리 없이 → 받는 폴더).
+    var held = rowForTest(1, 7, .held);
+    held.risky = true;
+    try entries.append(allocator(), held);
+    try std.testing.expectEqual(State.preparing, try agentAct(1, .save, null));
+    try std.testing.expect(!entryOfKey(1).?.chosen and !entryOfKey(1).?.agent_chosen);
+    // 묻는 행(저장 창이 떠 있다 — 사람이 고르는 중) — 에이전트의 답이 받는다(창은 행이 묻는 중이 아니게 되면 Swift 가 거둔다). 그 자리에 같은 이름이 있으면 번호.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "report.pdf", .data = "keep me" });
+    try entries.append(allocator(), rowForTest(2, 7, .asking));
+    _ = claimAsk(2);
+    var path_buf: [max_path_bytes]u8 = undefined;
+    const chosen = try std.fmt.bufPrint(&path_buf, "{s}/report.pdf", .{root});
+    try std.testing.expectEqual(State.preparing, try agentAct(2, .save, chosen));
+    const two = entryOfKey(2).?;
+    try std.testing.expect(two.chosen and two.agent_chosen and !two.replace and !two.ask_claimed);
+    try std.testing.expectEqualStrings("report.pdf", two.name());
+    waitPreparedForTest(2);
+    reapPrepared();
+    try std.testing.expectEqual(State.active, two.state);
+    try std.testing.expect(std.mem.endsWith(u8, two.finalPath(), "/report (1).pdf")); // 덮어쓰지 않는다
+    var keep_buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("keep me", try tmp.dir.readFile(std.testing.io, "report.pdf", &keep_buf));
+    var dir_buf: [max_path_bytes]u8 = undefined;
+    try std.testing.expect(!std.mem.eql(u8, root, askDirectory(&dir_buf))); // 에이전트의 자리는 사람의 저장 창 기본 폴더가 되지 않는다
+    // 이름은 사람의 저장 창과 같이 다듬는다.
+    try entries.append(allocator(), rowForTest(3, 7, .held));
+    const odd = try std.fmt.bufPrint(&path_buf, "{s}/a:b.txt", .{root});
+    _ = try agentAct(3, .save, odd);
+    try std.testing.expectEqualStrings("a_b.txt", entryOfKey(3).?.name());
+    // 쓸 수 없는 폴더 — 보류로 되돌리고(사람에게 저장 창을 띄우지 않는다) 까닭을 남긴다.
+    try entries.append(allocator(), rowForTest(4, 7, .held));
+    const missing = try std.fmt.bufPrint(&path_buf, "{s}/no-such-folder/x.bin", .{root});
+    _ = try agentAct(4, .save, missing);
+    waitPreparedForTest(2); // 3 과 4
+    reapPrepared();
+    const four = entryOfKey(4).?;
+    try std.testing.expectEqual(State.held, four.state);
+    try std.testing.expect(four.save_failed and !four.agent_chosen and !four.chosen and !four.ask_retry);
+    // 사람이 목록에서 받으면 까닭을 지운다.
+    try std.testing.expect(act(4, .accept));
+    try std.testing.expect(!four.save_failed);
+    // 버리기 — 보류·묻는 행.
+    try entries.append(allocator(), rowForTest(5, 7, .held));
+    try entries.append(allocator(), rowForTest(6, 7, .asking));
+    try std.testing.expectEqual(State.canceled, try agentAct(5, .discard, null));
+    try std.testing.expectEqual(State.canceled, try agentAct(6, .discard, null));
+    // 그만두기·다시 받기 — 목록 창의 단추와 같은 길(엔진이 확인할 때 바뀐다).
+    try entries.append(allocator(), rowForTest(8, 7, .interrupted));
+    try std.testing.expectEqual(State.interrupted, try agentAct(8, .resume_download, null));
+    try std.testing.expectEqual(State.interrupted, try agentAct(8, .cancel, null));
+    // 그 상태에서는 못 한다·없는 번호·틀린 자리.
+    try std.testing.expectError(error.WrongState, agentAct(5, .save, null)); // 끝난 행
+    try std.testing.expectError(error.WrongState, agentAct(8, .discard, null)); // 끊긴 행은 버리기가 아니라 그만두기
+    try std.testing.expectError(error.WrongState, agentAct(2, .resume_download, null));
+    try std.testing.expectError(error.NoSuchDownload, agentAct(99, .save, null));
+    try entries.append(allocator(), rowForTest(10, 7, .held));
+    try std.testing.expectError(error.BadPath, agentAct(10, .save, "/tmp/"));
+    try std.testing.expectEqual(State.held, entryOfKey(10).?.state); // 틀린 자리는 아무것도 바꾸지 않는다
+    waitPreparedForTest(1); // 4 의 사람 받기
+    reapPrepared();
+}
+
+test "agent list: every row with key, tab, state, risky, bytes, saved path, an open panel and a failed save — and the ask setting" {
+    resetForTest();
+    defer resetForTest();
+    var a = rowForTest(1, 7, .held);
+    a.risky = true;
+    a.save_failed = true;
+    try entries.append(allocator(), a);
+    var b = rowForTest(2, 9, .asking);
+    b.ask_claimed = true;
+    try entries.append(allocator(), b);
+    var c = rowForTest(3, 9, .done);
+    const final = "/Users/x/Downloads/f.zip";
+    @memcpy(c.final_buf[0..final.len], final);
+    c.final_len = final.len;
+    try entries.append(allocator(), c);
+    const json = try agentListJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const rows = parsed.value.object.get("downloads").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqualStrings("held", rows[0].object.get("state").?.string);
+    try std.testing.expect(rows[0].object.get("risky").?.bool);
+    try std.testing.expect(rows[0].object.get("save_failed") != null);
+    try std.testing.expectEqual(@as(i64, 7), rows[0].object.get("tab").?.integer);
+    try std.testing.expect(rows[1].object.get("panel_open").?.bool);
+    try std.testing.expect(rows[0].object.get("panel_open") == null);
+    try std.testing.expectEqualStrings(final, rows[2].object.get("path").?.string);
+    try std.testing.expectEqualStrings("f.zip", rows[2].object.get("name").?.string);
+    try std.testing.expect(!parsed.value.object.get("ask").?.bool);
 }
 
 test "a chosen path past the length limits says so, a folder that can't be written says that (W10c)" {

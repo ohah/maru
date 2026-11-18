@@ -203,6 +203,14 @@ pub const BrowserMethod = enum {
     /// 페이지는 보이되 사람이 그 페이지를 누를 때까지 키·포커스를 주지 않는다(`key_held`). `visible` = maru 가 그 탭을 숨기지 않는가(화면 밖
     /// 워크스페이스면 거짓). 모달·sheet·그 pane 에서 끌기·탭 줄 숨김·사람이 그 pane 에서 편집 중이면 실패. base `browser` scope. op.arg 빈 것. **op_kind=35**.
     show,
+    /// `browser.downloads {}`(Chromium 다운로드 — 사용자 결정 2026-11-17) → `{downloads:[…], ask}` — 앱 전체의 다운로드 목록(사람의 목록 창과 같은 행).
+    /// 대상 탭이 없어 `id` 를 받지 않는다 — **부른 pane**(1g)이 있어야 한다(`open` 과 같다 — pane 이 없는 연결은 균일 unauthorized). 엄격 키.
+    /// op.arg 빈 것. **op_kind=36**.
+    downloads,
+    /// `browser.download {key, action, path?}`(사용자 결정 2026-11-17) → `{ok:true, key, state}`. `action` 은 `save`(보류·묻는 행을 받는다 — `path` 가
+    /// 있으면 그 자리·이름, 없으면 `~/Downloads`; 있는 파일은 덮어쓰지 않는다 — 번호), `discard`·`cancel`·`resume`. `path` 는 `save` 에만, 절대 경로
+    /// (`agentSavePathOk`). 부른 pane(1g)이 있어야 한다. op.arg=`{key, action, path?}` 정규형. **op_kind=37**.
+    download,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -245,6 +253,8 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "emulate")) return .emulate; // W9e①
     if (eq(rest, "trace")) return .trace; // W9e②
     if (eq(rest, "show")) return .show;
+    if (eq(rest, "downloads")) return .downloads;
+    if (eq(rest, "download")) return .download;
     return null;
 }
 
@@ -287,6 +297,8 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .emulate => "emulate",
         .trace => "trace",
         .show => "show",
+        .downloads => "downloads",
+        .download => "download",
     };
 }
 
@@ -297,7 +309,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show, .downloads, .download => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
@@ -306,7 +318,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
         // W9d①: 네트워크 목록·자세히(CEF 자원 요청 처리기 — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show, .downloads, .download => true,
             else => false,
         },
     };
@@ -315,7 +327,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
 /// 그 web 탭에서 이 메서드를 실행할 수 있는가 — 목록의 `methods` 와 확인 모달 전 거절이 함께 쓴다.
 pub fn surfaceSupports(w: cs.WebMeta, m: BrowserMethod) bool {
     // `open` 은 탭에 쓰는 메서드가 아니다(대상이 부른 pane) — 탭마다의 목록에 싣지 않는다(W9b③).
-    if (m == .open) return false;
+    if (m == .open or m == .downloads or m == .download) return false; // 탭에 쓰지 않는다 — 부른 pane 이 대상
     return w.controllable and engineSupports(w.engine, m);
 }
 
@@ -810,6 +822,78 @@ pub fn parseOpenParams(params: ?std.json.Value) ParamError!OpenParams {
         else => return error.InvalidParams,
     } else open_default_timeout_ms;
     return .{ .url = url, .timeout_ms = timeout_ms };
+}
+
+/// `browser.download` 의 동작(사람의 다운로드 목록 창 단추와 저장 창 — 사용자 결정 2026-11-17).
+pub const DownloadAction = enum {
+    /// 보류·묻는 행을 받는다(목록 창 「받기」·저장 창 「저장」).
+    save,
+    /// 보류·묻는 행을 받지 않는다(목록 창 「버리기」·저장 창 「취소」).
+    discard,
+    /// 받는 중·끊김·준비·묻는 행을 그만둔다(목록 창 「취소」).
+    cancel,
+    /// 끊긴 행을 다시 받는다(목록 창 「다시 받기」).
+    @"resume",
+};
+pub const DownloadParams = struct { key: u64, action: DownloadAction, path: ?[]const u8 = null };
+/// 저장 경로의 상한 — 앱의 다운로드 경로 버퍼(`web_downloads.max_path_bytes`)와 같다.
+pub const download_max_path_bytes = 1024;
+
+/// 에이전트가 고른 저장 자리의 꼴(순수 — 파일 시스템은 보지 않는다): 절대 경로, 상한 안, UTF-8, 제어 문자 없음, 마지막 이름이 비지 않고 `.`·`..` 가
+/// 아니다. 폴더가 있는지·쓸 수 있는지는 앱이 작업 스레드에서 본다(보호 폴더면 TCC 가 그 호출을 막아 메인 스레드가 멈춘다). 덮어쓰기는 앱이 막는다(번호).
+pub fn agentSavePathOk(path: []const u8) bool {
+    if (path.len < 2 or path.len > download_max_path_bytes or path[0] != '/') return false;
+    if (!std.unicode.utf8ValidateSlice(path)) return false;
+    for (path) |c| if (c < 0x20 or c == 0x7f) return false;
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/').?;
+    const name = path[slash + 1 ..];
+    return name.len > 0 and !eq(name, ".") and !eq(name, "..");
+}
+
+pub fn parseDownloadsParams(params: ?std.json.Value) ParamError!void {
+    const p = params orelse return;
+    const obj = switch (p) {
+        .object => |o| o,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 0) return error.InvalidParams;
+}
+
+pub fn parseDownloadParams(params: ?std.json.Value) ParamError!DownloadParams {
+    const obj = try paramsObject(params);
+    var it = obj.iterator();
+    while (it.next()) |e| if (!(eq(e.key_ptr.*, "key") or eq(e.key_ptr.*, "action") or eq(e.key_ptr.*, "path"))) return error.InvalidParams;
+    const key: u64 = switch (obj.get("key") orelse return error.InvalidParams) {
+        .integer => |i| if (i <= 0) return error.InvalidParams else @intCast(i),
+        else => return error.InvalidParams,
+    };
+    const action_name = try strFromObj(obj, "action");
+    const action = std.meta.stringToEnum(DownloadAction, action_name) orelse return error.InvalidParams;
+    const path = try optStrFromObj(obj, "path");
+    if (path) |pth| {
+        if (action != .save) return error.InvalidParams; // 자리는 받기에만
+        if (!agentSavePathOk(pth)) return error.InvalidParams;
+    }
+    return .{ .key = key, .action = action, .path = path };
+}
+
+pub fn serializeDownloadArg(gpa: std.mem.Allocator, p: DownloadParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |e| break :blk e;
+        s.objectField("key") catch |e| break :blk e;
+        s.write(p.key) catch |e| break :blk e;
+        s.objectField("action") catch |e| break :blk e;
+        s.write(@tagName(p.action)) catch |e| break :blk e;
+        if (p.path) |pth| {
+            s.objectField("path") catch |e| break :blk e;
+            s.write(pth) catch |e| break :blk e;
+        }
+        s.endObject() catch |e| break :blk e;
+    }) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
 }
 
 pub fn serializeOpenArg(gpa: std.mem.Allocator, p: OpenParams) std.mem.Allocator.Error![]u8 {
@@ -2951,7 +3035,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
         // W9b①: back/forward → 갈 곳이 있었는가, reload → true.
         .back, .forward, .reload => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         // W9b③: 엔진이 준 `{"id","url","loaded"}`·`{"closed","reason"?}` 을 검사해 그 필드만 싣는다. show 는 `{"shown","visible","changed","key_held"}`.
-        .open, .close, .show => serializeTabResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
+        .open, .close, .show, .download => serializeTabResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid tab payload", null),
         },
@@ -2961,7 +3045,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid dialog payload", null),
         },
         // W9d①: 앱이 준 결과 객체(링이 만든 JSON)를 그대로 싣는다 — 객체가 아니면 내부 오류.
-        .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
+        .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .downloads => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid network payload", null),
         },
@@ -3095,6 +3179,22 @@ fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, 
                 s.write(changed.bool) catch |e| break :blk e;
                 s.objectField("key_held") catch |e| break :blk e;
                 s.write(key_held.bool) catch |e| break :blk e;
+                endResult(&s) catch |e| break :blk e;
+            }) catch return error.OutOfMemory;
+        },
+        .download => {
+            const ok = o.get("ok") orelse return error.InvalidTabPayload;
+            const key = o.get("key") orelse return error.InvalidTabPayload;
+            const state = o.get("state") orelse return error.InvalidTabPayload;
+            if (ok != .bool or !ok.bool or key != .integer or key.integer <= 0 or state != .string) return error.InvalidTabPayload;
+            (blk: {
+                beginResult(&s, id) catch |e| break :blk e;
+                s.objectField("ok") catch |e| break :blk e;
+                s.write(true) catch |e| break :blk e;
+                s.objectField("key") catch |e| break :blk e;
+                s.write(key.integer) catch |e| break :blk e;
+                s.objectField("state") catch |e| break :blk e;
+                s.write(state.string) catch |e| break :blk e;
                 endResult(&s) catch |e| break :blk e;
             }) catch return error.OutOfMemory;
         },
@@ -3492,6 +3592,16 @@ pub fn browserOpFromRequest(
         // 사용자 결정 2026-11-16(「AI 가 모든 접근」): pane 이 확인되면 묻지 않고 연다 — 같은 날의 pane 동의(#4731)를 걷었다.
         return .{ .op = .{ .surface_id = pane, .method = .open, .arg = try serializeOpenArg(gpa, p) } };
     }
+    // ── 다운로드(사용자 결정 2026-11-17): 대상 탭이 없다 — open 과 같이 부른 pane(1g)이 있어야 한다(목록은 사용자의 파일 이름·주소다). ──
+    if (eq(method.rest, "downloads") or eq(method.rest, "download")) {
+        const pane = pane_selector orelse return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        if (eq(method.rest, "downloads")) {
+            parseDownloadsParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+            return .{ .op = .{ .surface_id = pane, .method = .downloads, .arg = try gpa.dupe(u8, "") } };
+        }
+        const p = parseDownloadParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+        return .{ .op = .{ .surface_id = pane, .method = .download, .arg = try serializeDownloadArg(gpa, p) } };
+    }
 
     // ── 3. id 파싱(target web surface_id). authz(4)가 target을 알아야 하므로 먼저. 형식 오류는 surface 존재
     //       oracle이 아니라 요청 형식 오류다(session.get과 동일) → invalid_params. ──
@@ -3737,7 +3847,7 @@ pub fn browserOpFromRequest(
             break :blk try serializeNetworkMockArg(gpa, &p);
         },
         .subscribe => unreachable, // 위에서 이미 분기
-        .open => unreachable, // 위(id 파싱 앞)에서 이미 분기
+        .open, .downloads, .download => unreachable, // 위(id 파싱 앞)에서 이미 분기
     };
     // arg는 이제 gpa-owned. surface·authz는 step 6에서 이미 접혔으므로(op 반환만 남음) 여기서 free할 실패 경로가 없다
     // — 파싱 실패는 switch 각 arm이 arg 할당 전 return하고, 여기 도달하면 곧장 op에 arg 소유권을 넘긴다.
@@ -5004,7 +5114,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
     // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload·show 등 18 개는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 18), webkit.get("methods").?.array.items.len);
+    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 18 - 2), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
@@ -6149,6 +6259,105 @@ test "browser.show: 35 번, Chromium 만, base browser grant 로 op(인자 없�
     }
     // 전권 대상 — 제어할 수 있는 탭을 가리키는 show 에도 grant 를 넣는다(다른 `{id}` op 과 같다).
     try testing.expectEqual(@as(?u64, 12), try fullAccessTarget(testing.allocator, show12, fx_engine));
+}
+
+// 다운로드(사용자 결정 2026-11-17): 대상 탭이 없는 op 둘 — `open` 처럼 부른 pane(1g)이 있어야 하고(목록은 사용자의 파일 이름·주소다), 엄격 키, 저장 자리는
+// 꼴만 L2 가(절대 경로·상한·제어 문자·이름), 덮어쓰기와 폴더는 앱이 본다.
+test "browser.downloads·download: 36·37, 부른 pane 이 있어야 op(없으면 unauthorized), 엄격 키, 동작 넷, 자리는 save 와만·절대 경로만, 정규형 arg" {
+    try testing.expectEqual(@as(u8, 36), @as(u8, @backingInt(BrowserMethod.downloads)));
+    try testing.expectEqual(@as(u8, 37), @as(u8, @backingInt(BrowserMethod.download)));
+    try testing.expectEqual(BrowserMethod.downloads, parseBrowserMethod("downloads").?);
+    try testing.expectEqual(BrowserMethod.download, parseBrowserMethod("download").?);
+    try testing.expect(engineSupports(.chromium, .downloads) and !engineSupports(.webkit, .download));
+    var grants: cpg.PaneGrantStore = .{};
+    const list_req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.downloads\",\"params\":{}}";
+    // pane 이 없다(cap 만 든 연결·pane 밖) — 균일 unauthorized.
+    switch (try dispatchBrowser(testing.allocator, list_req, fx_engine, &.{}, null, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    const cases = [_]struct { bytes: []const u8, method: BrowserMethod, arg: []const u8 }{
+        .{ .bytes = list_req, .method = .downloads, .arg = "" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.downloads\"}", .method = .downloads, .arg = "" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"save\"}}", .method = .download, .arg = "{\"key\":3,\"action\":\"save\"}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"action\":\"save\",\"path\":\"/Users/me/Desktop/a b.pdf\",\"key\":3}}", .method = .download, .arg = "{\"key\":3,\"action\":\"save\",\"path\":\"/Users/me/Desktop/a b.pdf\"}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"discard\"}}", .method = .download, .arg = "{\"key\":3,\"action\":\"discard\"}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"cancel\"}}", .method = .download, .arg = "{\"key\":3,\"action\":\"cancel\"}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"resume\"}}", .method = .download, .arg = "{\"key\":3,\"action\":\"resume\"}" },
+    };
+    for (cases) |c| switch (try dispatchBrowser(testing.allocator, c.bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(c.method, op.method);
+            try testing.expectEqual(@as(u64, 10), op.surface_id); // 대상은 부른 pane
+            try testing.expectEqualStrings(c.arg, op.arg);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.downloads\",\"params\":{\"id\":12}}", // 모르는 키
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"action\":\"save\"}}", // key 없음
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":0,\"action\":\"save\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":\"3\",\"action\":\"save\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"open\"}}", // 열기는 없다
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"discard\",\"path\":\"/tmp/a\"}}", // 자리는 save 와만
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"save\",\"path\":\"a.pdf\"}}", // 상대 경로
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"save\",\"path\":\"/tmp/\"}}", // 이름 없음
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"save\",\"path\":\"/tmp/a\\nb\"}}", // 제어 문자
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"save\",\"extra\":1}}", // 모르는 키
+    }) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            std.debug.print("accepted: {s}\n", .{bytes});
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    // 탭마다의 메서드 목록에는 싣지 않는다(open 처럼 — 탭에 쓰지 않는다), 전권 대상도 아니다(id 가 없다).
+    try testing.expect(!surfaceSupports(.{ .panel_kind = .browser, .trust = .untrusted, .controllable = true, .engine = .chromium }, .downloads));
+    try testing.expectEqual(@as(?u64, null), try fullAccessTarget(testing.allocator, list_req, fx_engine));
+}
+
+test "agentSavePathOk: 절대 경로·1024 바이트·UTF-8·제어 문자 없음·마지막 이름이 비지 않고 . .. 아님" {
+    try testing.expect(agentSavePathOk("/Users/me/Downloads/report.pdf"));
+    try testing.expect(agentSavePathOk("/a"));
+    try testing.expect(agentSavePathOk("/Users/me/Library/x.plist")); // 어디든(사용자 결정) — 막는 것은 덮어쓰기뿐
+    for ([_][]const u8{ "", "/", "a/b", "./a", "/tmp/", "/tmp/.", "/tmp/..", "/tmp/a\x00b", "/tmp/a\tb", "/tmp/a\x7fb", "/tmp/\xff" }) |bad| try testing.expect(!agentSavePathOk(bad));
+    var buf: [download_max_path_bytes + 2]u8 = undefined;
+    buf[0] = '/';
+    @memset(buf[1..], 'x');
+    try testing.expect(agentSavePathOk(buf[0..download_max_path_bytes]));
+    try testing.expect(!agentSavePathOk(buf[0 .. download_max_path_bytes + 1]));
+}
+
+test "browser.download 결과는 ok·key·state — 모양이 틀리면 internal_error, downloads 는 객체를 그대로" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.download\",\"params\":{\"key\":3,\"action\":\"save\"}}";
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"ok\":true,\"key\":3,\"state\":\"preparing\",\"x\":1}");
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"ok\":true,\"key\":3,\"state\":\"preparing\"}") != null);
+    }
+    for ([_][]const u8{ "{\"ok\":false,\"key\":3,\"state\":\"x\"}", "{\"ok\":true,\"key\":0,\"state\":\"x\"}", "{\"ok\":true,\"key\":3}", "[]" }) |payload| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, payload);
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
+    }
+    const list = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.downloads\",\"params\":{}}";
+    const w = try serializeBrowserResponseStatus(testing.allocator, list, .success, "{\"downloads\":[],\"ask\":false}");
+    defer testing.allocator.free(w);
+    try testing.expect(std.mem.indexOf(u8, w, "\"downloads\":[]") != null);
 }
 
 test "browser.show 결과는 shown·visible·changed·key_held 넷 다 — 빠지거나 bool 이 아니거나 shown 이 거짓이면 internal_error" {

@@ -63,6 +63,8 @@ pub const browser_help =
     \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
     \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
     \\  show    --surface <id>                     bring a tab to the front of its pane, like clicking its tab (Chromium tabs; keys the user types stay out of the page until they click it; never switches workspace or window)
+    \\  downloads                                  list every download in the app, like the downloads window: key, state, name, bytes, tab, saved path (Chromium)
+    \\  download --key <n> (--save [--path <file>] | --discard | --cancel | --resume)   act on one download like the downloads window: save a held or waiting one (to ~/Downloads, or to --path anywhere — an existing file is never replaced, the name gets a number), discard it, cancel it, resume it
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
@@ -133,6 +135,11 @@ pub const Request = union(enum) {
     close: struct { surface_id: u64 },
     /// `browser show`(Chromium — 사용자 결정 2026-11-17·18). 그 탭을 그 pane 의 앞 탭으로. 응답 {shown, visible, changed, key_held}.
     show: struct { surface_id: u64 },
+    /// `browser downloads`(사용자 결정 2026-11-17) — 앱 전체 다운로드 목록. 대상 탭 없음(부른 pane). 응답 {downloads:[…], ask}.
+    downloads,
+    /// `browser download --key <n> (--save [--path f] | --discard | --cancel | --resume)` — 한 다운로드에 목록 창의 동작. `path` 는 이 프로세스의 현재
+    /// 폴더로 붙여(러너) 절대 경로로 보낸다. 응답 {ok, key, state}.
+    download: struct { key: u64, action: DownloadAction, path: ?[]const u8 = null },
     /// `browser dialog`(W9c② — Chromium). 그 탭·팝업 가족에 떠 있는 대화상자. 응답 {dialogs:[…]}.
     dialog: struct { surface_id: u64 },
     /// `browser handle-dialog`(W9c② — Chromium). `--accept`·`--dismiss` 중 하나, `--dialog` 는 `dialog` 가 준 번호. 응답 {ok, kind, continues?}.
@@ -170,6 +177,8 @@ pub const Request = union(enum) {
             .open => .open,
             .close => .close,
             .show => .show,
+            .downloads => .downloads,
+            .download => .download,
             .dialog => .dialog,
             .handle_dialog => .handle_dialog,
             .upload => .upload,
@@ -735,8 +744,13 @@ pub const ParseError = error{
     InvalidMockAction, // `network-mock` 에 동작이 없거나 둘 이상(W9d④)
     InvalidTraceArgs, // `trace` 의 꼴 — 동작마다 받는 옵션, 길이 1–30 초, 값 둘(W9e②)
     InvalidEmulateArgs, // `emulate` 의 꼴 — 값 둘·`--no-x` 와 값·사람과 JSON 꼴을 한 무리에, --platform·--client-hints 만, 바꿀 것 없는 set, 무리와 함께 준 --clear·--get(W9e①)
+    InvalidDownloadKey, // `download --key` 가 1..2^53-1 정수가 아님
+    InvalidDownloadAction, // `download` 에 --save·--discard·--cancel·--resume 중 하나가 아님(없거나 둘), `--path` 를 --save 없이, 빈 --path
     InvalidMockArgs, // `network-mock` 의 동작과 맞지 않는 옵션(응답 옵션은 --add 와만), 패턴 둘, 본문 둘, 잘못된 --header·--status, 상한 넘음
 };
+
+/// `browser download` 의 동작 — wire 이름은 태그 그대로(`control_browser.DownloadAction` 과 같은 넷 — CLI 는 세션 L2 를 가져오지 않는다).
+pub const DownloadAction = enum { save, discard, cancel, @"resume" };
 
 /// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
 pub const max_dialog_token: u64 = 9_007_199_254_740_991;
@@ -1077,6 +1091,49 @@ fn parseInner(args: []const []const u8, diag: *Diag) ParseError!Command {
         const s = p.surface orelse return error.MissingSurface;
         if (p.arg) |extra| return diag.unexpected(extra);
         return .{ .request = .{ .close = .{ .surface_id = s } } };
+    }
+    if (eq(sub, "downloads")) {
+        // 대상 탭 없음 — 앱 전체(부른 pane). 남는 인자는 오타.
+        if (rest.len != 0) {
+            if (std.mem.startsWith(u8, rest[0], "-")) return diag.unknownOption(rest[0]);
+            return diag.unexpected(rest[0]);
+        }
+        return .{ .request = .downloads };
+    }
+    if (eq(sub, "download")) {
+        var key: ?u64 = null;
+        var action: ?DownloadAction = null;
+        var path: ?[]const u8 = null;
+        var i: usize = 0;
+        while (i < rest.len) {
+            const a = rest[i];
+            if (matchOpt(a, "--key")) {
+                const value = optValue(diag, rest, &i, "--key") catch |err| switch (err) {
+                    error.MissingOptionValue => return error.MissingKey,
+                    else => return err,
+                };
+                const k = std.fmt.parseInt(u64, value, 10) catch return error.InvalidDownloadKey;
+                if (k == 0 or k > max_dialog_token) return error.InvalidDownloadKey;
+                key = k;
+            } else if (matchOpt(a, "--path")) {
+                path = try optValue(diag, rest, &i, "--path");
+                if (path.?.len == 0) return error.InvalidDownloadAction;
+            } else if (matchOpt(a, "--action")) {
+                // `maru mcp` 의 길(`action` 인자) — `--save` 따위와 같은 뜻.
+                if (action != null) return error.InvalidDownloadAction;
+                action = std.meta.stringToEnum(DownloadAction, try optValue(diag, rest, &i, "--action")) orelse return error.InvalidDownloadAction;
+            } else if (eq(a, "--save") or eq(a, "--discard") or eq(a, "--cancel") or eq(a, "--resume")) {
+                if (action != null) return error.InvalidDownloadAction;
+                action = if (eq(a, "--save")) .save else if (eq(a, "--discard")) .discard else if (eq(a, "--cancel")) .cancel else .@"resume";
+                i += 1;
+            } else if (std.mem.startsWith(u8, a, "-")) {
+                return diag.unknownOption(a);
+            } else return diag.unexpected(a);
+        }
+        const k = key orelse return error.MissingKey;
+        const act = action orelse return error.InvalidDownloadAction;
+        if (path != null and act != .save) return error.InvalidDownloadAction; // 자리는 받기에만
+        return .{ .request = .{ .download = .{ .key = k, .action = act, .path = path } } };
     }
     if (eq(sub, "show")) {
         const p = try parseSurfaceArg(rest, diag);
@@ -2220,6 +2277,15 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
         .back => |g| return idOnlyRequest(gpa, id, "browser.back", g.surface_id),
         .close => |g| return idOnlyRequest(gpa, id, "browser.close", g.surface_id),
         .show => |g| return idOnlyRequest(gpa, id, "browser.show", g.surface_id),
+        .downloads => return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.downloads", .params = .{ .object = .empty } } }),
+        .download => |d| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "key", .{ .integer = @intCast(d.key) });
+            try obj.put(gpa, "action", .{ .string = @tagName(d.action) });
+            if (d.path) |p| try obj.put(gpa, "path", .{ .string = p });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.download", .params = .{ .object = obj } } });
+        },
         .dialog => |g| return idOnlyRequest(gpa, id, "browser.dialog", g.surface_id),
         .handle_dialog => |h| {
             var obj: std.json.ObjectMap = .empty;
@@ -2506,7 +2572,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, show, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock, emulate, trace };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, show, downloads, download, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock, emulate, trace };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -2712,6 +2778,45 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
         // 앞 탭이 됐다. 화면 밖 워크스페이스면 그 pane 의 앞 탭일 뿐이고(워크스페이스·창은 바꾸지 않는다), 사람이 치는 pane 이면 그 페이지는 사람이
         // 누를 때까지 키를 받지 않는다 — 둘 다 에이전트가 사람에게 말할 것이라 한 줄씩 알린다.
+        // 다운로드 목록 — 한 행에 한 줄. 이름·출처·경로는 페이지(서버)가 정한 글이라 걸러 낸다.
+        .downloads => {
+            const items = switch (result.get("downloads") orelse std.json.Value{ .null = {} }) {
+                .array => |a| a,
+                else => {
+                    try w.writeAll("error: malformed downloads\n");
+                    return false;
+                },
+            };
+            if (items.items.len == 0) try w.writeAll("(no downloads)\n");
+            for (items.items) |item| {
+                const o = switch (item) {
+                    .object => |oo| oo,
+                    else => continue,
+                };
+                try w.print("download {d}  {s}  ", .{ intField(o.get("key")) orelse 0, strField(o.get("state")) });
+                try writePageText(gpa, w, strField(o.get("name")), true);
+                const received = intField(o.get("received")) orelse 0;
+                const total = intField(o.get("total")) orelse -1;
+                if (total >= 0) try w.print("  {d}/{d} bytes", .{ received, total }) else try w.print("  {d} bytes", .{received});
+                try w.print("  tab={d}", .{intField(o.get("tab")) orelse 0});
+                if (strField(o.get("origin")).len > 0) {
+                    try w.writeAll("  from ");
+                    try writePageText(gpa, w, strField(o.get("origin")), false);
+                }
+                if (boolField(o.get("risky"))) try w.writeAll("  [can run]");
+                if (boolField(o.get("panel_open"))) try w.writeAll("  [save panel open]");
+                if (o.get("path")) |p| if (p == .string) {
+                    try w.writeAll("  path=");
+                    try writePageText(gpa, w, p.string, false);
+                };
+                if (o.get("save_failed")) |f| if (f == .string) try w.print("  [save failed: {s}]", .{f.string});
+                try w.writeAll("\n");
+            }
+            if (boolField(result.get("ask"))) try w.writeAll("note: the user asked maru to ask where to save each download — a held or waiting row needs download --save (with --path to pick the place)\n");
+        },
+        .download => {
+            try w.print("ok: {s}\n", .{strField(result.get("state"))});
+        },
         .show => {
             try w.writeAll(if (boolField(result.get("changed"))) "shown\n" else "already in front\n");
             if (!boolField(result.get("visible"))) try w.writeAll("note: its workspace is not the one on screen — it is the front tab of its pane there (the workspace was not switched)\n");
@@ -5223,6 +5328,8 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
         \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
         \\  show    --surface <id>                     bring a tab to the front of its pane, like clicking its tab (Chromium tabs; keys the user types stay out of the page until they click it; never switches workspace or window)
+        \\  downloads                                  list every download in the app, like the downloads window: key, state, name, bytes, tab, saved path (Chromium)
+        \\  download --key <n> (--save [--path <file>] | --discard | --cancel | --resume)   act on one download like the downloads window: save a held or waiting one (to ~/Downloads, or to --path anywhere — an existing file is never replaced, the name gets a number), discard it, cancel it, resume it
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
@@ -5580,6 +5687,54 @@ test "render: open(W9b③) 은 id·주소(다 못 불렀으면 경고), close �
 
 // 탭 보이기(사용자 결정 2026-11-17·18): `show --surface <id>` 는 `browser.show {id}` 이고, 답의 두 갈래(화면 밖 워크스페이스·사람이 치는 pane)는
 // 에이전트가 사람에게 말할 것이라 한 줄씩 알린다.
+// 다운로드(사용자 결정 2026-11-17): 대상 탭 없이 앱 전체 — 목록 한 줄에 한 행(페이지가 정한 이름·출처·경로는 거른다), 동작은 넷 중 하나(`--action` 은
+// `maru mcp` 의 길), 자리는 --save 와만.
+test "parse·build·render: downloads·download — 동작 하나, --path 는 --save 와만, 목록은 한 행 한 줄로 걸러서" {
+    try testing.expect((try parse(&.{"downloads"})).request == .downloads);
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "downloads", "x" }));
+    const d = (try parse(&.{ "download", "--key", "3", "--save", "--path", "/tmp/a.pdf" })).request.download;
+    try testing.expect(d.key == 3 and d.action == .save and std.mem.eql(u8, d.path.?, "/tmp/a.pdf"));
+    try testing.expect((try parse(&.{ "download", "--key", "3", "--action", "resume" })).request.download.action == .@"resume");
+    try testing.expect((try parse(&.{ "download", "--key=3", "--discard" })).request.download.action == .discard);
+    try testing.expectError(error.MissingKey, parse(&.{ "download", "--save" }));
+    try testing.expectError(error.InvalidDownloadKey, parse(&.{ "download", "--key", "0", "--save" }));
+    try testing.expectError(error.InvalidDownloadAction, parse(&.{ "download", "--key", "3" }));
+    try testing.expectError(error.InvalidDownloadAction, parse(&.{ "download", "--key", "3", "--save", "--cancel" }));
+    try testing.expectError(error.InvalidDownloadAction, parse(&.{ "download", "--key", "3", "--cancel", "--path", "/tmp/a" }));
+    try testing.expectError(error.InvalidDownloadAction, parse(&.{ "download", "--key", "3", "--action", "open" }));
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "download", "--key", "3", "--save", "--path", "/tmp/a.pdf" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.download", pm.message.request.method);
+        const o = pm.message.request.params.?.object;
+        try testing.expectEqualStrings("save", o.get("action").?.string);
+        try testing.expectEqualStrings("/tmp/a.pdf", o.get("path").?.string);
+    }
+    var buf: [1024]u8 = undefined;
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"downloads\":[{\"key\":3,\"tab\":7,\"name\":\"set\\u001b[31mup.command\",\"origin\":\"e.test\",\"state\":\"held\",\"risky\":true,\"received\":20,\"total\":20},{\"key\":4,\"tab\":7,\"name\":\"a.pdf\",\"origin\":\"\",\"state\":\"done\",\"risky\":false,\"received\":5,\"total\":-1,\"path\":\"/tmp/a (1).pdf\",\"save_failed\":\"x\"},{\"key\":5,\"tab\":9,\"name\":\"b\",\"origin\":\"\",\"state\":\"asking\",\"risky\":false,\"received\":0,\"total\":0,\"panel_open\":true}],\"ask\":true}}", .downloads, &w));
+        const out = w.buffered();
+        try testing.expect(std.mem.indexOf(u8, out, "download 3  held  \"set[31mup.command\"  20/20 bytes  tab=7  from e.test  [can run]\n") != null);
+        try testing.expect(std.mem.indexOf(u8, out, "download 4  done  \"a.pdf\"  5 bytes  tab=7  path=/tmp/a (1).pdf  [save failed: x]\n") != null);
+        try testing.expect(std.mem.indexOf(u8, out, "[save panel open]") != null);
+        try testing.expect(std.mem.indexOf(u8, out, "\x1b") == null); // 페이지가 정한 제어 문자는 터미널에 가지 않는다
+        try testing.expect(std.mem.indexOf(u8, out, "note: the user asked maru to ask where to save") != null);
+    }
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"downloads\":[],\"ask\":false}}", .downloads, &w));
+        try testing.expectEqualStrings("(no downloads)\n", w.buffered());
+    }
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"key\":3,\"state\":\"preparing\"}}", .download, &w));
+        try testing.expectEqualStrings("ok: preparing\n", w.buffered());
+    }
+}
+
 test "parse·build·render: show — surface 만, browser.show {id}, shown/already in front 와 화면 밖·키 막음 안내" {
     try testing.expectEqual(@as(u64, 9), (try parse(&.{ "show", "--surface", "9" })).request.show.surface_id);
     try testing.expectError(error.MissingSurface, parse(&.{"show"}));
@@ -5668,7 +5823,7 @@ pub const ReplLine = union(enum) {
 
 /// 대상 탭을 받지 않는 하위 명령.
 fn takesNoSurface(sub: []const u8) bool {
-    return eq(sub, "list") or eq(sub, "open") or eq(sub, "help") or eq(sub, "repl");
+    return eq(sub, "list") or eq(sub, "open") or eq(sub, "downloads") or eq(sub, "download") or eq(sub, "help") or eq(sub, "repl");
 }
 
 /// repl 한 줄 — `exit`·`quit`, `help`·`?`, `use <id>`, `#` 주석, 그 밖은 하위 명령(고른 탭이 있고 대상이 빠졌으면 `--surface` 를 붙인다).

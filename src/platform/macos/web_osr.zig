@@ -2401,7 +2401,8 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
     navigateAs(gpa, surface_id, url, false);
 }
 
-/// W9d③ D2: `user` — 사용자가 주소창에 친 이동이다(그 이동 한 번은 막기 규칙이 막지 않는다 — sidecar 가 토큰으로). 복원·에이전트·재생 이동은 거짓.
+/// `user` — 사용자가 주소창에 친 이동이다(sidecar 가 사람의 탭 사용으로 센다 — `human_use.touchOf`, 흉내의 사람 입력 풀림; 막기·가짜 규칙의 예외는
+/// 아니다 — 옛 D2 는 사용자 결정 2026-11-18 「그것까지 넓히기」·「막기도 넓히기」 로 걷었다). 복원·에이전트·재생 이동은 거짓.
 fn navigateAs(gpa: std.mem.Allocator, surface_id: u64, url: []const u8, user: bool) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     const owned = gpa.dupe(u8, url) catch return;
@@ -2420,7 +2421,7 @@ fn navigateAs(gpa: std.mem.Allocator, surface_id: u64, url: []const u8, user: bo
 /// 이미 좁히기가 먼저다).
 pub fn userNavigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
     noteUserNavigation(surface_id);
-    navigateAs(gpa, surface_id, url, true); // W9d③ D2
+    navigateAs(gpa, surface_id, url, true); // 사람의 이동(사람의 탭 사용 — `human_use.touchOf`)
 }
 
 /// W9a: 에이전트의 `browser.navigate` — 이동을 보내고 그 끝을 지켜본다(`agentNavState`). 사용자의 이동이 아니다(`noteUserNavigation` 을
@@ -2480,7 +2481,7 @@ pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.Nav
     s.user_action_ms = monotonicNow(); // W9c②: 이것이 부른 떠나기 확인은 사용자 것이다
     s.console.userDrove(); // W9c① 4 회차 D: 뒤로 가면 사용자가 그 탭으로 지나온 곳일 수 있다
     networkUserDrove(surface_id, s); // W9d①
-    if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action, .user = true } }); // W9d③ D2 — 부르는 곳은 모두 사용자다
+    if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action, .user = true } }); // 부르는 곳은 모두 사용자다(사람의 탭 사용 — `human_use.touchOf`)
 }
 
 /// P0-2: 앱 전역 찾기 번호(0 은 「없음」이라 건너뛴다).
@@ -4019,7 +4020,7 @@ pub fn browserEmulate(out: std.mem.Allocator, surface_id: u64, req: EmulateReque
     const outcome = s.emu.apply(.{ .pane = req.pane, .params = req.params, .any_host = req.any_host, .grant_host = req.grant_host, .birth = req.birth, .page_host = page_host, .now_ms = monotonicNow(), .owner = req.owner }, &why) catch return .{ .fail = why };
     s.emu.tab_hidden = s.record.hidden; // W9e②: 숨은 탭의 CPU 경고(배경 우선순위)
     if (outcome.changed) sendEmulation(gpa, surface_id, s);
-    // `reload:true` — 걸고 나서 새로고침(첫 문서의 머리·터치 이벤트까지 — 실측 E5·E6). 에이전트의 새로고침이다(사용자 이동이 아니다 — D2 예외 없음).
+    // `reload:true` — 걸고 나서 새로고침(첫 문서의 머리·터치 이벤트까지 — 실측 E5·E6). 에이전트의 새로고침이다(사용자 이동이 아니다).
     const reloaded = req.params.reload and req.params.action != .get and s.created;
     if (reloaded) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = .reload } });
     return .{ .ok = try s.emu.resultJsonFor(out, req.pane, s.record.size.width, s.record.size.height, reloaded, outcome.touch_added) };
@@ -11865,7 +11866,7 @@ test "W9d② v20f 18: the engine stops for good while a recording is paused — 
 
 // ── W9d③: 요청 막기 — maru 쪽 배선 ──
 // 시험이 증명하는 것: sidecar 가 다시 떠 브라우저가 새로 만들어지면 지켜보기 → 본문 기록 → 막기 → 재생 이동의 차례로 보낸다(재생 이동은 사용자 이동이
-// 아니다 — D2 예외 없음), 사용자의 주소창 이동·뒤로는 `user` 를 싣고 에이전트 이동은 싣지 않는다, `error_page` 의 막은 규칙이 에이전트 이동을
+// 아니다), 사용자의 주소창 이동·뒤로는 `user` 를 싣고(사람의 탭 사용 — 막기의 예외는 아니다, 2026-11-18) 에이전트 이동은 싣지 않는다, `error_page` 의 막은 규칙이 에이전트 이동을
 // `blocked` 로 끝내고 사용자가 마지막으로 몬 탭이면 알린다, 규칙·엄격이 있는 탭은 ⊘(잠든 규칙만 있어도·sidecar 확인 전에도), grant 동기화가
 // 주인을 잃은 규칙을 버리고 다시 보낸다, 지켜보기가 끝나면 사라진다.
 
@@ -12091,7 +12092,7 @@ test "W9d③ v20b R15a: sidecar 가 다시 떠도 — 규칙·엄격이 같은 �
     try std.testing.expect(got.len == 3 and got[0] == .net_watch and got[1] == .net_block and got[2] == .navigate);
     try std.testing.expectEqual(gen, got[1].net_block.generation);
     try std.testing.expectEqualStrings("agent.test", got[1].net_block.strict_site);
-    try std.testing.expect(!got[2].navigate.user); // 재생 이동은 D2 예외가 아니다
+    try std.testing.expect(!got[2].navigate.user); // 재생 이동은 사람의 이동이 아니다
     {
         const j = try v20bBlockOk(gpa, 96, .{ .pane = 5, .any_host = true, .action = .list });
         defer gpa.free(j);
@@ -12198,7 +12199,7 @@ test "W9d③ v20b R18a: 사용자 알림 — 몰기는 세대마다 한 번, 같
     gpa.free(try v20bBlockOk(gpa, 98, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/two/*"} }));
     navAction(gpa, 98, .back);
     try std.testing.expect(takeBlockNotice(98)); // 새 세대 — 다시 한 번
-    // 같은 세대에서 사용자가 몬 이동이 두 번 막힌다(링크 — D2 예외 아님).
+    // 같은 세대에서 사용자가 몬 이동이 두 번 막힌다(링크).
     s.user_action_ms = monotonicNow() + 10;
     var notices: usize = 0;
     for (0..2) |_| {

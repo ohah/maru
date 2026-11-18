@@ -22,18 +22,18 @@ fn a5Tab(t: *table_mod.Table) !*table_mod.Tab {
     const tab = t.ensure(7, 70).?;
     const set1 = try compiled(testing.allocator, 7, 1, &.{ .{ .id = 41, .site = "localhost", .pattern = "*://*/s/swlate*" }, .{ .id = 42, .site = "localhost", .pattern = "*://*/blkifr*" } });
     try t.swap(testing.allocator, tab, set1, "", 1);
-    t.committed(7, 70, "localhost", 0);
+    t.committed(7, 70, "localhost");
     return tab;
 }
 
 /// 하위 프레임 이동 하나를 규칙 42 로 막는다(진행 중 기록 → IO 고르기 → 표시).
-fn blockSub(t: *table_mod.Table, frame: u64, url: []const u8, req: u64, at: i64) !u64 {
+fn blockSub(t: *table_mod.Table, frame: u64, url: []const u8, at: i64) !u64 {
     const o = table_mod.originHash("http://127.0.0.1:9");
     const canon = table_mod.canonHash(u8, url);
-    _ = t.beforeBrowse(7, 70, false, false, .other, frame, canon, o, "127.0.0.1", at);
+    t.beforeBrowse(7, 70, false, false, frame, canon, o, "127.0.0.1", at);
     var ub: [128]u16 = undefined;
     for (url, 0..) |ch, i| ub[i] = ch;
-    const a = t.acquire(70, req, false, 0, at + 1).?;
+    const a = t.acquire(70).?;
     const v = table_mod.decideTab(&a, ub[0..url.len], 1, false, "localhost");
     t.releaseNav(70, &a, v, false, true, canon);
     try testing.expectEqual(table_mod.Verdict{ .block = 42 }, v);
@@ -48,7 +48,7 @@ test "A5-R6 MED: 막힌 iframe 아홉·열둘의 오류 페이지 — 표시를 
         var keys: [12]u64 = undefined;
         for (0..n) |i| {
             // 사이트가 다른 iframe — 오류 페이지는 새 렌더 프레임 열쇠로 선다(실측 CEF 154).
-            const u = try blockSub(&t, 0x100 + i, "http://127.0.0.1:9/blkifr?a5", 300 + i, @intCast(1000 + i * 10));
+            const u = try blockSub(&t, 0x100 + i, "http://127.0.0.1:9/blkifr?a5", @intCast(1000 + i * 10));
             keys[i] = 0x200 + i;
             t.subframeEnded(70, keys[i], u, true);
         }
@@ -87,15 +87,15 @@ test "A5-R6 MED: 막은 하위 프레임 표시 자리가 넘쳐도 「다 알�
     var t: table_mod.Table = .{};
     defer t.deinit(testing.allocator);
     const tab = try a5Tab(&t);
-    for (0..table_mod.max_blocked_sub) |i| _ = try blockSub(&t, 0x100 + i, "http://127.0.0.1:9/blkifr?bs", 300 + i, @intCast(1000 + i));
+    for (0..table_mod.max_blocked_sub) |i| _ = try blockSub(&t, 0x100 + i, "http://127.0.0.1:9/blkifr?bs", @intCast(1000 + i));
     try testing.expect(!tab.err_unsure);
-    _ = try blockSub(&t, 0x900, "http://127.0.0.1:9/blkifr?bs", 900, 2000);
+    _ = try blockSub(&t, 0x900, "http://127.0.0.1:9/blkifr?bs", 2000);
     try testing.expect(tab.err_unsure);
     // 실측 꼴(A5-R6-err-frames-overflow n=12): 열둘이 함께 막혀 끝을 기다려도 자리가 남는다(넘침이 아니다 — 판정은 정확하게).
     var t2: table_mod.Table = .{};
     defer t2.deinit(testing.allocator);
     const tab2 = try a5Tab(&t2);
-    for (0..12) |i| _ = try blockSub(&t2, 0x100 + i, "http://127.0.0.1:9/blkifr?bs12", 300 + i, @intCast(1000 + i));
+    for (0..12) |i| _ = try blockSub(&t2, 0x100 + i, "http://127.0.0.1:9/blkifr?bs12", @intCast(1000 + i));
     try testing.expect(!tab2.err_unsure);
 }
 
@@ -138,8 +138,8 @@ test "A5-R6 NIT: 같은 주소로 막힌 두 iframe — 한 프레임의 끝(on_
     var t: table_mod.Table = .{};
     defer t.deinit(testing.allocator);
     const tab = try a5Tab(&t);
-    const u = try blockSub(&t, 0x20, "http://127.0.0.1:9/blkifr?same", 300, 1000);
-    _ = try blockSub(&t, 0x21, "http://127.0.0.1:9/blkifr?same", 301, 1010);
+    const u = try blockSub(&t, 0x20, "http://127.0.0.1:9/blkifr?same", 1000);
+    _ = try blockSub(&t, 0x21, "http://127.0.0.1:9/blkifr?same", 1010);
     // 프레임 0x20 의 막힘은 실측 길(on_load_error -20)로 끝난다.
     t.subframeEnded(70, 0x30, u, true);
     // 프레임 0x21 은 on_load_error 없이 그 주소로 문서가 선다(방어 갈래 — 이 갈래면 오류 페이지여야 한다).
@@ -149,8 +149,8 @@ test "A5-R6 NIT: 같은 주소로 막힌 두 iframe — 한 프레임의 끝(on_
     var t2: table_mod.Table = .{};
     defer t2.deinit(testing.allocator);
     const tab2 = try a5Tab(&t2);
-    const ub2 = try blockSub(&t2, 0x40, "http://127.0.0.1:9/blkifr?same2", 400, 1000);
-    _ = try blockSub(&t2, 0x41, "http://127.0.0.1:9/blkifr?same2", 401, 1010);
+    const ub2 = try blockSub(&t2, 0x40, "http://127.0.0.1:9/blkifr?same2", 1000);
+    _ = try blockSub(&t2, 0x41, "http://127.0.0.1:9/blkifr?same2", 1010);
     t2.subframeEnded(70, 0x41, ub2, true);
     try testing.expect(tab2.isErrFrame(0x41));
     var left: usize = 0;
@@ -168,7 +168,7 @@ test "A5-R6 NIT: 같은 주소로 막힌 두 iframe — 한 프레임의 끝(on_
     var t3: table_mod.Table = .{};
     defer t3.deinit(testing.allocator);
     const tab3 = try a5Tab(&t3);
-    const ub3 = try blockSub(&t3, 0x50, "http://127.0.0.1:9/blkifr?gone", 500, 1000);
+    const ub3 = try blockSub(&t3, 0x50, "http://127.0.0.1:9/blkifr?gone", 1000);
     t3.subframeGone(70, 0x50);
     t3.subframeStarted(70, 0x51, ub3);
     try testing.expect(!tab3.isErrFrame(0x51));
@@ -180,11 +180,11 @@ test "A5-R6 NIT: 같은 주소로 막힌 두 iframe — 한 프레임의 끝(on_
     var ufl: [u4_text.len]u16 = undefined;
     for (u4_text, 0..) |ch, i| ufl[i] = ch;
     const c4 = table_mod.canonHash(u16, &ufl);
-    const a4 = t4.acquire(70, 600, false, 0, 1000).?;
+    const a4 = t4.acquire(70).?;
     const v4 = table_mod.decideTab(&a4, &ufl, 1, false, "localhost");
     t4.releaseNav(70, &a4, v4, false, true, c4);
     try testing.expect(tab4.blocked_sub[0].url == c4 and tab4.blocked_sub[0].frame == 0);
-    _ = t4.beforeBrowse(7, 70, false, false, .other, 0x60, c4, 1, "127.0.0.1", 1100);
+    t4.beforeBrowse(7, 70, false, false, 0x60, c4, 1, "127.0.0.1", 1100);
     try testing.expectEqual(@as(u64, 0), tab4.blocked_sub[0].url);
 }
 
@@ -195,13 +195,13 @@ test "A5-R6 LOW-1: 서비스 워커 길의 이동 자체 판정은 요청의 쿠
     const tab = t.ensure(7, 70).?;
     try t.swap(gpa, tab, try compiled(gpa, 7, 1, &.{.{ .id = 93, .site = "localhost", .pattern = "http://localhost:9/s4/hang*" }}), "", 1);
     const set = tab.set.?;
-    t.committed(7, 70, "127.0.0.1", 0);
+    t.committed(7, 70, "127.0.0.1");
     const nav = "http://localhost:9/s4/hang?a5navs";
     var nb16: [nav.len]u16 = undefined;
     for (nav, 0..) |ch, i| nb16[i] = ch;
     const canon = table_mod.canonHash(u16, &nb16);
     const dest = table_mod.urlOriginHash(u16, &nb16);
-    _ = t.beforeBrowse(7, 70, true, false, .other, 0, canon, dest, "localhost", 100);
+    t.beforeBrowse(7, 70, true, false, 0, canon, dest, "localhost", 100);
     const parts = nb.splitUrl(u16, &nb16).?;
     var hb: [2][]const u8 = undefined;
     var bg: nb.Budget = .{};
@@ -229,24 +229,6 @@ test "A5-R6 LOW-1: 서비스 워커 길의 이동 자체 판정은 요청의 쿠
     // 다른 주소·다른 출처의 요청은 이동이 아니다(귀속도 없다 — 부른 쪽이 `no` 를 거른다).
     try testing.expectEqual(table_mod.SwNav.no, table_mod.swNavItself(tab, table_mod.canonHash(u8, "http://localhost:9/s4/other"), dest, "localhost"));
     try testing.expectEqual(table_mod.SwNav.no, table_mod.swNavItself(tab, canon, table_mod.originHash("http://127.0.0.1:9"), "localhost"));
-}
-
-test "A5-R10 문서화된 틈: 사용자의 뒤로가 같은 문서의 다른 주소 항목이고 페이지가 그 이동을 취소하면(확정·on_before_browse 없음) 모형에서는 기록 토큰이 30 초 남는다 — 실측은 그 뒤 페이지의 기록 이동이 시작되지 않는다(판정 A5-R10-traverse-cancel-steal 이 지킨다)" {
-    var t: table_mod.Table = .{};
-    defer t.deinit(testing.allocator);
-    _ = try a5Tab(&t);
-    const H = table_mod.HistoryAt;
-    const A = table_mod.canonHash(u8, "http://localhost:9/a5/nc");
-    const B = table_mod.canonHash(u8, "http://localhost:9/a5/nc?b");
-    const blk = table_mod.canonHash(u8, "http://localhost:9/blk/target");
-    // [blk, A, B(몸짓 있는 pushState — 같은 문서)] — 사용자 뒤로: 대상 A(주소가 다르다) → 남긴다.
-    t.userNavAction(7, 70, .history, 1000);
-    const stays = table_mod.historyTokenStays(H{ .index = 2, .url = B, .step_url = A }, H{ .index = 1, .url = A });
-    try testing.expect(stays);
-    // 페이지가 navigate 사건으로 그 같은 문서 기록 이동을 취소했다 — 확정(주소 바뀜)이 없다. 20 초 뒤 페이지의 history.go(-2)(전이 FORWARD_BACK).
-    // 모형은 그 이동을 사용자의 것으로 친다 — 이 단언이 바뀌면(토큰을 거두게 되면) 계획 문서의 틈도 고친다.
-    const user = t.beforeBrowse(7, 70, true, false, .history, 0, blk, 1, "localhost", 21_000);
-    try testing.expect(user);
 }
 
 test "A5-B NIT: 엄격 밖의 bypass_off 가 실패하면(우회 모름) 그 뒤 기록 켬은 enable_record 다음 bypass_off 를 명시한다(기록의 enable 이 남은 우회 표시를 되살리지 않게), 한 번만" {

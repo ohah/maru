@@ -1022,8 +1022,9 @@ pub const FrameChannel = struct {
 pub const Navigate = struct {
     browser: BrowserId,
     url: []const u8,
-    /// W9d③ D2: 사용자가 주소창에 친 이동이다 — 그 탭의 막기 규칙은 이 이동 한 번(리다이렉트 홉 포함)을 막지 않는다(하위 자원은 막는다). 에이전트
-    /// 이동·sidecar 재시작 뒤 재생 이동은 거짓.
+    /// 사용자가 주소창에 친 이동이다 — sidecar 는 사람의 탭 사용으로만 센다(`human_use.touchOf` — 흉내의 사람 입력 풀림). 막기·가짜 규칙의 예외는
+    /// 아니다(옛 W9d③ D2 — 사용자 결정 2026-11-18 「그것까지 넓히기」·「막기도 넓히기」 로 걷었다; 칸은 바이트 꼴 그대로). 에이전트 이동·sidecar
+    /// 재시작 뒤 재생 이동은 거짓.
     user: bool = false,
 };
 
@@ -1072,7 +1073,8 @@ pub const FindResult = struct {
 pub const NavAction = struct {
     browser: BrowserId,
     action: NavActionKind,
-    /// W9d③ D2: 사용자의 뒤로·앞으로·새로고침이다 — 다음 주 프레임 이동 하나(1 초 안)는 막기 규칙이 막지 않는다.
+    /// 사용자의 뒤로·앞으로·새로고침이다 — sidecar 는 사람의 탭 사용으로만 센다(`human_use.touchOf`). 막기·가짜 규칙의 예외는 아니다(옛 D2 —
+    /// 2026-11-18 걷었다).
     user: bool = false,
 };
 

@@ -484,9 +484,10 @@ pub const gate_deadline_ms: i64 = 100;
 /// 이동이 주 프레임을 옮기지 않는 항목 등에서 흉내가 꺼진 채 남지 않게).
 pub const gate_safety_ms: i64 = 1000;
 
-/// 게이트가 붙잡는 maru 의 이동 하나. `user` 는 wire 의 `user`(D2 토큰 — 낼 때 건다). 메뉴의 뒤로·앞으로는 CEF 의 메뉴 명령과 같이 토큰 없이 낸다.
+/// 게이트가 붙잡는 maru 의 이동 하나(사람의 것이든 아니든 같다 — 막기의 옛 D2 토큰을 낼 때 걸던 `user` 는 2026-11-18 걷었다). 메뉴의 뒤로·앞으로는
+/// CEF 의 메뉴 명령과 같다.
 pub const GateAction = enum { back, forward, reload, navigate, menu_back, menu_forward };
-pub const GateStep = struct { action: GateAction, user: bool = false };
+pub const GateStep = struct { action: GateAction };
 
 /// 탭 하나의 게이트 줄 — 지움의 답을 기다리는 동안 온 maru 의 이동을 차례대로 쥔다. 규칙: 주소 이동은 줄을 그것 하나로 바꾼다(새 주소가 진행 중
 /// 이동을 대신한다 — Chrome 과 같다; 주소 사본은 부른 쪽이 하나 쥔다), 뒤로·앞으로·새로고침은 뒤에 붙는다, 줄이 차면 `full` — 부른 쪽이 곧 연다
@@ -1737,14 +1738,14 @@ test "W9e① 게이트: 줄 — 주소는 줄을 대신하고 뒤로·앞으로�
     try testing.expect(!g.active and !g.due(1 << 40));
     g.start(1000);
     try testing.expect(g.active and !g.due(1099) and g.due(1000 + gate_deadline_ms));
-    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .back, .user = true }));
+    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .back }));
     try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .forward }));
-    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .reload, .user = true }));
+    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .reload }));
     try testing.expectEqual(@as(usize, 3), g.len);
     try testing.expect(!g.hasNavigate());
-    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .navigate, .user = true })); // 진행 중 이동을 대신한다
+    try testing.expectEqual(Gate.Push.queued, g.push(.{ .action = .navigate })); // 진행 중 이동을 대신한다
     try testing.expectEqual(@as(usize, 1), g.len);
-    try testing.expect(g.hasNavigate() and g.steps[0].user);
+    try testing.expect(g.hasNavigate() and g.steps[0].action == .navigate);
     _ = g.push(.{ .action = .menu_back });
     try testing.expectEqual(GateAction.menu_back, g.steps[1].action);
     while (g.len < Gate.capacity) _ = g.push(.{ .action = .back });

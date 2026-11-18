@@ -385,8 +385,8 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         network_block_check.runV20c(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20c", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
-    // W9d③ 8 차 적대 검증 A8(`A8-*` — `--review-block-v20h`, `A8_ONLY=tgt,hid,dstrict,drule,drec`, `A8_M=<메서드 이름 조각>`) — 읽기 목록에 남은 28 개를 다른 강제 계산·로드 갈래로
-    // (늦은 iframe·그림, c-v:hidden 안 iframe·shadow·font-display, print, image-set·srcset, 상위 레이어, 닫힌 select·details, 숨긴 iframe, 숨은 탭). 회귀 판정(8 차 2 판 기준 199/0).
+    // W9d③ 8 차 적대 검증 A8(`--review-block-v20h`, `A8_ONLY=dstrict,drule,drec,…`) — 8 차의 읽기 목록 탐침(`tgt`·`hid` — 옛 D2 토큰의 다툼에서 남기는
+    // DevTools 호출)은 2026-11-18 「막기도 넓히기」 로 목록과 함께 지웠다(7 차 `--review-block-v20g` 도 통째로).
     // 9 차(`A9-*` — dstrict·drule·drec): 렌더러가 죽은 동안 보낸 엄격 켬·끔·막기 규칙 지우기·기록 끔·켬이 되살린 렌더러에 맞는가.
     // 10 차(`Z-*` — 기본: zbrecoff·zbstrict·zbrecon·zkill·zslots·z204·zpopup·zsrec·zkeeprec, `A8_ONLY` 에 이름이 있을 때만: zcrashurl·zrecrash·zearly·zrace):
     // 바쁜 렌더러가 처리하지 못한 채 죽은 명령, 탭마다 짝 자리, 되살린 문서의 머리 하위 자원(남는 틈 — 적기만).
@@ -400,17 +400,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         network_block_v20a3_check.runA8(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20h", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
-    // W9d③ 7 차 적대 검증 A7(`A7-*` — `--review-block-v20g`, `A7_ONLY=forced,hidden,name,rel,sub,tok`) — 읽기 목록에 남은 메서드가 페이지 스크립트를 돌리는가.
-    // 7 차 고침 뒤 기준: getBoxModel·getComputedStyleForNode 는 토큰을 거둔다, 숨은 탭 화면 찍기·releaseObject 뒤 FinalizationRegistry 는 남는 틈(적기만).
-    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20g")) {
-        _ = signal(13, 1);
-        var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
-        warmUp(host, std.mem.span(argv[3]));
-        network_block_v20a3_check.runA7(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20g", "{s}", .{@errorName(err)});
-        return if (failures == 0) 0 else 1;
-    }
-    // W9d③ 6 차 적대 검증 A6(`A6-*` — `--review-block-v20f`, `A6_ONLY=stale,mainerr,ro,tok,lazy`) — 6 차 고침(getProperties 는 토큰을 거둔다) 뒤 모두 단언.
+    // W9d③ 6 차 적대 검증 A6(`A6-*` — `--review-block-v20f`, `A6_ONLY=stale,mainerr`) — 읽기 목록·토큰의 `ro`·`tok`·`lazy` 는 2026-11-18 「막기도 넓히기」 로 지웠다.
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20f")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
@@ -419,7 +409,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         network_block_v20a3_check.runA6(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20f", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
-    // W9d③ 5 차 적대 검증 A5(`A5-*` — `--review-block-v20e`, `A5_ONLY=eov,leak,bfc,swi,nc,ro,tok,hist,strict`) — 5 차 고침 뒤 모두 단언.
+    // W9d③ 5 차 적대 검증 A5(`A5-*` — `--review-block-v20e`, `A5_ONLY=eov,leak,bfc,swi,strict`) — 토큰·읽기 목록의 `nc`·`ro`·`tok`·`hist` 는 2026-11-18 「막기도 넓히기」 로 지웠다.
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20e")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;

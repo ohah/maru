@@ -17,45 +17,6 @@ fn compiled(gpa: std.mem.Allocator, browser: msg.BrowserId, gen: u32, rules: []c
     return c.set;
 }
 
-test "A6-ro: startsNavigationCall 인자 꼴 — Chromium 이 참으로 읽을 수 있는 꼴은 모두 거두고, Chromium 이 무시하는 꼴만 남긴다" {
-    const gpa = testing.allocator;
-    const big_pad = try gpa.alloc(u8, 1 << 20);
-    defer gpa.free(big_pad);
-    @memset(big_pad, 'a');
-    const big = try std.fmt.allocPrint(gpa, "{{\"pad\":\"{s}\",\"captureBeyondViewport\":true}}", .{big_pad});
-    defer gpa.free(big);
-    var deep_buf: [600]u8 = undefined;
-    var dw: std.Io.Writer = .fixed(&deep_buf);
-    try dw.writeAll("{\"x\":");
-    for (0..200) |_| try dw.writeByte('[');
-    for (0..200) |_| try dw.writeByte(']');
-    try dw.writeAll(",\"captureBeyondViewport\":true}");
-    const deep = dw.buffered();
-    for ([_][]const u8{
-        "{\"captureBeyondViewport\":\"true\"}",
-        "{\"captureBeyondViewport\":1}",
-        "{\"captureBeyondViewport\":true,\"captureBeyondViewport\":false}",
-        "{\"captureBeyondViewport\":false,\"captureBeyondViewport\":true}",
-        "{\"\\u0063aptureBeyondViewport\":true}",
-        "{\"captureBeyondViewport\":tr",
-        "  {\"captureBeyondViewport\" : true }  ",
-        "{\"captureBeyondViewport\":true,}",
-        "{\"s\":\"\xff\",\"captureBeyondViewport\":true}",
-        big,
-        deep,
-    }) |p| {
-        if (!dt.startsNavigationCall(gpa, "Page.captureScreenshot", p)) std.debug.print("A6-ro kept: {s}\n", .{p[0..@min(p.len, 80)]});
-        try testing.expect(dt.startsNavigationCall(gpa, "Page.captureScreenshot", p));
-    }
-    // Chromium(crdtp)도 무시하는 꼴 — 중첩·대소문자 다른 열쇠: 남긴다(보기 크기를 바꾸지 않는다).
-    for ([_][]const u8{
-        "{\"clip\":{\"x\":0,\"y\":0,\"width\":10,\"height\":10,\"scale\":1,\"captureBeyondViewport\":true}}",
-        "{\"CaptureBeyondViewport\":true}",
-    }) |p| try testing.expect(!dt.startsNavigationCall(gpa, "Page.captureScreenshot", p));
-    // 메서드 이름에 따옴표를 넣어 바깥 JSON 을 바꾸는 꼴은 목록에 없다 — 거둔다.
-    try testing.expect(dt.startsNavigationCall(gpa, "Page.captureScreenshot\",\"params\":{\"captureBeyondViewport\":true},\"x\":\"", "{}"));
-}
-
 // iframe 하나가 오류 페이지(열쇠 err)와 다른 사이트 진짜 문서(열쇠 good — 새 렌더 프레임)를 오간다. 순수 모형에 떠난 열쇠의 떨어져 나감을 주지 않으면
 // (CEF 가 렌더 프레임 바꿈에 on_frame_detached 를 부르지 않는다고 치면) 자리가 찬다 — 살아 있는 프레임은 늘 하나인데도.
 // **모형의 답이다 — 실측은 닿지 않는다**: 같은 꼴을 실제 CEF 154 로 70 번 돌린 판정 `A6-stale-err-keys`(오류 페이지 갈래 둘)는 끝에도 규칙 없는 탭의
@@ -65,7 +26,7 @@ test "A6-R6 모형 답(실측 A6-stale-err-keys 로 닿지 않음): 떨어져 �
     var t: table_mod.Table = .{};
     defer t.deinit(testing.allocator);
     const tab = t.ensure(7, 70).?;
-    t.committed(7, 70, "localhost", 0);
+    t.committed(7, 70, "localhost");
     const bad = table_mod.canonHash(u8, "http://127.0.0.1:1/refused");
     const good = table_mod.canonHash(u8, "http://127.0.0.1:9/x/blank");
     for (0..table_mod.max_err_frames + 1) |i| {
@@ -81,46 +42,19 @@ test "A6-R6 모형 답(실측 A6-stale-err-keys 로 닿지 않음): 떨어져 �
     try testing.expectEqual(sw_share.Role.shows, sw_share.role(v == .shows, false, true, v == .maybe));
 }
 
-// 6 차 검증 LOW(실측 2/2 — 판정 `A6-R10-read-only-error-stack`): `Runtime.getProperties` 는 Error 값의 설명(`stack` 의 늦은 꼴 만들기)으로 페이지의
-// `Error.prepareStackTrace` 를 Error 마다 한 번 돌렸다(`ownProperties`·`generatePreview` 와 무관, `window` 에도). 고침: 읽기 목록에서 뺐다 — 토큰을 거둔다
-// (실제 CEF 판정 `A6-R10-getproperties-token`). maru 의 흐름(snapshot·찾기·화면 찍기·저장소 읽기)은 getProperties 를 쓰지 않는다.
-test "A6-R10 LOW 고침: Runtime.getProperties 는 읽기 목록 밖 — 인자와 무관하게 사용자 토큰을 거둔다" {
-    const gpa = testing.allocator;
-    try testing.expect(dt.startsNavigation("Runtime.getProperties"));
-    for ([_][]const u8{
-        "",
-        "{}",
-        "{\"objectId\":\"1\",\"ownProperties\":true}",
-        "{\"objectId\":\"1\",\"ownProperties\":true,\"generatePreview\":true}",
-        "{\"objectId\":\"1\",\"ownProperties\":false,\"accessorPropertiesOnly\":true,\"generatePreview\":true}",
-        "{\"objectId\":\"1\",\"nonIndexedPropertiesOnly\":true}",
-        "not json",
-    }) |p| try testing.expect(dt.startsNavigationCall(gpa, "Runtime.getProperties", p));
-    // 목록에 남은 Runtime 메서드는 페이지 값을 설명하지 않는 셋(놓기·멈춤)뿐이다 — 값의 설명을 만드는 메서드가 다시 들어오면 여기서 걸린다.
-    for (dt.read_only_methods) |m| {
-        if (!std.mem.startsWith(u8, m, "Runtime.")) continue;
-        const allowed = std.mem.eql(u8, m, "Runtime.releaseObject") or std.mem.eql(u8, m, "Runtime.releaseObjectGroup") or std.mem.eql(u8, m, "Runtime.terminateExecution");
-        if (!allowed) std.debug.print("A6: read list has {s}\n", .{m});
-        try testing.expect(allowed);
-    }
-    // 목록에 남은 읽기(실측 `A6-R10-read-list-lazy-accessors` 로 marks 0)는 그대로 남긴다.
-    for ([_][]const u8{ "DOM.resolveNode", "DOM.describeNode", "Accessibility.getFullAXTree", "Accessibility.queryAXTree", "Page.captureScreenshot" }) |m|
-        try testing.expect(!dt.startsNavigationCall(gpa, m, "{}"));
-}
-
 test "A6-R6 문서화된 대가: 같은 사이트 다른 호스트로 가는 서비스 워커 범위 이동은 ambiguous — 목적지 호스트에만 묶인 규칙은 막지 못한다" {
     const gpa = testing.allocator;
     var t: table_mod.Table = .{};
     defer t.deinit(gpa);
     const tab = t.ensure(7, 70).?;
     try t.swap(gpa, tab, try compiled(gpa, 7, 1, &.{.{ .id = 7, .site = "b.example.test", .pattern = "*://b.example.test/admin*" }}), "", 1);
-    t.committed(7, 70, "a.example.test", 0);
+    t.committed(7, 70, "a.example.test");
     const nav = "https://b.example.test/admin";
     var nb16: [nav.len]u16 = undefined;
     for (nav, 0..) |ch, i| nb16[i] = ch;
     const canon = table_mod.canonHash(u16, &nb16);
     const dest = table_mod.urlOriginHash(u16, &nb16);
-    _ = t.beforeBrowse(7, 70, true, false, .other, 0, canon, dest, "b.example.test", 100);
+    t.beforeBrowse(7, 70, true, false, 0, canon, dest, "b.example.test", 100);
     try testing.expectEqual(table_mod.SwNav.ambiguous, table_mod.swNavItself(tab, canon, dest, "example.test"));
     var hb: [2][]const u8 = undefined;
     const hs = table_mod.swHosts(tab, canon, dest, "example.test", &hb);

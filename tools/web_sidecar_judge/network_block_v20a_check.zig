@@ -3,8 +3,8 @@
 //! 회차마다(`A-R<n>-*`): R2 GURL 이 고쳐 쓰는 주소 꼴, R3 요청 도중 더한 규칙·다른 사이트로 가는 주 프레임 홉, R4 사이트 묶기(about:blank·떠난
 //! 문서의 비콘·다른 사이트 iframe·blob 맨 위), R5 특별한 요청 갈래(서비스 워커 등록 스크립트는 막지 못한다 — 문서화), R6 서비스 워커 길의 T(O)
 //! (불러오는 중·늦게 뜨는 iframe 이 있어도 규칙을 쥔 탭은 막는다 — MED-2), R7 귀속, R8 엄격 모드(리다이렉트로 경계를 넘은 문서는 시작 때의 값
-//! 그대로 닿고 수로 알린다 — MED-1), R9 Network 도메인 차례·DevTools 지킴, R10 D2(아무 일도 하지 않은 뒤로 뒤의 에이전트 이동 — LOW-3, 친 글의
-//! Chromium 꼴 — LOW-4). 탐침(`A-P-*`)은 같은 회차의 다른 길.
+//! 그대로 닿고 수로 알린다 — MED-1), R9 Network 도메인 차례·DevTools 지킴(R10 D2 토큰의 판정은 2026-11-18 「막기도 넓히기」 로 토큰과 함께
+//! 지웠다 — R7 의 귀속 판정은 규칙을 비운 뒤의 같은 주소 이동으로 잰다). 탐침(`A-P-*`)은 같은 회차의 다른 길.
 //! 엄격 모드(`blkstrict`): block-strict-per-tab·other-tab-untouched·same-origin-iframe·cache-to-network·reload·crosssite·site-latch·oopif-not·crash·
 //!   recording-share·valve·disable-flag.
 //! 재시작(`blkrestart` — 같은 프로필로 host 를 다시 띄운다): block-restart·block-strict-restart(규칙·엄격이 첫 이동보다 먼저 선다).
@@ -796,73 +796,21 @@ fn tabAttacks(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         for (r.errors.items[errs0..]) |ep| if (ep.browser == 1 and ep.rule != 0) {
             rule_after_supersede = ep.rule;
         };
-        // user types the same URL (D2 exempt — the server sleeps 2 s), then the user stops it.
+        // the rules go away and the same URL is navigated again (it reaches the server — it sleeps 2 s), then stopped: the stale attribution of the
+        // superseded blocked navigation must not tag that stop (2026-11-18 「막기도 넓히기」: the user's own typed navigation used to make this
+        // reachable through the D2 exemption — now it is blocked too, so the rules are cleared instead).
+        _ = try r.block(1, &.{}, "");
         const errs1 = r.errors.items.len;
         try r.host.send(.{ .navigate = .{ .browser = 1, .url = slow, .user = true } });
         r.pump(500);
         try r.host.send(.{ .nav_action = .{ .browser = 1, .action = .stop, .user = true } });
         r.pump(2500);
+        _ = try r.block(1, &rules, "");
         var stop_err: ?ErrPage = null;
         for (r.errors.items[errs1..]) |ep| if (ep.browser == 1) {
             stop_err = ep;
         };
-        report(stop_err == null or stop_err.?.rule == 0, "A-R7-stale-attribution", std.fmt.bufPrint(&d, "agent nav /blk/slowA superseded at once: error_pages {d} (rule {d}) · then user-typed /blk/slowA (server {d}) stopped → error_page {?d} rule {?d}", .{ errs_after_supersede, rule_after_supersede, seen("/blk/slowA"), if (stop_err) |v| v.code else null, if (stop_err) |v| v.rule else null }) catch "");
-    }
-
-    // ── R10: D2 — lingering nav_action token, same-document back, typed URL forms, one-shot ──
-    {
-        try r.create(2, uLoop(&u, "/p/sub?t2"));
-        try r.watch(2);
-        report(try r.block(2, &rules, ""), "A-setup-tab2", "rules on tab 2");
-        // a) no-op user back (no history), then agent navigate at once.
-        try r.host.send(.{ .nav_action = .{ .browser = 2, .action = .back, .user = true } });
-        try r.host.send(.{ .navigate = .{ .browser = 2, .url = uLoop(&u, "/blk/nb1") } });
-        _ = r.until(Run.loadsAt, 2, r.loads[2] + 1, wait_ms);
-        r.pump(600);
-        const a_seen = seen("/blk/nb1");
-        // b) control: wait 1.3 s
-        try r.host.send(.{ .nav_action = .{ .browser = 2, .action = .back, .user = true } });
-        r.pump(1300);
-        try r.nav(2, uLoop(&u, "/blk/nb2"), false);
-        r.pump(400);
-        const b_seen = seen("/blk/nb2");
-        report(a_seen == 0, "A-R10-noop-back-token-steal", std.fmt.bufPrint(&d, "no-op user back then agent navigate /blk/nb1 at once → server {d} (0 expected: agent navigations are not exempt) · control after 1.3 s /blk/nb2 server {d}", .{ a_seen, b_seen }) catch "");
-        // c) same-document back (pushState), then agent navigate at once.
-        try r.nav(2, uLoop(&u, "/p/sub?t2b"), false);
-        _ = r.ev(2, "(history.pushState({},'','/p/sub?t2b-ps'),'ps')", &o);
-        r.pump(200);
-        try r.host.send(.{ .nav_action = .{ .browser = 2, .action = .back, .user = true } });
-        r.pump(100);
-        var o2: [200]u8 = undefined;
-        const loc = r.ev(2, "location.search", &o2);
-        try r.host.send(.{ .navigate = .{ .browser = 2, .url = uLoop(&u, "/blk/nb3") } });
-        _ = r.until(Run.loadsAt, 2, r.loads[2] + 1, wait_ms);
-        r.pump(600);
-        report(seen("/blk/nb3") == 0, "A-R10-samedoc-back-token-steal", std.fmt.bufPrint(&d, "user back over a pushState entry (now {s}) then agent navigate /blk/nb3 within ~100 ms → server {d}", .{ loc, seen("/blk/nb3") }) catch "");
-        // d) typed URL forms that GURL rewrites.
-        r.pump(1200);
-        const Typed = struct { label: []const u8, path: []const u8, token: []const u8 };
-        const typed = [_]Typed{
-            .{ .label = "exact (control)", .path = "/blk/ty1", .token = "/blk/ty1" },
-            .{ .label = "space", .path = "/blk/t y2", .token = "/blk/t%20y2" },
-            .{ .label = "dot segment", .path = "/blk/zz/../ty3", .token = "/blk/ty3" },
-            .{ .label = "double quote", .path = "/blk/\"ty4\"", .token = "ty4" },
-        };
-        var exempt_n: usize = 0;
-        for (typed) |t| {
-            try r.nav(2, uLoop(&u, t.path), true);
-            r.pump(300);
-            const s = seen(t.token);
-            if (s > 0) exempt_n += 1;
-            report(s > 0, "A-R10-typed-form", std.fmt.bufPrint(&d, "user-typed {s} ({s}) → server {d}", .{ t.label, t.path, s }) catch "");
-        }
-        // LOW-4: 친 글은 Chromium 꼴로 맞춰 보므로 넷 모두 D2 예외로 지나간다(전에는 빈칸·점 조각·따옴표 셋이 막혔다).
-        report(exempt_n == typed.len, "A-R10-typed-summary", std.fmt.bufPrint(&d, "typed forms {d}: exempt (reached server) {d}", .{ typed.len, exempt_n }) catch "");
-        // e) one-shot: agent navigates to the exact URL the user typed.
-        const before = seen("/blk/ty1");
-        try r.nav(2, uLoop(&u, "/blk/ty1"), false);
-        r.pump(300);
-        report(seen("/blk/ty1") == before, "A-R10-one-shot", std.fmt.bufPrint(&d, "agent re-navigates the user's typed /blk/ty1 → server +{d}", .{seen("/blk/ty1") - before}) catch "");
+        report(stop_err == null or stop_err.?.rule == 0, "A-R7-stale-attribution", std.fmt.bufPrint(&d, "agent nav /blk/slowA superseded at once: error_pages {d} (rule {d}) · then rules cleared, user-typed /blk/slowA (server {d}) stopped → error_page {?d} rule {?d}", .{ errs_after_supersede, rule_after_supersede, seen("/blk/slowA"), if (stop_err) |v| v.code else null, if (stop_err) |v| v.rule else null }) catch "");
     }
 }
 

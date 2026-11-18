@@ -2,18 +2,14 @@
 //! 준다(CEF SDK 없이 기본 test 에서 돈다). 잠금은 `shared.lock`(IO 스레드의 처리기 고르기와 UI 스레드가 함께 쓴다 — 막기·가짜의 잠금과 함께
 //! 쥐지 않는다).
 //!
-//! 처리기 고르기가 보는 예외는 둘이다(`Exempt`):
-//!   - **사용자 이동(D2 — 막기만; 가짜는 2026-11-18 사용자 결정 「그것까지 넓히기」 로 이 예외를 보지 않는다)**: 막기 표(`net_block_table` 의 토큰 — W9d③ 의 2–20 회 검증 고침이 모두 거기 있다: 몸짓의 갈래,
-//!     거두기, 떠나기 확인의 멈춤, 시계 시작, speculation 번호 0)가 답한다. W9d④ 는 처음에 그 토큰을 이 파일로 떼어 냈지만(§13 P2-1 — 막기 규칙이
-//!     없는 탭에서는 소비하지 않았다), main 위로 옮기며 토큰은 막기 표에 두고 소비만 규칙과 무관하게 했다(`net_block_table.consumeExempt` —
-//!     「W9d④ main 위로 옮김」).
-//!   - **사람의 누름(Q2 — 가짜만, 사용자 탭의 규칙만)**: 이 표. 사용자 결정 Q2(2026-10-21 「사용자 탭은 진짜로」) — 사람이 누른 링크·폼으로
+//! 처리기 고르기가 보는 예외는 하나다(`Exempt`). 옛 **사용자 이동(D2)** 예외는 걷었다 — 가짜는 2026-11-18 「그것까지 넓히기」, 막기는 같은 날
+//! 「막기도 넓히기」(막기 표의 토큰·다툼·멈춤을 모두 지웠다).
+//!   - **사람의 누름(Q2 — 가짜만, `human_nav_real` 깃발의 규칙만; maru 는 2026-11-17 부터 그 깃발을 싣지 않는다)**: 이 표. 사용자 결정 Q2(2026-10-21 「사용자 탭은 진짜로」) — 사람이 누른 링크·폼으로
 //!     시작한 이동의 주 문서는 사용자 탭의 가짜 규칙이 바꾸지 않는다. sidecar 는 maru 가 보낸 사람 입력(마우스 누름·뗌·키·IME 확정 — 에이전트의
 //!     DevTools 입력은 maru 를 지나지 않는다)의 시각을 탭마다 적고, 렌더러가 시작한 주 프레임 이동(`on_before_browse` 의 사용자 몸짓)이 그 뒤
-//!     창 안이면 「사람」 으로 묶는다(사용자 이동 토큰이 그 이동을 이미 가져갔으면 묶지 않는다 — 사용자 이동이 이긴다). 가르지 못할 때는 사람
-//!     쪽으로(진짜 문서 — 안전한 쪽).
+//!     창 안이면 「사람」 으로 묶는다. 가르지 못할 때는 사람 쪽으로(진짜 문서 — 안전한 쪽).
 //!
-//! 시험이 증명하는 것: 사람 입력 창(몸짓이 있어야, 창 밖이면 아님, 사용자 이동이 이긴다), 첫 홉에서 번호를 예외로(리다이렉트 홉은 같은 번호로),
+//! 시험이 증명하는 것: 사람 입력 창(몸짓이 있어야, 창 밖이면 아님), 첫 홉에서 번호를 예외로(리다이렉트 홉은 같은 번호로),
 //! 번호 0(speculation)은 묶음을 쓰지 않는다, 하위 프레임·리다이렉트 홉은 묶지 않는다, 예외 아닌 새 이동은 남은 묶음을 지운다, 브라우저를 잊으면
 //! 지운다.
 
@@ -36,10 +32,8 @@ pub const bound_ms: i64 = 5_000;
 /// 안의 `setTimeout` 이동도 몸짓을 싣는다). 사람·에이전트를 가르지 못하면 사람 쪽(진짜 문서)이다.
 pub const human_window_ms: i64 = 5_000;
 
-/// 처리기 고르기가 보는 답 — `user` 는 막기만 지나가고(막기 표의 D2 — 가짜는 2026-11-18 부터 보지 않는다), `human` 은 그 깃발의 가짜 규칙만
-/// 지나간다(이 표의 Q2).
+/// 처리기 고르기가 보는 답 — `human` 은 그 깃발의 가짜 규칙만 지나간다(이 표의 Q2). 막기는 보지 않는다.
 pub const Exempt = struct {
-    user: bool = false,
     human: bool = false,
 };
 
@@ -83,12 +77,12 @@ pub const Table = struct {
     }
 
     /// `on_before_browse`(주 프레임만 — 하위 프레임은 부르지 않는다) — 사람의 이동이면 그 주소에 묶고 참. 리다이렉트 홉은 묶지 않는다(탭 길은 요청
-    /// 번호로 이미 예외다). `user_gesture` — CEF 가 준 사용자 몸짓(렌더러가 시작한 이동의 링크 누름·폼 제출). `user` — 막기 표의 D2 토큰이 이
-    /// 이동을 가져갔다(사용자 이동이 이긴다 — 사람으로 묶지 않는다). 예외 아닌 새 이동은 남은 묶음을 지운다(그 이동이 대신한다).
-    pub fn beforeBrowse(self: *Table, browser: BrowserId, cef_id: c_int, is_redirect: bool, user_gesture: bool, user: bool, url_canon: u64, now_ms: i64) bool {
+    /// 번호로 이미 예외다). `user_gesture` — CEF 가 준 사용자 몸짓(렌더러가 시작한 이동의 링크 누름·폼 제출 — 브라우저가 시작한
+    /// 친 주소·뒤로 단추에는 없다). 예외 아닌 새 이동은 남은 묶음을 지운다(그 이동이 대신한다).
+    pub fn beforeBrowse(self: *Table, browser: BrowserId, cef_id: c_int, is_redirect: bool, user_gesture: bool, url_canon: u64, now_ms: i64) bool {
         if (is_redirect) return false;
         const t = self.ensure(browser, cef_id) orelse return false;
-        const human = !user and user_gesture and now_ms < t.human_until;
+        const human = user_gesture and now_ms < t.human_until;
         if (human) {
             t.bound_url = url_canon;
             t.bound_until = now_ms + bound_ms;
@@ -137,47 +131,44 @@ pub var shared: Shared = .{};
 
 const testing = std.testing;
 
-test "W9d④ Q2: 사람 입력 창 — 몸짓이 있는 렌더러 이동이 창 안이면 사람, 몸짓이 없거나 창 밖이면 아님, 사용자 이동 토큰이 이긴다, 리다이렉트 홉은 번호로" {
+test "W9d④ Q2: 사람 입력 창 — 몸짓이 있는 렌더러 이동이 창 안이면 사람, 몸짓이 없거나 창 밖이면 아님, 리다이렉트 홉은 번호로" {
     var t: Table = .{};
-    try testing.expect(!t.beforeBrowse(7, 70, false, true, false, 1, 100)); // 사람 입력이 없었다 — 에이전트의 DevTools 누름
+    try testing.expect(!t.beforeBrowse(7, 70, false, true, 1, 100)); // 사람 입력이 없었다 — 에이전트의 DevTools 누름
     t.humanInput(7, 70, 1000);
-    try testing.expect(!t.beforeBrowse(7, 70, false, false, false, 1, 1001)); // 몸짓 없는 이동(페이지가 스스로)
-    try testing.expect(t.beforeBrowse(7, 70, false, true, false, 2, 1002));
+    try testing.expect(!t.beforeBrowse(7, 70, false, false, 1, 1001)); // 몸짓 없는 이동(페이지가 스스로)
+    try testing.expect(t.beforeBrowse(7, 70, false, true, 2, 1002));
     try testing.expect(t.consume(70, 40, 2, 1003));
     try testing.expect(t.consume(70, 40, 3, 1004)); // 같은 번호의 다음 홉
-    try testing.expect(!t.beforeBrowse(7, 70, false, true, false, 4, 1000 + human_window_ms)); // 창 밖
-    t.humanInput(7, 70, 9000);
-    try testing.expect(!t.beforeBrowse(7, 70, false, true, true, 5, 9001)); // 사용자가 친 주소(막기 표의 토큰이 가져갔다) — 사람으로 묶지 않는다
-    try testing.expect(!t.consume(70, 41, 5, 9002));
+    try testing.expect(!t.beforeBrowse(7, 70, false, true, 4, 1000 + human_window_ms)); // 창 밖
 }
 
 test "W9d④ 변이: 묶음의 시한, 소비한 묶음은 다음 요청에 다시 쓰지 않는다, 예외 아닌 이동은 남은 묶음을 지운다, 리다이렉트 홉은 묶지 않는다, 잊기" {
     var t: Table = .{};
     t.humanInput(7, 70, 1000);
-    try testing.expect(t.beforeBrowse(7, 70, false, true, false, 9, 1001));
+    try testing.expect(t.beforeBrowse(7, 70, false, true, 9, 1001));
     try testing.expect(!t.consume(70, 3, 9, 1001 + bound_ms)); // 묶은 주소의 시한
     // 묶음은 첫 홉 하나 — 같은 주소의 다른 요청(번호가 다르다)은 예외가 아니다.
     t.humanInput(7, 70, 2000);
-    _ = t.beforeBrowse(7, 70, false, true, false, 9, 2001);
+    _ = t.beforeBrowse(7, 70, false, true, 9, 2001);
     try testing.expect(t.consume(70, 55, 9, 2002));
     try testing.expect(!t.consume(70, 56, 9, 2003));
     try testing.expect(t.consume(70, 55, 10, 2004)); // 그 사이 다른 요청이 와도 첫 이동의 리다이렉트 홉은 그대로 예외
     // 사람 이동이 묶였지만 소비되지 않았다(취소) — 이어진 에이전트의 같은 주소 이동(몸짓 없음)은 그 묶음을 쓰지 않는다.
     t.humanInput(7, 70, 3000);
-    try testing.expect(t.beforeBrowse(7, 70, false, true, false, 4, 3001));
-    try testing.expect(!t.beforeBrowse(7, 70, false, false, false, 4, 3002));
+    try testing.expect(t.beforeBrowse(7, 70, false, true, 4, 3001));
+    try testing.expect(!t.beforeBrowse(7, 70, false, false, 4, 3002));
     try testing.expect(!t.consume(70, 60, 4, 3003));
     // 리다이렉트 홉은 사람 창으로 묶지 않는다.
     t.humanInput(7, 70, 4000);
-    try testing.expect(!t.beforeBrowse(7, 70, true, true, false, 6, 4001));
+    try testing.expect(!t.beforeBrowse(7, 70, true, true, 6, 4001));
     // 번호 0(speculation)은 묶음을 쓰지 않는다 — 진짜 이동 요청이 쓴다.
-    try testing.expect(t.beforeBrowse(7, 70, false, true, false, 6, 4002));
+    try testing.expect(t.beforeBrowse(7, 70, false, true, 6, 4002));
     try testing.expect(!t.consume(70, 0, 6, 4003));
     try testing.expect(t.consume(70, 61, 6, 4004));
     // 잊기.
     t.humanInput(7, 70, 5000);
     t.forget(70);
-    try testing.expect(!t.beforeBrowse(7, 70, false, true, false, 7, 5001));
+    try testing.expect(!t.beforeBrowse(7, 70, false, true, 7, 5001));
 }
 
 test "W9e② A3-1: 몸짓은 누름·뗌·키(뗌 제외)·IME 확정만, 탭을 쓴 것은 굴림·IME 조합·끝내기·편집 명령·놓음까지 — 옮김·떠남·끌기 들어옴/위/나감·키 뗌은 아니다" {

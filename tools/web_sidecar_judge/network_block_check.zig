@@ -9,11 +9,11 @@
 //!   block-cancel-not-used(막힌 XHR 이 곧 끝난다 — RV_CANCEL 이 아니다)·block-download(첨부 주소로의 이동은 막힘, `<a download>` 는 다운로드)·
 //!   block-ws-untouched(WebSocket 은 처리기를 지나지 않는다)·block-prefetch·block-speculation-id0(번호 0 의 prefetch·prerender 요청)·
 //!   block-page-context(다른 사이트에 묶인 규칙은 잠든다, 그 사이트 페이지의 다른 사이트 iframe 과 떠난 문서의 비콘에는 듣는다)·block-url-forms(조각·
-//!   사용자 정보는 막힘, 경로 대소문자·`%2F` 는 문서화된 빠져나가기)·block-types(종류 단 규칙)·block-user-nav-exempt(주소창 이동·사용자 뒤로·
-//!   새로고침·리다이렉트 홉은 통과, 그 페이지의 하위 자원은 막힘, 에이전트 새로고침은 막힘)·block-gate-flood(문이 떨어뜨린 요청도 막힘 —
+//!   사용자 정보는 막힘, 경로 대소문자·`%2F` 는 문서화된 빠져나가기)·block-types(종류 단 규칙)·block-user-nav-blocked(주소창 이동·사용자 뒤로·
+//!   새로고침·리다이렉트 홉도 막힘 — 막기도 넓히기 2026-11-18, 새로 고침·뒤로는 규칙 앞에 확정한 규칙 주소 문서에서)·block-gate-flood(문이 떨어뜨린 요청도 막힘 —
 //!   서버 0, 수)·block-devtools-guard·block-memcache-bfcache(관측)·block-hits(수의 차이).
 //! 서비스 워커 길(`blksw`): block-sw-all-ruled·shared-not-applied·types-skip·empty-T·midnav·new-browser·popup·partition·cache-storage,
-//!   block-navigate-op(서비스 워커 길로 막힌 이동은 -2 이지만 규칙이 붙는다)·block-user-nav-exempt-sw.
+//!   block-navigate-op(서비스 워커 길로 막힌 이동은 -2 이지만 규칙이 붙는다)·block-user-nav-blocked-sw(사람이 친 이동도 그 길에서 막힌다).
 //! 공유 워커(`blkshw` — 옮긴 판 재검증 SEVERE-1, 사용자 결정 A): 공유 워커의 요청도 서비스 워커 길 — block-shw-one-tab(탭 하나·종류 없는 규칙은
 //!   막고 `sw_hits`)·block-shw-types-skip(종류 규칙은 페이지만 막고 공유 워커에는 듣지 않는다)·block-shw-shared-not-applied(규칙 없는 같은 출처
 //!   탭이 있으면 지나가고 `sw_not_applied`).
@@ -119,8 +119,8 @@ fn reply(conn: c_int, status: []const u8, ctype: []const u8, extra: []const u8, 
 
 const html = "text/html; charset=utf-8";
 /// 서비스 워커 — `/s/`·`/blk/` 아래를 네트워크로 받아 오며 `sw=<인스턴스>` 를 단다(서버 줄로 서비스 워커를 지났는지·어느 인스턴스인지 안다).
-/// 이동(`mode=navigate`)은 주소를 바꾸지 않고 받아 온다 — 서비스 워커가 주소를 바꿔 받아 오는 이동은 막혀도 오류 페이지에 규칙이 붙지 않고 D2
-/// 예외도 받지 못한다(계획 §6.3 — 문서화된 틈, 실측 phase 0 sw3 가 그 꼴이었다).
+/// 이동(`mode=navigate`)은 주소를 바꾸지 않고 받아 온다 — 서비스 워커가 주소를 바꿔 받아 오는 이동은 막혀도 오류 페이지에 규칙이 붙지 않는다
+/// (계획 §6.3 — 문서화된 틈, 실측 phase 0 sw3 가 그 꼴이었다).
 /// `message` 를 받으면 1.5 초 뒤 `/s/swlate` 를 부른다(탭이 모두 떠난 뒤의 요청 — block-sw-empty-T).
 const sw_js =
     \\const iid=Math.random().toString(36).slice(2,8);
@@ -722,27 +722,41 @@ fn tabPath(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         r.pump(800);
         report(iframe_blocked and seen("/ctx/beacon") == 0, "block-page-context", std.fmt.bufPrint(&d, "localhost 의 127.0.0.1 iframe {s} · 떠난 문서 비콘 서버 {d}", .{ msgs, seen("/ctx/beacon") }) catch "");
     }
-    // D2 — 주소창 이동·사용자 뒤로·새로고침·리다이렉트 홉은 통과, 그 페이지의 하위 자원은 막힘, 에이전트 새로고침은 막힘.
+    // 막기도 넓히기(사용자 결정 2026-11-18): 사람의 주소창 이동·리다이렉트 홉·뒤로·새로 고침도 막힌다(옛 D2 예외 없음 — 오류 페이지에 규칙이 붙고
+    // 서버에 닿지 않는다). 새로 고침·뒤로가 규칙 주소 문서로 가게 그 문서는 규칙을 잠깐 비운 동안 에이전트가 확정한다(규칙 **앞에** — 계획 공격
+    // 3-MED-2: 친 문서가 막혀 확정되지 않으면 그 뒤의 새로 고침·뒤로는 규칙 밖 문서로 가 아무것도 재지 않는다).
     {
-        const errors_before = r.errors.items.len;
+        const e0 = r.errors.items.len;
         try r.nav(1, uLoop(&u, "/blk/userpage"), true);
         r.pump(800);
-        const typed = seen("/blk/userpage") == 1 and seen("/blk/userimg") == 0;
+        const ep_typed = r.lastError(1);
+        const typed = seen("/blk/userpage") == 0 and r.errors.items.len > e0 and ep_typed != null and ep_typed.?.rule == 1;
+        const e1 = r.errors.items.len;
         try r.nav(1, uLoop(&u, "/r/user"), true);
         r.pump(600);
-        const hop = seen("/blk/usertarget") == 1;
-        try r.nav(1, uLoop(&u, "/p/sub?r5"), false);
-        try r.action(1, .back, true);
-        r.pump(600);
-        const back = seen("/blk/usertarget") == 2;
+        const ep_hop = r.lastError(1);
+        const hop = seen("/r/user") >= 1 and seen("/blk/usertarget") == 0 and r.errors.items.len > e1 and ep_hop != null and ep_hop.?.rule == 1;
+        _ = try r.block(1, &.{}, "");
+        try r.nav(1, uLoop(&u, "/blk/userdoc?pre"), false);
+        r.pump(400);
+        const pre = seen("/blk/userdoc?pre") == 1;
+        _ = try r.block(1, &rules, "");
+        const e2 = r.errors.items.len;
         try r.action(1, .reload, true);
         r.pump(600);
-        const reload = seen("/blk/usertarget") == 3;
-        const errs_user = r.errors.items.len - errors_before;
-        try r.action(1, .reload, false);
-        r.pump(800);
-        const agent_reload_blocked = seen("/blk/usertarget") == 3 and r.errors.items.len > errors_before + errs_user;
-        report(typed and hop and back and reload and errs_user == 0 and agent_reload_blocked, "block-user-nav-exempt", std.fmt.bufPrint(&d, "주소창 {} (하위 자원 막힘) · 리다이렉트 홉 {} · 뒤로 {} · 새로고침 {} · 사용자 오류 페이지 {d} · 에이전트 새로고침 막힘 {}", .{ typed, hop, back, reload, errs_user, agent_reload_blocked }) catch "");
+        const ep_reload = r.lastError(1);
+        const reload = seen("/blk/userdoc?pre") == 1 and r.errors.items.len > e2 and ep_reload != null and ep_reload.?.rule == 1;
+        try r.nav(1, uLoop(&u, "/p/sub?r5"), false);
+        r.pump(300);
+        const e3 = r.errors.items.len;
+        try r.action(1, .back, true);
+        r.pump(600);
+        const ep_back = r.lastError(1);
+        const back = seen("/blk/userdoc?pre") == 1 and r.errors.items.len > e3 and ep_back != null and ep_back.?.rule == 1;
+        try r.action(1, .forward, true);
+        r.pump(600);
+        const forward = seen("/p/sub?r5") == 2;
+        report(typed and hop and pre and reload and back, "block-user-nav-blocked", std.fmt.bufPrint(&d, "주소창 {} · 리다이렉트 홉 {} · (규칙 앞에 확정 {}) 새로 고침 {} · 뒤로 {} · 앞으로(규칙 밖 — 관찰) {} — 서버 userpage {d}·usertarget {d}·userdoc {d}", .{ typed, hop, pre, reload, back, forward, seen("/blk/userpage"), seen("/blk/usertarget"), seen("/blk/userdoc?pre") }) catch "");
     }
     // 메모리 캐시·bfcache(관측 — 처리기를 지나지 않는다).
     {
@@ -894,11 +908,14 @@ fn serviceWorkerPath(report: Report, host_path: [:0]const u8, root: []const u8) 
         try r.nav(1, uLoop(&u, "/s/page?A2"), true);
         r.pump(500);
     }
-    // 사용자가 친 이동은 서비스 워커 길에서도 통과(D2 — §6.2-8).
+    // 막기도 넓히기(2026-11-18): 사용자가 친 이동도 서비스 워커 길에서 막힌다 — -2 오류 페이지에 규칙이 붙는다(옛 D2 §6.2-8 은 지나갔다). 그 출처를
+    // 보이는 두 탭이 모두 맞는 규칙을 쥐었다(바로 위 판정과 같은 차림).
     {
+        const errs = r.errors.items.len;
         try r.nav(1, uLoop(&u, "/s/swblkuser"), true);
-        r.pump(800);
-        report(seen("/s/swblkuser") >= 1, "block-user-nav-exempt-sw", std.fmt.bufPrint(&d, "주소창 이동(서비스 워커가 받아 옴) 서버 {d}", .{seen("/s/swblkuser")}) catch "");
+        r.pump(1200);
+        const ep = r.lastError(1);
+        report(r.errors.items.len > errs and ep != null and ep.?.rule == 11 and seen("/s/swblkuser") == 0, "block-user-nav-blocked-sw", std.fmt.bufPrint(&d, "주소창 이동(서비스 워커가 받아 옴) error_page {?d}·규칙 {?d} · 서버 {d}", .{ if (ep) |v| v.code else null, if (ep) |v| v.rule else null, seen("/s/swblkuser") }) catch "");
         try r.nav(1, uLoop(&u, "/s/page?A3"), true);
         r.pump(500);
     }
@@ -1527,14 +1544,14 @@ fn v20bRestart(report: Report, host_path: [:0]const u8, root: []const u8) !void 
     _ = r.until(Run.loadsAt, 1, 2, wait_ms);
     r.pump(800);
     const ep = r.lastError(1);
-    // 대조: 같은 주소를 사용자가 친 이동(user)으로 보내면 지나간다(D2) — 그래서 재생은 user 거짓이어야 한다.
+    // 사용자가 친 이동(user)도 막힌다(막기도 넓히기 2026-11-18 — 옛 D2 는 지나가 재생이 user 거짓이어야 했다; 이제 둘 다 막힌다, 수는 +1).
     try r.nav(1, uLoop(&u, "/v20b/rs/typed"), true);
     r.pump(500);
     // 재시작 뒤의 수는 0 부터의 차이(maru 가 누적한다).
     try r.nav(1, uLoop(&u, "/p/sub?second"), false);
     _ = r.ev(1, fetchExpr(&x, "/v20b/rs/b0"), &o);
     const after_hits = r.hitOf(1, 51).hits;
-    report(seen("/v20b/rs/replay") == 0 and ep != null and ep.?.rule == 51 and seen("/v20b/rs/typed") == 1 and first_hits == 3 and after_hits >= 1 and after_hits <= 2, "v20b-r15-restart-with-record", std.fmt.bufPrint(&d, "첫 sidecar 수 {d} · 재생 이동 서버 {d}·규칙 {?d} · 사용자 이동(D2) 서버 {d} · 재시작 뒤 수(차이) {d}", .{ first_hits, seen("/v20b/rs/replay"), if (ep) |e| e.rule else null, seen("/v20b/rs/typed"), after_hits }) catch "");
+    report(seen("/v20b/rs/replay") == 0 and ep != null and ep.?.rule == 51 and seen("/v20b/rs/typed") == 0 and first_hits == 3 and after_hits >= 2 and after_hits <= 3, "v20b-r15-restart-with-record", std.fmt.bufPrint(&d, "첫 sidecar 수 {d} · 재생 이동 서버 {d}·규칙 {?d} · 사용자 이동(막힘) 서버 {d} · 재시작 뒤 수(차이) {d}", .{ first_hits, seen("/v20b/rs/replay"), if (ep) |e| e.rule else null, seen("/v20b/rs/typed"), after_hits }) catch "");
 }
 
 /// 긴 주소(쿼리 ~2 KiB)로 3000 fetch — 규칙 없음 · 거의 맞다 빗나가는 8-별 규칙 32 개(마지막 조각만 없다) · 엄격 켬(규칙 없음).

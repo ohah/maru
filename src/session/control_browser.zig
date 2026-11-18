@@ -3592,11 +3592,12 @@ pub const GrantProvenance = struct {
     host: cpg.GrantHost = .{},
 };
 
-/// 대상 web surface 문서의 지금 호스트(collector snapshot 의 URL — http(s) 가 아니면 null).
+/// 대상 web surface 문서의 지금 호스트(collector snapshot 의 **확정 문서** 주소 — `doc_url_set` 이면 `doc_url`, 아니면 `url`; http(s) 가 아니면
+/// null). 주소창의 실패 주소(오류 페이지 — 2026-11-18)는 쓰지 않는다.
 pub fn targetHost(snapshot: cs.CollectorSnapshot, target_id: u64) ?[]const u8 {
     const dto = snapshot.find(target_id) orelse return null;
     return switch (dto.detail) {
-        .web => |w| cpg.hostOfUrl(w.url orelse return null),
+        .web => |w| cpg.hostOfUrl((if (w.doc_url_set) w.doc_url else w.url) orelse return null),
         else => null,
     };
 }
@@ -4537,6 +4538,22 @@ test "targetHost: web surface 의 http(s) 호스트만 — 없는 surface·비 w
     try testing.expectEqualStrings("example", targetHost(fx, 11).?);
     try testing.expect(targetHost(fx, 10) == null); // terminal
     try testing.expect(targetHost(fx, 99) == null);
+}
+
+test "targetHost(2026-11-18): Chromium 탭이 오류 페이지면 주소창의 실패 주소(url)가 아니라 확정 문서 주소(doc_url)의 호스트 — 페이지가 실패 이동으로 고른 호스트에 grant 가 묶이지 않는다" {
+    const web = struct {
+        fn dto(url: ?[]const u8, doc: ?[]const u8, set: bool) cs.SurfaceDto {
+            return .{ .surface_id = 21, .title = "t", .window = 1, .detail = .{ .web = .{ .url = url, .doc_url = doc, .doc_url_set = set, .panel_kind = .browser, .trust = .untrusted, .engine = .chromium, .controllable = true } } };
+        }
+    };
+    const shown_failed = [_]cs.SurfaceDto{web.dto("https://bank.test:1/", "https://a.test/page", true)};
+    try testing.expectEqualStrings("a.test", targetHost(.{ .surfaces = &shown_failed, .windows = &fx_windows }, 21).?);
+    // 확정 문서가 아직 없다(첫 이동이 실패) — 호스트 없음(실패 주소로 넘어가지 않는다).
+    const first_failed = [_]cs.SurfaceDto{web.dto("https://bank.test:1/", null, true)};
+    try testing.expect(targetHost(.{ .surfaces = &first_failed, .windows = &fx_windows }, 21) == null);
+    // WebKit 탭(`doc_url_set` 거짓)은 그대로 `url`.
+    const webkit = [_]cs.SurfaceDto{web.dto("https://w.test/", null, false)};
+    try testing.expectEqualStrings("w.test", targetHost(.{ .surfaces = &webkit, .windows = &fx_windows }, 21).?);
 }
 
 // ── 6) 유효 cap + browser.screenshot(5f-1) → BrowserOp{screenshot, arg={}} ── screenshot도 browser scope, rect/scale 없으면 빈 옵션 `{}`.

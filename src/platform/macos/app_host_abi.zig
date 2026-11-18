@@ -8720,7 +8720,8 @@ fn beginCdp(run: *CdpRun) void {
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
             if (!session_mod.web_osr.agentNavigate(gpa, run.surface_id, p.target.?)) return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id));
         },
-        .get_url => p.url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id))).url,
+        // 주소창·`browser.list` 와 같은 보이는 주소(오류 페이지면 실패한 주소 — 2026-11-18). 쿠키 op 의 `doc_url` 은 아래처럼 확정 주소다.
+        .get_url => p.url = session_mod.web_osr.shownUrl(run.surface_id) orelse return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id)),
         .screenshot => {},
     };
     // W9a③: 확인한 문서 주소를 복사해 op 에 준다 — 쿠키 저장소 op 은 grant 호스트가 그 주소를 덮는지 다시 본다(그사이 다른 사이트로 갔을 수 있다).
@@ -9219,7 +9220,7 @@ fn pollAgentOpen(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
     };
     const ready = if (r.want_load) st.loads > 0 else st.created;
     if (!ready and now < r.deadline_ms) return false;
-    completeAgentOpen(r.async_id, r.tab, st.url, ready);
+    completeAgentOpen(r.async_id, r.tab, session_mod.web_osr.shownUrl(r.tab) orelse st.url, ready); // 보이는 주소(오류 페이지면 실패한 주소)
     return true;
 }
 

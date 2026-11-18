@@ -5248,10 +5248,19 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   `on_before_browse` 가 묶고 IO 가 소비), 에이전트의 이동·DevTools 호출이 만드는 「다툼」 과 그 읽기 허용 목록(`devtools_table.read_only_methods`·
   `startsNavigationCall`), 떠나기 확인의 멈춤, 기록 토큰 거두기(`historyAt`), 서비스 워커 길의 사용자 이동 예외(`sw_share` 의 `user_nav`), Q2 표의
   「사용자 이동이 이긴다」. wire 의 `user` 칸은 그대로(사람의 탭 사용 — `human_use.touchOf`). 순수 시험 581 → 560(토큰·다툼·읽기 목록의 시험 22 를 지우고
-  사람 이동도 막는 시험 하나를 더했다). 사람이 보는 것: Chromium 오류 페이지 「… is blocked」(서비스 워커 사이트는 -2), 주소창은 옛 주소, ⊘, 탭·규칙
+  사람 이동도 막는 시험 하나를 더했다). 사람이 보는 것: Chromium 오류 페이지 「… is blocked」(서비스 워커 사이트는 -2), 주소창은 옛 주소(다음 날 「사람이 친 주소」 로 막힌 주소 — 아래), ⊘, 탭·규칙
   세대마다 한 번 알림. 갇히지 않는다(규칙은 추가한 사이트에 묶인다). 판정자: `--network-block`·`--network-mock`·`--review-block-v20*` 의 D2 판정을 뜻
   있게 뒤집거나(규칙 주소 문서를 규칙 **앞에** 확정한 뒤 사람의 새로 고침·뒤로) 토큰 장치만 재던 것을 지웠다. 격리 앱 재실측: 고치기 전 사람의 새로 고침·
   친 주소·뒤로가 진짜(서버에 닿음), 고친 뒤 셋 다 막힘(오류 페이지, 서버에 닿지 않음) — 기록 `$S/agent_equal/block_all/`.
+- **실패한 이동의 주소창(사용자 결정 2026-11-18 「사람이 친 주소」, `feat/browser-addr-failed-url`)**: 주 프레임 이동이 오류 페이지로 끝나면(막힘·접속
+  거부·DNS·안전하지 않은 포트·알 수 없는 스킴 — Chrome 처럼 모든 오류 페이지) 주소창은 가려던 주소다. CEF 는 실패한 주 프레임 이동에 주소를 알리지
+  않는다(판정 `af-no-address`) — sidecar 가 `on_load_error` 의 `failed_url`(마지막 홉)을 `error_page.url` 로 싣는다(**wire 28**). 주 프레임의 지금 주소가
+  그 주소와 같을 때만(오류 페이지가 섰다 — 옛 문서 위 주소 위장을 막는다; 판정자로 잰 갈래는 모두 오류 페이지를 세웠다). maru 는 http(s)·4 KiB 안만
+  받아(`Surface.failed_url` — 다른 스킴이 저장돼 다음 실행에 브라우저 이동이 되지 않게) **보이는 주소**로 낸다: 주소창·`browser.list`·`get_url`·
+  `browser.open` 결과·저장(#4745 의 「본 주소」 — 그 탭이 보이려던 주소). **확정 문서 주소**(`Surface.url`)는 그대로 — grant 호스트
+  (`control_browser.targetHost` 가 snapshot 의 `doc_url` 을 본다), 쿠키 op 의 문서 주소, 네트워크 판정. 새 문서(`page_started`)·주소 확정
+  (`url_changed`)·새 브라우저가 지운다. 판정자 `--addr-failed`(10 — 갈래마다 실패 주소·마지막 홉·새로 고침·뒤로·다운로드), 격리 앱 재실측 — 기록
+  `$S/agent_equal/addr_failed/`.
 - **A2 주인 넘기기**: 막기 규칙·막기 엄격·가짜 규칙·가짜 엄격·탭의 흉내·탭의 trace 는 각각 주인 pane 이 하나. 어느 pane 이든 바꾸고 지운다 — **실제로
   바꾼 호출의 pane 이 주인**, 그대로 두는 호출(같은 규칙·같은 응답(실행 사이트까지)·같은 사이트 엄격·같은 값의 흉내)은 주인을 옮기지 않는다. 철회·pane
   닫힘은 그 순간 주인인 것만 거둔다 — 20 회 검증 B DEF-3·W9d④ v2 R13(다시 켠 pane 이 주인이 되고 그 pane 의 철회가 처음 pane 의 엄격을 지웠다)을 이

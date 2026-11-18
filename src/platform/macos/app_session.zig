@@ -220,6 +220,10 @@ const ExternalLinkAction = struct {
 
 /// resolveNavUrl 결과(https:// 프리픽스 포함)를 담는 navigate pending 버퍼 크기 — 편집 버퍼(cap) + "https://"(8) 여유.
 pub const addr_nav_url_cap: usize = 4096;
+
+test "addr_nav_url_cap 는 web_osr 의 실패 주소 상한과 같다(넘는 실패 주소를 주소창에 보이면 그 탭이 저장되지 않는다 — 2026-11-18)" {
+    try std.testing.expectEqual(addr_nav_url_cap, web_osr.failed_url_cap);
+}
 /// 웹 페이지 찾기 질의 상한(§8). 찾기 문자열이 이보다 길 일은 없고, 넘으면 제출하지 않는다.
 const web_find_query_cap = 512;
 
@@ -19573,6 +19577,9 @@ pub const AppSession = struct {
                             (if (ns.url.len == 0) null else try arena.dupe(u8, ns.url))
                         else
                             null;
+                        // 확정 문서 주소(Chromium 탭 — grant 호스트는 이것으로; 주소창·list 의 `url` 은 오류 페이지면 실패한 주소다, 2026-11-18).
+                        const osr_doc: ?[]const u8 = if (web_ops.isOsrTerm(term)) (if (web_osr.docUrl(web_sid)) |d| d else "") else null;
+                        const doc_url: ?[]const u8 = if (osr_doc) |d| (if (d.len == 0) null else try arena.dupe(u8, d)) else null;
                         try member_ids.append(arena, web_sid);
                         try surfaces.append(arena, .{
                             .surface_id = web_sid,
@@ -19585,6 +19592,8 @@ pub const AppSession = struct {
                             .detail = .{
                                 .web = .{
                                     .url = web_url, // Phase 7e-1a nav 상태(로드 전엔 null)
+                                    .doc_url = doc_url,
+                                    .doc_url_set = osr_doc != null,
                                     .panel_kind = switch (term.web_panel_kind) {
                                         .markdown => .markdown,
                                         .browser => .browser,
@@ -62209,6 +62218,18 @@ test "captureWorkspaceTab: 아직 넘기지 않은 복원 주소·열리지 않�
     {
         const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
         try std.testing.expectEqual(@as(usize, 1), wp.browser_terms.len);
+        try std.testing.expectEqualStrings("https://e.test/page", wp.browser_terms[0].url);
+    }
+    // (e) 2026-11-18 「사람이 친 주소」: 본 주소가 있어도 오류 페이지면 주소창이 보이는 실패 주소를 저장한다(그 탭이 보이려던 주소) — http(s) 가
+    // 아닌 실패 주소는 받지 않아 앞 문서의 주소 그대로(다음 실행에 `file:` 등을 열지 않게).
+    web_osr.testApply(allocator, .{ .error_page = .{ .browser = sid, .error_code = -20, .blocked_rule = 1, .url = "https://e.test/blocked" } });
+    {
+        const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
+        try std.testing.expectEqualStrings("https://e.test/blocked", wp.browser_terms[0].url);
+    }
+    web_osr.testApply(allocator, .{ .error_page = .{ .browser = sid, .error_code = -301, .url = "file:///etc/hosts" } });
+    {
+        const wp = (try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session))).panes[0];
         try std.testing.expectEqualStrings("https://e.test/page", wp.browser_terms[0].url);
     }
 }

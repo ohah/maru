@@ -8,7 +8,7 @@
 //!   speculation-id0·favicon·main-frame(주소·history·`mocked` 끝)·iframe-same-site·oopif-site-bound(실행 출처 — 묶인 사이트가 덮지 않으면 진짜,
 //!   어느 호스트든이면 가짜)·redirect-location·redirect-hop-rematch·redirect-loop·cors(ACAO 없음 실패·`*`·preflight 없음)·nocors-redirect-opaque·
 //!   cookie-filter(판정자 훅으로 가짜에 Set-Cookie 를 실어도 저장 안 됨 — 기록하는·기록하지 않는 요청 둘 다)·header-allowlist(codec 이 거절)·
-//!   no-store-bfcache·download-refused·block-wins·user-nav-exempt(가짜만 있는 탭 — §13 P2-1)·human-click(Q2 — 사용자 탭 규칙은 사람의 링크·폼
+//!   no-store-bfcache·download-refused·block-wins·user-nav-mocked(사용자가 친 주소·새로 고침·뒤로도 가짜 — 2026-11-18)·human-click(Q2 — 사용자 탭 규칙은 사람의 링크·폼
 //!   이동의 주 문서에 듣지 않고 에이전트의 DevTools 누름에는 듣는다, 에이전트 탭 규칙은 둘 다)·unrecorded(문이 떨어뜨려도 가짜)·
 //!   no-request-echo·devtools-guard·hits.
 //! 서비스 워커(`mksw`): mock-sw-path-not-mocked(`sw_not_mocked`·`page_controlled`)·sw-cache-clean(설치의 `cache.add` 는 진짜)·
@@ -24,7 +24,7 @@
 //!   같은 공유 워커에 붙어도 진짜)·mock-shw-script-after-close(만든 탭을 닫은 뒤 새 연결도 진짜)·mock-block-strict-union(막기 엄격만 켜도 가짜가 서비스 워커 아래 탭 길로 듣는다, 상태는 각자의 엄격만)·
 //!   mock-record-body-mixed(W9d② 기록 중 같은 주소를 가짜(fetch)·진짜(img)로 함께 — 진짜 기록에 가짜 본문이 붙지 않는다).
 //! 적대 검증 SEVERE 넷 고침(`mkfix4f`·`mkfix4d`·`mkfix4c` — 2026-11-11, `MOCK_ONLY=fix4`): mock-xframe-*·mock-sameframe-mocked(허락 밖 iframe 의 요청은 모두 진짜),
-//!   mock-d2-*·block-d2-*(사용자 이동 × 에이전트 DevTools 호출 — 다툼), mock-churn-no-traffic(요청 없는 바꾸기) — 파일 끝의 설명.
+//!   mock-typed·reload·same-url-*(사용자 이동 × 에이전트 DevTools 호출 — 2026-11-18 부터 둘 다 가짜)·block-d2-*(막기의 다툼 — 그대로), mock-churn-no-traffic(요청 없는 바꾸기) — 파일 끝의 설명.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -858,10 +858,19 @@ fn tabPath(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         try r.action(1, .reload, true);
         var o4: [200]u8 = undefined;
         const reload = r.ev(1, "document.title", &o4);
+        // 사람의 뒤로·앞으로(`nav_action{user}`)도 가짜 — 하위 자원 페이지로 갔다가 돌아온다(가짜 문서는 `no-store` 라 bfcache 에 들지 않는다).
+        try r.nav(1, uLoop(&u, "/p/sub?d2back"), false);
+        try r.action(1, .back, true);
+        var o6: [200]u8 = undefined;
+        const back = r.ev(1, "document.title", &o6);
+        try r.action(1, .forward, true);
+        try r.action(1, .back, true);
+        var o7: [200]u8 = undefined;
+        const back2 = r.ev(1, "document.title", &o7);
         try r.action(1, .reload, false);
         var o5: [200]u8 = undefined;
         const agent = r.ev(1, "document.title", &o5);
-        report(std.mem.eql(u8, typed, "MOCKED-DOC") and starts(sub, "ok 200 application/json {\"mock\"") and std.mem.eql(u8, reload, "MOCKED-DOC") and std.mem.eql(u8, agent, "MOCKED-DOC"), "mock-user-nav-mocked", std.fmt.bufPrint(&d, "주소창 {s} · 하위 자원 {s} · 사용자 새로고침 {s} · 에이전트 새로고침 {s}(2026-11-18 — 사용자 이동도 가짜)", .{ typed, sub, reload, agent }) catch "");
+        report(std.mem.eql(u8, typed, "MOCKED-DOC") and starts(sub, "ok 200 application/json {\"mock\"") and std.mem.eql(u8, reload, "MOCKED-DOC") and std.mem.eql(u8, back, "MOCKED-DOC") and std.mem.eql(u8, back2, "MOCKED-DOC") and std.mem.eql(u8, agent, "MOCKED-DOC"), "mock-user-nav-mocked", std.fmt.bufPrint(&d, "주소창 {s} · 하위 자원 {s} · 사용자 새로고침 {s} · 사용자 뒤로 {s}·{s} · 에이전트 새로고침 {s}(2026-11-18 — 사용자 이동도 가짜)", .{ typed, sub, reload, back, back2, agent }) catch "");
     }
     // 문이 떨어뜨린 요청도 가짜(기록 없이) — 쿠키 필터도. 100 개씩 여덟 번(한꺼번에 800 개면 탭의 처리기 자리 128 을 넘어 나머지는 설계대로 -12 다 —
     // 그것은 `mock-pool-busy` 가 본다).
@@ -1367,9 +1376,9 @@ fn portChecks(report: Report, host_path: [:0]const u8, root: []const u8) !void {
 // mock-xframe-*(v1 SEVERE-1 — 사용자 결정 「허락 밖 iframe 요청은 모두 진짜」): 맨 위 127.0.0.1(사이트 grant 127.0.0.1 — 실행 사이트도) 아래 다른 사이트
 //   iframe(localhost)이 부른 스크립트·grant 사이트 주소의 스크립트·이미지·fetch·전용 워커는 모두 진짜이고 서버가 받으며 규칙의 frame_not_mocked 로
 //   센다, 그 iframe 은 localhost 쿠키를 읽지 못한다(검증자의 쿠키 읽기 재현); 같은 사이트 iframe 의 같은 다섯은 가짜(대조).
-// mock-d2-*·block-d2-*(v1 SEVERE-2 — 사용자 결정 「고침」): 사용자가 친 주소·새로 고침(떠나기 처리기가 도는 옛 문서 포함) 바로 뒤의 에이전트
-//   `Runtime.evaluate` 는 그 이동을 가짜·막힘으로 만들지 않는다, 친 주소와 같은 주소로 겹친 에이전트 이동도 진짜(fail-safe), 대조로 에이전트만의 이동·
-//   새 문서가 선 뒤의 에이전트 이동은 그대로 가짜·막힘.
+// block-d2-*(v1 SEVERE-2 — 사용자 결정 「고침」): 사용자가 친 주소·새로 고침(떠나기 처리기가 도는 옛 문서 포함) 바로 뒤의 에이전트
+//   `Runtime.evaluate` 는 그 이동을 막힘으로 만들지 않는다, 대조로 에이전트만의 이동은 그대로 막힘. 가짜(mock-typed·reload·same-url-*·agent-nav-mocked)는
+//   2026-11-18 「그것까지 넓히기」 로 사용자 이동도 가짜다 — 같은 경주에서 사용자의 문서·겹친 에이전트 이동 모두 가짜이고 서버에 닿지 않는다.
 // mock-churn-no-traffic(v2 SEVERE-1 R11): 요청 없이 512 KiB 본문 규칙을 160 번 바꿔도 맺음이 모두 되고 페이지는 마지막 본문을 받으며 host 의
 //   footprint 가 자라지 않는다(은퇴 묶음을 바꿀 때 곧 거둔다).
 

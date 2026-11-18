@@ -5241,7 +5241,7 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   다음 날 걷었다 — 아래 「A8 넓히기」.
 - **A8 넓히기(사용자 결정 2026-11-18 「그것까지 넓히기」, `feat/browser-mock-all-navs`)**: 사람이 시작한 어떤 이동도 가짜에 진짜로 남지 않는다 —
   sidecar `net_mock_table.decideTab` 이 사용자 이동 토큰(D2)을 보지 않는다(요청의 `user_exempt` 칸을 걷었다). 막기의 D2 는 그대로다(결정은 가짜만).
-  판정자 `--network-mock` 의 D2 다섯을 뒤집었다(옛 판정자를 새 sidecar 에 돌리면 정확히 그 여섯이 FAIL — 기록 `$S/agent_equal/mock_all/`). 격리
+  판정자 `--network-mock` 의 옛 D2 판정을 「가짜·서버에 닿지 않음」 으로 뒤집고 사람의 뒤로·앞으로를 더했다(옛 판정자를 새 sidecar 에 돌리면 정확히 옛 D2 판정 여섯이 FAIL — 기록 `$S/agent_equal/mock_all/`). 격리
   앱 재실측: 사람이 주소창에 친 `m.html`·새로 고침 단추·뒤로 단추가 고치기 전 셋 다 진짜(서버에 닿음), 고친 뒤 셋 다 가짜(서버에 닿지 않음).
 - **A2 주인 넘기기**: 막기 규칙·막기 엄격·가짜 규칙·가짜 엄격·탭의 흉내·탭의 trace 는 각각 주인 pane 이 하나. 어느 pane 이든 바꾸고 지운다 — **실제로
   바꾼 호출의 pane 이 주인**, 그대로 두는 호출(같은 규칙·같은 응답(실행 사이트까지)·같은 사이트 엄격·같은 값의 흉내)은 주인을 옮기지 않는다. 철회·pane

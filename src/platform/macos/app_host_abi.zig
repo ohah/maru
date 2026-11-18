@@ -204,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 263), abi_version);
+    try std.testing.expectEqual(@as(u32, 264), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -5539,6 +5539,15 @@ pub export fn maru_macos_app_session_take_osr_location(session: ?*AppSession, ou
     return 1;
 }
 
+/// v264: 에이전트가 허용한 권한 요청 하나(이 창이 맡는다 — Swift 가 사람의 허용 단추와 같은 길로 답한다).
+pub export fn maru_macos_app_session_take_osr_agent_allow(session: ?*AppSession, out: ?*c.MaruAppHostOsrAgentAllow) i32 {
+    const app = session orelse return 0;
+    const dst = out orelse return 0;
+    const next = session_mod.web_ops.takeOsrAgentAllow(app) orelse return 0;
+    dst.* = .{ .surface_id = next.surface_id, .token = next.token, .permission_kinds = next.kinds, .permission_media = next.media };
+    return 1;
+}
+
 /// v205(W5b2): 위치 요청의 좌표 — 답했으면 1. 모르는 status 는 「없음」으로 본다.
 pub export fn maru_macos_app_session_osr_location_reply(session: ?*AppSession, surface_id: u64, token: u64, status: u32, latitude: f64, longitude: f64, accuracy: f64) i32 {
     const app = session orelse return 0;
@@ -6788,6 +6797,8 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .subscribe, .wait, .open, .close, .show, .downloads, .download => false,
         // W9c②: 대화상자 보기·답하기는 `pushBrowserOp` 가 곧 답한다(실행 중인 것이 없다).
         .dialog, .handle_dialog => false,
+        // 권한 요청 보기·답하기도 같은 자리(허용의 끝은 탭 op 목록이 기다린다 — 실행 자리를 쥐지 않는다).
+        .permissions, .permission => false,
         // W9d①: 네트워크 목록·자세히도 곧 답한다(쥔 기록을 읽기만 한다 — DevTools·op 줄 없음).
         .network, .network_request => false,
         // W9d②: 본문 기록을 켜고 끄기도 곧 답한다(sidecar 에 `net_record` 를 보내고 상태만 — 켜짐은 `browser.network` 의 `recording` 이 알린다).
@@ -6845,6 +6856,8 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .download => "browser.download",
         .dialog => "browser.dialog",
         .handle_dialog => "browser.handleDialog",
+        .permissions => "browser.permissions",
+        .permission => "browser.permission",
         .upload => "browser.upload",
         .network => "browser.network",
         .network_request => "browser.networkRequest",
@@ -7234,6 +7247,9 @@ const control_hello_caps = [_][]const u8{
     // 에이전트의 다운로드 목록·받기·버리기·그만두기·다시 받기(사용자 결정 2026-11-17).
     "browser.downloads",
     "browser.download",
+    // 에이전트가 권한 요청을 보고 답한다(사용자 결정 2026-11-18).
+    "browser.permissions",
+    "browser.permission",
     // W9c②: 에이전트가 JS 대화상자를 보고 답한다.
     "browser.dialog",
     "browser.handleDialog",
@@ -7552,7 +7568,7 @@ fn pushBrowserOp(
     const chromium = session_mod.web_osr.enabled();
     // W9c②: 대화상자 보기·답하기는 DevTools 를 부르지 않는다 — 여기서 곧 답한다. 대화상자로 멈춘 탭의 op 줄 뒤에 서면 안 되고(그 줄이
     // 바로 막힌 것이다) — 한 자리에서 가른다(계획 공격 2 회차).
-    if (op.method == .dialog or op.method == .handle_dialog) {
+    if (op.method == .dialog or op.method == .handle_dialog or op.method == .permissions or op.method == .permission) {
         if (chromium) return answerDialogOp(server, async_id, op);
         server.cross_gpa.free(op.arg);
         const pending = server.inFlightPending(async_id) orelse return;
@@ -8208,9 +8224,21 @@ fn answerDialogOp(server: *control_server_mod.ControlServer, async_id: u64, op: 
     switch (op.method) {
         .dialog => {
             var buf: [max_listed_dialogs]session_mod.web_osr.DialogEntry = undefined;
-            writeDialogList(&aw.writer, &caller, session_mod.web_osr.dialogList(op.surface_id, &buf)) catch return completeTabStatus(async_id, .failed, "out of memory");
+            var pbuf: [max_listed_dialogs]session_mod.web_osr.PermissionEntry = undefined;
+            // 같은 가족의 권한 요청 수(볼 수 있는 탭만) — 대화상자만 본 에이전트도 `browser.permissions` 를 알게(2026-11-18).
+            var perms: usize = 0;
+            for (session_mod.web_osr.permissionList(op.surface_id, &pbuf)) |e| {
+                if (DialogCaller.granted(&caller, e.tab)) perms += 1;
+            }
+            writeDialogList(&aw.writer, &caller, session_mod.web_osr.dialogList(op.surface_id, &buf), perms) catch return completeTabStatus(async_id, .failed, "out of memory");
             completeTabStatus(async_id, .success, aw.written());
         },
+        .permissions => {
+            var buf: [max_listed_dialogs]session_mod.web_osr.PermissionEntry = undefined;
+            writePermissionList(&aw.writer, &caller, session_mod.web_osr.permissionList(op.surface_id, &buf)) catch return completeTabStatus(async_id, .failed, "out of memory");
+            completeTabStatus(async_id, .success, aw.written());
+        },
+        .permission => answerPermissionOp(async_id, op, &caller),
         .handle_dialog => {
             const parsed = std.json.parseFromSlice(struct { accept: bool, text: ?[]const u8 = null, dialog: ?u64 = null }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
             defer parsed.deinit();
@@ -8231,8 +8259,8 @@ fn answerDialogOp(server: *control_server_mod.ControlServer, async_id: u64, op: 
     }
 }
 
-/// `{"dialogs":[…]}` — 볼 수 있는 탭(grant)의 것은 전부, 나머지 가족 탭은 `{tab, kind}`(cap 연결에는 싣지 않는다).
-fn writeDialogList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const session_mod.web_osr.DialogEntry) !void {
+/// `{"dialogs":[…], "permission_requests"?}` — 볼 수 있는 탭(grant)의 것은 전부, 나머지 가족 탭은 `{tab, kind}`(cap 연결에는 싣지 않는다).
+fn writeDialogList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const session_mod.web_osr.DialogEntry, permission_requests: usize) !void {
     var s: std.json.Stringify = .{ .writer = w, .options = .{} };
     try s.beginObject();
     try s.objectField("dialogs");
@@ -8264,6 +8292,10 @@ fn writeDialogList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const
         try s.endObject();
     }
     try s.endArray();
+    if (permission_requests > 0) {
+        try s.objectField("permission_requests");
+        try s.write(permission_requests);
+    }
     try s.endObject();
 }
 
@@ -8271,6 +8303,119 @@ const dialog_none_reason = "no dialog is showing in this tab — a dialog in a t
 /// 번호가 없거나 grant 가 없는 탭의 번호 — 둘을 가르지 않는다(다른 탭의 대화상자를 떠보지 못하게).
 const dialog_unknown_reason = "no such dialog — it was answered already, or it is not in a tab this caller controls (see maru browser dialog)";
 const dialog_file_reason = "a file chooser can only be dismissed here (--dismiss) — to put files in a file input, dismiss it and use browser upload (it checks and copies the files)";
+
+// ── 권한 요청(사용자 결정 2026-11-18 — 「에이전트는 사용자와 같은 힘」): 모든 종류, 허용·차단·닫기. 볼 수 있는 탭은 대화상자와 같다(`DialogCaller`). ──
+
+/// 청한 종류의 이름(`browser.permissions` 의 `permissions`) — 미디어 비트는 `MediaPermission` 이름, 프롬프트 비트는 `PermissionKind` 이름. 한 요청은
+/// 둘 중 하나만 싣는다(`message.PermissionRequest`). 차례는 비트 차례.
+fn permissionNames(kinds: u32, media: u8, out: *[40][]const u8) [][]const u8 {
+    const msg = maru.session.web_sidecar.message;
+    var n: usize = 0;
+    inline for (@import("type_info_fields").fields(msg.MediaPermission)) |f| {
+        const which: msg.MediaPermission = @fromBackingInt(@intCast(f.value));
+        if (media & which.bit() != 0) {
+            out[n] = @tagName(which);
+            n += 1;
+        }
+    }
+    inline for (@import("type_info_fields").fields(msg.PermissionKind)) |f| {
+        const which: msg.PermissionKind = @fromBackingInt(@intCast(f.value));
+        if (kinds & which.bit() != 0) {
+            out[n] = @tagName(which);
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+/// `{"permissions":[…]}` — 볼 수 있는 탭(grant)의 요청은 전부(`request`·`origin`·`permissions`·`shown`·`answering`), 나머지 가족 탭은 `{tab}`(cap 연결에는
+/// 싣지 않는다 — `dialog` 와 같다).
+fn writePermissionList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const session_mod.web_osr.PermissionEntry) !void {
+    var s: std.json.Stringify = .{ .writer = w, .options = .{} };
+    try s.beginObject();
+    try s.objectField("permissions");
+    try s.beginArray();
+    for (list) |e| {
+        const full = DialogCaller.granted(caller, e.tab);
+        if (!full and caller.pane == null) continue;
+        try s.beginObject();
+        if (full) {
+            try s.objectField("request");
+            try s.write(e.token);
+        }
+        try s.objectField("tab");
+        try s.write(e.tab);
+        if (full) {
+            try s.objectField("origin");
+            try s.write(e.origin);
+            var names: [40][]const u8 = undefined;
+            try s.objectField("permissions");
+            try s.write(permissionNames(e.kinds, e.media, &names));
+            try s.objectField("shown");
+            try s.write(e.shown);
+            try s.objectField("answering");
+            try s.write(e.answering);
+        }
+        try s.endObject();
+    }
+    try s.endArray();
+    try s.endObject();
+}
+
+const permission_none_reason = "no permission request is waiting in this tab — one in a tab it opened, or that opened it, is answered with its number (see maru browser permissions); a tab that is not on screen asks only once it is shown (maru browser show)";
+/// 번호가 없거나 grant 가 없는 탭의 번호 — 둘을 가르지 않는다.
+const permission_unknown_reason = "no such permission request — it was answered already, or it is not in a tab this caller controls (see maru browser permissions)";
+const permission_allowing_reason = "maru is already allowing this request (macOS may be asking the user, or the location is being looked up) — wait, or answer it with --block or --dismiss";
+const permission_gone_reason = "the request went away before it was answered (the page navigated, the tab closed or the browser engine restarted)";
+/// 허용의 끝을 기다리는 시한 — macOS 가 사람에게 묻는 창(처음 쓰는 장치)이나 좌표를 기다리면 넘는다(`waiting` — 답은 나중에 페이지로 간다).
+const agent_permission_wait_ms: i64 = 10_000;
+
+fn answerPermissionOp(async_id: u64, op: control_browser.BrowserOp, caller: *const DialogCaller) void {
+    const parsed = std.json.parseFromSlice(struct { answer: []const u8, request: ?u64 = null }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
+    defer parsed.deinit();
+    const answer = std.meta.stringToEnum(session_mod.web_osr.PermissionAnswer, parsed.value.answer) orelse return completeTabStatus(async_id, .failed, "invalid arguments");
+    const gpa = session_mod.web_osr.gpaRef() orelse return completeTabStatus(async_id, .failed, "the Chromium engine is not running");
+    const replied = session_mod.web_osr.agentAnswerPermission(gpa, op.surface_id, parsed.value.request, answer, caller.access()) catch |e| return completeTabStatus(async_id, .failed, switch (e) {
+        error.NoRequest => if (parsed.value.request != null) permission_unknown_reason else permission_none_reason,
+        error.AlreadyAllowing => permission_allowing_reason,
+    });
+    if (!replied.waits) return completeAgentPermission(async_id, answer, "answered", replied.token, replied.tab);
+    tab_runs.append(allocator, .{
+        .async_id = async_id,
+        .kind = .permission,
+        .tab = replied.tab,
+        .pane = 0,
+        .token = replied.token,
+        .deadline_ms = cdpNowMs() + agent_permission_wait_ms,
+    }) catch completeAgentPermission(async_id, answer, "waiting", replied.token, replied.tab);
+}
+
+fn completeAgentPermission(async_id: u64, answer: session_mod.web_osr.PermissionAnswer, outcome: []const u8, token: u64, tab: u64) void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    std.json.Stringify.value(.{ .ok = true, .answer = @tagName(answer), .outcome = outcome, .request = token, .tab = tab }, .{}, &aw.writer) catch return completeTabStatus(async_id, .failed, "out of memory");
+    completeTabStatus(async_id, .success, aw.written());
+}
+
+/// 에이전트 허용의 끝 — 창이 사람의 허용과 같은 길로 답하면 그 끝(`takeAgentOutcome`), 요청이 끝 없이 사라지면 실패, 시한이면 `waiting`.
+fn pollAgentPermission(r: TabRun, now: i64) bool {
+    if (session_mod.web_osr.takeAgentOutcome(r.token)) |o| {
+        const outcome: []const u8 = switch (o.result) {
+            // 허용을 기다리는 사이 차단·닫기가 먼저 갔다(그 답이 페이지로 갔다).
+            .deny, .dismiss => "replaced",
+            else => @tagName(o.outcome),
+        };
+        completeAgentPermission(r.async_id, .allow, outcome, r.token, r.tab);
+        return true;
+    }
+    if (session_mod.web_osr.dialogPending(r.tab, r.token) == null) {
+        completeTabStatus(r.async_id, .failed, permission_gone_reason);
+        return true;
+    }
+    if (now < r.deadline_ms) return false;
+    completeAgentPermission(r.async_id, .allow, "waiting", r.token, r.tab);
+    return true;
+}
 
 // ── W9b①: Chromium 탭의 op 실행 — DevTools 호출 차례 ──────────────────────────────────────────────────────────────
 // 한 op = `web_cdp_ops.Op` 하나(호출 여러 번). 호출마다 `web_osr.devtoolsCall` 로 보내고, 답(`pump` 끝에서 온다)을 차례에
@@ -8727,9 +8872,11 @@ fn isTabOp(m: control_browser.BrowserMethod) bool {
 
 const TabRun = struct {
     async_id: u64,
-    kind: enum { open, close, show },
+    kind: enum { open, close, show, permission },
     tab: u64,
     pane: u64,
+    /// permission — 에이전트가 허용한 요청의 번호(끝을 기다린다).
+    token: u64 = 0,
     /// open — 주소를 줬다(첫 불러오기까지 기다린다). 없으면 브라우저가 만들어질 때까지.
     want_load: bool = false,
     deadline_ms: i64,
@@ -8938,6 +9085,7 @@ fn pollTabRuns(refs: []const ControlSessionRef) void {
             .open => pollAgentOpen(refs, r, now),
             .close => pollAgentClose(refs, r, now),
             .show => pollAgentShow(refs, r, now),
+            .permission => pollAgentPermission(r, now),
         };
         if (finished) _ = tab_runs.orderedRemove(i) else i += 1;
     }
@@ -15627,6 +15775,143 @@ test "W9c②: 움직이는 op(누름·키·이동·스크립트)만 에이전트
 }
 
 /// 붙잡은 요청의 오류 메시지(소유 — 부른 쪽이 놓는다).
+// 권한 요청(사용자 결정 2026-11-18): dialog 와 같은 자리에서 곧 답한다 — 목록은 이름·사람이 맡음, 차단은 곧, 허용은 창이 사람의 길로 낸 답의 끝을
+// 탭 op 목록이 기다린다(끝·사라짐·시한). dialog 는 가족의 권한 요청 수를 싣는다.
+fn permPush(pending: *control_server_mod.PendingRequest, tab: u64, method: control_browser.BrowserMethod, arg: []const u8) !void {
+    try w9c2Push(pending, .{ .surface_id = tab, .method = method, .arg = try allocator.dupe(u8, arg), .pane_grant = w9c2Grant(5, tab) });
+}
+
+test "browser.permissions·permission: 목록(이름·shown)과 dialog 의 수, 차단은 곧 answered, 허용은 창의 답을 기다려 outcome — 사라지면 실패, 시한이면 waiting, 없는 요청은 까닭" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer tab_runs.clearAndFree(allocator);
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{75});
+    defer w9c2Forget(ta, &.{75});
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 75, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const web = session_mod.web_osr;
+    const notif = maru.session.web_sidecar.message.PermissionKind.notifications.bit();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.permission\",\"params\":{\"id\":75,\"answer\":\"allow\"}}";
+    var none: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    try permPush(&none, 75, .permission, "{\"answer\":\"allow\"}");
+    try expectPendingFailureText(&none, "no permission request is waiting in this tab");
+    var unknown: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    try permPush(&unknown, 75, .permission, "{\"answer\":\"block\",\"request\":424242}");
+    try expectPendingFailureText(&unknown, "no such permission request");
+    // 카메라+마이크(미디어) — 사람의 sheet 가 맡았다(창 11).
+    web.testApplyNow(ta, .{ .permission_request = .{ .browser = 75, .request = 1, .origin = "https://meet.test", .media = 0b11 } });
+    const t_cam = web.testDialogToken(75).?;
+    web.markDialogShown(75, t_cam, 11);
+    var list: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.permissions\",\"params\":{\"id\":75}}", .selector = null, .io = std.testing.io };
+    try permPush(&list, 75, .permissions, "");
+    {
+        const parsed = try w9b3Result(&list);
+        defer parsed.deinit();
+        const items = parsed.value.object.get("result").?.object.get("permissions").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), items.len);
+        const e = items[0].object;
+        try std.testing.expectEqual(@as(i64, @intCast(t_cam)), e.get("request").?.integer);
+        try std.testing.expectEqual(@as(i64, 75), e.get("tab").?.integer);
+        try std.testing.expectEqualStrings("https://meet.test", e.get("origin").?.string);
+        const names = e.get("permissions").?.array.items;
+        try std.testing.expect(names.len == 2 and std.mem.eql(u8, names[0].string, "microphone") and std.mem.eql(u8, names[1].string, "camera"));
+        try std.testing.expect(e.get("shown").?.bool and !e.get("answering").?.bool);
+    }
+    // dialog 는 대화상자가 없어도 권한 요청 수를 싣는다.
+    var dlg: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.dialog\",\"params\":{\"id\":75}}", .selector = null, .io = std.testing.io };
+    try permPush(&dlg, 75, .dialog, "");
+    {
+        const parsed = try w9b3Result(&dlg);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqual(@as(usize, 0), r.get("dialogs").?.array.items.len);
+        try std.testing.expectEqual(@as(i64, 1), r.get("permission_requests").?.integer);
+    }
+    // 허용 — 곧 답하지 않는다. 창이 맡아 사람의 길로 답하면(macOS 가 막았다 — 못 물음) 끝을 싣는다.
+    var allow: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    try permPush(&allow, 75, .permission, "{\"answer\":\"allow\"}");
+    try std.testing.expect(allow.response == null);
+    try std.testing.expectEqual(@as(usize, 1), tab_runs.items.len);
+    var again: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const again_arg = try std.fmt.allocPrint(allocator, "{{\"answer\":\"allow\",\"request\":{d}}}", .{t_cam});
+    defer allocator.free(again_arg);
+    try permPush(&again, 75, .permission, again_arg);
+    try expectPendingFailureText(&again, "maru is already allowing this request");
+    pollTabRuns(&.{});
+    try std.testing.expect(allow.response == null);
+    const taken = web.nextAgentAllow(12).?;
+    try std.testing.expectEqual(t_cam, taken.token);
+    try std.testing.expect(web.replyPermission(web.gpaRef().?, 75, t_cam, .ignore, .agent));
+    pollTabRuns(&.{});
+    {
+        const parsed = try w9b3Result(&allow);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expect(r.get("ok").?.bool);
+        try std.testing.expectEqualStrings("allow", r.get("answer").?.string);
+        try std.testing.expectEqualStrings("macos_blocked", r.get("outcome").?.string);
+        try std.testing.expectEqual(@as(i64, @intCast(t_cam)), r.get("request").?.integer);
+    }
+    try std.testing.expectEqual(@as(usize, 0), tab_runs.items.len);
+    // 차단 — 곧 answered.
+    web.testApplyNow(ta, .{ .permission_request = .{ .browser = 75, .request = 2, .origin = "https://news.test", .kinds = notif } });
+    var block: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    try permPush(&block, 75, .permission, "{\"answer\":\"block\"}");
+    {
+        const parsed = try w9b3Result(&block);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("block", r.get("answer").?.string);
+        try std.testing.expectEqualStrings("answered", r.get("outcome").?.string);
+    }
+    try std.testing.expect(web.testDialogToken(75) == null);
+    // 허용을 기다리는 사이 요청이 사라지면(이동) 실패, 시한이면 waiting.
+    web.testApplyNow(ta, .{ .permission_request = .{ .browser = 75, .request = 3, .origin = "https://news.test", .kinds = notif } });
+    var gone: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    try permPush(&gone, 75, .permission, "{\"answer\":\"allow\"}");
+    web.testApplyNow(ta, .{ .dialog_closed = .{ .browser = 75, .request = 3 } });
+    pollTabRuns(&.{});
+    try expectPendingFailureText(&gone, "the request went away before it was answered");
+    web.testApplyNow(ta, .{ .permission_request = .{ .browser = 75, .request = 4, .origin = "https://news.test", .kinds = notif } });
+    var slow: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    try permPush(&slow, 75, .permission, "{\"answer\":\"allow\"}");
+    tab_runs.items[0].deadline_ms = 0;
+    pollTabRuns(&.{});
+    {
+        const parsed = try w9b3Result(&slow);
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("waiting", parsed.value.object.get("result").?.object.get("outcome").?.string);
+    }
+    try std.testing.expect(web.testDialogToken(75) != null); // 요청은 남아 창이 이어서 답한다
+    // 허용을 기다리는 사이 차단이 먼저 가면 그 허용은 replaced(차단은 곧 answered).
+    const t_slow = web.testDialogToken(75).?;
+    try std.testing.expect(web.replyPermission(web.gpaRef().?, 75, t_slow, .accept, .agent));
+    _ = web.takeAgentOutcome(t_slow);
+    web.testApplyNow(ta, .{ .permission_request = .{ .browser = 75, .request = 5, .origin = "https://news.test", .kinds = notif } });
+    const t5 = web.testDialogToken(75).?;
+    var first: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    try permPush(&first, 75, .permission, "{\"answer\":\"allow\"}");
+    const block_arg = try std.fmt.allocPrint(allocator, "{{\"answer\":\"block\",\"request\":{d}}}", .{t5});
+    defer allocator.free(block_arg);
+    var over: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    try permPush(&over, 75, .permission, block_arg);
+    {
+        const parsed = try w9b3Result(&over);
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("answered", parsed.value.object.get("result").?.object.get("outcome").?.string);
+    }
+    pollTabRuns(&.{});
+    {
+        const parsed = try w9b3Result(&first);
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("replaced", parsed.value.object.get("result").?.object.get("outcome").?.string);
+    }
+}
+
 fn pendingErrorMessage(pending: *control_server_mod.PendingRequest) ![]u8 {
     const response = pending.response orelse return error.ExpectedResponse;
     defer allocator.free(response);

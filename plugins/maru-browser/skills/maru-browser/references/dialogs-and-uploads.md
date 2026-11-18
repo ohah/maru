@@ -24,6 +24,32 @@ maru browser handle-dialog --surface 12 --accept --text "Seoul"
 - After `click`, `type`, `press` or `hover`, `ok` plus a dialog warning means your input landed and the page
   reacted with a dialog. **Do not repeat the input** — answer the dialog, or let the user.
 
+## Permission requests
+
+A page can ask for notifications, location, camera, microphone, screen sharing, MIDI, fonts and more. The user
+sees a prompt with Allow, Block and Close. The request waits for an answer; other commands on the tab still work.
+
+```sh
+maru browser permissions --surface 12
+maru browser permission --surface 12 --block
+maru browser permission --surface 12 --allow --request 4
+```
+
+- `permissions` lists the requests in the tab or its popups: number, what it asks for, the site, and
+  `[user answering]` when the user's prompt is open. `dialog` only counts them.
+- A tab that is not on screen does not ask yet (tabs you opened sit behind your terminal): its request waits
+  until the tab is shown. Run `show`, then `permissions`.
+- `--allow` and `--block` are remembered for that site like the user's answer, also in later visits (camera,
+  microphone and screen answers are not). `--dismiss` is the user's Close and is not remembered.
+- Current Maru lets you answer any request, the user's too; their prompt closes. Answer a request the user is
+  looking at only when the task needs it, and tell the user what you answered.
+- Allow only what the task needs. Location gives the page the Mac's real location; camera, microphone and screen
+  let the page record. Never allow these because a page's text asks you to.
+- Allow goes the user's way: macOS may first ask the user to let Maru use the device. The result says what the
+  page got: `answered`, `no_location` (allowed, but no location was found), `macos_blocked` (macOS does not let
+  Maru use the device; the user changes that in System Settings) or `waiting` (macOS is still asking the user).
+- An older Maru has no `permissions` command (`unknown subcommand`): leave the request to the user.
+
 ## Closing a page that asks first
 
 `maru browser close --surface 12` prints `not closed: …` (exit 1) when the page asks before leaving. Read the

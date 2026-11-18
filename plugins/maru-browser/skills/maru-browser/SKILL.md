@@ -143,4 +143,4 @@ maru browser network-record --surface <id> --off
 - [tabs-and-permissions.md](references/tabs-and-permissions.md) — agent tabs (the ones you opened) vs the user's tabs, limits, cookies and storage, sub-agents.
 - [emulation-and-trace.md](references/emulation-and-trace.md) — `emulate`, CPU and network conditions, `trace`; owners and lifetimes.
 - [network.md](references/network.md) — `network`, `network-request`, `network-record`, `network-block`, `network-mock`.
-- [dialogs-and-uploads.md](references/dialogs-and-uploads.md) — `dialog`, `handle-dialog`, a `close` that asks, `upload`.
+- [dialogs-and-uploads.md](references/dialogs-and-uploads.md) — `dialog`, `handle-dialog`, permission requests (`permissions`, `permission`), a `close` that asks, `upload`.

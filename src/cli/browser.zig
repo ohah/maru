@@ -67,6 +67,8 @@ pub const browser_help =
     \\  download --key <n> (--save [--path <file>] | --discard | --cancel | --resume)   act on one download like the downloads window: save a held or waiting one (to ~/Downloads, or to --path anywhere — an existing file is never replaced, the name gets a number), discard it, cancel it, resume it
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
+    \\  permissions --surface <id>                 show the permission requests (notifications, location, camera, microphone, screen sharing …) waiting in this tab or its popups (Chromium tabs)
+    \\  permission --surface <id> (--allow | --block | --dismiss) [--request <n>]   answer one like the user's Allow, Block or Close — any request, the user's too; Allow and Block are remembered for that site like the user's answer (camera, microphone and screen answers are not); --request picks one from `permissions` (Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
     \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
     \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a new file under the temp folder only; a binary body needs --out; Chromium tabs)
@@ -144,6 +146,11 @@ pub const Request = union(enum) {
     dialog: struct { surface_id: u64 },
     /// `browser handle-dialog`(W9c② — Chromium). `--accept`·`--dismiss` 중 하나, `--dialog` 는 `dialog` 가 준 번호. 응답 {ok, kind, continues?}.
     handle_dialog: struct { surface_id: u64, accept: bool, text: ?[]const u8, dialog: ?u64 },
+    /// `browser permissions`(Chromium — 사용자 결정 2026-11-18). 그 탭·팝업 가족에 떠 있는 권한 요청. 응답 {permissions:[…]}.
+    permissions: struct { surface_id: u64 },
+    /// `browser permission`(Chromium — 사용자 결정 2026-11-18). `--allow`·`--block`·`--dismiss` 중 하나, `--request` 는 `permissions` 가 준 번호.
+    /// 응답 {ok, answer, outcome, request, tab}.
+    permission: struct { surface_id: u64, answer: PermissionAnswer, request: ?u64 },
     /// `browser upload`(W9c③ — Chromium). 대상(click 과 같은 로케이터)과 파일 1..10 개. 응답 {origin, files:[{name,size}], kept, navigated, dialog}.
     upload: UploadCmd,
     /// `browser network`(W9d① — Chromium). 거르기·쪽. 응답 {requests:[…], hidden_before_grant, dropped, …, next_page?}.
@@ -181,6 +188,8 @@ pub const Request = union(enum) {
             .download => .download,
             .dialog => .dialog,
             .handle_dialog => .handle_dialog,
+            .permissions => .permissions,
+            .permission => .permission,
             .upload => .upload,
             .network => .network,
             .network_request => .network_request,
@@ -727,6 +736,9 @@ pub const ParseError = error{
     TooManyFiles, // `upload` 에 파일이 10 개 넘게
     ConflictingAnswer, // `handle-dialog` 에 둘 다
     InvalidDialogToken, // `--dialog` 가 1..2^53-1 정수가 아님
+    MissingPermissionAnswer, // `permission` 에 `--allow`·`--block`·`--dismiss` 가 없음
+    ConflictingPermissionAnswer, // `permission` 에 둘 이상(또는 모르는 `--answer`)
+    InvalidPermissionRequest, // `--request` 가 1..2^53-1 정수가 아님
     InvalidNetworkType, // `network --type` 에 모르는 종류(또는 20 개 넘게)
     InvalidMethod, // `network --method` 가 1..32 자 토큰이 아님
     InvalidStatus, // `network --status` 가 100..599 또는 `1xx`..`5xx` 가 아님
@@ -751,9 +763,70 @@ pub const ParseError = error{
 
 /// `browser download` 의 동작 — wire 이름은 태그 그대로(`control_browser.DownloadAction` 과 같은 넷 — CLI 는 세션 L2 를 가져오지 않는다).
 pub const DownloadAction = enum { save, discard, cancel, @"resume" };
+/// `dialog` 의 `permission_requests`(2026-11-18) — 같은 가족에 권한 요청도 떠 있다(대화상자만 본 에이전트가 길을 알게).
+fn writePermissionRequestsNote(w: *std.Io.Writer, result: std.json.ObjectMap) !void {
+    const n = intField(result.get("permission_requests")) orelse return;
+    if (n <= 0) return;
+    try w.print("note: {d} permission request{s} also wait{s} in this tab or its popups — see maru browser permissions --surface <id>\n", .{ n, if (n == 1) "" else "s", if (n == 1) "s" else "" });
+}
+
+/// `browser permission` 의 끝마다 한 줄(없으면 null — 답이 페이지로 갔다).
+pub fn permissionOutcomeNote(outcome: []const u8) ?[]const u8 {
+    if (eq(outcome, "no_location")) return "allowed, but maru could not get a location — the page was told the location is unavailable";
+    if (eq(outcome, "macos_blocked")) return "macOS does not let Maru use a device this request needs (camera, microphone, screen recording or location) — the page was told it could not be asked; the user can allow Maru in System Settings › Privacy & Security";
+    if (eq(outcome, "site_blocked")) return "the user blocked this site's location while maru was getting it — not allowed";
+    if (eq(outcome, "replaced")) return "a block or dismiss reached the page first";
+    if (eq(outcome, "waiting")) return "macOS is asking the user to let Maru use a device, or maru is still getting the location — the page gets the answer when that finishes (see maru browser permissions)";
+    return null;
+}
+
+/// `browser permissions` — 요청마다 한 줄. 출처는 페이지가 정한 글이라 걸러 낸다.
+fn renderPermissions(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
+    const list = switch (result.get("permissions") orelse std.json.Value{ .null = {} }) {
+        .array => |a| a,
+        else => {
+            try w.writeAll("error: malformed permissions\n");
+            return false;
+        },
+    };
+    if (list.items.len == 0) {
+        try w.writeAll("(no permission requests)\n");
+        return true;
+    }
+    var any_full = false;
+    for (list.items) |item| {
+        const o = switch (item) {
+            .object => |oo| oo,
+            else => continue,
+        };
+        const request = intField(o.get("request")) orelse {
+            try w.print("permission tab={d} (no grant on that tab — not shown)\n", .{intField(o.get("tab")) orelse 0});
+            continue;
+        };
+        any_full = true;
+        try w.print("permission {d}  tab={d}  ", .{ request, intField(o.get("tab")) orelse 0 });
+        if (o.get("permissions")) |names| if (names == .array) for (names.array.items, 0..) |name, i| {
+            if (i > 0) try w.writeAll(",");
+            if (name == .string) try writePageText(gpa, w, name.string, false);
+        };
+        const origin = strField(o.get("origin"));
+        if (origin.len > 0) {
+            try w.writeAll("  from ");
+            try writePageText(gpa, w, origin, false);
+        }
+        if (boolField(o.get("shown"))) try w.writeAll("  [user answering]");
+        if (boolField(o.get("answering"))) try w.writeAll("  [allowing]");
+        try w.writeAll("\n");
+    }
+    if (any_full) try w.writeAll("answer with: maru browser permission --surface <id> (--allow | --block | --dismiss) --request <n>\n");
+    return true;
+}
 
 /// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
 pub const max_dialog_token: u64 = 9_007_199_254_740_991;
+
+/// `browser permission` 의 답 — 사람의 sheet 단추 셋(허용·차단·닫기)과 같다(L2 `control_browser.PermissionAnswer` 와 같은 이름).
+pub const PermissionAnswer = enum { allow, block, dismiss };
 
 /// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자, 양방향 제어 글자, 줄·문단 구분, interlinear, tag 글자를 뺀다(서버가 보낸 페이지
 /// 글을 터미널에 찍을 때). 쓴 바이트 수. `web_cdp_locate.displaySafe` 와 같다(둘을 함께 고친다).
@@ -1148,6 +1221,13 @@ fn parseInner(args: []const []const u8, diag: *Diag) ParseError!Command {
         return .{ .request = .{ .dialog = .{ .surface_id = s } } };
     }
     if (eq(sub, "handle-dialog")) return .{ .request = .{ .handle_dialog = try parseHandleDialogArgs(rest, diag) } };
+    if (eq(sub, "permissions")) {
+        const p = try parseSurfaceArg(rest, diag);
+        const s = p.surface orelse return error.MissingSurface;
+        if (p.arg) |extra| return diag.unexpected(extra);
+        return .{ .request = .{ .permissions = .{ .surface_id = s } } };
+    }
+    if (eq(sub, "permission")) return .{ .request = .{ .permission = try parsePermissionArgs(rest, diag) } };
     if (eq(sub, "upload")) return .{ .request = .{ .upload = try parseUploadArgs(rest, diag) } };
     if (eq(sub, "network")) return .{ .request = .{ .network = try parseNetworkArgs(rest, diag) } };
     if (eq(sub, "network-request")) return .{ .request = .{ .network_request = try parseNetworkRequestArgs(rest, diag) } };
@@ -1526,6 +1606,43 @@ fn parseHandleDialogArgs(rest: []const []const u8, diag: *Diag) ParseError!@Fiel
         } else return diag.unexpected(a);
     }
     return .{ .surface_id = surface orelse return error.MissingSurface, .accept = accept orelse return error.MissingAnswer, .text = text, .dialog = dialog };
+}
+
+/// `permission --surface <id> (--allow | --block | --dismiss) [--request <n>]`(2026-11-18). 숨은 `--answer <allow|block|dismiss>` 는 `maru mcp` 의 길이다.
+fn parsePermissionArgs(rest: []const []const u8, diag: *Diag) ParseError!@FieldType(Request, "permission") {
+    var surface: ?u64 = null;
+    var answer: ?PermissionAnswer = null;
+    var request: ?u64 = null;
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (eq(a, "--surface") or std.mem.startsWith(u8, a, "--surface=")) {
+            if (eq(a, "--surface")) {
+                if (i + 1 >= rest.len) return error.MissingSurfaceValue;
+                try assignSurface(&surface, rest[i + 1]);
+                i += 2;
+            } else {
+                try assignSurface(&surface, a["--surface=".len..]);
+                i += 1;
+            }
+        } else if (eq(a, "--allow") or eq(a, "--block") or eq(a, "--dismiss")) {
+            if (answer != null) return error.ConflictingPermissionAnswer;
+            answer = std.meta.stringToEnum(PermissionAnswer, a[2..]).?;
+            i += 1;
+        } else if (matchOpt(a, "--answer")) {
+            const value = try optValue(diag, rest, &i, "--answer");
+            if (answer != null) return error.ConflictingPermissionAnswer;
+            answer = std.meta.stringToEnum(PermissionAnswer, value) orelse return error.ConflictingPermissionAnswer;
+        } else if (matchOpt(a, "--request")) {
+            const value = try optValue(diag, rest, &i, "--request");
+            const t = std.fmt.parseInt(u64, value, 10) catch return error.InvalidPermissionRequest;
+            if (t == 0 or t > max_dialog_token) return error.InvalidPermissionRequest;
+            request = t;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return diag.unknownOption(a);
+        } else return diag.unexpected(a);
+    }
+    return .{ .surface_id = surface orelse return error.MissingSurface, .answer = answer orelse return error.MissingPermissionAnswer, .request = request };
 }
 
 const CookieArgs = struct { surface: ?u64, name: ?[]const u8, key: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, selector: ?[]const u8, ref: ?[]const u8, text: ?[]const u8, secure: bool };
@@ -2296,6 +2413,15 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             if (h.dialog) |d| try obj.put(gpa, "dialog", .{ .integer = @intCast(d) });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.handleDialog", .params = .{ .object = obj } } });
         },
+        .permissions => |g| return idOnlyRequest(gpa, id, "browser.permissions", g.surface_id),
+        .permission => |pr| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(pr.surface_id) });
+            try obj.put(gpa, "answer", .{ .string = @tagName(pr.answer) });
+            if (pr.request) |r| try obj.put(gpa, "request", .{ .integer = @intCast(r) });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.permission", .params = .{ .object = obj } } });
+        },
         .upload => |u| {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
@@ -2572,7 +2698,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, show, downloads, download, dialog, handle_dialog, upload, network, network_request, network_record, network_block, network_mock, emulate, trace };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, show, downloads, download, dialog, handle_dialog, permissions, permission, upload, network, network_request, network_record, network_block, network_mock, emulate, trace };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -2838,6 +2964,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             };
             if (list.items.len == 0) {
                 try w.writeAll("(no dialog)\n");
+                try writePermissionRequestsNote(w, result);
                 return true;
             }
             var any_full = false;
@@ -2870,6 +2997,17 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 };
             }
             if (any_full) try w.writeAll("answer with: maru browser handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] --dialog <token>\n");
+            try writePermissionRequestsNote(w, result);
+        },
+        .permissions => return renderPermissions(gpa, result, w),
+        .permission => {
+            try w.writeAll("ok: ");
+            try writePageText(gpa, w, strField(result.get("answer")), false);
+            try w.writeAll(" (");
+            const outcome = strField(result.get("outcome"));
+            try writePageText(gpa, w, outcome, false);
+            try w.writeAll(")\n");
+            if (permissionOutcomeNote(outcome)) |note| try w.print("note: {s}\n", .{note});
         },
         .upload => {
             // {origin, files:[{name,size}], kept, navigated, dialog} — 이름도 표시 안전하게(제어·양방향 글자를 뺀다).
@@ -5332,6 +5470,8 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  download --key <n> (--save [--path <file>] | --discard | --cancel | --resume)   act on one download like the downloads window: save a held or waiting one (to ~/Downloads, or to --path anywhere — an existing file is never replaced, the name gets a number), discard it, cancel it, resume it
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
+        \\  permissions --surface <id>                 show the permission requests (notifications, location, camera, microphone, screen sharing …) waiting in this tab or its popups (Chromium tabs)
+        \\  permission --surface <id> (--allow | --block | --dismiss) [--request <n>]   answer one like the user's Allow, Block or Close — any request, the user's too; Allow and Block are remembered for that site like the user's answer (camera, microphone and screen answers are not); --request picks one from `permissions` (Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
         \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
         \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a new file under the temp folder only; a binary body needs --out; Chromium tabs)
@@ -6232,6 +6372,63 @@ test "render: dialog(W9c②) 은 대화상자마다 종류·탭·번호·원인�
         var w: std.Io.Writer = .fixed(&buf);
         try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[{\"token\":3,\"tab\":5,\"kind\":\"before_unload\",\"message\":\"\",\"origin\":\"\",\"cause\":\"user\"}]}}", .dialog, &w));
         try testing.expectEqualStrings("before_unload tab=5 token=3 cause=user\n  message: \"\"\nanswer with: maru browser handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] --dialog <token>\n", w.buffered());
+    }
+}
+
+test "parse·build·render: permissions·permission(2026-11-18) — 답은 --allow·--block·--dismiss 중 하나(꼭, 숨은 --answer), --request 는 선택, 목록은 요청마다 한 줄, 끝마다 안내, dialog 는 권한 요청 수" {
+    try testing.expectEqual(@as(u64, 9), (try parse(&.{ "permissions", "--surface", "9" })).request.permissions.surface_id);
+    try testing.expectError(error.MissingSurface, parse(&.{"permissions"}));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "permissions", "--surface", "9", "x" }));
+    const a = (try parse(&.{ "permission", "--surface", "9", "--allow", "--request", "42" })).request.permission;
+    try testing.expect(a.surface_id == 9 and a.answer == .allow and a.request.? == 42);
+    try testing.expectEqual(PermissionAnswer.block, (try parse(&.{ "permission", "--block", "--surface=9" })).request.permission.answer);
+    try testing.expectEqual(PermissionAnswer.dismiss, (try parse(&.{ "permission", "--surface", "9", "--answer", "dismiss" })).request.permission.answer);
+    try testing.expectError(error.MissingPermissionAnswer, parse(&.{ "permission", "--surface", "9" }));
+    try testing.expectError(error.ConflictingPermissionAnswer, parse(&.{ "permission", "--surface", "9", "--allow", "--block" }));
+    try testing.expectError(error.ConflictingPermissionAnswer, parse(&.{ "permission", "--surface", "9", "--answer", "deny" }));
+    try testing.expectError(error.ConflictingPermissionAnswer, parse(&.{ "permission", "--surface", "9", "--allow", "--answer", "allow" }));
+    try testing.expectError(error.MissingSurface, parse(&.{ "permission", "--allow" }));
+    try testing.expectError(error.InvalidPermissionRequest, parse(&.{ "permission", "--surface", "9", "--allow", "--request", "0" }));
+    try testing.expectError(error.InvalidPermissionRequest, parse(&.{ "permission", "--surface", "9", "--allow", "--request", "9007199254740992" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "permission", "--surface", "9", "--allow", "--remember" }));
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "permission", "--surface", "9", "--block", "--request", "42" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.permission", pm.message.request.method);
+        const p = pm.message.request.params.?.object;
+        try testing.expectEqual(@as(i64, 9), p.get("id").?.integer);
+        try testing.expectEqualStrings("block", p.get("answer").?.string);
+        try testing.expectEqual(@as(i64, 42), p.get("request").?.integer);
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "permissions", "--surface", "9" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.permissions", pm.message.request.method);
+    }
+    var buf: [2048]u8 = undefined;
+    const cases = [_]struct { bytes: []const u8, kind: ResponseKind, want: []const u8 }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"permissions\":[]}}", .kind = .permissions, .want = "(no permission requests)\n" },
+        .{
+            .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"permissions\":[{\"request\":7,\"tab\":12,\"origin\":\"https://meet.test\\u202e\",\"permissions\":[\"microphone\",\"camera\"],\"shown\":true,\"answering\":false},{\"request\":8,\"tab\":12,\"origin\":\"\",\"permissions\":[\"notifications\"],\"shown\":false,\"answering\":true},{\"tab\":13}]}}",
+            .kind = .permissions,
+            .want = "permission 7  tab=12  microphone,camera  from https://meet.test  [user answering]\npermission 8  tab=12  notifications  [allowing]\npermission tab=13 (no grant on that tab — not shown)\nanswer with: maru browser permission --surface <id> (--allow | --block | --dismiss) --request <n>\n",
+        },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"answer\":\"block\",\"outcome\":\"answered\",\"request\":7,\"tab\":12}}", .kind = .permission, .want = "ok: block (answered)\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"answer\":\"allow\",\"outcome\":\"macos_blocked\",\"request\":7,\"tab\":12}}", .kind = .permission, .want = "ok: allow (macos_blocked)\nnote: macOS does not let Maru use a device this request needs (camera, microphone, screen recording or location) — the page was told it could not be asked; the user can allow Maru in System Settings › Privacy & Security\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"answer\":\"allow\",\"outcome\":\"waiting\",\"request\":7,\"tab\":12}}", .kind = .permission, .want = "ok: allow (waiting)\nnote: macOS is asking the user to let Maru use a device, or maru is still getting the location — the page gets the answer when that finishes (see maru browser permissions)\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[],\"permission_requests\":2}}", .kind = .dialog, .want = "(no dialog)\nnote: 2 permission requests also wait in this tab or its popups — see maru browser permissions --surface <id>\n" },
+    };
+    for (cases) |c| {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, c.bytes, c.kind, &w));
+        try testing.expectEqualStrings(c.want, w.buffered());
+    }
+    for ([_][]const u8{ "answered", "no_location", "macos_blocked", "site_blocked", "replaced", "waiting" }) |o| {
+        if (std.mem.eql(u8, o, "answered")) try testing.expect(permissionOutcomeNote(o) == null) else try testing.expect(permissionOutcomeNote(o) != null);
     }
 }
 

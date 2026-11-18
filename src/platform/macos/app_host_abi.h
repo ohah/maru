@@ -31,7 +31,8 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* v261: grant scope wire 7 (browser_agent_tabs — per-pane consent to open agent tabs) and the agent-tabs denial/title exports for the Browser Grants menu. */
 /* v262: user decision 2026-11-16 (full agent access) — grant scope wire 7 and the four agent-tabs denial/title exports are removed. */
 /* v263: P0-3 — maru_macos_control_tick (the browser-control clock work that ran at the top of take_browser_op). */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 263u
+/* v264: browser.permission — maru_macos_app_session_take_osr_agent_allow (agent-allowed permission requests, answered through the sheet's Allow path). */
+#define MARU_MACOS_APP_HOST_ABI_VERSION 264u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);
@@ -2419,6 +2420,17 @@ typedef struct MaruAppHostOsrLocationRequest {
     uint64_t token;
 } MaruAppHostOsrLocationRequest;
 int32_t maru_macos_app_session_take_osr_location(MaruAppHostSession *session, MaruAppHostOsrLocationRequest *out);
+/* v264: 에이전트가 허용한 권한 요청(browser.permission) — 모든 탭에서 하나씩(이 창이 맡는다). Swift 는 sheet 의 허용 단추와 같은 길로
+   답한다: kinds·media 의 장치마다 macOS 권한을 받고(처음이면 macOS 가 사용자에게 묻는다), 위치면 좌표를 구해
+   maru_macos_app_session_osr_location_reply, 아니면 maru_macos_app_session_osr_permission_reply(ACCEPT 또는 macOS 가 막으면 IGNORE).
+   macOS 안내 sheet 는 띄우지 않는다(사람이 누르지 않았다 — 에이전트는 결과로 안다). 떠 있던 사람의 sheet 는 이미 거뒀다. */
+typedef struct MaruAppHostOsrAgentAllow {
+    uint64_t surface_id;
+    uint64_t token;
+    uint32_t permission_kinds;
+    uint32_t permission_media;
+} MaruAppHostOsrAgentAllow;
+int32_t maru_macos_app_session_take_osr_agent_allow(MaruAppHostSession *session, MaruAppHostOsrAgentAllow *out);
 /* v205(W5b2): 위치 요청(sheet 의 허용 뒤 또는 기억된 요청)의 좌표 — maru_macos_app_session_osr_location_reply. status 는 아래
    MARU_OSR_LOCATION_*. POSITION 이면 위도·경도·정확도(m)를 싣고(범위 밖은 「없음」으로 본다), UNAVAILABLE 이면 페이지가 「위치를
    알 수 없음」을 받는다, BLOCKED 는 macOS 가 Maru 의 위치를 막았다(처음 요청이면 못 물음, 기억된 요청이면 허용과 「없음」).

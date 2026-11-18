@@ -441,6 +441,10 @@ pub const Dialog = struct {
     revoked: bool = false,
     /// 띄운 창(AppSession 주소) — 0 이면 아직 안 띄웠다.
     shown_by: usize = 0,
+    /// 에이전트가 이 권한 요청을 허용했다(`agentAnswerPermission`). 허용은 사람의 허용 단추와 같은 Swift 길(macOS 권한·위치 좌표)을 탄다 —
+    /// `allow_pending` 은 아직 아무 창도 맡지 않았고, `allow_taken` 은 `agent_by` 창이 맡아 답을 내는 중이다. 사람의 sheet 는 거둔다(`tickOsrDialog`).
+    agent: AgentAllow = .none,
+    agent_by: usize = 0,
     /// W9c②: 누가 띄웠나 — 도착할 때 한 번 정한다(`dialog_cause.classify`). 답할 때 다시 재지 않는다(시간이 지나며 판정이 바뀌지 않게).
     cause: dialog_cause.Cause = .unknown,
     /// W9c②: 도착한 단조 ms — 그 뒤 사용자가 그 탭에 손댔는지 본다.
@@ -782,6 +786,8 @@ fn testTeardown(gpa: std.mem.Allocator) void {
     for (trace_answers.items) |x| gpa.free(x.json);
     trace_answers.clearAndFree(gpa);
     trace_redraw = 0;
+    agent_outcomes = @splat(.{}); // 에이전트 권한 답의 끝
+    agent_outcome_next = 0;
 }
 
 test "closing a tab that is still downloading hides it on about:blank and closes it once the downloads end (W10c)" {
@@ -3185,7 +3191,8 @@ fn removeDialog(gpa: std.mem.Allocator, s: *Surface, token: u64) void {
 pub fn nextDialog(surface_id: u64) ?*const Dialog {
     const s = surfaces.getPtr(surface_id) orelse return null;
     for (s.dialogs.items) |*d| {
-        if (d.remembered) continue;
+        // 에이전트가 허용한 요청도 sheet 가 없다 — 창이 맡아 macOS 권한·좌표를 구해 답한다(`nextAgentAllow`).
+        if (d.remembered or d.agent != .none) continue;
         return if (d.shown_by == 0) d else null;
     }
     return null;
@@ -3202,6 +3209,19 @@ pub fn nextLocation(window: usize) ?struct { surface_id: u64, token: u64 } {
     return null;
 }
 
+/// 에이전트가 허용한 권한 요청 하나(모든 탭에서 — 보이지 않는 탭도). 맡은 창을 적는다 — 그 창이 사람의 허용 단추와 같은 길로 답한다
+/// (`allowOsrPermission` — macOS 권한을 받고, 위치면 좌표를 구한다).
+pub fn nextAgentAllow(window: usize) ?struct { surface_id: u64, token: u64, kinds: u32, media: u8 } {
+    for (surfaces.keys(), surfaces.values()) |surface_id, *s| {
+        for (s.dialogs.items) |*d| if (d.kind == .permission and d.agent == .allow_pending) {
+            d.agent = .allow_taken;
+            d.agent_by = window;
+            return .{ .surface_id = surface_id, .token = d.token, .kinds = d.permission_kinds, .media = d.permission_media };
+        };
+    }
+    return null;
+}
+
 /// W5b2: 위치 요청의 답 — `accept` 면 좌표(없으면 「없음」)를 먼저 걸고 허용한다(허용 뒤에 걸면 기다리던 요청이 실패한다 —
 /// 실측), 아니면 그 답만. 답했으면 true — 위치 요청이 아니거나 이미 사라졌으면 false.
 pub fn replyLocation(gpa: std.mem.Allocator, surface_id: u64, token: u64, position: ?Position, result: ws.message.PermissionResult, by: ReplyBy) bool {
@@ -3211,6 +3231,12 @@ pub fn replyLocation(gpa: std.mem.Allocator, surface_id: u64, token: u64, positi
     const request = d.request;
     // 기다리는 사이 그 출처를 차단했다 — 허용으로 답하지 않는다(늦은 허용이 차단을 덮어쓰지 않게).
     const effective: ws.message.PermissionResult = if (d.revoked and result == .accept) .ignore else result;
+    if (d.agent != .none) noteAgentOutcome(token, effective, if (effective == .accept)
+        (if (position != null) AgentOutcome.answered else .no_location)
+    else if (effective == .ignore)
+        (if (d.revoked) AgentOutcome.site_blocked else .macos_blocked)
+    else
+        .answered);
     // sheet 에서 허용했다 — 이 탭에서 이 출처의 다음 요청(Chromium 은 부를 때마다 묻는다)은 sheet 없이 답한다.
     if (!d.remembered and effective == .accept) allowLocation(gpa, surface_id, d.origin);
     removeDialog(gpa, s, token);
@@ -3247,7 +3273,33 @@ pub fn dialogPending(surface_id: u64, token: u64) ?*const Dialog {
 /// 대화상자·파일 선택·권한 요청에 누가 답했나(W9e② 적대 검증 v20c N3). `human` — 사람이 maru 의 sheet 로 답했다: 사람이 그 탭을 쓴 것이다(사용자
 /// 결정 2·7 — 그 탭의 trace 를 버리고 CPU·네트워크 조건을 푼다; prompt 에 친 글이 페이지로 가고 그 화면이 스크린샷에 든다). `program` — 에이전트의
 /// `browser.handleDialog`·maru 가 스스로 낸 답(창 닫힘의 취소·기억된 위치 요청·막힌 요청의 자동 답). sidecar 는 둘을 가를 수 없어 답에 싣는다(`user`).
-pub const ReplyBy = enum { human, program };
+/// `agent` — 에이전트의 `browser.permission`(sidecar 에는 program 과 같다 — `user` 거짓). 답이 부른 다음 대화상자는 에이전트 것이다(`agent_input_ms`).
+pub const ReplyBy = enum { human, program, agent };
+
+/// 에이전트가 답한 권한 요청이 어떻게 끝났나(`browser.permission` 의 `outcome`). `answered` — 그 답이 페이지로 갔다. `no_location` — 위치를
+/// 허용했지만 maru 가 좌표를 구하지 못했다(페이지는 「위치를 알 수 없음」). `macos_blocked` — macOS 가 Maru 의 장치(카메라·마이크·화면·위치)를
+/// 막았다(페이지에는 「못 물음」 — 사람의 허용과 같다). `site_blocked` — 기다리는 사이 사람이 그 출처의 위치를 차단했다.
+pub const AgentOutcome = enum { answered, no_location, macos_blocked, site_blocked };
+pub const AgentAllow = enum { none, allow_pending, allow_taken };
+
+const AgentOutcomeRecord = struct { token: u64 = 0, result: ws.message.PermissionResult = .ignore, outcome: AgentOutcome = .answered };
+/// 에이전트가 답한 요청의 끝(번호 → 답). 탭 run 이 곧 가져간다 — 고리라 가져가지 않은 옛것은 덮인다.
+var agent_outcomes: [16]AgentOutcomeRecord = @splat(.{});
+var agent_outcome_next: usize = 0;
+
+fn noteAgentOutcome(token: u64, result: ws.message.PermissionResult, outcome: AgentOutcome) void {
+    agent_outcomes[agent_outcome_next] = .{ .token = token, .result = result, .outcome = outcome };
+    agent_outcome_next = (agent_outcome_next + 1) % agent_outcomes.len;
+}
+
+/// 그 요청의 끝을 가져간다(한 번).
+pub fn takeAgentOutcome(token: u64) ?struct { result: ws.message.PermissionResult, outcome: AgentOutcome } {
+    for (&agent_outcomes) |*r| if (r.token == token and token != 0) {
+        r.token = 0;
+        return .{ .result = r.result, .outcome = r.outcome };
+    };
+    return null;
+}
 
 /// JS 대화상자의 답. 요청이 없으면(이미 사라졌다) 무동작. `suppress` 면 그 페이지가 이동할 때까지 대화상자를 더 띄우지 못한다.
 pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool, by: ReplyBy) void {
@@ -5011,6 +5063,102 @@ pub fn agentReplyDialog(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, ac
     return .{ .kind = kind, .continues = leaving };
 }
 
+/// 권한 요청 한 건(`browser.permissions`). `kinds`·`media` 는 sidecar 가 청한 비트 그대로(이름은 앱이 붙인다).
+pub const PermissionEntry = struct {
+    tab: u64,
+    token: u64,
+    origin: []const u8,
+    kinds: u32,
+    media: u8,
+    /// 사람의 sheet 가 맡았다 — 떠 있거나, 위치를 허용해 좌표를 기다린다.
+    shown: bool,
+    /// 에이전트의 허용이 진행 중이다 — macOS 권한(사람에게 묻는 macOS 창)이나 좌표를 기다린다.
+    answering: bool,
+};
+
+/// 그 탭의 팝업 가족에 떠 있는 권한 요청 — (탭 번호, 도착) 순으로 `out` 에 채운다(`dialogList` 와 같은 차례). 기억된 위치 요청(W5b2 — sheet 없이
+/// maru 가 좌표로 답하는 중)은 싣지 않는다 — 답할 일이 아니다.
+pub fn permissionList(surface_id: u64, out: []PermissionEntry) []PermissionEntry {
+    if (!surfaces.contains(surface_id)) return out[0..0];
+    const family = popupFamily(surface_id);
+    var n: usize = 0;
+    var last: u64 = 0;
+    while (n < out.len) {
+        var next: ?u64 = null;
+        for (surfaces.keys()) |id| {
+            if (id <= last or popupFamily(id) != family) continue;
+            if (next == null or id < next.?) next = id;
+        }
+        const id = next orelse break;
+        last = id;
+        const s = surfaces.getPtr(id).?;
+        for (s.dialogs.items) |*d| {
+            if (d.kind != .permission or d.remembered) continue;
+            if (n == out.len) break;
+            out[n] = .{
+                .tab = id,
+                .token = d.token,
+                .origin = if (d.origin.len > 0) d.origin else urlOrigin(s.url orelse ""),
+                .kinds = d.permission_kinds,
+                .media = d.permission_media,
+                .shown = d.shown_by != 0 and d.agent == .none,
+                .answering = d.agent != .none,
+            };
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+/// 에이전트의 답 — 사람의 sheet 단추 셋과 같다: 허용·차단(둘 다 Chromium 이 그 사이트에 기억한다 — 미디어는 기억하지 않는다)·닫기(기억하지 않는다).
+pub const PermissionAnswer = enum { allow, block, dismiss };
+
+pub const AgentPermissionError = error{
+    /// 답할 요청이 없다 — 번호를 줬으면 그 번호가 없거나 grant 가 없는 탭의 것이다(둘을 가르지 않는다).
+    NoRequest,
+    /// 에이전트가 이미 그 요청을 허용하는 중이다(macOS 창·좌표를 기다린다) — 차단·닫기로는 덮을 수 있다.
+    AlreadyAllowing,
+};
+
+pub const AgentPermissionReplied = struct { tab: u64, token: u64, waits: bool };
+
+/// 사용자 결정 2026-11-18(「에이전트는 사용자와 같은 힘」): 에이전트가 권한 요청에 답한다 — 모든 종류, 허용·차단·닫기. `token` 이 없으면 그 탭
+/// 자신의 첫 요청(에이전트가 이미 허용하는 중인 것은 건너뛴다), 있으면 가족에서 그 번호(grant 가 있는 탭의 것만). 떠 있던 사람의 sheet 는 창의
+/// 다음 tick 이 거둔다. 차단·닫기는 곧 답한다(`replyPermission` — 사람과 같은 길: 위치 차단은 maru 의 기록도 지운다). 허용은 표시만 하고(`allow_pending`)
+/// 창이 사람의 허용 단추와 같은 Swift 길로 답한다(`nextAgentAllow`) — 그래서 그 답도 사람의 답처럼 사이트에 기억된다. `waits` 면 끝은
+/// `takeAgentOutcome` 으로 온다.
+pub fn agentAnswerPermission(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, answer: PermissionAnswer, access: DialogAccess) AgentPermissionError!AgentPermissionReplied {
+    const target: struct { id: u64, s: *Surface, d: *Dialog } = blk: {
+        const me = surfaces.getPtr(surface_id) orelse return error.NoRequest;
+        if (token) |t| {
+            const family = popupFamily(surface_id);
+            for (surfaces.keys(), surfaces.values()) |id, *s| {
+                if (popupFamily(id) != family) continue;
+                for (s.dialogs.items) |*d| if (d.token == t and d.kind == .permission and !d.remembered) {
+                    if (!access.granted(access.ctx, id)) return error.NoRequest;
+                    break :blk .{ .id = id, .s = s, .d = d };
+                };
+            }
+            return error.NoRequest;
+        }
+        for (me.dialogs.items) |*d| if (d.kind == .permission and !d.remembered and d.agent == .none) break :blk .{ .id = surface_id, .s = me, .d = d };
+        return error.NoRequest;
+    };
+    const tok = target.d.token;
+    switch (answer) {
+        .allow => {
+            if (target.d.agent != .none) return error.AlreadyAllowing;
+            target.d.agent = .allow_pending;
+            target.s.agent_input_ms = monotonicNow();
+            return .{ .tab = target.id, .token = tok, .waits = true };
+        },
+        .block, .dismiss => {
+            _ = replyPermission(gpa, target.id, tok, if (answer == .block) .deny else .dismiss, .agent);
+            return .{ .tab = target.id, .token = tok, .waits = false };
+        },
+    }
+}
+
 /// 파일 선택의 경로 하나(여러 개면 여러 번). 경로 규칙을 못 지나면 버린다.
 pub fn fileDialogPath(gpa: std.mem.Allocator, surface_id: u64, token: u64, path: []const u8) void {
     const s = surfaces.getPtr(surface_id) orelse return;
@@ -5035,8 +5183,11 @@ pub fn replyPermission(gpa: std.mem.Allocator, surface_id: u64, token: u64, resu
     const s = surfaces.getPtr(surface_id) orelse return false;
     const d = dialogPending(surface_id, token) orelse return false;
     if (d.kind != .permission) return false;
-    s.user_action_ms = monotonicNow(); // 허용 뒤 페이지가 곧 alert 를 띄운다(W9c② 적대 리뷰 1 회차)
+    // 허용 뒤 페이지가 곧 alert 를 띄운다(W9c② 적대 리뷰 1 회차) — 그 대화상자는 답한 쪽의 것이다.
+    if (by == .agent) s.agent_input_ms = monotonicNow() else s.user_action_ms = monotonicNow();
     const request = d.request;
+    // 에이전트의 허용을 기다리는 탭 run 이 읽는다(그 사이 온 차단·닫기도 — `replaced`). 곧 답한 차단·닫기는 기다리는 이가 없어 적지 않는다.
+    if (d.agent != .none) noteAgentOutcome(token, result, if (result == .ignore) .macos_blocked else .answered);
     // 위치를 차단했다 — maru 의 기록에서도 빼고, 같은 출처의 기다리던 허용을 거둔다(Chromium 도 차단을 기억해 다시 묻지 않는다).
     if (result == .deny and d.permission_kinds & ws.message.PermissionKind.geolocation.bit() != 0) {
         forgetLocationOrigin(gpa, d.origin);
@@ -5054,6 +5205,16 @@ pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
         var i: usize = 0;
         while (i < s.dialogs.items.len) {
             const d = s.dialogs.items[i];
+            // 에이전트가 허용한 요청은 창에 묶이지 않는다 — 맡은 창이 닫히면 맡음만 풀어 다른 창이 답하게 한다(그 창이 띄웠던 sheet 는 이미
+            // 거뒀다 — 「못 물음」 으로 끝내지 않는다).
+            if (d.kind == .permission and d.agent != .none) {
+                if (d.agent_by == window) {
+                    s.dialogs.items[i].agent = .allow_pending;
+                    s.dialogs.items[i].agent_by = 0;
+                }
+                i += 1;
+                continue;
+            }
             if (d.shown_by != window) {
                 i += 1;
                 continue;
@@ -13666,4 +13827,111 @@ test "W9e②: 조건의 주인 — 끝난 주인(없는 pid)의 CPU 는 앱 tick
         },
         .fail => |f| try std.testing.expectEqualStrings("no_agent_process", f.reason),
     }
+}
+
+// ── 2026-11-18: 에이전트가 권한 요청에 답한다(browser.permissions·permission) ──────────────────────────────────────────────
+
+test "agent permission: 목록은 가족의 요청(기억된 위치 빼고, 사람이 맡음·에이전트 허용 중), 차단·닫기는 곧 답하고 허용은 창이 사람의 길로 — 맡음·창 닫힘·끝 기록, user 는 거짓" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer forgetAllLocations(gpa);
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 7, 8 });
+    surfaces.getPtr(8).?.popup_family = 7;
+    var acc: TestAccess = .{ .granted = 1 << 7 };
+    const s7 = surfaces.getPtr(7).?;
+    const notif = ws.message.PermissionKind.notifications.bit();
+    const geo = ws.message.PermissionKind.geolocation.bit();
+    const site = "https://maps.example";
+    try std.testing.expectError(error.NoRequest, agentAnswerPermission(gpa, 7, null, .allow, acc.access()));
+    // JS 대화상자는 권한 답의 대상이 아니다.
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "" } }, 0);
+    try std.testing.expectError(error.NoRequest, agentAnswerPermission(gpa, 7, testLastDialog(7).token, .allow, acc.access()));
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false, .program);
+    outbox_pending.clearRetainingCapacity();
+
+    // 알림 요청 — 사람의 sheet 가 맡았다(창 11).
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 2, .origin = "https://news.example", .kinds = notif } }, 0);
+    const t_notif = testLastDialog(7).token;
+    markDialogShown(7, t_notif, 11);
+    var buf: [8]PermissionEntry = undefined;
+    var list = permissionList(7, &buf);
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expect(list[0].tab == 7 and list[0].token == t_notif and list[0].kinds == notif and list[0].shown and !list[0].answering);
+    try std.testing.expectEqualStrings("https://news.example", list[0].origin);
+    // 허용 — 표시만 한다(창이 사람의 허용과 같은 Swift 길로 답한다). sheet 는 맡음에서 빠지고 답은 아직 없다.
+    const before_user = s7.user_action_ms;
+    const r = try agentAnswerPermission(gpa, 7, null, .allow, acc.access());
+    try std.testing.expect(r.waits and r.token == t_notif and r.tab == 7);
+    try std.testing.expect(s7.agent_input_ms > never_ms);
+    list = permissionList(7, &buf);
+    try std.testing.expect(!list[0].shown and list[0].answering);
+    try std.testing.expect(nextDialog(7) == null); // sheet 로 다시 띄우지 않는다
+    try std.testing.expectError(error.AlreadyAllowing, agentAnswerPermission(gpa, 7, t_notif, .allow, acc.access()));
+    try std.testing.expectError(error.NoRequest, agentAnswerPermission(gpa, 7, null, .block, acc.access())); // 번호 없는 답은 진행 중인 것을 건너뛴다
+    try std.testing.expectEqual(@as(usize, 0), outbox_pending.items.len);
+    // 창 12 가 맡는다 — 한 창만. sheet 를 띄웠던 창 11 이 닫혀도 「못 물음」 으로 끝내지 않는다. 맡은 창 12 가 닫히면 맡음만 풀린다.
+    const taken = nextAgentAllow(12).?;
+    try std.testing.expect(taken.surface_id == 7 and taken.token == t_notif and taken.kinds == notif and taken.media == 0);
+    try std.testing.expect(nextAgentAllow(13) == null);
+    cancelDialogsShownBy(gpa, 11);
+    try std.testing.expect(dialogPending(7, t_notif) != null);
+    cancelDialogsShownBy(gpa, 12);
+    try std.testing.expectEqual(t_notif, nextAgentAllow(13).?.token);
+    // 창의 답(에이전트의 답 — user 거짓). 끝은 한 번 가져간다. 사람의 손댐 시각은 그대로.
+    try std.testing.expect(replyPermission(gpa, 7, t_notif, .accept, .agent));
+    try std.testing.expectEqual(AgentOutcome.answered, takeAgentOutcome(t_notif).?.outcome);
+    try std.testing.expect(takeAgentOutcome(t_notif) == null);
+    try std.testing.expectEqual(before_user, s7.user_action_ms);
+
+    // 위치 — 허용은 사람의 허용처럼 그 (탭, 출처)를 기록한다(다음 요청은 sheet 없이). 좌표가 없으면 no_location.
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 3, .origin = site, .kinds = geo } }, 0);
+    const t_geo = testLastDialog(7).token;
+    _ = try agentAnswerPermission(gpa, 7, t_geo, .allow, acc.access());
+    _ = nextAgentAllow(12).?;
+    try std.testing.expect(replyLocation(gpa, 7, t_geo, null, .accept, .agent));
+    try std.testing.expectEqual(AgentOutcome.no_location, takeAgentOutcome(t_geo).?.outcome);
+    try std.testing.expect(locationAllowed(7, site));
+    // 기억된 위치 요청은 답할 일이 아니다 — 목록·번호 모두에서 빠진다.
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 4, .origin = site, .kinds = geo, .remembered = true } }, 0);
+    const t_rem = testLastDialog(7).token;
+    try std.testing.expectEqual(@as(usize, 0), permissionList(7, &buf).len);
+    try std.testing.expectError(error.NoRequest, agentAnswerPermission(gpa, 7, t_rem, .block, acc.access()));
+    try std.testing.expect(replyLocation(gpa, 7, nextLocation(11).?.token, .{ .latitude = 1, .longitude = 2, .accuracy = 3 }, .accept, .program));
+    // 허용 중인 위치 요청을 차단으로 덮는다 — 곧 차단(사람의 차단처럼 기록도 지운다), 늦은 창의 답은 무동작.
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 5, .origin = site, .kinds = geo } }, 0);
+    const t_geo2 = testLastDialog(7).token;
+    _ = try agentAnswerPermission(gpa, 7, null, .allow, acc.access());
+    _ = nextAgentAllow(12).?;
+    const blocked = try agentAnswerPermission(gpa, 7, t_geo2, .block, acc.access());
+    try std.testing.expect(!blocked.waits);
+    try std.testing.expect(!locationAllowed(7, site));
+    try std.testing.expect(!replyLocation(gpa, 7, t_geo2, .{ .latitude = 1, .longitude = 2, .accuracy = 3 }, .accept, .agent));
+    try std.testing.expectEqual(ws.message.PermissionResult.deny, takeAgentOutcome(t_geo2).?.result);
+    // 팝업(가족 8)의 미디어 요청 — 번호로만, grant 가 있어야. macOS 가 막으면 macos_blocked. 닫기는 곧 dismiss.
+    apply(gpa, .{ .permission_request = .{ .browser = 8, .request = 6, .origin = "https://meet.example", .media = 0b11 } }, 0);
+    const t_cam = testLastDialog(8).token;
+    try std.testing.expectError(error.NoRequest, agentAnswerPermission(gpa, 7, null, .allow, acc.access())); // 번호 없이는 자기 탭만
+    try std.testing.expectError(error.NoRequest, agentAnswerPermission(gpa, 7, t_cam, .allow, acc.access())); // grant 없는 가족 탭
+    list = permissionList(7, &buf);
+    try std.testing.expect(list.len == 1 and list[0].tab == 8 and list[0].media == 0b11 and !list[0].shown);
+    acc.granted |= 1 << 8;
+    _ = try agentAnswerPermission(gpa, 7, t_cam, .allow, acc.access());
+    try std.testing.expectEqual(@as(u8, 0b11), nextAgentAllow(12).?.media);
+    try std.testing.expect(replyPermission(gpa, 8, t_cam, .ignore, .agent));
+    try std.testing.expectEqual(AgentOutcome.macos_blocked, takeAgentOutcome(t_cam).?.outcome);
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 7, .origin = "", .kinds = ws.message.PermissionKind.local_fonts.bit() } }, 0);
+    try std.testing.expect(!(try agentAnswerPermission(gpa, 7, null, .dismiss, acc.access())).waits);
+
+    var frames: [16]Message = undefined;
+    const n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 8), n);
+    try std.testing.expect(frames[0].permission_reply.request == 2 and frames[0].permission_reply.result == .accept and !frames[0].permission_reply.user);
+    try std.testing.expect(frames[1].geolocation.request == 3 and !frames[1].geolocation.available);
+    try std.testing.expect(frames[2].permission_reply.request == 3 and frames[2].permission_reply.result == .accept and !frames[2].permission_reply.user);
+    try std.testing.expect(frames[3].geolocation.request == 4 and frames[4].permission_reply.request == 4);
+    try std.testing.expect(frames[5].permission_reply.request == 5 and frames[5].permission_reply.result == .deny and !frames[5].permission_reply.user);
+    try std.testing.expect(frames[6].permission_reply.request == 6 and frames[6].permission_reply.result == .ignore);
+    try std.testing.expect(frames[7].permission_reply.request == 7 and frames[7].permission_reply.result == .dismiss and !frames[7].permission_reply.user);
 }

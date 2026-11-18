@@ -51,7 +51,8 @@ maru browser close --surface 12                      # always, when done
   Work there, with the id it printed — the ids in `list` are mostly the user's tabs (section 3).
 - Target by locator (`--role button --name "Sign in"`, `--by-text`, `--by-label`) or ref; CSS `--selector` last.
   Refs come from the latest snapshot and last while that document lives: after a navigation, snapshot again.
-- `navigate`, `back`, `forward` and `reload` move the tab; `get-url` prints its address; `wait` takes a locator
+- `navigate`, `back`, `forward` and `reload` move the tab; `get-url` prints its address (on an error page, the
+  address it tried — like the address bar); `wait` takes a locator
   with `--visible`, or `--load`. After a click, wait for something only the next page has: `--load` checks the
   current document, which right after a click can still be the old page — do not click again because of it.
   `scroll`, `hover` and `press` target elements like `click`.

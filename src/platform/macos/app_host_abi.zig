@@ -8726,6 +8726,8 @@ fn beginCdp(run: *CdpRun) void {
     };
     // W9a③: 확인한 문서 주소를 복사해 op 에 준다 — 쿠키 저장소 op 은 grant 호스트가 그 주소를 덮는지 다시 본다(그사이 다른 사이트로 갔을 수 있다).
     if (run.op.storage) |*st| {
+        // 2026-11-18: 오류 페이지면 주소창·`get_url` 은 실패한 주소인데 확정 문서는 앞 문서다 — 저장소 op 이 앞 문서의 저장소를 만지지 않게 곧 실패한다.
+        if (session_mod.web_osr.showsErrorPage(run.surface_id)) return finishCdp(run, .failed, "the tab shows an error page (its last navigation failed) — cookie and storage ops need a loaded document; navigate first");
         const url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id))).url;
         run.doc_url = allocator.dupe(u8, url) catch return finishCdp(run, .failed, "out of memory");
         st.doc_url = run.doc_url.?;
@@ -15469,6 +15471,41 @@ test "W9a③: 쿠키 저장소 op 은 시작에 grant 호스트가 지금 문서
     defer allocator.free(response);
     p3.response = null;
     try std.testing.expect(std.mem.indexOf(u8, response, "loading a new page") != null);
+}
+
+test "실패한 이동의 주소창(2026-11-18) 적대 검증 B R16: 오류 페이지를 보이는 탭의 쿠키·저장소 op 은 보내지 않고 곧 실패한다 — get_url 은 실패한 주소인데 확정 문서는 앞 문서라 다른 사이트의 저장소를 만지지 않게" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 79);
+    defer {
+        session_mod.web_osr.destroy(ta, 79);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(79);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 79, .url = "https://a.test/x" } });
+    session_mod.web_osr.testApply(ta, .{ .error_page = .{ .browser = 79, .error_code = -105, .url = "https://b.test/failed" } });
+    try std.testing.expect(session_mod.web_osr.showsErrorPage(79));
+    const host = control_pane_grant.GrantHost.init("a.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 79, .scope = .browser_storage, .host = host });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.clearStorage\",\"params\":{\"id\":79}}";
+    var p: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&p, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 79, .method = .clear_storage, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 79, .scope = .browser_storage, .host = host } } });
+    const before = cdp_calls_attempted;
+    startCdpOpHost(id, 79, .clear_storage, "", host);
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    const response = p.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    p.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, "shows an error page") != null);
+    // 새 문서가 서면 다시 된다(오류 페이지 표시가 지워진다).
+    session_mod.web_osr.testApply(ta, .{ .page_started = 79 });
+    try std.testing.expect(!session_mod.web_osr.showsErrorPage(79));
 }
 
 test "W9a③ 적대 리뷰 7 회차 재현 F1: deleteCookie 가 쿠키를 읽는 동안 grant 가 철회되면 지우기를 보내지 않아야 한다 — 첫 지우기는 보내기 전에 committed" {

@@ -96,6 +96,18 @@ pub const Server = struct {
     }
 };
 
+/// 닫힌 포트 하나 — 바인드해 번호를 받고 곧 닫는다(그 포트로의 연결은 거절된다 — `addr_failed_check` 의 진짜 접속 거부).
+pub fn closedPort() !u16 {
+    const fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return error.SocketFailed;
+    defer _ = std.c.close(fd);
+    var addr: SockaddrIn = .{ .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+    if (bind(fd, &addr, @sizeOf(SockaddrIn)) != 0) return error.BindFailed;
+    var len: u32 = @sizeOf(SockaddrIn);
+    if (getsockname(fd, &addr, &len) != 0) return error.SocketFailed;
+    return std.mem.bigToNative(u16, addr.port);
+}
+
 fn serve(fd: c_int) void {
     while (true) {
         const conn = accept(fd, null, null);

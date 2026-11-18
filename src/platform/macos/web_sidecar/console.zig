@@ -128,7 +128,7 @@ pub fn subframeStarted(entry: *registry_mod.Entry, frame: [*c]c.cef_frame_t) voi
 
 /// 주 프레임의 이동이 실패해 오류 페이지가 옛 문서를 바꿨다(`on_load_error` — `page_started` 가 없다). maru 에는 문서 경계로 알린다.
 /// W9d③: 오류 번호와, 막기 규칙이 그 이동을 막았으면 그 규칙(`blocking.loadError` — 실패 주소의 해시로 짝지었다)을 싣는다.
-/// wire 28: `url` — 주소창에 보일 실패 주소(`dialogs.errorPageUrl` 이 오류 페이지가 섰는지 확인한 것, 아니면 빈 글).
+/// wire 29: `url` — 주소창에 보일 실패 주소(`dialogs.errorPageUrl` 이 오류 페이지가 섰는지 확인한 것, 아니면 빈 글).
 pub fn errorPage(id: BrowserId, error_code: i32, blocked_rule: u32, url: []const u8) void {
     const entry = browsers.state.registry.byId(id) orelse return;
     sendDrops(entry);

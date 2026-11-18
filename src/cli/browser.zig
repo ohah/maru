@@ -2843,7 +2843,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.writeAll("error: navigate not ok\n");
                 return false;
             }
-            // W9d③: 막기 규칙이 그 이동을 막았다 — 탭은 Chromium 의 「막혔다」 페이지를 보이고 주소는 앞 문서 그대로다.
+            // W9d③: 막기 규칙이 그 이동을 막았다 — 탭은 Chromium 의 「막혔다」 페이지를 보이고 주소창은 막힌 주소다(2026-11-18 「사람이 친 주소」).
             if (boolField(result.get("blocked"))) {
                 try w.print("blocked: request-blocking rule {d} stopped this navigation (the tab shows Chromium's ERR_BLOCKED_BY_CLIENT page) — see maru browser network-block --list\n", .{intField(result.get("block_rule")) orelse 0});
                 return true;
@@ -2851,7 +2851,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             // W9d④: 주 프레임 문서를 가짜 규칙이 줬다 — 주소창은 진짜 주소를 보인다(그 탭에 ▣).
             if (boolField(result.get("mocked"))) try w.print("mocked: mock rule {d} answered this page (the address bar shows the real address) — see maru browser network-mock --list\n", .{intField(result.get("mock_rule")) orelse 0});
             // Chromium 탭은 첫 불러오기를 기다린다(W9a) — 불러온 문서가 없으면 경고 한 줄(이동 자체는 보냈다).
-            if (result.get("loaded")) |l| if (l == .bool and !l.bool) try w.writeAll("warning: no page finished loading (an empty response, a download, a same-page link, or the time ran out) — check with get-url\n");
+            if (result.get("loaded")) |l| if (l == .bool and !l.bool) try w.writeAll("warning: no page finished loading (an error page, an empty response, a download, a same-page link, or the time ran out) — get-url shows the address the tab tried\n");
         },
         .ok => { // set-cookie/delete-cookie/set·remove-local-storage/clear-storage 성공 = {ok:true}
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else {
@@ -6207,7 +6207,7 @@ test "W9a: Chromium 탭의 navigate 가 불러온 문서 없이 끝나면 ok 뒤
     const cases = [_]struct { body: []const u8, want: []const u8 }{
         .{ .body = "{\"ok\":true}", .want = "ok\n" },
         .{ .body = "{\"ok\":true,\"loaded\":true}", .want = "ok\n" },
-        .{ .body = "{\"ok\":true,\"loaded\":false}", .want = "ok\nwarning: no page finished loading (an empty response, a download, a same-page link, or the time ran out) — check with get-url\n" },
+        .{ .body = "{\"ok\":true,\"loaded\":false}", .want = "ok\nwarning: no page finished loading (an error page, an empty response, a download, a same-page link, or the time ran out) — get-url shows the address the tab tried\n" },
     };
     for (cases) |c| {
         var w: std.Io.Writer = .fixed(&buf);

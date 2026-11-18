@@ -95,7 +95,7 @@ const Surface = struct {
     /// `ERR_ABORTED`)은 `error_page` 가 오지 않아 세우지 않는다.
     request_failed: bool = false,
     /// 주소창에 보일 실패한 주소(사용자 결정 2026-11-18 「사람이 친 주소」 — Chrome 처럼 오류 페이지면 가려던 주소). sidecar 의
-    /// `error_page.url`(wire 28 — 주 프레임이 정말 그 주소의 오류 페이지가 되었을 때만) 가운데 http(s)·`failed_url_cap` 안의 것만(`setFailedUrl`):
+    /// `error_page.url`(wire 29 — 주 프레임이 정말 그 주소의 오류 페이지가 되었을 때만) 가운데 http(s)·`failed_url_cap` 안의 것만(`setFailedUrl`):
     /// 다른 스킴은 저장되면 다음 실행에 브라우저가 시작한 이동이 되고(`file:`·`chrome:` — 계획 공격 5), 상한을 넘으면 그 탭이 저장되지 않는다
     /// (공격 7) — 그때는 옛 주소를 그대로 보인다. 새 문서(`page_started`)·주소 확정(`url_changed`)·새 브라우저(`browser_created`)가 지운다. **보이는
     /// 주소일 뿐**이다 — 확정된 문서 주소(`url` — grant 호스트·쿠키 op·네트워크 판정)는 바꾸지 않는다(오류 페이지는 그 주소의 문서가 아니다).
@@ -3110,6 +3110,13 @@ fn clearFailedUrl(gpa: std.mem.Allocator, s: *Surface) void {
 pub fn shownUrl(surface_id: u64) ?[]const u8 {
     const s = surfaces.getPtr(surface_id) orelse return null;
     return shownOf(s) orelse "";
+}
+
+/// 그 탭이 실패한 이동의 오류 페이지를 보이는가(주소창이 실패한 주소 — 확정 문서 주소와 다르다). 쿠키·저장소 op 이 곧 실패하는 데 쓴다 —
+/// `get_url` 은 실패 주소를 답하는데 그 op 은 앞 문서의 저장소를 만지면 에이전트가 다른 사이트의 저장소를 지운다(적대 검증 B R16).
+pub fn showsErrorPage(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.failed_url != null;
 }
 
 /// 그 탭의 확정된 문서 주소(보안 판단 — collector snapshot 의 `doc_url`, grant 호스트). 모르는 탭은 null, 아직 없으면 빈 글.
@@ -7291,7 +7298,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .error_page => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.request_failed = true; // 보낸 이동이 열리지 않았다 — 그 주소는 그 탭이 보이려던 주소로 남는다(`requestFacts`)
             // 사용자 결정 2026-11-18 「사람이 친 주소」: 주소창은 실패한 주소(Chrome 과 같다 — 막힘·접속 거부·DNS 모두). CEF 는 실패한 주 프레임
-            // 이동에 주소를 알리지 않는다(`url_changed` 가 없다 — 판정 `af-no-address`) — sidecar 가 `error_page` 에 싣는다(wire 28).
+            // 이동에 주소를 알리지 않는다(`url_changed` 가 없다 — 판정 `af-no-address`) — sidecar 가 `error_page` 에 싣는다(wire 29).
             setFailedUrl(gpa, s, v.url);
             s.console.newDocument();
             s.block.newDocument();

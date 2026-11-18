@@ -6785,7 +6785,7 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .upload,
         => true,
         // W9b③: open·close 는 따로 둔 탭 op 목록이 본다(대상이 부른 pane·닫히는 것이 성공 — `enqueueTabOp`).
-        .subscribe, .wait, .open, .close, .show => false,
+        .subscribe, .wait, .open, .close, .show, .downloads, .download => false,
         // W9c②: 대화상자 보기·답하기는 `pushBrowserOp` 가 곧 답한다(실행 중인 것이 없다).
         .dialog, .handle_dialog => false,
         // W9d①: 네트워크 목록·자세히도 곧 답한다(쥔 기록을 읽기만 한다 — DevTools·op 줄 없음).
@@ -6841,6 +6841,8 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .open => "browser.open",
         .close => "browser.close",
         .show => "browser.show",
+        .downloads => "browser.downloads",
+        .download => "browser.download",
         .dialog => "browser.dialog",
         .handle_dialog => "browser.handleDialog",
         .upload => "browser.upload",
@@ -7229,6 +7231,9 @@ const control_hello_caps = [_][]const u8{
     "browser.close",
     // 에이전트가 탭을 그 pane 의 앞 탭으로 보인다(사용자 결정 2026-11-17·18).
     "browser.show",
+    // 에이전트의 다운로드 목록·받기·버리기·그만두기·다시 받기(사용자 결정 2026-11-17).
+    "browser.downloads",
+    "browser.download",
     // W9c②: 에이전트가 JS 대화상자를 보고 답한다.
     "browser.dialog",
     "browser.handleDialog",
@@ -8715,9 +8720,9 @@ fn onAgentPageTab(pane: u64, tab: u64) bool {
 }
 
 /// 탭 op — 실행 자리·op 줄이 아니라 탭 op 목록(`tab_runs`)이 본다: open(대상이 부른 pane)·close(닫히는 것이 성공)·show(배치가 sidecar 로 갈
-/// 때까지 기다린다). 디스패치 두 자리(`handleControlRequest`·`testDispatchDeferred`)가 같은 판정을 쓴다.
+/// 때까지 기다린다). 다운로드 둘(`downloads`·`download` — 대상이 부른 pane, 앱 전체의 다운로드 표를 메인 스레드에서 곧 읽고 바꾼다)도 같은 자리로. 디스패치 두 자리(`handleControlRequest`·`testDispatchDeferred`)가 같은 판정을 쓴다.
 fn isTabOp(m: control_browser.BrowserMethod) bool {
-    return m == .open or m == .close or m == .show;
+    return m == .open or m == .close or m == .show or m == .downloads or m == .download;
 }
 
 const TabRun = struct {
@@ -8784,6 +8789,8 @@ fn startTabOp(refs: []const ControlSessionRef, async_id: u64, op: control_browse
         .open => startAgentOpen(refs, async_id, op.surface_id, op.arg),
         .close => startAgentClose(refs, async_id, op),
         .show => startAgentShow(refs, async_id, op.surface_id),
+        .downloads => completeAgentDownloads(async_id),
+        .download => startAgentDownload(async_id, op.arg),
         else => completeTabStatus(async_id, .failed, "not a tab operation"),
     }
 }
@@ -8864,6 +8871,45 @@ fn completeAgentShow(r: TabRun) void {
     defer aw.deinit();
     std.json.Stringify.value(.{ .shown = true, .visible = r.shown.visible, .changed = r.shown.changed, .key_held = r.shown.key_held }, .{}, &aw.writer) catch return completeTabStatus(r.async_id, .failed, "out of memory");
     completeTabStatus(r.async_id, .success, aw.written());
+}
+
+// ── 다운로드(사용자 결정 2026-11-17) — 앱 전체의 다운로드 표(`web_downloads`)를 사람의 목록 창처럼 읽고 바꾼다. 곧 답한다. ──
+
+fn completeAgentDownloads(async_id: u64) void {
+    const json = session_mod.web_osr.downloads.agentListJson(allocator) catch return completeTabStatus(async_id, .failed, "out of memory");
+    defer allocator.free(json);
+    completeTabStatus(async_id, .success, json);
+}
+
+fn startAgentDownload(async_id: u64, arg: []const u8) void {
+    const parsed = std.json.parseFromSlice(struct { key: u64, action: []const u8, path: ?[]const u8 = null }, allocator, arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
+    defer parsed.deinit();
+    const action = std.meta.stringToEnum(control_browser.DownloadAction, parsed.value.action) orelse return completeTabStatus(async_id, .failed, "invalid arguments");
+    const dl = session_mod.web_osr.downloads;
+    const state = dl.agentAct(parsed.value.key, switch (action) {
+        .save => .save,
+        .discard => .discard,
+        .cancel => .cancel,
+        .@"resume" => .resume_download,
+    }, parsed.value.path) catch |e| return completeTabStatus(async_id, .failed, switch (e) {
+        error.NoSuchDownload => "no such download — list them with maru browser downloads (finished rows the user cleared are gone)",
+        error.WrongState => agentDownloadWrongState(action),
+        error.BadPath => "the save path needs a folder and a file name",
+        error.CannotStart => "maru could not start saving this download (it is now failed)",
+    });
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    std.json.Stringify.value(.{ .ok = true, .key = parsed.value.key, .state = @tagName(state) }, .{}, &aw.writer) catch return completeTabStatus(async_id, .failed, "out of memory");
+    completeTabStatus(async_id, .success, aw.written());
+}
+
+fn agentDownloadWrongState(action: control_browser.DownloadAction) []const u8 {
+    return switch (action) {
+        .save => "only a held download or one waiting for a save location can be saved",
+        .discard => "only a held download or one waiting for a save location can be discarded",
+        .cancel => "only a download that is preparing, downloading, interrupted or waiting for a save location can be canceled",
+        .@"resume" => "only an interrupted download can be resumed",
+    };
 }
 
 const agent_show_closed = "the tab was closed";
@@ -14107,6 +14153,53 @@ test "browser.show: 키 받는 pane 의 뒤쪽 탭을 앞으로 — 배치가 �
     var gone: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
     startAgentShow(&refs, try control_server_storage.deferRequest(&gone, std.math.maxInt(i128)), tab + 1000);
     try expectPendingFailureText(&gone, "the tab was closed");
+}
+
+// 다운로드(사용자 결정 2026-11-17): 탭 op 자리에서 곧 답한다 — 목록은 앱 전체 표의 JSON, 동작은 바뀐 상태, 못 하면 까닭 글. 엔진이 꺼진 프로세스는 open
+// 처럼 -32008(다운로드는 Chromium 탭의 것).
+test "browser.downloads·download: 탭 op 자리에서 곧 답한다 — 목록, 보류 받기·버리기, 틀린 상태·없는 번호는 까닭과 함께 실패" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const dl = session_mod.web_osr.downloads;
+    defer dl.testReset();
+    try std.testing.expect(isTabOp(.downloads) and isTabOp(.download));
+    try dl.testAddRow(41, 7, .held);
+    try dl.testAddRow(42, 7, .held);
+    const list_req = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.downloads\",\"params\":{}}";
+    var list: control_server_mod.PendingRequest = .{ .request_bytes = list_req, .selector = null, .io = std.testing.io };
+    startTabOp(&.{}, try control_server_storage.deferRequest(&list, std.math.maxInt(i128)), .{ .surface_id = 1, .method = .downloads, .arg = "" });
+    {
+        const parsed = try w9b3Result(&list);
+        defer parsed.deinit();
+        const rows = parsed.value.object.get("result").?.object.get("downloads").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), rows.len);
+        try std.testing.expectEqualStrings("held", rows[0].object.get("state").?.string);
+    }
+    const act_req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.download\",\"params\":{\"key\":42,\"action\":\"discard\"}}";
+    var discard: control_server_mod.PendingRequest = .{ .request_bytes = act_req, .selector = null, .io = std.testing.io };
+    startTabOp(&.{}, try control_server_storage.deferRequest(&discard, std.math.maxInt(i128)), .{ .surface_id = 1, .method = .download, .arg = "{\"key\":42,\"action\":\"discard\"}" });
+    {
+        const parsed = try w9b3Result(&discard);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("canceled", r.get("state").?.string);
+        try std.testing.expectEqual(@as(i64, 42), r.get("key").?.integer);
+    }
+    try std.testing.expectEqual(dl.State.canceled, dl.testState(42).?);
+    var again: control_server_mod.PendingRequest = .{ .request_bytes = act_req, .selector = null, .io = std.testing.io };
+    startTabOp(&.{}, try control_server_storage.deferRequest(&again, std.math.maxInt(i128)), .{ .surface_id = 1, .method = .download, .arg = "{\"key\":42,\"action\":\"discard\"}" });
+    try expectPendingFailureText(&again, "only a held download or one waiting");
+    var none: control_server_mod.PendingRequest = .{ .request_bytes = act_req, .selector = null, .io = std.testing.io };
+    startTabOp(&.{}, try control_server_storage.deferRequest(&none, std.math.maxInt(i128)), .{ .surface_id = 1, .method = .download, .arg = "{\"key\":4242,\"action\":\"save\"}" });
+    try expectPendingFailureText(&none, "no such download");
+    try std.testing.expectEqual(dl.State.held, dl.testState(41).?); // 다른 행은 그대로
 }
 
 test "browser.show 는 탭 op — 두 디스패치 자리가 같은 판정(isTabOp)으로 탭 op 목록에 보낸다" {

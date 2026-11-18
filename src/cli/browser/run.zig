@@ -104,6 +104,8 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.ConflictingLocator => "give only one target: --selector, --ref (not for wait), --role, --by-text or --by-label",
         error.MissingWaitCondition => "wait needs --selector, --load, --role, --by-text or --by-label",
         error.ConflictingWaitCondition => "wait takes only one of --selector and --load (--load does not go with --visible or a locator)",
+        error.InvalidDownloadKey => "--key must be a download key from maru browser downloads (an integer in 1..2^53-1)",
+        error.InvalidDownloadAction => "download needs exactly one of --save, --discard, --cancel or --resume (--path goes only with --save)",
         error.MissingTimeoutValue => "--timeout needs a value",
         error.InvalidTimeout => "--timeout must be an integer in 1..25000 (ms)",
         error.MissingText => "type needs --text",
@@ -253,6 +255,20 @@ fn runRequest(
     if (req == .snapshot) return runWrappedResult(io, allocator, req, cp.browser_snapshot_chunk_method, "snapshot", .snapshot, stdout, stderr);
     if (req == .console) return runWrappedResult(io, allocator, req, cp.browser_console_chunk_method, "console", .console, stdout, stderr);
     // W9c③: 상대 경로는 이 프로세스의 현재 폴더로 붙인다(앱은 절대 경로만 받는다 — 상대 경로는 Chromium 이 렌더러를 죽였다).
+    // 다운로드의 저장 자리: 상대 경로는 이 프로세스의 현재 폴더로 붙인다(앱은 절대 경로만 받는다 — 앱의 현재 폴더는 이 프로세스의 것과 다르다).
+    if (req == .download and req.download.path != null and req.download.path.?[0] != '/') {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd: []const u8 = if (std.process.currentPath(io, &cwd_buf)) |n| cwd_buf[0..n] else |_| {
+            try stderr.writeAll("error: cannot read the current directory to resolve a relative --path\n");
+            try stderr.flush();
+            return error.UnknownCommand;
+        };
+        const abs = if (cwd.len > 0 and cwd[cwd.len - 1] == '/') try std.fmt.allocPrint(allocator, "{s}{s}", .{ cwd, req.download.path.? }) else try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, req.download.path.? });
+        defer allocator.free(abs);
+        var d = req.download;
+        d.path = abs;
+        return runPlainRequest(io, allocator, .{ .download = d }, stdout, stderr);
+    }
     if (req == .upload) {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd: []const u8 = if (std.process.currentPath(io, &cwd_buf)) |n| cwd_buf[0..n] else |_| {

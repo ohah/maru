@@ -72,6 +72,24 @@ asks the user for your downloads too (a save panel, or the download list for a h
 after the user picks a place, so tell the user what is waiting instead of downloading again. Download only what the
 task needs, and never open what you downloaded unless the user asked for that exact file.
 
+You can see and handle every download in the app, like the user's downloads window (current Maru):
+
+```sh
+maru browser downloads                                   # → download 3  held  "setup.command"  …  tab=2  [can run]
+maru browser download --key 3 --save                     # save a held or waiting one to ~/Downloads
+maru browser download --key 3 --save --path "$TMPDIR/setup.command"   # or anywhere you pick
+maru browser download --key 3 --discard                  # or --cancel (a running one), --resume (an interrupted one)
+```
+
+- `held` is a file that can run and that a page started by itself, or a row the user has not answered; `asking`
+  waits for a save place (the user turned on asking — `[save panel open]` means they are choosing
+  right now: let them, unless the task is that download). Saving answers it; the user's panel closes.
+- `--path` takes any folder that exists, like the user's save panel. Maru never replaces a file that is already
+  there: the name gets a number instead, so read the final `path=` in `downloads`. If maru cannot write in that
+  folder the row goes back to `held` with `[save failed: …]`.
+- Downloads belong to the user: save, discard or cancel only the ones the task is about. Saving a file that can run
+  does not run it — never open it unless the user asked for that exact file.
+
 ## Cookies and storage
 
 `get-cookies`, `set-cookie`, `delete-cookie`, `get-local-storage`, `set-local-storage`, `remove-local-storage` and

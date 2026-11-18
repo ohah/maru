@@ -1378,7 +1378,7 @@ pub fn agentAct(key: u64, action: AgentAction, path: ?[]const u8) AgentError!Sta
                 const slash = std.mem.lastIndexOfScalar(u8, p, '/') orelse return error.BadPath;
                 const dir = if (slash == 0) "/" else p[0..slash];
                 const raw_name = p[slash + 1 ..];
-                if (p.len > max_path_bytes or raw_name.len == 0) return error.BadPath;
+                if (raw_name.len == 0 or p.len > max_path_bytes) return error.BadPath;
                 var name_buf: [max_name_bytes]u8 = undefined;
                 const clean = sanitizeChosenName(raw_name, &name_buf); // 사람의 저장 창과 같은 다듬기(`:`·끝 점·길이)
                 if (clean.len == 0) return error.BadPath;
@@ -1998,12 +1998,14 @@ test "agent list: every row with key, tab, state, risky, bytes, saved path, an o
     @memcpy(c.final_buf[0..final.len], final);
     c.final_len = final.len;
     try entries.append(allocator(), c);
+    try entries.append(allocator(), rowForTest(4, 9, .asking)); // 묻는 중이지만 창은 아무도 맡지 않았다 — panel_open 이 없어야
     const json = try agentListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
     defer parsed.deinit();
     const rows = parsed.value.object.get("downloads").?.array.items;
-    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqual(@as(usize, 4), rows.len);
+    try std.testing.expect(rows[3].object.get("panel_open") == null);
     try std.testing.expectEqualStrings("held", rows[0].object.get("state").?.string);
     try std.testing.expect(rows[0].object.get("risky").?.bool);
     try std.testing.expect(rows[0].object.get("save_failed") != null);

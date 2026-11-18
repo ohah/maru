@@ -23,7 +23,7 @@ pub const net_fields = @import("net_fields.zig");
 pub const net_policy = @import("net_policy.zig");
 /// 요청 막기의 패턴(W9d③ — 풀기·정규형·맞추기·종류 마스크) — maru 는 인자 검사와 정규형에, sidecar 는 IO 스레드의 맞추기에.
 pub const net_block = @import("net_block.zig");
-/// 주소의 Chromium 꼴 흉내(W9d③ 20 회 검증 — D2 토큰의 주소 비교, 패턴의 IP 호스트 꼴 검사).
+/// 주소의 Chromium 꼴 흉내(W9d③ 20 회 검증 — 주소 비교(흉내 게이트의 대상 주소 — 처음은 D2 토큰), 패턴의 IP 호스트 꼴 검사).
 pub const url_canon = @import("url_canon.zig");
 /// 가짜 응답의 응답 규칙(W9d④ — 상태·Location·content_type·머리 허용 목록·본문 상한·메서드·실행 출처) — maru 는 인자 검사에, sidecar 는 규칙
 /// frame 의 닫힌 칸과 응답 만들기에.

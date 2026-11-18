@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
-const msg = protocol.message;
 const fields = protocol.fields;
 const codec = protocol.codec;
 const testing = std.testing;

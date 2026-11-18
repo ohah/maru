@@ -26,7 +26,7 @@ pub const humanUseOf = protocol.human_use.useOf;
 
 /// 탭 자리 — sidecar 의 브라우저 상한과 같다.
 pub const capacity = @import("registry.zig").capacity;
-/// 묶인 주소의 시한 — 보통 수 ms 안에 쓰인다. 넉넉히 두되 남지 않게(막기 표의 `url_token_ms` 와 같다).
+/// 묶인 주소의 시한 — 보통 수 ms 안에 쓰인다. 넉넉히 두되 남지 않게(옛 막기 표의 주소 토큰 시한과 같은 5 초).
 pub const bound_ms: i64 = 5_000;
 /// 사람 입력 뒤 렌더러가 시작한 이동을 사람의 것으로 보는 창 — Chromium 의 일시 사용자 활성화(transient activation) 수명과 같다(5 초: 그
 /// 안의 `setTimeout` 이동도 몸짓을 싣는다). 사람·에이전트를 가르지 못하면 사람 쪽(진짜 문서)이다.

@@ -1,4 +1,4 @@
-//! W9d③ 6 차 적대 검증(A6 — 56c752cdb 를 친 판)의 순수 탐침과 6 차 고침(getProperties 를 읽기 목록에서 뺐다)의 단언. 모형 탐침은 실측과 갈리므로
+//! W9d③ 6 차 적대 검증(A6 — 56c752cdb 를 친 판)의 순수 탐침(6 차 고침의 읽기 목록 단언은 2026-11-18 「막기도 넓히기」 로 목록과 함께 지웠다). 모형 탐침은 실측과 갈리므로
 //! 모형의 답을 고정하는 시험으로 둔다(결함의 재현이 아니다).
 
 const std = @import("std");
@@ -6,7 +6,6 @@ const protocol = @import("web_sidecar_protocol");
 const nb = protocol.net_block;
 const msg = protocol.message;
 const table_mod = @import("net_block_table.zig");
-const dt = @import("devtools_table.zig");
 const sw_share = @import("sw_share.zig");
 const testing = std.testing;
 

@@ -1603,10 +1603,10 @@ fn fix4D2(report: Report, host_path: [:0]const u8, root: []const u8) !void {
         const srv_typed = seen("/m/x4bdoc?");
         for (0..3) |i| {
             try r.nav(1, uLoop(&u, "/p/sub?bb"), false);
-            if (!contains(try typedThenEval(&r, 1, uLoop(&u, std.fmt.bufPrint(&qb, "/m/x4bdoc?{d}", .{i}) catch ""), 0, "1", &o), "REAL|")) bblocked += 1;
+            if (contains(try typedThenEval(&r, 1, uLoop(&u, std.fmt.bufPrint(&qb, "/m/x4bdoc?{d}", .{i}) catch ""), 0, "1", &o), "is blocked")) bblocked += 1;
         }
         try r.nav(1, uLoop(&u, "/x4/bu"), false);
-        if (!contains(try typedThenEval(&r, 1, uLoop(&u, "/m/x4bdoc?bu"), 100, "1", &o), "REAL|")) bblocked += 1;
+        if (contains(try typedThenEval(&r, 1, uLoop(&u, "/m/x4bdoc?bu"), 100, "1", &o), "is blocked")) bblocked += 1;
         const typed_srv = seen("/m/x4bdoc?") - srv_typed;
         // 규칙을 잠깐 비우고 에이전트가 규칙 주소 문서를 확정한 뒤 규칙을 다시 건다.
         try r.host.send(.{ .net_block = .{ .browser = 1, .generation = 2 } });
@@ -1624,13 +1624,13 @@ fn fix4D2(report: Report, host_path: [:0]const u8, root: []const u8) !void {
             _ = r.call(1, "Runtime.evaluate", "{\"expression\":\"1\"}", 3000) catch null;
             _ = r.until(Run.loadsAt, 1, before + 1, wait_ms);
             r.pump(300);
-            if (!contains(d2Doc(&r, 1, &o), "REAL|")) rblocked += 1;
+            if (contains(d2Doc(&r, 1, &o), "is blocked")) rblocked += 1;
         }
         report(bblocked == 4 and typed_srv == 0 and pre_ok and rblocked == 2 and seen("/m/x4bdoc?r") == srv_r, "block-typed-reload+agent-eval-blocked", std.fmt.bufPrint(&d, "막기 규칙 — 친 주소 + eval 막힘 {d}/4(떠나기 처리기 하나 포함, 서버 {d}) · (규칙 앞에 확정 {}) 새로 고침 + eval 막힘 {d}/2(서버 {d})", .{ bblocked, typed_srv, pre_ok, rblocked, seen("/m/x4bdoc?r") - srv_r }) catch "");
         const before_srv = seen("/m/x4bdoc?agent");
         try r.nav(1, uLoop(&u, "/m/x4bdoc?agent"), false);
         const agent_view = d2Doc(&r, 1, &o);
-        report(!contains(agent_view, "REAL|") and seen("/m/x4bdoc?agent") == before_srv, "block-agent-nav-blocked", std.fmt.bufPrint(&d, "에이전트 이동도 막힌다 — {s} · 서버 {d}", .{ agent_view, seen("/m/x4bdoc?agent") - before_srv }) catch "");
+        report(contains(agent_view, "is blocked") and seen("/m/x4bdoc?agent") == before_srv, "block-agent-nav-blocked", std.fmt.bufPrint(&d, "에이전트 이동도 막힌다 — {s} · 서버 {d}", .{ agent_view, seen("/m/x4bdoc?agent") - before_srv }) catch "");
         try r.host.send(.{ .net_block = .{ .browser = 1, .generation = 4 } });
         r.pump(200);
     }

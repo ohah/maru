@@ -716,7 +716,7 @@ test "A-R9: CDP 번호 대역이 겹치지 않는다(엄격·본문·DevTools·�
     try testing.expectEqual(@as(i64, @import("devtools_table.zig").id_base), dt_lo);
 }
 
-// ── R10 (pure): D2 tokens ─────────────────────────────────────────────────────────────────────────────
+// ── R10 (pure): typed URL forms vs GURL (the old D2 token compared them — the emulation gate does now) ─────────────────────────────────────────────────────────────────────────────
 
 test "A-R10 LOW-4: 친 글과 Chromium(GURL) 꼴이 같은 해시다(옛 D2 의 주소 토큰 — 지금은 흉내 게이트의 대상 주소가 쓴다)(빈칸·점 조각·? 앞의 / 없음·IP 꼴·따옴표·역슬래시 포함 9 꼴)" {
     const Row = struct { typed: []const u8, gurl: []const u8 };

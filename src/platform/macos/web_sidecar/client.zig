@@ -355,7 +355,7 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
 
 /// `on_before_browse` — 주 프레임의 이동이 시작된다(리다이렉트마다도): maru 에 알리고(W9a 적대 리뷰 5 회차 — 확정 전 DevTools 호출을
 /// 가른다) 그대로 둔다(0 — 막지 않는다).
-/// W9d③: 주·하위 프레임 모두 — 진행 중 이동을 적고(서비스 워커 길·귀속), 사용자 이동 토큰을 묶고, 엄격 모드를 사이트에 묶는다(IO 의 처리기
+/// W9d③: 주·하위 프레임 모두 — 진행 중 이동을 적고(서비스 워커 길·귀속), 사람의 누름(Q2 — 가짜만)을 묶고, 엄격 모드를 사이트에 묶는다(IO 의 처리기
 /// 고르기보다 늘 먼저 — 실측 J-B15·D3(i)).
 fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, req: [*c]c.cef_request_t, user_gesture: c_int, is_redirect: c_int) callconv(.c) c_int {
     defer object.releaseArg(browser);

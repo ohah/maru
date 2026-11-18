@@ -16025,6 +16025,55 @@ test "browser.permissions·permission: 목록(이름·shown)과 dialog 의 수, 
     }
 }
 
+// 사이트 권한 창(2026-11-18): ABI 가 표의 행을 보이는 출처·종류 이름(UI 언어)으로 싣고, 밑 줄에 더 있는 수·표에 없는 수를 적고, 지우기는 (종류, 출처)로
+// 표에 있는 것만 — 0·너무 긴 출처·모르는 종류는 거절.
+test "site permissions ABI: 행(보이는 출처·이름)·밑 줄·지우기의 거절" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ta = std.testing.allocator;
+    const web = session_mod.web_osr;
+    try web.testHold(ta, 991);
+    web.testRunning(991);
+    defer {
+        web.testResetSitePermissions(ta);
+        web.destroy(ta, 991);
+        web.testForget(ta);
+    }
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.en);
+    maru_macos_site_permissions_refresh();
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_site_permissions_state());
+    var list: maru.session.web_sidecar.message.SitePermissionsList = .{ .request = 0, .total = 4, .unlisted = 3, .count = 1 };
+    list.entries[0] = .{ .kind = .notifications, .setting = .block, .origin = "https://news.example:443" };
+    // 낸 번호를 모른다 — 1 부터 차례로 낸다(이 시험이 처음 낸 것).
+    var request: u32 = 1;
+    while (request < 64 and maru_macos_site_permissions_count() == 0) : (request += 1) {
+        list.request = request;
+        web.testApply(ta, .{ .site_permissions_list = list });
+    }
+    try std.testing.expectEqual(@as(u32, 2), maru_macos_site_permissions_state());
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_site_permissions_count());
+    var row: c.MaruSitePermissionRow = undefined;
+    try std.testing.expectEqual(@as(i32, 1), maru_macos_site_permissions_row(0, &row));
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_site_permissions_row(1, &row));
+    try std.testing.expect(row.kind == 1 and row.setting == 2);
+    try std.testing.expectEqualStrings("https://news.example:443", row.origin[0..row.origin_len]);
+    try std.testing.expectEqualStrings("https://news.example", row.display[0..row.display_len]);
+    try std.testing.expectEqualStrings("Notifications", row.label[0..row.label_len]);
+    var buf: [256]u8 = undefined;
+    const n = maru_macos_site_permissions_footer(&buf, buf.len);
+    try std.testing.expectEqualStrings("3 more not shown  3 other remembered settings cannot be shown here", buf[0..n]);
+    try std.testing.expectEqualStrings("Site Permissions", std.mem.span(maru_macos_site_permissions_text(0)));
+    try std.testing.expectEqualStrings("", std.mem.span(maru_macos_site_permissions_text(99)));
+    const origin = "https://news.example:443";
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_site_permissions_reset(1, null, 0));
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_site_permissions_reset(99, origin.ptr, origin.len));
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_site_permissions_reset(1, origin.ptr, 256));
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_site_permissions_reset(2, origin.ptr, origin.len)); // 표에 없는 종류
+    try std.testing.expectEqual(@as(i32, 1), maru_macos_site_permissions_reset(1, origin.ptr, origin.len));
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_site_permissions_state()); // 지운 뒤의 목록을 기다린다
+}
+
 fn pendingErrorMessage(pending: *control_server_mod.PendingRequest) ![]u8 {
     const response = pending.response orelse return error.ExpectedResponse;
     defer allocator.free(response);

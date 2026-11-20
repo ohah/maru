@@ -1,7 +1,7 @@
 //! Chromium 탭의 `browser.upload`(W9c③) — 로케이터가 찾은 `<input type=file>` 에 앱이 만든 사본을 넣는 DevTools 차례. 로케이터 풀기는
-//! `web_cdp_ops.Op` 가 click 과 같은 길로 하고(selector·ref·role·text·label), 요소를 찾으면 이 차례로 넘긴다(`located`). 확인 모달은 앱이
-//! 띄운다 — 이 차례는 모달 전 확인을 마치면 `Step.confirm` 으로 멈추고, 앱이 승인 뒤 사본을 만들어 `beginPost` 하면 로케이터를 **다시**
-//! 풀어 같은 요소인지 본 뒤 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」, 실제 CEF 154 실측):
+//! `web_cdp_ops.Op` 가 click 과 같은 길로 하고(selector·ref·role·text·label), 요소를 찾으면 이 차례로 넘긴다(`located`). 확인 모달은
+//! 없다(사용자 결정 2026-11-16 — 아래의 「모달 전」·「승인 뒤」 는 그 전의 이름이고 지금은 「넣기 전 확인」·「사본 뒤」 다) — 이 차례는 넣기
+//! 전 확인을 마치면 `Step.confirm` 으로 멈추고, 앱이 곧 사본을 만들어 `beginPost` 하면 로케이터를 **다시** 풀어 같은 요소인지 본 뒤 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」, 실제 CEF 154 실측):
 //!
 //! - **모달 전**: `Page.getFrameTree`(주 프레임 id·`loaderId`·`securityOrigin` — 모달은 이 출처만 보인다, 페이지가 정한 글은 싣지 않는다)
 //!   → 격리 world → `DOM.resolveNode` → 확인 함수(파일 입력칸인가·꺼지지 않았나(`:disabled` — fieldset 도)·폴더 칸이 아닌가·여러 파일이면

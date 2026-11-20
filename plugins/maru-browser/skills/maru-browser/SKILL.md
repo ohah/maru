@@ -73,8 +73,9 @@ without asking the user (user decision 2026-11-16). That makes section 5 the onl
 
 - Some calls take long (`trace`, an `upload` of large files, an older Maru waiting for the user's answer). Give
   those shell calls a timeout of at least 3 minutes (Claude Code Bash: `timeout: 180000`).
-- `error: Unauthorized (-32002)` means maru refused: ask, do not retry in a loop. `close` works only on
-  tabs your pane opened. See [tabs-and-permissions.md](references/tabs-and-permissions.md).
+- `error: Unauthorized (-32002)` means maru refused: ask, do not retry in a loop. `close` works on any tab, the
+  user's too — close a user's tab only when the user asked (an older Maru closes only tabs your pane opened).
+  See [tabs-and-permissions.md](references/tabs-and-permissions.md).
 
 ## 4. Output files — `--out`, a new name in `$TMPDIR`
 

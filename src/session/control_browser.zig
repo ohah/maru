@@ -35,6 +35,11 @@
 //!     scope_insufficient·surface 부재·surface가 terminal(web 아님)이 **전부** 균일 `unauthorized`(-32002)로 접힌다.
 //!     deny 이유는 절대 wire로 안 나간다(`authorize`의 `.deny` reason을 버리고 message는 균일 "Unauthorized").
 //!   - id 형식 오류(순서 3)만 `invalid_params`다 — surface 존재 oracle이 아니라 요청 형식 오류라 session.get과 동일.
+//!   - **2026-11-16 이후의 읽는 법(docs/control-plane-security.md §8.9 「전권」)**: 이 파일의 `needs_grant`·「확인 모달」·「사이트마다
+//!     묻는다」 는 그 결정 전의 흐름이다. 지금은 앱(L4 `grantFullAccess`)이 디스패치 **전에** 신원 판정을 지난 pane 에 전권 grant 를
+//!     넣으므로 그 pane 의 디스패치는 대개 인가되고, 그래도 남은 `needs_grant` 는 모달 없이 `grants_full`·균일 unauthorized 로 끝난다
+//!     (`answerNeedsGrant`). 거절의 차례는 그대로다 — 엔진·로케이터 키 거절과 emulate 의 인자 거절은 인가 판정 앞, 나머지 인자 형식
+//!     거절(`invalid_params`)은 인가 뒤(§8.3 oracle 불변식).
 //!
 //! **L2 순수:** std + control_plane(1a) + control_capability(1e) + control_surface(1c) + control_events(5f-0a: browser.subscribe
 //! 이벤트 필터 vocabulary)만 import한다(app/pty/platform/chrome import 0 — tests/boundary/imports.zig가 강제). OS 타입 0.
@@ -148,8 +153,8 @@ pub const BrowserMethod = enum {
     /// op.arg=`{accept, text?, dialog?}`. **op_kind=26 고정**.
     handle_dialog,
     /// `browser.upload {id, selector|ref|locator, files:[절대 경로]}`(W9c③ — Chromium 전용) → `{origin, files:[{name,size}], kept, navigated, dialog}`. 로케이터가 가리킨
-    /// `<input type=file>` 에 파일을 넣는다. **부를 때마다 확인 모달**(grant·cap 이 있어도 — 기억하지 않는다)이 파일을 모두 보이고, 앱이 파일을 열어
-    /// 승인 뒤에 사본을 만들어 그 사본을 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」). op.arg=`{선택자 필드, files:[…]}`. **op_kind=27 고정**.
+    /// `<input type=file>` 에 파일을 넣는다. 묻지 않는다(사용자 결정 2026-11-16 — 그 전에는 부를 때마다 확인 모달이 파일을 모두 보였다). 앱이 파일을
+    /// 열고 넣기 전 확인을 마치면 곧 사본을 만들어 그 사본을 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」). op.arg=`{선택자 필드, files:[…]}`. **op_kind=27 고정**.
     upload,
     /// `browser.network {id, page?, page_size?, types?, method?, status?, url_contains?, before_req?, clear?}`(W9d① — Chromium 전용) →
     /// `{requests:[…], hidden_before_grant, hidden_other_site_pages?, dropped, full_details, cross_site_iframe_hidden?,
@@ -330,7 +335,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
         // hover·press.
         // W9a①: navigate·getUrl·screenshot, W9a②: executeScript, W9a③: localStorage·쿠키·clearStorage, W9c②: 대화상자 보기·답하기,
-        // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
+        // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 묻지 않는다, 2026-11-16 전에는 매번 확인 모달).
         // W9d①: 네트워크 목록·자세히(CEF 자원 요청 처리기 — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
             .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block, .network_mock, .emulate, .trace, .show, .downloads, .download, .permissions, .permission => true,
@@ -339,7 +344,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     };
 }
 
-/// 그 web 탭에서 이 메서드를 실행할 수 있는가 — 목록의 `methods` 와 확인 모달 전 거절이 함께 쓴다.
+/// 그 web 탭에서 이 메서드를 실행할 수 있는가 — 목록의 `methods` 와 인가 판정 전 거절이 함께 쓴다.
 pub fn surfaceSupports(w: cs.WebMeta, m: BrowserMethod) bool {
     // `open` 은 탭에 쓰는 메서드가 아니다(대상이 부른 pane) — 탭마다의 목록에 싣지 않는다(W9b③).
     if (m == .open or m == .downloads or m == .download) return false; // 탭에 쓰지 않는다 — 부른 pane 이 대상
@@ -3087,8 +3092,8 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
                 cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), null),
             .invalid_params => cp.serializeError(gpa, req.id, .invalid_params, if (result.len > 0) result else "Invalid selector", null),
             .process_exited => cp.serializeError(gpa, req.id, .process_exited, cp.ErrorCode.process_exited.defaultMessage(), null),
-            // W9c③: 업로드 확인 모달의 「거부」 는 인가 판정이 아니라 사용자의 답이다 — 무엇을 거절했는지 그대로 싣는다(인가의 균일 글은 존재·이유를
-            // 숨기려는 것이라 여기에는 숨길 것이 없다). 철회·닫힘의 unauthorized 는 글 없이 오므로 균일 글 그대로다.
+            // W9c③: 업로드의 「부른 프로그램이 그 pane 의 foreground 를 떠났다」(사본 전 — 2026-11-16 전에는 확인 모달의 「거부」 도)는 인가 판정이
+            // 아니다 — 그 글을 그대로 싣는다(인가의 균일 글은 존재·이유를 숨기려는 것이라 여기에는 숨길 것이 없다). 철회·닫힘의 unauthorized 는 글 없이 오므로 균일 글 그대로다.
             .unauthorized => cp.serializeError(gpa, req.id, .unauthorized, if (bmethod == .upload and result.len > 0) result else cp.ErrorCode.unauthorized.defaultMessage(), null),
             .success => unreachable,
             // W9d①: 모르는·버려진 요청 번호 — handleDialog 의 모르는 번호와 같은 코드에 `data.reason`(앱이 `{"reason","message"}` 를 준다).
@@ -3834,8 +3839,8 @@ pub fn browserOpFromRequest(
     //       invalid_params로 답해 파라미터 스키마를 탐침당했다(리뷰 — subscribe는 막았으나 일반 경로가 규율을 놓침). ──
     const dto = snapshot.find(target_id);
     if (dto == null or dto.?.kind() != .web) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
-    // W9-0: 엔진이 지원하지 않는 메서드는 확인 모달 **전에** 답한다(예전엔 승인 뒤 실행 단계에서 실패해, 사용자가 허용을 눌러도
-    // 에이전트는 실패를 받았다).
+    // W9-0: 엔진이 지원하지 않는 메서드는 인가 판정(`needs_grant`) **전에** 답한다(예전엔 확인 모달의 승인 뒤 실행 단계에서 실패해, 사용자가
+    // 허용을 눌러도 에이전트는 실패를 받았다).
     if (unsupportedOnSurface(dto.?, bmethod)) |w| return .{ .err = try unsupportedByEngineResponse(gpa, req.id, w.engine, w.controllable) };
     // W9b②: 로케이터(`locator`)는 Chromium 만 — 키가 있는지만 본다(인가 전에는 params 값을 풀지 않는다 — §8.3 oracle 불변식).
     if (locatorUnsupported(dto.?, bmethod, req.params)) |w| return .{ .err = try unsupportedByEngineParamResponse(gpa, req.id, w.engine, w.controllable, "locator") };
@@ -3975,7 +3980,8 @@ pub fn browserOpFromRequest(
             break :blk try gpa.dupe(u8, "");
         },
         .permission => try serializePermissionArg(gpa, parsePermissionParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
-        // W9c③: 업로드 — `{선택자 필드, files}`. 확인 모달은 실행 계층이 매번 띄운다(여기서 인가된 것은 「그 탭을 다뤄도 된다」 뿐이다).
+        // W9c③: 업로드 — `{선택자 필드, files}`. 파일 열기·검사·사본은 실행 계층이 맡는다(여기서 인가된 것은 「그 탭을 다뤄도 된다」 뿐이다 —
+        // 2026-11-16 전에는 실행 계층이 매번 확인 모달도 띄웠다).
         .upload => blk: {
             var why: UploadParamsWhy = .{};
             const p = parseUploadParams(req.params, &why) catch return .{ .err = try cp.serializeError(gpa, req.id, .invalid_params, why.text() orelse cp.ErrorCode.invalid_params.defaultMessage(), null) };

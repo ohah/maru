@@ -6827,6 +6827,9 @@ var control_cap_store: control_capability.CapabilityStore = .{};
 /// **1e-confirm(§9.2 Model B)**: pane-bound confirm-grant 라이브 store. 사용자가 확인 모달로 승인한 (pane, target,
 /// scope) grant를 저장하고, dispatchAuthenticated가 browser.* authz서 세션 cap과 **가법** 조회한다. 빈=grant 없음=
 /// (cap도 없으면) default-deny. grant 생성(확인 모달)·surface-close removeSurface 배선은 1e-confirm-1c/2. **메인 스레드 전용**(§8.8).
+/// **2026-11-16 이후의 읽는 법(docs/control-plane-security.md §8.9 「전권」)**: 확인 모달은 걷혔다 — 신원 판정을 지난 pane 의 요청은 디스패치
+/// 전에 전권 grant 를 받는다(`grantFullAccess`). 이 파일의 「모달 전」·「모달 뒤 재처리」 는 그 전의 이름이다(지금은 「인가 판정 전」·「그 요청」).
+/// 다만 업로드(W9c③) 갈래의 「모달 전」 은 「사본 전」, 「승인 뒤」 는 「사본 뒤」 다(`web_cdp_upload.zig` 머리말).
 var control_pane_grant_store: control_pane_grant.PaneGrantStore = .{};
 /// 마지막으로 꺼낸 op 의 허용 호스트(`maru_macos_control_taken_browser_op_required_host`).
 var browser_op_take_host: control_pane_grant.GrantHost = .{};
@@ -6903,7 +6906,7 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .reload,
         .hover,
         .press,
-        // W9c③: 업로드도 실행 자리를 쥔다(인가 출처를 호출마다 다시 본다 — 모달 동안 철회·탭 닫힘이면 넣지 않는다).
+        // W9c③: 업로드도 실행 자리를 쥔다(인가 출처를 호출마다 다시 본다 — 파일 작업 동안 철회·탭 닫힘이면 넣지 않는다).
         .upload,
         => true,
         // W9b③: open·close 는 따로 둔 탭 op 목록이 본다(대상이 부른 pane·닫히는 것이 성공 — `enqueueTabOp`).
@@ -7366,7 +7369,7 @@ const control_hello_caps = [_][]const u8{
     // W9c②: 에이전트가 JS 대화상자를 보고 답한다.
     "browser.dialog",
     "browser.handleDialog",
-    // W9c③: 에이전트가 파일 입력칸에 파일을 넣는다(부를 때마다 확인 모달).
+    // W9c③: 에이전트가 파일 입력칸에 파일을 넣는다(묻지 않는다 — 2026-11-16 전에는 부를 때마다 확인 모달).
     "browser.upload",
     // W9d①: 네트워크 기록 목록·자세히(`browser_network` grant — 사이트에 묶인다).
     "browser.network",
@@ -7429,8 +7432,8 @@ fn collectSessionsWithInspection(refs: []const ControlSessionRef, arena: std.mem
 
 /// **1g(control-plane-security §8.4)**: 붙은 프로세스의 출처(연결 스레드가 찾은 조상 사슬에서 자기 터미널의 foreground
 /// 그룹에 속한 첫 조상과 그 세션)를 pane 으로 바꾼다. 그 프로세스가 **지금도** 그 터미널의 foreground 일 때만(지속 세션은 요청마다 다시 본다).
-/// - `browser_pane` = 찾은 pane — browser 확인 grant(§9.2 Model B)의 pane. 셀렉터가 필요 없어 세션 유지 pane(셀렉터 없음)
-///   에서도 에이전트가 확인 모달을 받는다(사용자 결정 2026-10-09).
+/// - `browser_pane` = 찾은 pane — browser grant(§9.2 Model B — 2026-11-16 부터 전권 grant, §8.9)의 pane. 셀렉터가 필요 없어 세션 유지
+///   pane(셀렉터 없음)에서도 에이전트가 쓴다(사용자 결정 2026-10-09 — 그때는 확인 모달을 받았다).
 /// - `selector`(주장) 는 찾은 pane 과 같을 때만 남긴다. 다르거나 못 찾았으면 null — metadata 는 셀렉터 없는 연결처럼
 ///   전체 목록이 되고(넓어지는 권한이 없다, §4a), browser 는 찾은 pane 으로만 묻는다. 남의 pane 번호를 대도 그 pane 의
 ///   기억된 grant 를 못 탄다.
@@ -7677,7 +7680,7 @@ fn pushBrowserOp(
     // W9b①: Chromium(OSR) 탭의 op 은 Swift 가 아니라 DevTools 차례(`web_cdp_ops`)로 실행한다. 엔진은 프로세스 단위 결정
     // (`web_osr.enabled` — L2 의 탭 단위 판정 `isOsrTerm` 과 같은 값: 켜졌으면 제어 가능한 브라우저 탭은 모두 Chromium 이다,
     // markdown·파일 뷰는 L2 가 막았다). 한 번도 배치되지 않은 탭도 여기로 온다(레코드로 가르면 WebKit 으로 갔다).
-    // Chromium 이 지원하지 않는 메서드는 L2 가 확인 모달 전에 거절했다 — 닿으면 같은 `-32008`.
+    // Chromium 이 지원하지 않는 메서드는 L2 가 인가 판정 전에 거절했다 — 닿으면 같은 `-32008`.
     const chromium = session_mod.web_osr.enabled();
     // W9c②: 대화상자 보기·답하기는 DevTools 를 부르지 않는다 — 여기서 곧 답한다. 대화상자로 멈춘 탭의 op 줄 뒤에 서면 안 되고(그 줄이
     // 바로 막힌 것이다) — 한 자리에서 가른다(계획 공격 2 회차).
@@ -7698,7 +7701,7 @@ fn pushBrowserOp(
         _ = server.completeInFlight(async_id, resp);
         return;
     }
-    // W9c③: 업로드는 Chromium 만 — WebKit 프로세스(엔진이 꺼졌다)면 L2 가 모달 전에 막았다. 닿으면 같은 `-32008`(Swift 로 보내지 않는다).
+    // W9c③: 업로드는 Chromium 만 — WebKit 프로세스(엔진이 꺼졌다)면 L2 가 인가 판정 전에 막았다. 닿으면 같은 `-32008`(Swift 로 보내지 않는다).
     if (op.method == .upload and !chromium) {
         server.cross_gpa.free(op.arg);
         const pending = server.inFlightPending(async_id) orelse return;
@@ -8547,7 +8550,7 @@ const CdpRun = struct {
     required_host: control_pane_grant.GrantHost = .{},
     /// W9a③: 시작할 때 확인한 문서 주소(소유 — op 이 그 주소로만 한다).
     doc_url: ?[]u8 = null,
-    /// W9c③: 업로드할 파일을 여는·사본을 만드는 작업(시작할 때 연다 — 모달 전에 파일을 연다).
+    /// W9c③: 업로드할 파일을 여는·사본을 만드는 작업(시작할 때 연다 — 로케이터 확인과 함께).
     upload: ?*UploadJob = null,
     /// W9c③: 파일을 열었고 사본을 만드는 중이다(`uploadApprove`).
     upload_approved: bool = false,
@@ -8769,7 +8772,7 @@ fn beginCdp(run: *CdpRun) void {
             else => {},
         };
     }
-    // W9c③: 업로드 — 파일을 지금 연다(작업 스레드 — 죽은 망 마운트가 앱을 멈추지 않게). 로케이터 확인과 함께 진행되고, 둘 다 끝나야 모달이 뜬다.
+    // W9c③: 업로드 — 파일을 지금 연다(작업 스레드 — 죽은 망 마운트가 앱을 멈추지 않게). 로케이터 확인과 함께 진행되고, 둘 다 끝나면 묻지 않고 곧 사본을 만든다(`pollUploadRun` → `uploadApprove`).
     if (run.upload) |job| {
         if (!uploadSpawn(job, .prepare)) return finishCdp(run, .failed, "could not start opening the files");
     }
@@ -9297,7 +9300,8 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             finishCdp(run, d.status, d.result);
         },
         .sleep => |ms| cdp_sleepers.append(allocator, .{ .run = run, .wake_ms = cdpNowMs() + ms }) catch finishCdp(run, .failed, "out of memory"),
-        // W9c③: 업로드가 모달 전 확인을 마쳤다 — 멈추고 모달을 기다린다(그 탭의 줄은 쥔 채). 답할 시간은 grant 모달과 같은 120 초.
+        // W9c③: 업로드가 넣기 전 확인을 마쳤다 — 멈추고 파일 작업을 기다린다(그 탭의 줄은 쥔 채 — `pollUploadRuns` 가 곧 사본을 만든다).
+        // 요청 시한은 그때부터 120 초(`upload_prepare_timeout_ns`).
         .confirm => |cf| uploadPause(run, cf.origin),
         .call => |next| {
             defer allocator.free(next.params);
@@ -9441,7 +9445,8 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
         },
         else => completeCdp(async_id, status, result),
     } else if (refused)
-        // W9c③: 사용자가 거부했다(또는 물을 창이 없다) — 인가 판정이 아니라 사용자의 답이라 그 글을 싣는다(L2 가 업로드만 글을 싣는다).
+        // W9c③: 사본 전에 부른 프로그램이 그 pane 의 foreground 를 떠났다(`uploadApprove` — 2026-11-16 전에는 사용자의 거부·물을 창 없음도)
+        // — 부른 쪽 자신의 상태라 숨길 것이 없어 그 글을 싣는다(L2 가 업로드만 글을 싣는다).
         maru_macos_control_complete_browser_op(async_id, @backingInt(control_browser.BrowserCompletionStatus.unauthorized), result.ptr, result.len)
     else
         completeCdp(async_id, status, result);
@@ -9664,7 +9669,7 @@ const UploadJob = struct {
 };
 
 fn uploadPrepareAll(job: *UploadJob) void {
-    // 내용 해시(적대 리뷰 3 회차 M1)는 이 호출의 파일들이 함께 1 GiB 까지 — 모달 전에 이 스레드가 읽는다(모달이 그만큼 늦게 뜬다).
+    // 내용 해시(적대 리뷰 3 회차 M1)는 이 호출의 파일들이 함께 1 GiB 까지 — 사본 전에 이 스레드가 읽는다(사본이 그만큼 늦게 시작한다).
     var hash_budget: u64 = web_upload_stage.hash_cap_per_call;
     for (job.paths, 0..) |path, i| {
         const r = web_upload_stage.prepareWith(allocator, path, &hash_budget) catch {
@@ -9683,7 +9688,7 @@ fn uploadPrepareAll(job: *UploadJob) void {
                 return;
             },
         }
-        // 다른 경로가 같은 파일(링크) — 모달에 같은 파일이 둘 보인다.
+        // 다른 경로가 같은 파일(링크) — 같은 파일을 두 번 넣게 된다(옛 모달에는 둘로 보였다).
         if (web_upload_stage.sameFileBefore(job.prepared.items, i)) {
             job.refused = .{ .index = i, .why = .duplicate };
             return;
@@ -9789,7 +9794,7 @@ fn uploadRelease(job: *UploadJob) void {
     job.destroy();
 }
 
-/// 모달·파일 작업을 기다리는 업로드(멈춘 CdpRun — `cdp_runs` 에도 그대로 있다, 그 탭의 줄을 쥔다).
+/// 파일 작업을 기다리는 업로드(멈춘 CdpRun — `cdp_runs` 에도 그대로 있다, 그 탭의 줄을 쥔다).
 var upload_runs: std.ArrayList(*CdpRun) = .empty;
 /// 탭마다 다른 볼륨에서 복사한 바이트(탭 4 GiB 상한) — 탭이 닫히면 뺀다.
 var upload_tab_copied: std.AutoHashMapUnmanaged(u64, u64) = .empty;
@@ -10079,7 +10084,7 @@ pub export fn maru_macos_control_server_has_pending() u32 {
     if (cdpSleeperDue()) return 1;
     if (!control_server_active) return 0;
     if (tab_runs.items.len > 0) return 1; // W9b③: 연 탭의 첫 불러오기·물은 닫기를 매 drain 본다
-    if (upload_runs.items.len > 0) return 1; // W9c③: 모달·파일 작업을 기다리는 업로드를 매 drain 본다
+    if (upload_runs.items.len > 0) return 1; // W9c③: 파일 작업을 기다리는 업로드를 매 drain 본다
     if (session_mod.web_osr.hasTraceAnswer()) return 1; // W9e②: 끝난 trace op
     return if (control_server_storage.hasPendingRequest()) 1 else 0;
 }
@@ -17078,12 +17083,12 @@ test "W9d① 적대 리뷰 3 회차 D1(사용자 결정 「쿠키 권한 있을 
     try std.testing.expect(try r9d1DetailHas(199, w9d1Grant(6, 199), 2, "https://bank.test/next"));
 }
 
-// ── W9c③: 에이전트의 파일 올리기(`browser.upload`) — 앱 쪽: 모달 전 파일 열기·매번 모달·결정·사본·이어가기·정리 ────────────────────────
-// 엔진 차례(로케이터·확인·넣기·읽기)는 `web_cdp_ops` 시험이 본다. 여기서는 그 차례가 모달 앞에서 멈춘 뒤(`Step.confirm`)의 앱 몫을 실제
-// `AppSession`(확인 모달)과 실제 파일 시스템(시험 폴더 — 실제 프로필은 건드리지 않는다)으로 본다. 엔진은 없다(DevTools 호출은 「engine is not
-// running」 으로 끝난다) — 그래서 승인 뒤 이어간 첫 호출이 무엇인지로 「다시 찾기부터 잇는다」 를 본다.
+// ── W9c③: 에이전트의 파일 올리기(`browser.upload`) — 앱 쪽: 파일 열기·묻지 않는 사본·이어가기·정리(확인 모달은 2026-11-16 걷혔다) ──────────
+// 엔진 차례(로케이터·확인·넣기·읽기)는 `web_cdp_ops` 시험이 본다. 여기서는 그 차례가 넣기 전 확인을 마치고 멈춘 뒤(`Step.confirm`)의 앱 몫을
+// 실제 `AppSession`(모달이 뜨지 않는지)과 실제 파일 시스템(시험 폴더 — 실제 프로필은 건드리지 않는다)으로 본다. 엔진은 없다(DevTools 호출은
+// 「engine is not running」 으로 끝난다) — 그래서 사본 뒤 이어간 첫 호출이 무엇인지로 「다시 찾기부터 잇는다」 를 본다.
 
-/// 모달 전 차례의 흉내 답 — 파일 입력칸 하나(F1·L1·https://a.test).
+/// 넣기 전 확인 차례의 흉내 답 — 파일 입력칸 하나(F1·L1·https://a.test).
 fn w9c3Answer(method: []const u8, params: []const u8) web_cdp_ops.Reply {
     _ = params;
     if (std.mem.eql(u8, method, "DOM.getDocument")) return .{ .ok = "{\"root\":{\"nodeId\":1}}" };
@@ -17096,7 +17101,7 @@ fn w9c3Answer(method: []const u8, params: []const u8) web_cdp_ops.Reply {
     return .{ .ok = "{}" };
 }
 
-/// 업로드 요청 하나를 실행 자리에 넣고(그 탭의 grant 로) 모달 전 차례를 흉내 답으로 몰아 멈춘다 — 앱의 `beginCdp` 처럼 파일 작업도 띄운다.
+/// 업로드 요청 하나를 실행 자리에 넣고(그 탭의 grant 로) 넣기 전 확인 차례를 흉내 답으로 몰아 멈춘다 — 앱의 `beginCdp` 처럼 파일 작업도 띄운다.
 fn w9c3Start(pending: *control_server_mod.PendingRequest, request: []const u8, tab: u64, files_json: []const u8) !*CdpRun {
     return w9c3StartFrom(pending, request, tab, files_json, 5);
 }

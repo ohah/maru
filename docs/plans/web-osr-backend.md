@@ -1721,6 +1721,53 @@ W9c③ 적대 리뷰: 5 회차(2026-10-15 — 마지막 회차. 리뷰가 재현
   실행은 하지 않았다 — 덮는 단계가 없음은 읽어서 본 것이다). 크래시로 걸린 것: L2 의 10 개·길이 상한(뒤 버퍼의 범위 밖), 복사 예산(정수 넘침), 철회의 정리(null).
   스모크 변이 하나(JSdis)의 첫 실행은 무관한 `w9a-r2`(부하 약 11)에서 멈춰 무효로 치고 다시 돌려 걸렸다.
 
+### W9c③ 넓힘 — iframe 안의 칸·폴더 칸(사용자 결정 2026-11-20 「iframe·폴더 둘 다」, wire 30, 완료)
+
+그 전에는 iframe 안의 칸은 「elements inside frames are not supported yet」, 폴더 칸(`webkitdirectory`)은 「upload passes files, not folders」 로 넣기 전에
+거절했다(옛 모달 시절의 결정 — 다른 출처 iframe 은 OOPIF 라 wire 에 세션 갈래가 없었다). 사람은 둘 다 고른다. 실측(CEF 154, 판정 `maru-web-judge --upload`):
+- **폴더**: `DOM.setFileInputFiles` 에 폴더 경로를 주면 폴더 칸에는 `{}` 이고 아무것도 안 들어가며(Blink 가 첫 경로를 폴더로 펼치게 넘기는데 CEF 가
+  펼치지 않는다), 보통 칸에는 그 폴더가 파일 하나(224 바이트)로 들어간다(`up-folder-path-silent`). 사람의 고르개도 maru 가 폴더를 파일들로 펼쳐 답한다
+  (`osrFolderFiles` — 숨긴 것·패키지 속·링크를 빼고, 4096 개를 넘으면 취소). 격리 world 에서 `webkitdirectory` 를 떼고 `multiple` 을 붙여 넣으면 칸은
+  파일들을 진짜 `input`·`change` 로 받고(`webkitRelativePath` 빈 글 — 사람의 고르개와 같다) 되돌린 뒤에도 목록이 남는다; maru 의 캡처 듣는 이가 첫 진짜
+  `input` 에서 되돌리면 칸의 보통 처리기는 `webkitdirectory` 참을 본다(`up-folder-toggle`).
+- **iframe**: 같은 사이트 iframe 은 `Page.getFrameTree` 의 자식이고 iframe 요소의 `DOM.describeNode` 에 `frameId`·`contentDocument` 가 있으며, 그 frame 의
+  격리 world 에서 잡은 칸에 페이지 세션의 `setFileInputFiles` 가 진짜 `change` 로 넣는다(`up-frame-describe`·`up-frame-same`). 다른 사이트 iframe 은 트리에
+  없고 `frameId` 만 있다(OOPIF). 그 frame 의 타깃은 누가 찾기 전에는 없다 — `attachToTarget{frameId}` 만으로는 「No target with given id found」, 
+  `Target.getTargets{filter:[{type:"iframe"}]}`(브라우저 전체의 목록 — 다른 탭의 iframe 도 있다, `up-frame-other-tab`) 뒤에는 `type:"iframe"`·`targetId == frameId` 로 있고 붙는다. 그 세션의 프레임 트리 뿌리는 그 frame 이고,
+  격리 world·찾기·넣기가 진짜 `change` 로 된다(`up-frame-oopif`, 본문 기록을 켠 탭에서도 `up-frame-oopif-recording`). iframe 을 지우면 그 세션의 호출은
+  매달리지 않고 답한다(`up-frame-session-gone`).
+
+결정(작성자 선택 — 사용자 결정의 안전한 쪽):
+- **폴더**: L2 `folder`(절대 경로 하나, `files` 와 함께 못 씀), CLI `--folder <dir>`, MCP `folder`. 작업 스레드가 사본 전에 펼친다(`web_upload_stage.enumerateFolder`
+  — `openat(O_NOFOLLOW)`·`fstatat(AT_SYMLINK_NOFOLLOW)`, 파일은 열지 않는다): 숨긴 것(`.` 이름·`UF_HIDDEN`, 폴더면 그 안까지)·링크(따라가지 않는다)·패키지
+  (`kCFURLIsPackageKey`)·보통 파일이 아닌 것·넘길 수 없는 이름은 빼고 종류별로 센다. 상한 `max_folder_files`(1000)·`max_folder_bytes`(4 GiB, 복제도)·
+  `max_folder_entries`·`max_folder_depth`, 그리고 사본 경로 목록이 DevTools 인자 한 번(64 KiB — sidecar 명령 상자 설계라 늘리지 않았다)에 드는지 사본 전에 센다
+  (`folderListFits`). 사본은 파일마다 지금의 `prepareWith`(realpath·O_NOFOLLOW·정규 파일·해시)로 열고 펼칠 때의 (장치, inode, 크기)와 같아야 만들고 곧 닫는다
+  (`stageFolderEntry` — 펼친 뒤 링크로 바꿔치기·밖으로 빠지기·자람은 `folder_changed`, 열 수 없는 파일(권한·경로 길이)은 `folder_unreadable`, 통째로 실패). 이름은 펼친 이름. 폴더 안 하드 링크 둘은 받는다(같은 파일
+  둘 거절은 명시한 파일 목록에만). 넣기는 사본 뒤 확인(arm)이 속성을 바꾸고 maru 의 듣는 이·읽기·떼기·15 초 타이머가 되돌린다(`check_js`·`verify_js`·
+  `disarm_js`). 답에 `folder:{files, bytes, skipped}`; L2 는 `folder` 칸이 있으면 파일 1..1000 개이고 그 수가 같아야 받는다.
+- **iframe**: L2 `frame`(바깥 → 안 1–4 개), 대상은 selector 이거나 없음(그 frame 의 유일한 파일 칸). 업로드 차례(`web_cdp_upload`)가 걷는다 — 단계마다 그
+  frame 의 격리 world 에서 `Document.prototype.querySelector`, `DOM.describeNode` 로 그 frame(`contentDocument` 가 없으면 그 frame 의 세션으로 들어간다),
+  마지막 frame 에서 대상 → 지금의 차례(tree 는 그 frame 을 트리에서 찾아 loaderId·출처). 사본 뒤 걷기를 다시 해 단계마다 같은 frameId·같은 loaderId·같은
+  `backendNodeId`. 묶음은 쓴 세션마다 놓는다(사본 앞 멈춤·답 뒤). 넣기를 보낸 뒤 그 세션의 「Session … not found」 는 성공 `navigated:true`.
+- **sidecar frame 세션**(`devtools_frames.zig` — 순수 표, `devtools.zig` — 붙이기·보내기): `devtools_call.frame`(16 진, `message.max_devtools_frame_bytes` 까지, 빈 글 = root). 세션이 없으면
+  걷기의 처음 호출(`Page.getFrameTree`·`Page.createIsolatedWorld`)만 root 로 `Target.getTargetInfo`(이 탭의 page 타깃) → `Target.getTargets`(그 frame 이
+  iframe 타깃이고 `parentId` 사슬이 이 탭에 닿아야 — 목록은 브라우저 전체다) → attach 를 보내고 세운다(붙기의 답은 관찰자 콜백 안이라 세운 호출은
+  UI task 가 보낸다), 원격 객체를 싣는 호출은 새로 붙지 않고 `send_failed`. 붙기를 기다리다 시한이면 `send_failed`(보내지 않았다). 세션의 답은 원시 메시지로만
+  온다(끝의 sessionId). root 의 `Target.detachedFromTarget`·`Inspector.targetCrashed`·「Session … not found」 면 그 세션을 잊고, 그리로 보낸 호출은 그 CDP 오류로·
+  세운 호출은 `send_failed` 로 답한다. 자리는 탭마다 `devtools_frames.per_browser`·모두 `capacity`, 마지막 쓴 지 `idle_ms` 넘고 보낸 호출이 없는 것만 뗀다(차면 `busy`). 허용 목록 밖의 메서드는
+  `invalid_request`(`Target.*`·`Network.*` 등 — 둘째 세션이 새 통로가 되지 않게). `net_body.onTarget` 은 멈추지 않은 iframe 타깃의 붙음을 남의 것으로 둔다
+  (전에는 page 가 아닌 붙음을 모두 떼 기록한 탭에서 그 세션이 곧 떨어졌다).
+
+계획 공격 3 회(코드 전)의 요지: 폴더는 사람의 고르개 규칙 그대로 펼치고 통째로 실패한다, frame 은 selector 만, 원격 객체를 싣는 호출은
+새로 붙지 않는다, 사본 뒤 foreground 를 한 번 더 본다. 남는 틈: role·text·label·ref 로는 frame 안의 칸을 찾지 못한다(selector 만 — snapshot 이 frame 안을
+싣지 않는다), `allow-scripts` 없는 sandbox iframe 은 격리 world 가 돌지 않으면 실패한다(재지 않았다), iCloud 의 내려받지 않은 파일은 읽을 때 내려받는다(크기 합 상한 안).
+
+남은 일(미착수): 폴더 펼치기 규칙이 두 자리에 있다 — 사람의 고르개(`MaruAppHost.swift` `osrFolderFiles`, 4096 개, 넘길 수 없는 이름도 넣는다)와
+에이전트의 길(`web_upload_stage.enumerateFolder`, `max_folder_files`·`max_folder_entries`·`max_folder_depth`, 넘길 수 없는 이름은 뺀다). 뺄 것(숨긴 것·링크·
+패키지·보통 파일 아님)은 같다. 사람의 고르개가 Zig 의 것을 부르게 옮기려면 사람이 겪는 상한(4096 → 1000)과 이름 규칙이 바뀌므로 사용자와 정한 뒤 한다
+(docs/macos-app-host-boundary.md — 정책은 Zig).
+
 ### W9d① 결정·구현 — 네트워크 기록 읽기(`browser.network`·`browser.networkRequest`, wire 21)
 
 **범위 — 사용자 결정(2026-10-15)**: 읽기(①) → 본문 기록(②) → 막기(③) → **가짜 응답까지(④)**(「가짜 응답도 넣어주세요」). 다른 사이트의 요청과 다른 사이트

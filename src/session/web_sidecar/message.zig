@@ -1232,6 +1232,9 @@ pub const DownloadDecide = struct {
 
 /// DevTools 호출(W9-0b) 상한 — 메서드 이름(`Domain.method`), 인자, 결과, 조각.
 pub const max_devtools_method_bytes: usize = 128;
+/// 호출을 보낼 frame(다른 사이트 iframe — OOPIF 의 DevTools 타깃 id = 그 frame id, 사용자 결정 2026-11-20 「iframe·폴더 둘 다」)의 상한 —
+/// Chromium 의 frame id 는 32 자리 16 진이다(넉넉히 64). 빈 글이면 그 탭의 root 연결이다.
+pub const max_devtools_frame_bytes: usize = 64;
 /// sidecar 의 명령 상자(1 MiB)를 넘지 않게: 동시 호출 `max_devtools_calls` 개가 다 차도 640 KiB(62.5 %) 안이다(codec comptime).
 pub const max_devtools_params_bytes: u32 = 64 * 1024;
 /// 인자 JSON 의 중첩 깊이 상한 — Chromium 의 CDP 파서는 깊이 한도가 있어 넘으면 번호 없이 오류를 내고(그 호출은 답을 받지
@@ -1265,6 +1268,9 @@ pub const DevtoolsCall = struct {
     method: []const u8,
     /// 뒤따를 인자 크기(0 = 인자 없음).
     params_size: u32,
+    /// wire 30(사용자 결정 2026-11-20): 빈 글이 아니면 그 frame(다른 사이트 iframe)의 DevTools 세션으로 보낸다 — sidecar 가 붙인다
+    /// (`web_sidecar/devtools_frames.zig`). 16 진 글자 1..`max_devtools_frame_bytes`(JSON 에 그대로 싣는다 — 이스케이프가 필요 없다).
+    frame: []const u8 = "",
 };
 
 /// 인자·결과 조각 — 비지 않고 `devtools_chunk_bytes` 안(바이트 그대로 — JSON 검사는 다 모은 쪽이 한다).

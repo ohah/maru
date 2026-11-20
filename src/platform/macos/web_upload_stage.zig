@@ -289,6 +289,284 @@ fn sameContent(gpa: std.mem.Allocator, fd: c_int, p: *const Prepared) !?bool {
     return std.mem.eql(u8, &digest, &p.digest);
 }
 
+// ── 폴더 올리기(사용자 결정 2026-11-20 「iframe·폴더 둘 다」) ──────────────────────────────────────────────────────────────────
+// 사람의 폴더 고르기(`MaruAppHost.swift` `osrFolderFiles` — CEF 는 폴더 경로를 펼치지 않아 maru 가 파일들로 펼쳐 답한다)와 같은 뺄 것으로 펼친다
+// (다른 점: 상한 `max_folder_files`·항목·깊이 상한, 넘길 수 없는 이름은 뺀다 — 사람의 고르개는 4096 개, 이름은 그대로. 둘을 한 자리로 모으는 일은
+// docs/plans/web-osr-backend.md 「W9c③ 넓힘」 의 남은 일):
+// 숨긴 것(`.` 이름·`UF_HIDDEN`)은 파일이든 폴더든 빼고, 심볼릭 링크는 따라가지 않고 빼고, 패키지(`.app` 등 — `kCFURLIsPackageKey`)는 통째로
+// 빼고, 보통 파일만 남긴다. 펼치기는 파일을 열지 않는다(`fstatat(AT_SYMLINK_NOFOLLOW)` — fd 를 쥐지 않는다); 사본 단계가 파일마다 지금의
+// `prepareWith` 로 열고 펼칠 때의 (장치, inode, 크기)와 같은지 본 뒤 사본을 만들고 곧 닫는다(그 사이 링크로 바꿔치기·밖으로 빠지기를 막는다).
+
+/// 폴더 한 번에 올리는 보통 파일 수 상한(작성자 선택 — 사람의 고르개는 4096). 실제로는 사본 경로 목록이 DevTools 인자 한 번(64 KiB)에 들어가야
+/// 해 이름이 보통이면 더 적다 — 사본 전에 셈한다(`folderListFits`).
+pub const max_folder_files: usize = 1000;
+/// 폴더 한 번의 파일 크기 합 상한(복제도 센다 — 작성자 선택: 탭의 복사 상한 `copy_cap_per_tab` 과 같은 값).
+pub const max_folder_bytes: u64 = copy_cap_per_tab;
+/// 훑는 항목(빼는 것까지) 상한과 깊이 상한 — 큰 나무가 작업 스레드를 오래 묶지 않게. 넘으면 통째로 실패(일부만 올리지 않는다).
+pub const max_folder_entries: usize = 20_000;
+pub const max_folder_depth: usize = 32;
+
+/// 펼친 보통 파일 하나. `rel` 은 폴더 아래의 상대 경로(소유), `name` 은 그 마지막 이름(`rel` 의 조각 — 페이지가 받는 `File.name`).
+pub const FolderEntry = struct {
+    rel: []u8,
+    dev: i32,
+    ino: u64,
+    size: u64,
+
+    pub fn name(self: *const FolderEntry) []const u8 {
+        const slash = std.mem.lastIndexOfScalar(u8, self.rel, '/') orelse return self.rel;
+        return self.rel[slash + 1 ..];
+    }
+};
+
+/// 뺀 것의 수(이름은 싣지 않는다).
+pub const Skipped = struct { hidden: u32 = 0, links: u32 = 0, packages: u32 = 0, other: u32 = 0 };
+
+pub const Folder = struct {
+    /// 폴더의 실제 경로(소유 — `realpath`).
+    real: []u8,
+    entries: std.ArrayList(FolderEntry) = .empty,
+    bytes: u64 = 0,
+    skipped: Skipped = .{},
+
+    pub fn deinit(self: *Folder, gpa: std.mem.Allocator) void {
+        for (self.entries.items) |e| gpa.free(e.rel);
+        self.entries.deinit(gpa);
+        gpa.free(self.real);
+        self.* = undefined;
+    }
+
+    /// 파일 하나의 전체 경로(`real/rel`).
+    pub fn pathOf(self: *const Folder, buf: []u8, e: *const FolderEntry) ?[]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/{s}", .{ self.real, e.rel }) catch null;
+    }
+};
+
+/// 폴더를 펼치지 못한 까닭(앱 로그·에이전트 글 — `FolderRefusal.text`).
+pub const FolderRefusal = enum {
+    not_found,
+    not_folder,
+    unreadable,
+    control_chars,
+    too_many_files,
+    too_large,
+    too_many_entries,
+    too_deep,
+    empty,
+    cancelled,
+
+    pub fn text(self: FolderRefusal) []const u8 {
+        return switch (self) {
+            .not_found => "no such folder",
+            .not_folder => "it is not a folder — give a folder with --folder, or the files without it",
+            .unreadable => "cannot read the folder",
+            .control_chars => "the folder's real path contains control characters",
+            .too_many_files => std.fmt.comptimePrint("the folder has more than {d} files to upload (hidden files, links and packages are not counted) — upload a smaller folder", .{max_folder_files}),
+            .too_large => std.fmt.comptimePrint("the files in the folder add up to more than {d} GiB — upload a smaller folder", .{max_folder_bytes >> 30}),
+            .too_many_entries => std.fmt.comptimePrint("the folder has more than {d} entries — upload a smaller folder", .{max_folder_entries}),
+            .too_deep => std.fmt.comptimePrint("the folder is nested more than {d} levels deep — upload a smaller folder", .{max_folder_depth}),
+            .empty => "the folder has no files to upload (hidden files, links and packages inside it are skipped, as when a person picks a folder)",
+            .cancelled => "the request ended",
+        };
+    }
+};
+
+pub const FolderResult = union(enum) { ok: Folder, refused: FolderRefusal };
+
+const uf_hidden: u32 = 0x8000; // UF_HIDDEN — Finder 의 숨김 표지(NSURLIsHiddenKey 가 `.` 이름과 함께 본다)
+
+extern "c" fn CFURLCreateFromFileSystemRepresentation(alloc: ?*anyopaque, buffer: [*]const u8, len: isize, is_dir: u8) ?*anyopaque;
+extern "c" fn CFURLCopyResourcePropertyForKey(url: *anyopaque, key: ?*const anyopaque, value: *?*anyopaque, err: ?*?*anyopaque) u8;
+extern "c" fn CFRelease(cf: *anyopaque) void;
+extern "c" const kCFURLIsPackageKey: ?*const anyopaque;
+extern "c" const kCFBooleanTrue: ?*const anyopaque;
+
+/// 패키지 폴더인가(`.app`·`.bundle` 처럼 Finder 가 파일 하나로 보이는 폴더 — FileManager 의 `.skipsPackageDescendants` 가 보는 것과 같은 키).
+/// 시험은 이름 끝 `.maru-pkg` 도 패키지로 본다(Mac 마다 LaunchServices 등록이 달라 시험을 고정한다).
+fn isPackage(path: []const u8) bool {
+    if (builtin.is_test and std.mem.endsWith(u8, path, ".maru-pkg")) return true;
+    if (builtin.os.tag != .macos) return false;
+    const url = CFURLCreateFromFileSystemRepresentation(null, path.ptr, @intCast(path.len), 1) orelse return false;
+    defer CFRelease(url);
+    var value: ?*anyopaque = null;
+    if (CFURLCopyResourcePropertyForKey(url, kCFURLIsPackageKey, &value, null) == 0) return false;
+    const v = value orelse return false;
+    defer CFRelease(v);
+    return @as(?*const anyopaque, v) == kCFBooleanTrue;
+}
+
+/// 이름이 올릴 수 있는 글인가 — 올바른 UTF-8 이고 제어 문자(C0·DEL·C1)가 없다(앱 로그·DevTools 인자·에이전트의 글에 줄바꿈 같은 글자를
+/// 넣지 않게 — 명시한 파일의 실제 경로와 같은 규칙).
+fn nameOk(n: []const u8) bool {
+    const view = std.unicode.Utf8View.init(n) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| if (c < 0x20 or (c >= 0x7f and c <= 0x9f)) return false;
+    return true;
+}
+
+fn entryLess(_: void, a: FolderEntry, b: FolderEntry) bool {
+    return std.mem.lessThan(u8, a.rel, b.rel);
+}
+
+/// 폴더 하나를 펼친다(작업 스레드 — 사본 전, 파일은 열지 않는다). `stop` 이 2 가 되면(메인이 그 작업을 놓았다 — 요청이 끝났다) 곧 그만둔다.
+pub fn enumerateFolder(gpa: std.mem.Allocator, path: []const u8, stop: ?*const std.atomic.Value(u8)) !FolderResult {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return .{ .refused = .not_found };
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_c = std.c.realpath(path_z.ptr, &real_buf) orelse {
+        const e = std.c._errno().*;
+        return .{ .refused = if (e == @backingInt(std.c.E.NOENT) or e == @backingInt(std.c.E.NOTDIR)) .not_found else .unreadable };
+    };
+    const real = std.mem.sliceTo(real_c, 0);
+    if (!nameOk(real)) return .{ .refused = .control_chars };
+    const root = std.c.open(real_c, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
+    if (root < 0) return .{ .refused = if (std.c._errno().* == @backingInt(std.c.E.NOENT)) .not_found else .unreadable };
+    const st = statOf(root) orelse {
+        _ = std.c.close(root);
+        return .{ .refused = .unreadable };
+    };
+    if (st.mode & std.c.S.IFMT != std.c.S.IFDIR) {
+        _ = std.c.close(root);
+        return .{ .refused = .not_folder };
+    }
+    var folder: Folder = .{ .real = try gpa.dupe(u8, real) };
+    errdefer folder.deinit(gpa);
+    var walk: Walk = .{ .gpa = gpa, .folder = &folder, .stop = stop };
+    var rel_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const why = try walk.dir(root, &rel_buf, 0, 0); // `dir` 이 root 를 닫는다
+    if (why) |w| {
+        folder.deinit(gpa);
+        return .{ .refused = w };
+    }
+    if (folder.entries.items.len == 0) {
+        folder.deinit(gpa);
+        return .{ .refused = .empty };
+    }
+    std.mem.sort(FolderEntry, folder.entries.items, {}, entryLess);
+    return .{ .ok = folder };
+}
+
+const Walk = struct {
+    gpa: std.mem.Allocator,
+    folder: *Folder,
+    stop: ?*const std.atomic.Value(u8),
+    seen: usize = 0,
+
+    /// 폴더 fd 하나를 훑는다(그 fd 는 이 함수가 닫는다). `rel` 은 지금 폴더의 상대 경로(`rel_buf[0..rel_len]`). 실패 까닭이면 그것.
+    fn dir(self: *Walk, fd: c_int, rel_buf: []u8, rel_len: usize, depth: usize) !?FolderRefusal {
+        defer _ = std.c.close(fd);
+        if (depth > max_folder_depth) return .too_deep;
+        const again = std.c.dup(fd);
+        if (again < 0) return .unreadable;
+        const handle = std.c.fdopendir(again) orelse {
+            _ = std.c.close(again);
+            return .unreadable;
+        };
+        defer _ = std.c.closedir(handle);
+        while (std.c.readdir(handle)) |entry| {
+            const n = entry.name[0..@min(entry.namlen, entry.name.len)];
+            if (std.mem.eql(u8, n, ".") or std.mem.eql(u8, n, "..")) continue;
+            if (self.stop) |s| if (s.load(.acquire) == 2) return .cancelled;
+            self.seen += 1;
+            if (self.seen > max_folder_entries) return .too_many_entries;
+            var nb: [1024]u8 = undefined;
+            const nz = std.fmt.bufPrintSentinel(&nb, "{s}", .{n}, 0) catch {
+                self.folder.skipped.other += 1;
+                continue;
+            };
+            var est: std.c.Stat = undefined;
+            if (std.c.fstatat(fd, nz.ptr, &est, std.c.AT.SYMLINK_NOFOLLOW) != 0) {
+                self.folder.skipped.other += 1; // 그 사이 사라졌다·읽을 수 없다
+                continue;
+            }
+            const fmt = est.mode & std.c.S.IFMT;
+            if (fmt == std.c.S.IFLNK) {
+                self.folder.skipped.links += 1;
+                continue;
+            }
+            if (n[0] == '.' or est.flags & uf_hidden != 0) {
+                self.folder.skipped.hidden += 1;
+                continue;
+            }
+            // 넘길 수 없는 이름(제어 문자·UTF-8 아님)은 폴더든 파일이든 뺀다 — 폴더를 내려가면 그 아래 파일의 실제 경로가 사본 단계의 제어 문자
+            // 검사(`prepareWith`)에 걸려 그 폴더 전체가 매번 「바뀌었다」 로 실패했다(적대 검증 5 회차 MED).
+            if (!nameOk(n)) {
+                self.folder.skipped.other += 1;
+                continue;
+            }
+            // 상대 경로 = 지금 폴더 + "/" + 이름.
+            const sep: usize = if (rel_len == 0) 0 else 1;
+            if (rel_len + sep + n.len > rel_buf.len) {
+                self.folder.skipped.other += 1;
+                continue;
+            }
+            if (sep == 1) rel_buf[rel_len] = '/';
+            @memcpy(rel_buf[rel_len + sep ..][0..n.len], n);
+            const child_len = rel_len + sep + n.len;
+            if (fmt == std.c.S.IFDIR) {
+                var full_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const full = std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ self.folder.real, rel_buf[0..child_len] }) catch {
+                    self.folder.skipped.other += 1;
+                    continue;
+                };
+                if (isPackage(full)) {
+                    self.folder.skipped.packages += 1;
+                    continue;
+                }
+                const sub = std.c.openat(fd, nz.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
+                if (sub < 0) {
+                    self.folder.skipped.other += 1;
+                    continue;
+                }
+                if (try self.dir(sub, rel_buf, child_len, depth + 1)) |why| return why;
+                continue;
+            }
+            if (fmt != std.c.S.IFREG or !nameOk(n)) {
+                self.folder.skipped.other += 1; // FIFO·장치·소켓, 넘길 수 없는 이름
+                continue;
+            }
+            // 전체 경로가 경로 상한을 넘는 파일은 폴더처럼 뺀다(사본 단계에서 열 수 없어 매번 실패했다 — 18 회차).
+            if (self.folder.real.len + 1 + child_len >= std.fs.max_path_bytes) {
+                self.folder.skipped.other += 1;
+                continue;
+            }
+            if (self.folder.entries.items.len >= max_folder_files) return .too_many_files;
+            const size: u64 = @intCast(@max(est.size, 0));
+            self.folder.bytes +|= size;
+            if (self.folder.bytes > max_folder_bytes) return .too_large;
+            const rel = try self.gpa.dupe(u8, rel_buf[0..child_len]);
+            self.folder.entries.append(self.gpa, .{ .rel = rel, .dev = est.dev, .ino = est.ino, .size = size }) catch |e| {
+                self.gpa.free(rel);
+                return e;
+            };
+        }
+        return null;
+    }
+};
+
+/// 폴더의 사본 경로 목록(`<root>/<tab>/<op>/<i>/<이름>`)과 넣은 뒤 읽기의 이름·크기 목록이 DevTools 인자 한 번(`params_cap` — 64 KiB)에 드는가.
+/// 사본을 만들기 **전에** 실제 뿌리로 센다(넘으면 사본 하나 만들지 않고 실패 — 공격 A2-2). `overhead` 는 인자의 나머지(objectId·함수 본문 등).
+pub fn folderListFits(folder: *const Folder, root: []const u8, tab: u64, op: u64, params_cap: usize, overhead: usize) bool {
+    var paths: usize = overhead;
+    var names: usize = overhead;
+    var nb: [64]u8 = undefined;
+    for (folder.entries.items, 0..) |*e, i| {
+        const ids = (std.fmt.bufPrint(&nb, "/{d}/{d}/{d}/", .{ tab, op, i }) catch return false).len;
+        const nm = jsonLen(e.name());
+        paths += (jsonLen(root) - 2) + ids + nm + 1; // 따옴표 안(뿌리도 이스케이프해 센다 — 16 회차) + 쉼표
+        names += nm + 1 + 21; // 이름 + 쉼표 + 크기(u64 최대 20 자리와 쉼표)
+        if (paths > params_cap or names > params_cap) return false;
+    }
+    return true;
+}
+
+/// JSON 글로 쓴 길이(따옴표 둘 포함 — `std.json` 의 이스케이프와 같은 셈: `"`·`\\` 는 둘, 제어 문자는 `nameOk` 가 이미 막았다).
+fn jsonLen(s: []const u8) usize {
+    var n: usize = 2;
+    for (s) |b| n += if (b == '"' or b == '\\') 2 else 1;
+    return n;
+}
+
 /// 같은 파일을 두 번 적었는가(심링크·하드 링크로 다른 경로가 같은 파일 — 장치·inode). `files[i]` 와 앞의 것.
 pub fn sameFileBefore(files: []const Prepared, i: usize) bool {
     for (files[0..i]) |p| if (p.dev == files[i].dev and p.ino == files[i].ino) return true;
@@ -312,15 +590,57 @@ pub const StageError = enum {
     changed,
     too_large,
     io,
+    /// 폴더 안의 파일 하나가 펼친 뒤 바뀌었다·사라졌다·링크·보통 파일이 아닌 것으로 바뀌었다·크기가 달라졌다(통째로 실패 — 공격 A2-1).
+    folder_changed,
+    /// 폴더의 사본 경로 목록이 DevTools 인자 한 번에 들지 않는다(`folderListFits` — 공격 A2-2).
+    folder_list_too_long,
+    /// 다른 볼륨의 폴더라 복사하는데, 파일들의 합이 복사 예산(`copy_cap_per_call`·탭의 남은 몫)을 넘는다 — 폴더의 글(적대 검증 6·10 회차: 「그 파일」 을 말했다).
+    folder_too_large_to_copy,
+    /// 폴더 안의 파일 하나를 열 수 없다(권한·경로 길이) — 다시 해도 같다(「바뀌었다 — 다시 올려라」 로 답해 같은 실패를 되풀이하게 했다 — 적대 검증 18 회차).
+    folder_unreadable,
 
     pub fn text(self: StageError) []const u8 {
         return switch (self) {
-            .changed => "the file changed after the user approved it — run upload again",
+            .changed => "the file changed while maru was copying it — run upload again",
             .too_large => "the file is on another volume and is too large to copy (1 GiB per call, 4 GiB per tab)",
             .io => "could not make the copy the page reads",
+            .folder_changed => "a file in the folder changed, disappeared or turned into something maru does not upload while maru was copying it — nothing was uploaded; run upload again",
+            .folder_list_too_long => "the folder has too many files, or file names too long, for one upload — the paths of maru's copies must fit one DevTools call (64 KiB, about 400 files with short names); nothing was uploaded — upload a smaller folder",
+            .folder_too_large_to_copy => "the folder is on another volume, so maru copies its files, and they add up to more than it copies at once (1 GiB per call, 4 GiB per tab) — nothing was uploaded; upload a smaller folder",
+            .folder_unreadable => "a file in the folder cannot be opened for reading (its permissions, or a path too long) — nothing was uploaded; it fails the same way until that file is readable or moved out of the folder",
         };
     }
 };
+
+/// 폴더의 파일 하나의 사본(작업 스레드 — 사본 단계): 지금의 `prepareWith`(realpath·O_NOFOLLOW·정규 파일·실제 경로·해시)로 열고, 펼칠 때의
+/// (장치, inode, 크기)와 같아야 사본을 만든다(펼친 뒤 그 자리나 위 폴더를 링크로 바꿔 밖의 파일을 가리켜도 다른 inode 라 걸린다). 사본의 이름은
+/// 펼친 이름. fd 는 곧 닫는다(1000 개 fd 를 쥐지 않는다). 하나라도 안 되면 `folder_changed`(부른 쪽이 통째로 실패시킨다).
+pub fn stageFolderEntry(gpa: std.mem.Allocator, folder: *const Folder, index: usize, root: []const u8, tab: u64, op: u64, hash_budget: *u64, copy_budget: *u64, try_clone: bool) !StageResult {
+    const e = &folder.entries.items[index];
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const path = folder.pathOf(&pb, e) orelse return .{ .failed = .folder_unreadable };
+    var r = try prepareWith(gpa, path, hash_budget);
+    switch (r) {
+        // 열 수 없다(권한·길이·이름)는 다시 해도 같다 — 그 밖(사라짐·바꿔치기·자람)은 「바뀌었다」(적대 검증 18 회차).
+        .refused => |why| return .{ .failed = switch (why) {
+            .unreadable, .too_long, .control_chars => .folder_unreadable,
+            else => .folder_changed,
+        } },
+        .ok => |*p| {
+            defer p.deinit(gpa);
+            if (p.dev != e.dev or p.ino != e.ino or p.size != e.size) return .{ .failed = .folder_changed };
+            const out = try stageFileAs(gpa, root, tab, op, index, p, e.name(), copy_budget, try_clone);
+            return switch (out) {
+                .ok => out,
+                .failed => |why| .{ .failed = switch (why) {
+                    .changed => .folder_changed,
+                    .too_large => .folder_too_large_to_copy,
+                    else => why,
+                } },
+            };
+        },
+    }
+}
 
 pub const StageResult = union(enum) {
     /// 사본의 정규 경로(소유).
@@ -340,6 +660,11 @@ pub fn stageFile(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64, in
 
 /// `try_clone` 거짓 — 복제를 건너뛰고 복사한다(시험이 다른 볼륨의 길을 같은 볼륨에서 본다 — 앱 시험도 복사 예산을 보려고 부른다).
 pub fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64, index: usize, p: *const Prepared, copy_budget: *u64, try_clone: bool) !StageResult {
+    return stageFileAs(gpa, root, tab, op, index, p, p.name(), copy_budget, try_clone);
+}
+
+/// `stageFileWith` 와 같되 사본의 이름을 준다 — 폴더의 파일은 펼칠 때의 이름(하드 링크면 `F_GETPATH` 가 다른 이름을 줄 수 있다 — 공격 A2-7).
+pub fn stageFileAs(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64, index: usize, p: *const Prepared, name: []const u8, copy_budget: *u64, try_clone: bool) !StageResult {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     inline for (.{ "{s}/{d}", "{s}/{d}/{d}", "{s}/{d}/{d}/{d}" }, 0..) |fmt, depth| {
         const args = switch (depth) {
@@ -351,7 +676,7 @@ pub fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64
         if (!mkdirOwned(d)) return .{ .failed = .io };
     }
     var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrintSentinel(&dest_buf, "{s}/{d}/{d}/{d}/{s}", .{ root, tab, op, index, p.name() }, 0) catch return .{ .failed = .io };
+    const dest = std.fmt.bufPrintSentinel(&dest_buf, "{s}/{d}/{d}/{d}/{s}", .{ root, tab, op, index, name }, 0) catch return .{ .failed = .io };
     var made = false;
     defer if (!made) unlinkUnlocked(dest);
     if (!try_clone or fclonefileat(p.fd, std.c.AT.FDCWD, dest.ptr, 0) != 0) {
@@ -436,7 +761,7 @@ pub fn removeUnder(root: []const u8, sub: []const u8) void {
     const dir = std.c.open(root_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
     if (dir < 0) return;
     defer _ = std.c.close(dir);
-    var name_buf: [256]u8 = undefined;
+    var name_buf: [1024]u8 = undefined;
     const name = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{sub}, 0) catch return;
     removeAt(dir, name, 0);
 }
@@ -466,7 +791,8 @@ fn removeAt(dir: c_int, name: [:0]const u8, depth: u8) void {
         while (std.c.readdir(handle)) |entry| {
             const n = entry.name[0..@min(entry.namlen, entry.name.len)];
             if (std.mem.eql(u8, n, ".") or std.mem.eql(u8, n, "..")) continue;
-            var nb: [256]u8 = undefined;
+            // 이름은 255 바이트를 넘을 수 있다(HFS+·APFS 는 글자 수로 센다 — 한글 86 자면 넘는다; 공격 A2-11: 256 칸이면 그런 사본이 남았다).
+            var nb: [1024]u8 = undefined;
             const nz = std.fmt.bufPrintSentinel(&nb, "{s}", .{n}, 0) catch continue;
             removeAt(sub, nz, depth + 1);
             removed += 1;
@@ -1088,4 +1414,209 @@ test "W9c③ 적대 리뷰 5 회차 변이 PRctime: 해시 예산 밖의 바이�
     const r = try stageFile(testing.allocator, root, 1, 2, 0, &p, &budget);
     if (r == .ok) testing.allocator.free(r.ok);
     try testing.expect(r == .failed and r.failed == .changed);
+}
+
+// ── 폴더 올리기(사용자 결정 2026-11-20 「iframe·폴더 둘 다」) — 펼치기·사본 ─────────────────────────────────────────────────────────────
+
+fn expectFolderRefused(r: FolderResult, want: FolderRefusal) !void {
+    switch (r) {
+        .refused => |got| try testing.expectEqual(want, got),
+        .ok => |f| {
+            var m = f;
+            m.deinit(testing.allocator);
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+fn mkdirT(t: *const Tmp, name: []const u8) !void {
+    var b: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir(t.join(&b, name).ptr, 0o700));
+}
+
+test "폴더 펼치기: 사람의 폴더 고르기처럼 — 숨긴 것(점 이름·숨김 표지, 폴더면 그 안까지)·링크(파일·폴더)·패키지·FIFO·넘길 수 없는 이름은 빼고 센다, 보통 파일은 상대 경로 순" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    try mkdirT(&t, "up");
+    try mkdirT(&t, "up/sub");
+    try mkdirT(&t, "up/sub/deep");
+    try mkdirT(&t, "up/.git");
+    try mkdirT(&t, "up/App.maru-pkg");
+    try t.write("up/b.txt", "bb");
+    try t.write("up/a.txt", "a");
+    try t.write("up/sub/c.txt", "ccc");
+    try t.write("up/sub/deep/d.txt", "dddd");
+    try t.write("up/.env", "SECRET=1");
+    try t.write("up/.git/config", "x");
+    try t.write("up/App.maru-pkg/inner.txt", "pkg");
+    try t.write("up/flagged.txt", "hidden by flag");
+    try t.write("up/bad\x01name.txt", "ctl");
+    try mkdirT(&t, "up/ctl\x01dir");
+    try t.write("up/ctl\x01dir/inside.txt", "in");
+    try t.write("outside.txt", "OUTSIDE");
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), chflags(t.join(&b1, "up/flagged.txt").ptr, uf_hidden));
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(t.join(&b1, "outside.txt").ptr, t.join(&b2, "up/link.txt").ptr));
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(t.join(&b1, "up/sub").ptr, t.join(&b2, "up/dirlink").ptr));
+    try testing.expectEqual(@as(c_int, 0), mkfifo(t.join(&b1, "up/fifo").ptr, 0o600));
+    var r = try enumerateFolder(testing.allocator, t.join(&b1, "up"), null);
+    defer r.ok.deinit(testing.allocator);
+    const f = &r.ok;
+    const want = [_][]const u8{ "a.txt", "b.txt", "sub/c.txt", "sub/deep/d.txt" };
+    try testing.expectEqual(want.len, f.entries.items.len);
+    for (want, f.entries.items) |w, e| try testing.expectEqualStrings(w, e.rel);
+    try testing.expectEqualStrings("d.txt", f.entries.items[3].name());
+    try testing.expectEqual(@as(u64, 1 + 2 + 3 + 4), f.bytes);
+    // .env·.git(그 안은 세지 않는다 — 폴더째 뺀다)·숨김 표지 하나 = 3, 링크 둘, 패키지 하나, FIFO·제어 문자 이름의 파일과 폴더(그 안은 세지
+    // 않는다 — 적대 검증 5 회차) = 3.
+    try testing.expectEqual(Skipped{ .hidden = 3, .links = 2, .packages = 1, .other = 3 }, f.skipped);
+    try testing.expectEqualStrings(t.join(&b2, "up"), f.real);
+}
+
+test "폴더 펼치기: 없는 폴더·폴더 아님·빈 폴더(숨긴 것만 있어도)는 거절, 폴더 자리의 링크는 실제 경로로 따른다(명시한 파일과 같다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    try expectFolderRefused(try enumerateFolder(testing.allocator, t.join(&b1, "none"), null), .not_found);
+    try t.write("file.txt", "x");
+    try expectFolderRefused(try enumerateFolder(testing.allocator, t.join(&b1, "file.txt"), null), .not_folder);
+    try mkdirT(&t, "empty");
+    try t.write("empty/.DS_Store", "x");
+    try expectFolderRefused(try enumerateFolder(testing.allocator, t.join(&b1, "empty"), null), .empty);
+    try mkdirT(&t, "real");
+    try t.write("real/a.txt", "a");
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(t.join(&b1, "real").ptr, t.join(&b2, "alias").ptr));
+    var r = try enumerateFolder(testing.allocator, t.join(&b1, "alias"), null);
+    defer r.ok.deinit(testing.allocator);
+    try testing.expectEqualStrings(t.join(&b2, "real"), r.ok.real);
+    // 멈추라는 표지(메인이 작업을 놓았다)면 곧 그만둔다.
+    var stop: std.atomic.Value(u8) = .init(2);
+    try expectFolderRefused(try enumerateFolder(testing.allocator, t.join(&b1, "real"), &stop), .cancelled);
+}
+
+test "폴더 펼치기 상한: 파일 1000 개 넘음·크기 합 4 GiB 넘음(성긴 파일)·깊이 32 넘음은 통째로 거절 — 일부만 올리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    try mkdirT(&t, "many");
+    var nb: [64]u8 = undefined;
+    for (0..max_folder_files) |i| try t.write(try std.fmt.bufPrint(&nb, "many/f{d}", .{i}), "");
+    {
+        var r = try enumerateFolder(testing.allocator, t.join(&b1, "many"), null);
+        try testing.expectEqual(max_folder_files, r.ok.entries.items.len); // 딱 상한은 된다
+        r.ok.deinit(testing.allocator);
+    }
+    try t.write("many/one-more", "");
+    try expectFolderRefused(try enumerateFolder(testing.allocator, t.join(&b1, "many"), null), .too_many_files);
+    try mkdirT(&t, "big");
+    try t.write("big/a", "");
+    {
+        const fd = std.c.open(t.join(&b1, "big/a").ptr, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+        defer _ = std.c.close(fd);
+        try testing.expectEqual(@as(c_int, 0), std.c.ftruncate(fd, @intCast(max_folder_bytes + 1)));
+    }
+    try expectFolderRefused(try enumerateFolder(testing.allocator, t.join(&b1, "big"), null), .too_large);
+    var path_buf: [4096]u8 = undefined;
+    var len: usize = (try std.fmt.bufPrint(&path_buf, "deep", .{})).len;
+    try mkdirT(&t, "deep");
+    for (0..max_folder_depth + 1) |_| {
+        @memcpy(path_buf[len..][0..2], "/d");
+        len += 2;
+        try mkdirT(&t, path_buf[0..len]);
+    }
+    @memcpy(path_buf[len..][0..6], "/x.txt");
+    try t.write(path_buf[0 .. len + 6], "x");
+    try expectFolderRefused(try enumerateFolder(testing.allocator, t.join(&b1, "deep"), null), .too_deep);
+}
+
+test "폴더 사본: 펼친 이름으로 <뿌리>/<탭>/<op>/<i>/<이름> — 펼친 뒤 그 자리를 밖의 파일 링크로·위 폴더를 다른 폴더 링크로 바꾸거나 크기가 바뀌면 folder_changed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    try mkdirT(&t, "up");
+    try mkdirT(&t, "up/sub");
+    try t.write("up/a.txt", "AAAA");
+    try t.write("up/sub/b.txt", "BBBB");
+    try mkdirT(&t, "evil");
+    try t.write("evil/b.txt", "EVIL");
+    try t.write("secret.txt", "SECR");
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    var r = try enumerateFolder(testing.allocator, t.join(&b1, "up"), null);
+    defer r.ok.deinit(testing.allocator);
+    var hash: u64 = hash_cap_per_call;
+    var budget: u64 = copy_cap_per_call;
+    {
+        const s = try stageFolderEntry(testing.allocator, &r.ok, 1, root, 3, 4, &hash, &budget, true);
+        defer testing.allocator.free(s.ok);
+        var want: [std.fs.max_path_bytes]u8 = undefined;
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{s}/3/4/1/b.txt", .{root}), s.ok);
+    }
+    // 열 수 없는 파일(권한)은 「바뀌었다」 가 아니라 열 수 없다는 글 — 다시 해도 같다(적대 검증 18 회차).
+    {
+        var b3: [std.fs.max_path_bytes]u8 = undefined;
+        const p = t.join(&b3, "up/sub/b.txt");
+        try testing.expectEqual(@as(c_int, 0), std.c.chmod(p.ptr, 0));
+        defer _ = std.c.chmod(p.ptr, 0o644);
+        const s = try stageFolderEntry(testing.allocator, &r.ok, 1, root, 3, 8, &hash, &budget, true);
+        try testing.expect(s == .failed and s.failed == .folder_unreadable);
+    }
+    // 복사(다른 볼륨)의 예산을 넘으면 폴더의 글(「그 파일」 이 아니다 — 적대 검증 6·10 회차).
+    {
+        var small: u64 = 3;
+        const s = try stageFolderEntry(testing.allocator, &r.ok, 1, root, 3, 9, &hash, &small, false);
+        try testing.expect(s == .failed and s.failed == .folder_too_large_to_copy);
+        try testing.expect(std.mem.indexOf(u8, StageError.folder_too_large_to_copy.text(), "the folder is on another volume") != null);
+    }
+    // 펼친 뒤 a.txt 를 같은 크기의 밖 파일 링크로 — 다른 inode 라 올리지 않는다.
+    _ = std.c.unlink(t.join(&b1, "up/a.txt").ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(t.join(&b1, "secret.txt").ptr, t.join(&b2, "up/a.txt").ptr));
+    {
+        const s = try stageFolderEntry(testing.allocator, &r.ok, 0, root, 3, 5, &hash, &budget, true);
+        try testing.expect(s == .failed and s.failed == .folder_changed);
+    }
+    // 위 폴더(sub)를 같은 이름의 파일이 든 다른 폴더 링크로.
+    try testing.expectEqual(@as(c_int, 0), std.c.rename(t.join(&b1, "up/sub").ptr, t.join(&b2, "up/sub-old").ptr));
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(t.join(&b1, "evil").ptr, t.join(&b2, "up/sub").ptr));
+    {
+        const s = try stageFolderEntry(testing.allocator, &r.ok, 1, root, 3, 6, &hash, &budget, true);
+        try testing.expect(s == .failed and s.failed == .folder_changed);
+    }
+    // 되돌리고 크기를 바꾼다(펼친 크기와 다르다).
+    _ = std.c.unlink(t.join(&b1, "up/sub").ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.rename(t.join(&b1, "up/sub-old").ptr, t.join(&b2, "up/sub").ptr));
+    try t.write("up/sub/b.txt", "BBBBBBBB");
+    {
+        const s = try stageFolderEntry(testing.allocator, &r.ok, 1, root, 3, 7, &hash, &budget, true);
+        try testing.expect(s == .failed and s.failed == .folder_changed);
+    }
+}
+
+test "폴더 사본 목록: 사본 경로(뿌리 포함)와 읽기의 이름·크기가 DevTools 인자 한 번에 드는가 — 경계 바로 아래는 들고 바로 위는 안 든다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var entries: std.ArrayList(FolderEntry) = .empty;
+    defer {
+        for (entries.items) |e| testing.allocator.free(e.rel);
+        entries.deinit(testing.allocator);
+    }
+    for (0..3) |_| try entries.append(testing.allocator, .{ .rel = try testing.allocator.dupe(u8, "d/ab\"c"), .dev = 1, .ino = 1, .size = 1 });
+    var folder: Folder = .{ .real = @constCast("/x"), .entries = entries };
+    const root = "/rrrrrrrrrrrrrrrrrrrr";
+    // 경로 하나 = 뿌리 21 + "/9/8/<i>/" 7 + JSON 글 "ab\"c"(따옴표 둘 + 4 + 이스케이프 1 = 7) + 쉼표 1 = 36 → 셋이면 108(이름·크기 쪽은 (7+1+21)×3 = 87).
+    try testing.expect(folderListFits(&folder, root, 9, 8, 108, 0));
+    try testing.expect(!folderListFits(&folder, root, 9, 8, 107, 0));
+    try testing.expect(!folderListFits(&folder, root, 9, 8, 108, 1)); // 여유를 더하면 넘는다
+    entries = folder.entries;
+}
+
+test "에이전트에게 가는 업로드 글은 걷힌 확인(approval)을 말하지 않는다(문서 리뷰 2026-11-20)" {
+    for (std.enums.values(StageError)) |e| try testing.expect(std.mem.indexOf(u8, e.text(), "approv") == null);
+    for (std.enums.values(FolderRefusal)) |e| try testing.expect(std.mem.indexOf(u8, e.text(), "approv") == null);
 }

@@ -23,9 +23,9 @@ pub const Context = struct {
     maru_version: []const u8,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 4 + unsandboxed_policy 4 + datalist_page 3 + devtools_table 12 + console_gate 16 + net_gate 23 + net_body_table 267 + net_body_sw 38 + out_queue 4 + net_block_table 14 + sw_share 3 + net_domain 27 + net_block_review_tests 27 + net_block_review_b4_tests 7 + net_block_review_a5_tests 10 + net_block_review_a6_tests 2 + net_block_review_a7_tests 1 + nav_exempt 4 + net_mock_table 14 + emu_plan 30 + geo_slot 4 + proc_share 11 + trace_plan 6 + events 1 + site_pattern 1(사이트 권한 창 — 2026-11-18) + 입구 파일의 `test {}` 블록 1 — W9e② 가 devtools_table 1·net_domain 5(옛 W9e② 의 넷 중 렌더러 죽음 시험 하나를 main 의 다시 맞추기 꼴로 바꾸고, 옮길 때 ByRule 의 먼저 적는 짝 하나를 더했다)·nav_exempt 2·emu_plan 5(옮길 때 하나 — 홉 기다림의 네트워크 조건)를 늘리고 proc_share 11·trace_plan 6 을 더했다; (g) 흉내 전용 세션이 emu_plan 7 을 더했다; 「막기도 넓히기」(2026-11-18)가 옛 D2 토큰·다툼·읽기 목록의 시험을 지웠다 — net_block_table 18→14·net_block_review_tests 38→27·a5 11→10·a6 4→2·a7 4→1; 실패한 이동의 주소(2026-11-18)가 dialog_table 1 을 더했다). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 4 + unsandboxed_policy 4 + datalist_page 3 + devtools_table 14 + devtools_frames 3 + console_gate 16 + net_gate 23 + net_body_table 267 + net_body_sw 38 + out_queue 4 + net_block_table 14 + sw_share 3 + net_domain 27 + net_block_review_tests 27 + net_block_review_b4_tests 7 + net_block_review_a5_tests 10 + net_block_review_a6_tests 2 + net_block_review_a7_tests 1 + nav_exempt 4 + net_mock_table 14 + emu_plan 30 + geo_slot 4 + proc_share 11 + trace_plan 6 + events 1 + site_pattern 1(사이트 권한 창 — 2026-11-18) + 입구 파일의 `test {}` 블록 1 — W9e② 가 devtools_table 1·net_domain 5(옛 W9e② 의 넷 중 렌더러 죽음 시험 하나를 main 의 다시 맞추기 꼴로 바꾸고, 옮길 때 ByRule 의 먼저 적는 짝 하나를 더했다)·nav_exempt 2·emu_plan 5(옮길 때 하나 — 홉 기다림의 네트워크 조건)를 늘리고 proc_share 11·trace_plan 6 을 더했다; (g) 흉내 전용 세션이 emu_plan 7 을 더했다; 「막기도 넓히기」(2026-11-18)가 옛 D2 토큰·다툼·읽기 목록의 시험을 지웠다 — net_block_table 18→14·net_block_review_tests 38→27·a5 11→10·a6 4→2·a7 4→1; 실패한 이동의 주소(2026-11-18)가 dialog_table 1 을 더했다; iframe 업로드(2026-11-20)가 devtools_table 2 와 devtools_frames 3 을 더했다). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 562;
+const pure_test_count = 567;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{
@@ -118,6 +118,12 @@ pub fn register(b: *std.Build, ctx: Context) void {
         .imports = &.{.{ .name = "web_sidecar_protocol", .module = protocol_mod }},
     }));
 
+    // 2026-11-20 iframe·폴더 업로드: 앱이 보내는 격리 world 함수(`web_cdp_upload_js` — 아무것도 import 하지 않는 글 상수)를 판정자가 실제 CEF 에 댄다.
+    judge.root_module.addImport("web_cdp_upload_js", b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/web_cdp_upload_js.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+    }));
     // W9e②: 조건의 주인 판정(`control_self_origin` — 앱이 쓰는 그 함수)을 진짜 자식 프로세스에 댄다.
     judge.root_module.addImport("control_self_origin", b.createModule(.{
         .root_source_file = b.path("src/session/control_self_origin.zig"),

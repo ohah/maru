@@ -14,6 +14,7 @@
 const array_repeat = @import("array_repeat");
 
 const std = @import("std");
+const frames_mod = @import("devtools_frames.zig");
 const protocol = @import("web_sidecar_protocol");
 const message = protocol.message;
 const BrowserId = message.BrowserId;
@@ -37,6 +38,17 @@ pub const Call = struct {
     started_ms: i64,
     /// maru 의 kick(`message.devtools_kick_*` 와 꼭 같은 호출) — 짧은 시한(`kick_stale_ms`)에 놓는다(W9b②-3 적대 리뷰 3 회차).
     kick: bool = false,
+    /// wire 30: 보낼 frame(다른 사이트 iframe 의 세션 — 비면 root). `devtools_frames.zig`.
+    frame_buf: [message.max_devtools_frame_bytes]u8 = undefined,
+    frame_len: u8 = 0,
+    /// 인자를 다 받았지만 그 frame 의 세션이 붙기를 기다린다(아직 보내지 않았다 — 시한이면 `send_failed`).
+    parked: bool = false,
+    /// 보낸 frame 세션의 세대(`devtools_frames.Session.gen` — 답·시한이 그 세션의 셈만 돌려놓게).
+    sent_gen: u32 = 0,
+
+    pub fn frame(self: *const Call) []const u8 {
+        return self.frame_buf[0..self.frame_len];
+    }
 
     pub fn method(self: *const Call) []const u8 {
         return self.method_buf[0..self.method_len];
@@ -165,6 +177,8 @@ pub const Table = struct {
     /// 새 호출의 자리를 잡는다. 메서드 이름·크기는 wire 가 검사했다.
     pub fn begin(self: *Table, value: message.DevtoolsCall, now_ms: i64) BeginError!*Call {
         if (forbiddenMethod(value.method)) return error.Forbidden;
+        // wire 30: frame 세션으로는 업로드가 쓰는 메서드만(둘째 세션이 새 특권 통로가 되지 않게 — 공격 A1-5).
+        if (value.frame.len > 0 and !frames_mod.frameMethodAllowed(value.method)) return error.Forbidden;
         if (std.mem.eql(u8, value.method, target_info_method) and value.params_size > target_params_max) return error.Forbidden;
         if (self.find(value.browser, value.call) != null) return error.Duplicate;
         var of_browser: usize = 0;
@@ -173,8 +187,9 @@ pub const Table = struct {
         };
         if (of_browser >= message.max_devtools_calls_per_browser) return error.Busy;
         for (&self.slots) |*s| if (s.* == null) {
-            s.* = .{ .browser = value.browser, .call = value.call, .method_len = value.method.len, .params_size = value.params_size, .started_ms = now_ms };
+            s.* = .{ .browser = value.browser, .call = value.call, .method_len = value.method.len, .params_size = value.params_size, .started_ms = now_ms, .frame_len = @intCast(value.frame.len) };
             @memcpy(s.*.?.method_buf[0..value.method.len], value.method);
+            @memcpy(s.*.?.frame_buf[0..value.frame.len], value.frame);
             return &s.*.?;
         };
         return error.Busy;
@@ -198,6 +213,11 @@ pub const Table = struct {
 
     /// 보낼 CDP 메시지를 만들고 번호를 매긴다(부른 쪽이 해제). 인자가 JSON 객체 하나가 아니면 `InvalidParams`.
     pub fn buildMessage(self: *Table, gpa: std.mem.Allocator, c: *Call) BuildError![]u8 {
+        return self.buildMessageIn(gpa, c, null);
+    }
+
+    /// `buildMessage` 와 같되 자식 세션(`sid` — 16 진, `devtools_frames.sessionIdOf` 가 본 것)으로(wire 30 frame 호출).
+    pub fn buildMessageIn(self: *Table, gpa: std.mem.Allocator, c: *Call, sid: ?[]const u8) BuildError![]u8 {
         std.debug.assert(c.complete() and c.phase == .collecting);
         const params = c.params.items;
         if (params.len != 0) {
@@ -209,7 +229,10 @@ pub const Table = struct {
         if (!targetParamsAllowed(c.method(), params)) return error.InvalidParams; // 재검증 6 차 F11
         c.kick = std.mem.eql(u8, c.method(), message.devtools_kick_method) and std.mem.eql(u8, params, message.devtools_kick_params);
         const id = self.takeId();
-        const json = if (params.len == 0)
+        const json = if (sid) |sd| (if (params.len == 0)
+            try std.fmt.allocPrint(gpa, "{{\"id\":{d},\"sessionId\":\"{s}\",\"method\":\"{s}\"}}", .{ id, sd, c.method() })
+        else
+            try std.fmt.allocPrint(gpa, "{{\"id\":{d},\"sessionId\":\"{s}\",\"method\":\"{s}\",\"params\":{s}}}", .{ id, sd, c.method(), params })) else if (params.len == 0)
             try std.fmt.allocPrint(gpa, "{{\"id\":{d},\"method\":\"{s}\"}}", .{ id, c.method() })
         else
             try std.fmt.allocPrint(gpa, "{{\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}", .{ id, c.method(), params });
@@ -219,10 +242,39 @@ pub const Table = struct {
         return json;
     }
 
+    /// 그 (탭, frame) 의 세워 둔 호출 하나(세션이 붙었다 — 보낸다; 붙지 못했다 — 답한다).
+    pub fn nextParked(self: *Table, browser: BrowserId, frame: []const u8) ?*Call {
+        for (&self.slots) |*s| if (s.*) |*v| if (v.parked and v.browser == browser and std.mem.eql(u8, v.frame(), frame)) return v;
+        return null;
+    }
+
+    /// 그 (탭, frame) 의 세션으로 보낸 호출 하나를 꺼낸다(세션이 사라졌다 — 답이 오지 않는다).
+    pub fn takeSentIn(self: *Table, browser: BrowserId, frame: []const u8) ?Call {
+        for (&self.slots) |*s| if (s.*) |v| if (v.phase == .sent and v.frame_len > 0 and v.browser == browser and std.mem.eql(u8, v.frame(), frame)) {
+            s.* = null;
+            return v;
+        };
+        return null;
+    }
+
     /// 그 메시지 번호로 보낸 호출을 꺼낸다(대역 밖이거나 모르면 null — 다른 사용처의 결과).
     pub fn takeByCdpId(self: *Table, cdp_id: i32) ?Call {
         if (cdp_id < id_base or cdp_id >= id_end) return null;
         for (&self.slots) |*s| if (s.*) |v| if (v.phase == .sent and v.cdp_id == cdp_id) {
+            s.* = null;
+            return v;
+        };
+        return null;
+    }
+
+    /// frame 세션으로 온 답의 번호로 꺼낸다 — 그 번호가 대역 안이고, 그 호출이 **그 세션으로 보낸 것**(같은 탭·같은 frame·같은 세대)일 때만.
+    /// 번호는 렌더러가 쓴 글이다: 탈취된 다른 사이트 iframe 렌더러가 제 세션에 짐작한 번호의 답을 보내 다른 탭·root 호출의 답을 가로채지 못하게,
+    /// 대역 밖의 큰 수가 i32 변환에서 터지지 않게(적대 검증 13 회차 MED 둘).
+    pub fn takeSessionAnswer(self: *Table, cdp_id: i64, browser: BrowserId, f: []const u8, gen: u32) ?Call {
+        if (cdp_id < id_base or cdp_id >= id_end) return null;
+        const id: i32 = @intCast(cdp_id);
+        for (&self.slots) |*s| if (s.*) |v| if (v.phase == .sent and v.cdp_id == id) {
+            if (v.browser != browser or v.frame_len == 0 or v.sent_gen != gen or !std.mem.eql(u8, v.frame(), f)) return null;
             s.* = null;
             return v;
         };
@@ -287,6 +339,49 @@ test "인자 조각을 모아 CDP 메시지를 만들고, 대역 안의 번호�
     defer got.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 7), got.call);
     try testing.expect(t.find(3, 7) == null);
+}
+
+test "wire 30: frame 호출은 업로드의 메서드만 받고 frame 을 쥔다, 자식 세션 메시지는 sessionId 를 싣는다, 세운 호출·보낸 호출을 frame 으로 찾는다" {
+    var t: Table = .{};
+    defer t.deinit(testing.allocator);
+    try testing.expectError(error.Forbidden, t.begin(.{ .browser = 3, .call = 1, .method = "Network.getCookies", .params_size = 0, .frame = "AB" }, 0));
+    try testing.expectError(error.Forbidden, t.begin(.{ .browser = 3, .call = 1, .method = "Target.attachToTarget", .params_size = 0, .frame = "AB" }, 0));
+    const c = try t.begin(.{ .browser = 3, .call = 1, .method = "DOM.describeNode", .params_size = 2, .frame = "AB" }, 0);
+    try testing.expectEqualStrings("AB", c.frame());
+    _ = t.addData(testing.allocator, .{ .browser = 3, .call = 1, .bytes = "{}" });
+    c.parked = true;
+    try testing.expect(t.nextParked(3, "AB") == c);
+    try testing.expect(t.nextParked(3, "CD") == null);
+    c.parked = false;
+    const json = try t.buildMessageIn(testing.allocator, c, "5E55");
+    defer testing.allocator.free(json);
+    try testing.expectEqualStrings("{\"id\":536870912,\"sessionId\":\"5E55\",\"method\":\"DOM.describeNode\",\"params\":{}}", json);
+    var gone = t.takeSentIn(3, "AB").?;
+    gone.deinit(testing.allocator);
+    try testing.expect(t.takeSentIn(3, "AB") == null);
+}
+
+test "적대 검증 13 회차: frame 세션의 답은 그 세션으로 보낸 호출만 꺼낸다 — 다른 탭·root·다른 frame·앞 세대·대역 밖(큰 수)은 버린다" {
+    var t: Table = .{};
+    defer t.deinit(testing.allocator);
+    const root = try t.begin(callOf(4, 9, "Runtime.evaluate", 0), 0); // 다른 탭의 root 호출
+    const j0 = try t.buildMessage(testing.allocator, root);
+    testing.allocator.free(j0);
+    const c = try t.begin(.{ .browser = 3, .call = 1, .method = "DOM.describeNode", .params_size = 0, .frame = "AB" }, 0);
+    c.sent_gen = 7;
+    const j1 = try t.buildMessageIn(testing.allocator, c, "5E55");
+    testing.allocator.free(j1);
+    try testing.expect(t.takeSessionAnswer(id_base, 3, "AB", 7) == null); // 그 번호는 다른 탭의 root 호출
+    try testing.expect(t.takeSessionAnswer(id_base + 1, 4, "AB", 7) == null); // 다른 탭
+    try testing.expect(t.takeSessionAnswer(id_base + 1, 3, "CD", 7) == null); // 다른 frame
+    try testing.expect(t.takeSessionAnswer(id_base + 1, 3, "AB", 6) == null); // 앞 세대
+    try testing.expect(t.takeSessionAnswer(@as(i64, std.math.maxInt(i32)) + 1, 3, "AB", 7) == null); // i32 를 넘는 수
+    try testing.expect(t.takeSessionAnswer(999_999_999_999, 3, "AB", 7) == null);
+    var got = t.takeSessionAnswer(id_base + 1, 3, "AB", 7).?;
+    defer got.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 1), got.call);
+    var other = t.takeByCdpId(id_base).?; // 다른 탭의 호출은 그대로 남았다
+    other.deinit(testing.allocator);
 }
 
 test "인자 없는 호출은 params 없이, 번호는 대역 안에서 돈다" {

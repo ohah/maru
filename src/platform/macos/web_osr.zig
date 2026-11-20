@@ -2230,6 +2230,9 @@ const max_deferred_calls = 16;
 const DeferredCall = struct {
     method: DeferredMethod,
     params: []u8,
+    /// wire 30: 그 호출을 보낼 frame 세션(다른 사이트 iframe — 비면 root). 인자 안에 둔다(16 진 64 자까지).
+    frame_buf: [ws.message.max_devtools_frame_bytes]u8 = undefined,
+    frame_len: u8 = 0,
 };
 
 const DeferredMethod = enum {
@@ -2248,9 +2251,16 @@ const DeferredMethod = enum {
 
 /// 그 탭의 미룬 호출 줄에 넣는다(넘치면 오래된 것을 버린다). 메모리가 없으면 버린다(best effort — 문서가 죽을 때 함께 사라진다).
 fn deferCall(gpa: std.mem.Allocator, s: *Surface, method: DeferredMethod, params: []const u8) void {
+    deferCallIn(gpa, s, "", method, params);
+}
+
+fn deferCallIn(gpa: std.mem.Allocator, s: *Surface, frame: []const u8, method: DeferredMethod, params: []const u8) void {
+    if (frame.len > ws.message.max_devtools_frame_bytes) return;
     if (s.deferred_calls.items.len >= max_deferred_calls) gpa.free(s.deferred_calls.orderedRemove(0).params);
     const copy = gpa.dupe(u8, params) catch return;
-    s.deferred_calls.append(gpa, .{ .method = method, .params = copy }) catch gpa.free(copy);
+    var d: DeferredCall = .{ .method = method, .params = copy, .frame_len = @intCast(frame.len) };
+    @memcpy(d.frame_buf[0..frame.len], frame);
+    s.deferred_calls.append(gpa, d) catch gpa.free(copy);
 }
 
 /// 미룬 호출을 보낸다(답은 버린다) — 대화상자가 없고, 확정되지 않은 이동 중이 아니고, 이 줄에서 앞서 보낸 것이 자리를 놓은 탭만. 자리가 없으면 다음
@@ -2268,8 +2278,8 @@ fn flushDeferredCalls(gpa: std.mem.Allocator) void {
             s.deferred_in_flight = 0;
         }
         // tick 마다 탭에 하나씩 — 몰아 보내면 탭의 DevTools 자리(2)를 차 다음 op 의 첫 호출이 Busy 를 받았다(4 회차).
-        const d = s.deferred_calls.items[0];
-        if (devtoolsCall(gpa, id, d.method.name(), d.params, discard_sink)) |call| {
+        const d = &s.deferred_calls.items[0];
+        if (devtoolsCallIn(gpa, id, d.frame_buf[0..d.frame_len], d.method.name(), d.params, discard_sink)) |call| {
             s.deferred_in_flight = call;
         } else |e| switch (e) {
             error.Busy, error.DialogShowing => continue, // 다음 tick(대화상자는 위에서 걸렀다 — 여기서 다시 미루면 같은 것을 두 번 담는다)
@@ -2289,6 +2299,12 @@ fn discardDone(_: *anyopaque, _: u32, _: DevtoolsOutcome, _: []const u8) void {}
 /// sidecar 가 답할 때까지 센다). 업로드는 답을 낸 **뒤** 이것으로 정리한다: 정리를 기다리면 바쁜 페이지에서 놓기가 붙잡혀 정해진 답이 맨 시한(-32004)이
 /// 됐다. 그 밖의 메서드·모르는 탭·엔진이 멈춘 탭은 버린다(정리는 best effort — 묶음·듣는 이는 문서와 함께 사라진다).
 pub fn devtoolsCleanup(gpa: std.mem.Allocator, surface_id: u64, method: []const u8, params: []const u8) void {
+    devtoolsCleanupIn(gpa, surface_id, "", method, params);
+}
+
+/// `devtoolsCleanup` 와 같되 그 frame 세션으로(wire 30 — 다른 사이트 iframe 의 업로드가 그 세션에 단 듣는 이·묶음). sidecar 는 그 세션이 이미 없으면
+/// 새로 붙지 않고 버린다(객체는 세션과 함께 사라졌다 — 공격 A1-6).
+pub fn devtoolsCleanupIn(gpa: std.mem.Allocator, surface_id: u64, frame: []const u8, method: []const u8, params: []const u8) void {
     const which: DeferredMethod = if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup"))
         .release_object_group
     else if (std.mem.eql(u8, method, "Runtime.callFunctionOn"))
@@ -2297,7 +2313,7 @@ pub fn devtoolsCleanup(gpa: std.mem.Allocator, surface_id: u64, method: []const 
         return;
     const s = surfaces.getPtr(surface_id) orelse return;
     if (!s.created or state == .off or state == .failed) return;
-    deferCall(gpa, s, which, params);
+    deferCallIn(gpa, s, frame, which, params);
 }
 
 /// W9c③ 적대 리뷰 3 회차: 보낸 호출의 시한을 지금부터 `wait_ms` 로 줄인다(늘리지 않는다). 업로드의 넣은 뒤 읽기 — 붙잡혀도(응답이 늦은 이동) 요청
@@ -6643,7 +6659,13 @@ fn isJsonObject(gpa: std.mem.Allocator, bytes: []const u8) bool {
 /// (곧바로 실패하면 오지 않고 오류를 돌려준다). 브라우저가 아직 없으면(한 번도 배치되지 않은 탭·sidecar 가 뜨는 중) `NotReady`,
 /// 그 탭이나 전체가 상한이면 `Busy`(끝낸 호출도 sidecar 가 답할 때까지 센다).
 pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8, params: []const u8, sink: DevtoolsSink) DevtoolsCallError!u32 {
+    return devtoolsCallIn(gpa, surface_id, "", method, params, sink);
+}
+
+/// `devtoolsCall` 와 같되 그 frame 의 세션으로(wire 30 — 사용자 결정 2026-11-20: 다른 사이트 iframe 의 칸; sidecar 가 그 세션을 붙인다). 빈 글이면 root.
+pub fn devtoolsCallIn(gpa: std.mem.Allocator, surface_id: u64, frame: []const u8, method: []const u8, params: []const u8, sink: DevtoolsSink) DevtoolsCallError!u32 {
     ws.fields.checkDevtoolsMethod(method) catch return error.InvalidMethod;
+    ws.fields.checkDevtoolsFrame(frame) catch return error.InvalidParams;
     if (params.len > ws.message.max_devtools_params_bytes) return error.InvalidParams;
     if (params.len != 0 and (!isJsonObject(gpa, params) or !ws.fields.jsonDepthWithin(params, ws.message.max_devtools_params_depth))) return error.InvalidParams;
     const s = surfaces.getPtr(surface_id) orelse return error.NotReady;
@@ -6653,7 +6675,7 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     // W9a 적대 리뷰 4 회차: 팝업 가족의 **다른** 탭이 대화상자를 띄웠으면 이 탭의 스크립트는 다른 렌더러에서 돈다 — 멈추기는 보낸다.
     const terminate_ok = std.mem.eql(u8, method, "Runtime.terminateExecution") and !dialogPausesScript(surface_id);
     if (jsDialogShowing(surface_id) and !terminate_ok and !sendsDuringDialog(gpa, method, params)) {
-        if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) deferCall(gpa, s, .release_object_group, params);
+        if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) deferCallIn(gpa, s, frame, .release_object_group, params); // 그 세션의 묶음(root 로 미루면 frame 세션 묶음이 남았다 — 9 회차)
         return error.DialogShowing;
     }
     var of_surface: usize = 0;
@@ -6673,7 +6695,7 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     }
     next_devtools_call = call;
     slot.* = .{ .surface = surface_id, .call = call, .sink = sink, .deadline_ms = monotonicNow() + devtools_timeout_ms };
-    send(gpa, .{ .devtools_call = .{ .browser = surface_id, .call = call, .method = method, .params_size = @intCast(params.len) } });
+    send(gpa, .{ .devtools_call = .{ .browser = surface_id, .call = call, .method = method, .params_size = @intCast(params.len), .frame = frame } });
     var off: usize = 0;
     while (off < params.len) {
         const n = @min(ws.message.devtools_chunk_bytes, params.len - off);
@@ -6700,6 +6722,12 @@ pub const kick_params = ws.message.devtools_kick_params;
 /// 된다). 이동하는 순간에 보낸 kick 은 답이 오지 않을 수 있다 — sidecar 가 `devtools_kick_stale_ms` 에 `expired` 로 놓아 자리가 풀린다.
 /// 보이는 탭의 비용은 GPU 약 3 ms·페이지 멈춤 0(실측).
 pub fn devtoolsCallKick(gpa: std.mem.Allocator, surface_id: u64, method: []const u8, params: []const u8, sink: DevtoolsSink, kick_kind: Kick) DevtoolsCallError!u32 {
+    return devtoolsCallKickIn(gpa, surface_id, "", method, params, sink, kick_kind);
+}
+
+/// `devtoolsCallKick` 와 같되 frame 세션으로(wire 30). frame 호출은 kick 을 싣지 않는다(업로드의 차례는 kick 을 쓰지 않는다 — 주 호출만).
+pub fn devtoolsCallKickIn(gpa: std.mem.Allocator, surface_id: u64, frame: []const u8, method: []const u8, params: []const u8, sink: DevtoolsSink, kick_kind: Kick) DevtoolsCallError!u32 {
+    if (frame.len > 0) return devtoolsCallIn(gpa, surface_id, frame, method, params, sink);
     if (kick_kind == .none) return devtoolsCall(gpa, surface_id, method, params, sink);
     const s = surfaces.getPtr(surface_id) orelse return error.NotReady;
     if (!s.created or state == .off or state == .failed) return error.NotReady;
@@ -9208,6 +9236,71 @@ test "W9c③ 적대 리뷰 3·4 회차: 업로드의 정리(떼기·놓기)는 �
     flushDeferredCalls(gpa);
     try std.testing.expectEqual(@as(usize, 2), sentDevtoolsMethods(&methods));
     try std.testing.expectEqual(@as(usize, 1), surfaces.getPtr(7).?.deferred_calls.items.len);
+}
+
+test "wire 30(2026-11-20 iframe 업로드): 미룬 정리는 그 frame 세션을 쥐고 보낸다 — 다른 사이트 iframe 의 떼기·놓기가 root 로 가지 않는다, 빈 글은 root" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "got 1" } });
+    devtoolsCleanupIn(gpa, 7, "AB12CD", "Runtime.callFunctionOn", "{\"objectId\":\"o-1\"}");
+    devtoolsCleanupIn(gpa, 7, "", "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-42\"}");
+    devtoolsCleanupIn(gpa, 7, "not hex\"", "Runtime.releaseObjectGroup", "{}"); // 16 진이 아니다 — 보낼 때 거절(버린다)
+    outbox_pending.clearRetainingCapacity();
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false, .program);
+    flushDeferredCalls(gpa);
+    var buf: [32]Message = undefined;
+    var n = sentFrames(&buf);
+    var frames_sent: [4][]const u8 = undefined;
+    var k: usize = 0;
+    for (buf[0..n]) |m| if (m == .devtools_call and k < frames_sent.len) {
+        frames_sent[k] = m.devtools_call.frame;
+        k += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), k);
+    try std.testing.expectEqualStrings("AB12CD", frames_sent[0]);
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = surfaces.getPtr(7).?.deferred_in_flight, .status = .ok, .size = 0 } });
+    outbox_pending.clearRetainingCapacity();
+    flushDeferredCalls(gpa);
+    n = sentFrames(&buf);
+    k = 0;
+    for (buf[0..n]) |m| if (m == .devtools_call and k < frames_sent.len) {
+        frames_sent[k] = m.devtools_call.frame;
+        k += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), k);
+    try std.testing.expectEqualStrings("", frames_sent[0]);
+}
+
+test "wire 30(적대 검증 9·14 회차): 앱이 보내는 frame 호출은 kick 이 없어도 그 frame 을 싣고, 대화상자 중 놓기는 그 frame 으로 미룬다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    var rec: DevtoolsRecorder = .{};
+    outbox_pending.clearRetainingCapacity();
+    const c1 = try devtoolsCallKickIn(gpa, 7, "AB12CD", "Page.getFrameTree", "{}", rec.sink(), .none);
+    var buf: [32]Message = undefined;
+    var n = sentFrames(&buf);
+    var got: ?[]const u8 = null;
+    for (buf[0..n]) |m| if (m == .devtools_call) {
+        got = m.devtools_call.frame;
+    };
+    try std.testing.expectEqualStrings("AB12CD", got.?);
+    // 대화상자가 떠 있으면 놓기는 미뤄지고, 닫힌 뒤 그 frame 의 세션으로 간다(root 로 가면 그 세션의 묶음이 남았다).
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c1, .status = .ok, .size = 0 } });
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "got 1" } });
+    _ = devtoolsCallIn(gpa, 7, "AB12CD", "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-42\"}", rec.sink()) catch {};
+    outbox_pending.clearRetainingCapacity();
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false, .program);
+    flushDeferredCalls(gpa);
+    n = sentFrames(&buf);
+    got = null;
+    for (buf[0..n]) |m| if (m == .devtools_call and std.mem.eql(u8, m.devtools_call.method, "Runtime.releaseObjectGroup")) {
+        got = m.devtools_call.frame;
+    };
+    try std.testing.expectEqualStrings("AB12CD", got.?);
 }
 
 test "W9c③ 적대 리뷰 4 회차 재현 N3: 확정되지 않은 이동 중에는 미룬 호출을 보내지 않는다 — 확정(새 문서)이나 불러오기 끝 뒤에 보낸다" {

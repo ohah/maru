@@ -4,9 +4,13 @@
 //! 전 확인을 마치면 `Step.confirm` 으로 멈추고, 앱이 곧 사본을 만들어 `beginPost` 하면 로케이터를 **다시** 풀어 같은 요소인지 본 뒤 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」, 실제 CEF 154 실측):
 //!
 //! - **모달 전**: `Page.getFrameTree`(주 프레임 id·`loaderId`·`securityOrigin` — 모달은 이 출처만 보인다, 페이지가 정한 글은 싣지 않는다)
-//!   → 격리 world → `DOM.resolveNode` → 확인 함수(파일 입력칸인가·꺼지지 않았나(`:disabled` — fieldset 도)·폴더 칸이 아닌가·여러 파일이면
-//!   `multiple` 인가·문서에 붙어 있나·주 프레임인가). `setFileInputFiles` 는 꺼진 칸에도 넣고 이벤트까지 냈다(실측 d2 — 사람은 못 한다),
-//!   폴더 칸에는 조용히 아무것도 안 넣었고(i), 한 파일 칸에 둘을 주면 조용히 첫 것만 넣었다(b2) — 그래서 모달 **전에** 거절한다.
+//!   → 격리 world → `DOM.resolveNode` → 확인 함수(파일 입력칸인가·꺼지지 않았나(`:disabled` — fieldset 도)·칸의 종류가 준 것과 맞나(파일을
+//!   준 폴더 칸·폴더를 준 파일 칸은 거절)·여러 파일이면 `multiple` 인가·문서에 붙어 있나·그 frame 의 문서인가). `setFileInputFiles` 는 꺼진 칸에도
+//!   넣고 이벤트까지 냈다(실측 d2 — 사람은 못 한다), 폴더 칸에는 폴더 경로도 파일 경로도 조용히 아무것도 안 넣었고(i·`up-folder-path-silent`), 한
+//!   파일 칸에 둘을 주면 조용히 첫 것만 넣었다(b2) — 그래서 넣기 **전에** 거절한다. 폴더(`--folder`)는 사본 뒤 확인이 `webkitdirectory` 를 잠깐 떼고
+//!   넣은 뒤 첫 진짜 `input` 에서 되돌린다(2026-11-20 — 아래 `check_js`).
+//! - **iframe 안의 칸**(`frame`, 2026-11-20): 로케이터 대신 이 차례가 걷는다(`walk_*` — 단계마다 그 frame 의 격리 world 에서 그 iframe 의 selector,
+//!   `DOM.describeNode` 로 frame id). 다른 사이트 iframe 이면 그 frame 의 세션(`session` — sidecar 의 자식 세션, wire 30)으로 들어가 그 뒤 호출을 싣는다.
 //! - **승인 뒤**: 로케이터를 다시 풀어 같은 `backendNodeId` 인가 → 프레임 트리의 `loaderId` 가 같은가 → **새** 격리 world 에서 objectId 를
 //!   잡아 다시 확인(그때 그 칸에 maru 의 듣는 이를 단다 — 아래) → 프레임 트리를 한 번 더(확인과 넣기 사이의 이동) →
 //!   `DOM.setFileInputFiles{objectId}` → **같은 objectId** 로 읽어 확인(붙어 있나·수·이름·크기). objectId 는 문서와 함께 죽는다(실측 g4 —
@@ -60,13 +64,20 @@ pub const not_found_reason = "no element matches the locator";
 pub const hidden_reason = "no visible element matches the locator (matching elements are hidden) — a hidden file input can be given with --selector or --ref";
 pub const not_file_input_reason = "the element is not a file input (<input type=file>)";
 pub const disabled_reason = "the file input is disabled — a user could not choose files there";
-pub const directory_reason = "the file input takes a folder (webkitdirectory) — upload passes files, not folders";
+pub const directory_reason = "the file input takes a folder (webkitdirectory) — give the folder with --folder (MCP: folder) instead of files";
+/// 폴더를 주었는데 칸이 폴더 칸이 아니다(사용자 결정 2026-11-20 — 폴더는 `webkitdirectory` 칸에만: 사람의 고르개도 그 칸에서만 폴더를 고른다).
+pub const not_directory_reason = "the file input takes files, not a folder — give the files without --folder";
 pub const single_reason = "the file input takes one file — give one file, or use an input that allows several (multiple)";
-pub const frame_reason = "elements inside frames are not supported yet";
+/// 주 문서 길에서 찾은 칸이 다른 frame 의 것이다(role 질의는 같은 프로세스 iframe 안까지 닿는다) — iframe 안의 칸은 `--frame` 으로 준다(사용자 결정 2026-11-20).
+pub const frame_reason = "the file input is inside a frame — give the frame with --frame <css selector of the iframe> (MCP: frame), and the input inside it with --selector (or no locator for the frame's only file input)";
+/// `--frame` 단계 상한(바깥 → 안 — iframe 안의 iframe 까지). L2(`control_browser.max_upload_frames`)와 같다(앱이 컴파일 때 맞춘다).
+pub const max_frames = 4;
+/// 걷는 동안(사본 전) frame 이 사라졌다·옮겨 갔다.
+pub const frame_gone_reason = "the frame changed while maru was looking into it — run upload again";
 pub const detached_reason = "the file input is not in the page";
-pub const page_changed_reason = "the page changed while waiting for approval — no file was set; run upload again";
+pub const page_changed_reason = "the page changed while maru was copying the files — no file was set; run upload again";
 pub const removed_after_reason = "the file input was removed from the page before maru saw the files arrive — the page may not have them; check the page before trying again";
-pub const mismatch_reason = "the page did not get the files as approved (the file input held a different list when they were set) — check the page before trying again";
+pub const mismatch_reason = "the page did not get the files maru set (the file input held a different list when they were set) — check the page before trying again";
 pub const check_failed_reason = "could not check the file input";
 pub const unseen_reason = "maru did not see the page receive the files (no input or change event reached the file input) and the input does not hold them now — check the page before trying again";
 
@@ -80,54 +91,39 @@ const world_name = "maru-w9c-upload";
 /// 넣을 때의 목록을 적는 자리(격리 world 의 `globalThis` — 페이지는 보지 못한다) — 뒤에 요청 번호.
 const snapshot_key = "maru-w9c-upload-";
 
-/// 확인 함수(격리 world — 프로토타입 getter 로 읽는다: DOM clobbering). 인자 n = 넣을 파일 수. 승인 뒤(arm 참)에는 통과하면 그 칸에 캡처
-/// 단계의 `input`·`change` 듣는 이를 달아, 그 칸에 닿은 진짜 이벤트마다(둘까지) 그때의 목록(이름·크기)을 격리 world 의 `globalThis[key]` 에 적는다.
-const check_js =
-    "function(n,arm,key){var G=function(p,k){return Object.getOwnPropertyDescriptor(p,k).get};var t=this;" ++
-    "if(!(t instanceof Element))return 'not file';" ++
-    "if(G(Node.prototype,'ownerDocument').call(t)!==document)return 'frame';" ++
-    "if(!G(Node.prototype,'isConnected').call(t))return 'detached';" ++
-    "if(!(t instanceof HTMLInputElement)||G(HTMLInputElement.prototype,'type').call(t)!=='file')return 'not file';" ++
-    "if(G(HTMLInputElement.prototype,'disabled').call(t)||Element.prototype.matches.call(t,':disabled'))return 'disabled';" ++
-    "if(G(HTMLInputElement.prototype,'webkitdirectory').call(t))return 'directory';" ++
-    "if(n>1&&!G(HTMLInputElement.prototype,'multiple').call(t))return 'single';" ++
-    "if(arm){var D=G(HTMLInputElement.prototype,'files'),L=G(FileList.prototype,'length'),I=FileList.prototype.item,N=G(File.prototype,'name'),Z=G(Blob.prototype,'size');" ++
-    "var s={seen:[]};s.h=function(e){if(e.isTrusted!==true||e.target!==t||s.seen.length>=2)return;var f=D.call(t),l=[];" ++
-    "if(f)for(var i=0,c=L.call(f);i<c;i++){var x=I.call(f,i);l.push([N.call(x),Z.call(x)])}s.seen.push(l)};" ++
-    "var A=EventTarget.prototype.addEventListener;A.call(t,'input',s.h,true);A.call(t,'change',s.h,true);globalThis[key]=s}" ++
-    "return 'ok'}";
+/// 격리 world 함수들(칸 확인·떼기·읽기) — 판정자가 같은 글을 실제 CEF 에 대도록 따로 둔다(`web_cdp_upload_js.zig`).
+const upload_js = @import("web_cdp_upload_js.zig");
+const check_js = upload_js.check_js;
+const disarm_js = upload_js.disarm_js;
+const verify_js = upload_js.verify_js;
 
-/// 읽기를 못 하고 끝날 때 듣는 이를 뗀다(같은 objectId·같은 key — 없으면 아무것도 안 한다).
-const disarm_js =
-    "function(key){var s=globalThis[key];if(!s)return;var R=EventTarget.prototype.removeEventListener;" ++
-    "R.call(this,'input',s.h,true);R.call(this,'change',s.h,true);delete globalThis[key]}";
+/// 넣은 뒤 읽기 인자의 이름·크기 목록 밖 바이트의 위 끝(함수 본문이 JSON 이스케이프로 두 배가 돼도·objectId·key) — 앱이 폴더의 목록이 DevTools 인자
+/// 한 번에 드는지 셀 때 쓴다(`app_host_abi.upload_folder_params_overhead`).
+pub const verify_params_room: usize = verify_js.len * 2 + 512;
 
-/// 넣은 뒤 읽기(같은 objectId) — 듣는 이를 떼고, 넣을 때 적은 목록(받았나)과 지금 칸(그대로 두었나 — 붙어 있고 같은 목록)을 견준다:
-/// `ok`(지금 칸이 같다)·`dropped`(넣을 때 같았는데 지금은 아니다 — 페이지가 받은 뒤 비웠다)·`mismatch`(넣을 때 다른 목록)·`removed`(기록 없이
-/// 떨어졌다)·`unseen`(기록 없이 다른 목록).
-const verify_js =
-    "function(names,sizes,key){var G=function(p,k){return Object.getOwnPropertyDescriptor(p,k).get};var t=this;var s=globalThis[key];" ++
-    "var D=G(HTMLInputElement.prototype,'files'),L=G(FileList.prototype,'length'),I=FileList.prototype.item,N=G(File.prototype,'name'),Z=G(Blob.prototype,'size');" ++
-    "if(s){var R=EventTarget.prototype.removeEventListener;R.call(t,'input',s.h,true);R.call(t,'change',s.h,true);delete globalThis[key]}" ++
-    "var same=function(l){if(!l||l.length!==names.length)return false;for(var i=0;i<l.length;i++)if(l[i][0]!==names[i]||l[i][1]!==sizes[i])return false;return true};" ++
-    "var now=null;if(G(Node.prototype,'isConnected').call(t)){var f=D.call(t);now=[];if(f)for(var i=0,c=L.call(f);i<c;i++){var x=I.call(f,i);now.push([N.call(x),Z.call(x)])}}" ++
-    "if(same(now))return 'ok';" ++
-    "if(s&&s.seen.length){for(var j=0;j<s.seen.length;j++)if(same(s.seen[j]))return 'dropped';return 'mismatch'}" ++
-    "return now===null?'removed':'unseen'}";
-
-const Stage = enum { tree, world, resolve, check, release_pre, tree_again, set, verify };
+/// `walk_*` — iframe 걷기(사용자 결정 2026-11-20): 주 frame 부터 단계마다 그 frame 의 격리 world 에서 `--frame` selector 로 iframe 요소를 찾고
+/// (`DOM.describeNode` 로 그 frame id), 마지막 frame 에서 대상(selector 또는 유일한 파일 칸)을 찾아 `located` 로 넘긴다 — 그 뒤 차례(tree … verify)는
+/// 그 frame 에서 돈다.
+const Stage = enum { tree, world, resolve, check, release_pre, tree_again, set, verify, walk_tree, walk_world, walk_find, walk_describe };
 
 pub const Phase = enum { pre, post };
 
 /// 승인 뒤 넣을 사본 하나(앱이 준다).
 pub const Staged = struct { path: []const u8, name: []const u8, size: u64 };
 
+/// 폴더 올리기의 요약(앱이 펼친 것 — 답의 `folder` 칸): 파일 크기 합과 뺀 수(종류별 — 이름은 싣지 않는다).
+pub const FolderSummary = struct { bytes: u64, hidden: u32 = 0, links: u32 = 0, packages: u32 = 0, other: u32 = 0 };
+
 const OwnedStaged = struct { path: []u8, name: []u8, size: u64 };
 
 pub const Op = struct {
     id: u64,
-    /// 넣을 파일 수(L2 가 1..10 을 봤다).
+    /// 넣을 파일 수(L2 가 1..10 을 봤다). 폴더면 0 — 펼친 수는 사본 뒤 `beginPost` 가 안다.
     count: usize,
+    /// 폴더 올리기(사용자 결정 2026-11-20) — 칸이 `webkitdirectory` 여야 하고, 승인 뒤 확인이 속성을 바꿔 넣는다(`check_js`).
+    folder: bool = false,
+    /// 폴더의 요약(사본 뒤 `beginPost` — 답의 `folder` 칸).
+    folder_summary: ?FolderSummary = null,
     phase: Phase = .pre,
     stage: Stage = .tree,
     /// 모달 전에 찾은 요소 — 승인 뒤 다시 찾은 것과 같아야 한다.
@@ -146,9 +142,67 @@ pub const Op = struct {
     given: bool = false,
     /// 승인 뒤 확인이 그 칸에 듣는 이를 달았고 아직 떼지 않았다 — 읽기를 못 하고 끝나면 놓기 앞에서 뗀다(`disarm_js`).
     armed: bool = false,
+    /// iframe 안의 칸(사용자 결정 2026-11-20 — `--frame`): 바깥 → 안의 iframe selector 들(소유, 1..`max_frames`). 비면 주 문서 길(로케이터는
+    /// `web_cdp_ops` 가 푼다).
+    frames: std.ArrayList([]u8) = .empty,
+    /// 마지막 frame 안의 대상 selector(소유) — null 이면 그 frame 의 유일한 `input[type=file]`(다른 사이트 iframe 안은 에이전트가 볼 길이 없다 —
+    /// 공격 A3-7).
+    target_sel: ?[]u8 = null,
+    /// 걷기의 자리 — 다음에 풀 단계(`frames.len` 이면 대상).
+    walk_level: usize = 0,
+    /// 걷는 지금 frame 의 id(소유 — 처음은 주 frame, 끝나면 대상의 frame).
+    walk_frame: ?[]u8 = null,
+    walk_context: i64 = 0,
+    walk_object: ?[]u8 = null,
+    /// 모달 전 걷기가 단계마다 찾은 frame id(소유) — 사본 뒤 걷기가 같은 frame 들을 지나야 한다(iframe 을 바꿔 끼우면 다른 id).
+    pre_frames: std.ArrayList([]u8) = .empty,
+    /// wire 30: 지금 호출을 보내는 세션 — 다른 사이트 iframe(OOPIF)에 들어가면 그 frame id(소유, sidecar 가 그 타깃의 자식 세션으로 보낸다), null 이면
+    /// 그 탭의 root 연결. 걷기가 같은 프로세스의 하위 frame 으로 가면 그대로다.
+    session: ?[]u8 = null,
+    /// 원격 객체 묶음을 쥔 세션들(root 밖 — 놓기를 세션마다 보낸다, 공격 A1-6).
+    used_sessions: std.ArrayList([]u8) = .empty,
+    /// 세션마다의 놓기 자리(0 = root, i = `used_sessions[i-1]`) — 모달 앞 놓기(`release_pre`)·답 뒤 정리가 차례로 보낸다.
+    release_i: usize = 0,
 
     pub fn init(count: usize, id: u64) Op {
         return .{ .count = count, .id = id };
+    }
+
+    /// 폴더 올리기의 차례(파일 수는 사본 뒤에 안다).
+    pub fn initFolder(id: u64) Op {
+        return .{ .count = 0, .id = id, .folder = true };
+    }
+
+    /// iframe 안의 칸(`--frame`) — selector 들과 대상(없으면 유일한 파일 칸)을 복사해 쥔다. `start` 가 걷기를 시작한다.
+    pub fn initFrames(gpa: std.mem.Allocator, base: Op, frames: []const []const u8, target: ?[]const u8) !Op {
+        var op = base;
+        errdefer op.deinit(gpa);
+        for (frames) |f| {
+            const copy = try gpa.dupe(u8, f);
+            op.frames.append(gpa, copy) catch |e| {
+                gpa.free(copy);
+                return e;
+            };
+        }
+        if (target) |t| op.target_sel = try gpa.dupe(u8, t);
+        op.stage = .walk_tree;
+        return op;
+    }
+
+    pub fn framed(self: *const Op) bool {
+        return self.frames.items.len > 0;
+    }
+
+    /// iframe 걷기를 처음부터(모달 전·사본 뒤 모두 — 로케이터를 다시 푸는 것과 같은 자리).
+    pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
+        std.debug.assert(self.framed());
+        self.walk_level = 0;
+        if (self.walk_object) |o| gpa.free(o);
+        self.walk_object = null;
+        if (self.session) |f| gpa.free(f);
+        self.session = null; // 걷기는 주 frame(root)부터
+        self.stage = .walk_tree;
+        return call(gpa, "Page.getFrameTree", "", .{});
     }
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
@@ -158,6 +212,16 @@ pub const Op = struct {
         if (self.object) |s| gpa.free(s);
         self.freeStaged(gpa);
         self.staged.deinit(gpa);
+        for (self.frames.items) |f| gpa.free(f);
+        self.frames.deinit(gpa);
+        if (self.target_sel) |t| gpa.free(t);
+        if (self.walk_frame) |f| gpa.free(f);
+        if (self.walk_object) |o| gpa.free(o);
+        for (self.pre_frames.items) |f| gpa.free(f);
+        self.pre_frames.deinit(gpa);
+        if (self.session) |f| gpa.free(f);
+        for (self.used_sessions.items) |f| gpa.free(f);
+        self.used_sessions.deinit(gpa);
         self.* = undefined;
     }
 
@@ -171,7 +235,16 @@ pub const Op = struct {
 
     /// 승인 뒤 — 사본을 받고(복사한다) 차례를 처음부터(로케이터 다시 풀기는 `web_cdp_ops.Op.resumeUpload` 가).
     pub fn beginPost(self: *Op, gpa: std.mem.Allocator, staged: []const Staged) !void {
+        return self.beginPostWith(gpa, staged, null);
+    }
+
+    /// `beginPost` 와 같되 폴더의 요약을 함께(답의 `folder` 칸). 폴더면 사본 수가 곧 넣을 수다.
+    pub fn beginPostWith(self: *Op, gpa: std.mem.Allocator, staged: []const Staged, summary: ?FolderSummary) !void {
         self.freeStaged(gpa);
+        if (self.folder) {
+            self.count = staged.len;
+            self.folder_summary = summary;
+        }
         for (staged) |s| {
             const path = try gpa.dupe(u8, s.path);
             errdefer gpa.free(path);
@@ -180,7 +253,7 @@ pub const Op = struct {
             try self.staged.append(gpa, .{ .path = path, .name = name, .size = s.size });
         }
         self.phase = .post;
-        self.stage = .tree;
+        self.stage = if (self.framed()) .walk_tree else .tree;
         if (self.object) |o| gpa.free(o);
         self.object = null;
     }
@@ -218,13 +291,40 @@ pub const Op = struct {
             self.cleanup.disarm = false;
             var key_buf: [snapshot_key.len + 20]u8 = undefined;
             const key = std.fmt.bufPrint(&key_buf, snapshot_key ++ "{d}", .{self.id}) catch unreachable;
-            return try call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{f}}}]}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(disarm_js, .{}), std.json.fmt(key, .{}) });
+            // 듣는 이는 대상의 세션(그 frame)에 있다.
+            return self.inSession(try call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{f}}}]}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(disarm_js, .{}), std.json.fmt(key, .{}) }));
         }
         if (self.cleanup.release) {
-            self.cleanup.release = false;
-            return try call(gpa, "Runtime.releaseObjectGroup", "{{\"objectGroup\":\"maru-w9b-{d}\"}}", .{self.id});
+            // 묶음은 세션마다다 — root 와 걷기가 들어간 다른 사이트 iframe 의 세션마다 놓는다.
+            const step = try self.releaseAt(gpa, self.release_i);
+            self.release_i += 1;
+            if (self.release_i > self.used_sessions.items.len) {
+                self.cleanup.release = false;
+                self.release_i = 0;
+            }
+            return step;
         }
         return null;
+    }
+
+    /// 놓기 하나 — `i` 0 이면 root, 아니면 `used_sessions[i-1]` 의 세션으로.
+    fn releaseAt(self: *Op, gpa: std.mem.Allocator, i: usize) !Step {
+        var step = try call(gpa, "Runtime.releaseObjectGroup", "{{\"objectGroup\":\"maru-w9b-{d}\"}}", .{self.id});
+        // root 는 빈 글로 못박는다(`inSession` 이 null 만 지금 세션으로 채운다 — root 의 놓기가 그 세션으로 가지 않게).
+        step.call.frame = if (i == 0) "" else self.used_sessions.items[i - 1];
+        return step;
+    }
+
+    /// 지금 세션의 호출로(다른 사이트 iframe 안이면 그 frame — wire 30).
+    fn inSession(self: *const Op, step: Step) Step {
+        var out = step;
+        switch (out) {
+            .call => |*c| if (c.frame == null) {
+                c.frame = self.session;
+            },
+            else => {},
+        }
+        return out;
     }
 
     /// `setFileInputFiles` 를 보내기 직전인가 — 앱이 그 호출 앞에서 에이전트 시각을 적는다(페이지의 change 처리기가 띄운 대화상자가 에이전트 것이
@@ -241,18 +341,30 @@ pub const Op = struct {
     /// 철회 — 원격 객체를 쥐었으면 곧 실패로 끝내고 떼기·놓기는 답 뒤의 정리로 넘긴다(`doneThenCleanup` — 4 회차 L1 부터 놓기를 기다리지 않는다).
     /// 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
+        const out = try self.cancelInner(gpa);
+        return if (out) |st| self.inSession(st) else null;
+    }
+
+    fn cancelInner(self: *Op, gpa: std.mem.Allocator) !?Step {
         return switch (self.stage) {
-            .check, .tree_again, .set => try self.doneThenCleanup(gpa, .failed, "the request was cancelled"),
+            .check, .tree_again, .set, .walk_world, .walk_find, .walk_describe => try self.doneThenCleanup(gpa, .failed, "the request was cancelled"),
+            // iframe 걷기는 이 단계들에서도 걷기의 묶음을 쥐고 있다(1 회차 MED).
+            .tree, .world, .resolve => if (self.framed()) try self.doneThenCleanup(gpa, .failed, "the request was cancelled") else null,
             else => null,
         };
     }
 
     /// 로케이터가 요소를 찾았다(`web_cdp_ops.Op.scrollStep` 자리). 모달 전이면 그 요소를 쥐고, 승인 뒤면 같은 요소인지 본다.
     pub fn located(self: *Op, gpa: std.mem.Allocator, backend: i64) !Step {
+        return self.inSession(try self.locatedInner(gpa, backend));
+    }
+
+    fn locatedInner(self: *Op, gpa: std.mem.Allocator, backend: i64) !Step {
         if (self.phase == .pre) {
             self.backend = backend;
         } else if (backend != self.backend) {
-            return done(gpa, .failed, page_changed_reason);
+            // iframe 걷기는 묶음을 쥐었다 — 놓는다(1 회차 MED).
+            return if (self.framed()) self.doneThenCleanup(gpa, .failed, page_changed_reason) else done(gpa, .failed, page_changed_reason);
         }
         return self.treeStep(gpa, .tree);
     }
@@ -272,7 +384,8 @@ pub const Op = struct {
 
     fn releaseCall(self: *Op, gpa: std.mem.Allocator, stage: Stage) !Step {
         self.stage = stage;
-        return call(gpa, "Runtime.releaseObjectGroup", "{{\"objectGroup\":\"maru-w9b-{d}\"}}", .{self.id});
+        self.release_i = 0;
+        return self.releaseAt(gpa, 0); // root 부터(세션마다 — feed 가 잇는다)
     }
 
     /// 확인의 답(`check_js` 의 글) → 실패 이유(null 이면 통과).
@@ -281,15 +394,28 @@ pub const Op = struct {
         if (std.mem.eql(u8, verdict, "frame")) return frame_reason;
         if (std.mem.eql(u8, verdict, "disabled")) return disabled_reason;
         if (std.mem.eql(u8, verdict, "directory")) return directory_reason;
+        if (std.mem.eql(u8, verdict, "not directory")) return not_directory_reason;
         if (std.mem.eql(u8, verdict, "single")) return single_reason;
         if (std.mem.eql(u8, verdict, "detached")) return if (self.phase == .post) page_changed_reason else detached_reason;
         return not_file_input_reason;
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
-        if (self.stage == .release_pre) return self.confirmStep(gpa);
+        // 모달 앞 놓기는 세션마다(root·다른 사이트 iframe) — 다 놓으면 멈춘다.
+        if (self.stage == .release_pre) {
+            self.release_i += 1;
+            if (self.release_i <= self.used_sessions.items.len) return self.releaseAt(gpa, self.release_i);
+            self.release_i = 0;
+            return self.confirmStep(gpa);
+        }
+        return self.inSession(try self.feedInner(gpa, reply));
+    }
+
+    fn feedInner(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
         const holds = switch (self.stage) {
-            .check, .tree_again, .set, .verify => true,
+            // 걷기는 iframe·대상 요소를 묶음에 쥔다(첫 프레임 트리 뒤부터) — 실패해도 놓는다. 그 뒤의 tree·world·resolve 도(1 회차 MED).
+            .check, .tree_again, .set, .verify, .walk_world, .walk_find, .walk_describe => true,
+            .tree, .world, .resolve => self.framed(),
             else => false,
         };
         const bytes = switch (reply) {
@@ -313,7 +439,11 @@ pub const Op = struct {
                 // 넣은 뒤 읽기를 이동 중이라 보내지 않았다 — 넣기가 이동을 걸었다(2 회차: 「then try again」 이 다시 올리게 했다).
                 if (self.stage == .verify and std.mem.eql(u8, why, ops.loading_reason)) return self.navigated(gpa);
                 // 넣은 뒤 대화상자가 떠 읽기를 못 보냈다 — 넣기는 `{}` 로 끝났다(3 회차 D1). 넣기 자체를 못 보낸 것은 아래의 실패 그대로(갔다가 아니다).
+                // 다른 사이트 iframe 에서도 먼저 본다(아래 세션 갈래가 앞서면 `dialog:true` 가 빠졌다 — 적대 검증 11 회차).
                 if (self.stage == .verify and std.mem.eql(u8, why, ops.dialog_reason)) return self.dialogShown(gpa);
+                // 다른 사이트 iframe: 넣기가 `{}` 로 끝난 뒤 읽기를 보내기 전에 그 세션이 사라졌다(위젯이 받자마자 iframe 을 지웠다 — sidecar 는 세션이
+                // 없어 읽기를 보내지 않는다, `send_failed`). 처리기는 파일을 받았다 — 실패로 답하면 다시 올려 두 번 올라갔다(적대 검증 1 회차 SEVERE).
+                if (self.stage == .verify and self.session != null) return self.navigated(gpa);
                 return if (holds) self.doneThenCleanup(gpa, .failed, why) else done(gpa, .failed, why);
             },
         };
@@ -322,11 +452,27 @@ pub const Op = struct {
         defer parsed.deinit();
         const v = parsed.value;
         switch (self.stage) {
+            .walk_tree => {
+                const root = stringAt(v, &.{ "frameTree", "frame", "id" }) orelse return done(gpa, .failed, "no main frame");
+                try replace(gpa, &self.walk_frame, root);
+                return self.walkWorldStep(gpa);
+            },
+            .walk_world => {
+                self.walk_context = intAt(v, &.{"executionContextId"}) orelse return self.doneThenCleanup(gpa, .failed, "no isolated world");
+                return self.walkFindStep(gpa);
+            },
+            .walk_find => return self.walkFound(gpa, v),
+            .walk_describe => return self.walkDescribed(gpa, v),
             .tree, .tree_again => {
-                const frame = stringAt(v, &.{ "frameTree", "frame", "id" }) orelse return self.failHolding(gpa, "no main frame");
-                const loader = stringAt(v, &.{ "frameTree", "frame", "loaderId" }) orelse return self.failHolding(gpa, "no main frame");
+                // iframe 안의 칸이면 그 frame 을 트리에서 찾는다(같은 프로세스의 하위 frame 은 그 트리에 있다 — 실측 probe-frametree).
+                const fr: std.json.Value = if (self.framed())
+                    (frameIn(v, self.walk_frame.?, 0) orelse return self.failHolding(gpa, if (self.phase == .post) page_changed_reason else frame_gone_reason))
+                else
+                    (at(v, &.{ "frameTree", "frame" }) orelse return self.failHolding(gpa, "no main frame"));
+                const frame = stringAt(fr, &.{"id"}) orelse return self.failHolding(gpa, "no main frame");
+                const loader = stringAt(fr, &.{"loaderId"}) orelse return self.failHolding(gpa, "no main frame");
                 if (self.phase == .pre and self.stage == .tree) {
-                    const origin = stringAt(v, &.{ "frameTree", "frame", "securityOrigin" }) orelse "";
+                    const origin = stringAt(fr, &.{"securityOrigin"}) orelse "";
                     try replace(gpa, &self.frame, frame);
                     try replace(gpa, &self.loader, loader);
                     try replace(gpa, &self.origin, origin);
@@ -340,17 +486,21 @@ pub const Op = struct {
                 return call(gpa, "Page.createIsolatedWorld", "{{\"frameId\":{f},\"worldName\":\"" ++ world_name ++ "\"}}", .{std.json.fmt(self.frame.?, .{})});
             },
             .world => {
-                self.context = intAt(v, &.{"executionContextId"}) orelse return done(gpa, .failed, "no isolated world");
+                self.context = intAt(v, &.{"executionContextId"}) orelse return self.failHolding(gpa, "no isolated world");
                 self.stage = .resolve;
                 return call(gpa, "DOM.resolveNode", "{{\"backendNodeId\":{d},\"executionContextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.backend, self.context, self.id });
             },
             .resolve => {
-                const oid = stringAt(v, &.{ "object", "objectId" }) orelse return done(gpa, .failed, if (self.phase == .post) page_changed_reason else detached_reason);
+                const oid = stringAt(v, &.{ "object", "objectId" }) orelse return self.failHolding(gpa, if (self.phase == .post) page_changed_reason else detached_reason);
                 try replace(gpa, &self.object, oid);
                 self.stage = .check;
                 // 승인 뒤에는 듣는 이를 단다(넣을 때 받은 목록을 적는다) — 모달 전에는 페이지에 아무것도 달지 않는다.
+                // 폴더면 넷째 인자(dir)로 — 승인 뒤 확인이 속성을 바꿔 넣는다(`check_js`).
+                const dir_arg: []const u8 = if (self.folder) ",{\"value\":true}" else "";
                 if (self.phase == .post)
-                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{d}}},{{\"value\":true}},{{\"value\":\"" ++ snapshot_key ++ "{d}\"}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(check_js, .{}), self.count, self.id });
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{d}}},{{\"value\":true}},{{\"value\":\"" ++ snapshot_key ++ "{d}\"}}{s}],\"returnByValue\":true}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(check_js, .{}), self.count, self.id, dir_arg });
+                if (self.folder)
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":0}},{{\"value\":false}},{{\"value\":\"\"}},{{\"value\":true}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(check_js, .{}) });
                 return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(check_js, .{}), self.count });
             },
             .check => {
@@ -383,9 +533,126 @@ pub const Op = struct {
         }
     }
 
+    fn walkWorldStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .walk_world;
+        return call(gpa, "Page.createIsolatedWorld", "{{\"frameId\":{f},\"worldName\":\"" ++ world_name ++ "\"}}", .{std.json.fmt(self.walk_frame.?, .{})});
+    }
+
+    /// 지금 frame 의 격리 world 에서 다음 단계의 iframe(또는 대상)을 찾는다 — 격리 world 의 프로토타입으로(페이지가 바꿔 놓은 함수로 속이지 못하게).
+    fn walkFindStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .walk_find;
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        const w = &aw.writer;
+        (blk: {
+            const sel: ?[]const u8 = if (self.walk_level < self.frames.items.len) self.frames.items[self.walk_level] else self.target_sel;
+            var expr: std.Io.Writer.Allocating = .init(gpa);
+            defer expr.deinit();
+            if (sel) |q| {
+                expr.writer.writeAll("(function(s){return Document.prototype.querySelector.call(document,s)})(") catch |e| break :blk e;
+                std.json.Stringify.value(q, .{}, &expr.writer) catch |e| break :blk e;
+                expr.writer.writeAll(")") catch |e| break :blk e;
+            } else {
+                // 대상이 없다 — 그 frame 의 유일한 파일 칸(0 이나 둘 이상이면 그 수).
+                expr.writer.writeAll("(function(){var l=Document.prototype.querySelectorAll.call(document,'input[type=file]'),n=Object.getOwnPropertyDescriptor(NodeList.prototype,'length').get.call(l);return n===1?NodeList.prototype.item.call(l,0):n})()") catch |e| break :blk e;
+            }
+            w.writeAll("{\"expression\":") catch |e| break :blk e;
+            std.json.Stringify.value(expr.written(), .{}, w) catch |e| break :blk e;
+            w.print(",\"contextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.walk_context, self.id }) catch |e| break :blk e;
+        }) catch return error.OutOfMemory;
+        return .{ .call = .{ .method = "Runtime.evaluate", .params = try aw.toOwnedSlice() } };
+    }
+
+    /// 찾기의 답 — 요소면 그 노드를 본다(`DOM.describeNode`), 없으면·수면 그 까닭으로 끝.
+    fn walkFound(self: *Op, gpa: std.mem.Allocator, v: std.json.Value) !Step {
+        const level = self.walk_level + 1;
+        const at_frame = self.walk_level < self.frames.items.len;
+        if (at(v, &.{"exceptionDetails"}) != null) {
+            // selector 문법 오류(SyntaxError) — 주 문서 길의 selector 오류처럼 invalid_params.
+            const msg = if (at_frame)
+                try std.fmt.allocPrint(gpa, "the --frame selector at level {d} is not a valid CSS selector", .{level})
+            else
+                try gpa.dupe(u8, "the --selector inside the frame is not a valid CSS selector");
+            defer gpa.free(msg);
+            return self.doneThenCleanup(gpa, .invalid_params, msg);
+        }
+        if (stringAt(v, &.{ "result", "objectId" })) |oid| {
+            try replace(gpa, &self.walk_object, oid);
+            self.stage = .walk_describe;
+            return call(gpa, "DOM.describeNode", "{{\"objectId\":{f}}}", .{std.json.fmt(oid, .{})});
+        }
+        if (at_frame) {
+            const msg = try std.fmt.allocPrint(gpa, "no element matches the --frame selector at level {d}", .{level});
+            defer gpa.free(msg);
+            return self.doneThenCleanup(gpa, .failed, msg);
+        }
+        if (self.target_sel != null) return self.doneThenCleanup(gpa, .failed, not_found_reason);
+        const n = intAt(v, &.{ "result", "value" }) orelse 0;
+        const msg = if (n == 0)
+            try gpa.dupe(u8, "the frame has no file input (<input type=file>)")
+        else
+            try std.fmt.allocPrint(gpa, "the frame has {d} file inputs — pick one with --selector", .{n});
+        defer gpa.free(msg);
+        return self.doneThenCleanup(gpa, .failed, msg);
+    }
+
+    /// 찾은 노드 — 단계면 iframe·frame 이고 그 frame 이 같은 프로세스여야(문서가 실려 있다) 그 안으로, 대상이면 그 노드로 `located`.
+    fn walkDescribed(self: *Op, gpa: std.mem.Allocator, v: std.json.Value) !Step {
+        const node = at(v, &.{"node"}) orelse return self.doneThenCleanup(gpa, .failed, check_failed_reason);
+        if (self.walk_level >= self.frames.items.len) {
+            const backend = intAt(node, &.{"backendNodeId"}) orelse return self.doneThenCleanup(gpa, .failed, check_failed_reason);
+            // 대상은 그 frame 에서 다시 잡는다(`located` → 프레임 트리·격리 world·resolve) — 걷기의 객체는 묶음에 남고 놓기가 함께 놓는다.
+            return self.located(gpa, backend);
+        }
+        const level = self.walk_level + 1;
+        const name = stringAt(node, &.{"nodeName"}) orelse "";
+        if (!std.ascii.eqlIgnoreCase(name, "IFRAME") and !std.ascii.eqlIgnoreCase(name, "FRAME")) {
+            const msg = try std.fmt.allocPrint(gpa, "the --frame selector at level {d} matched an element that is not an iframe", .{level});
+            defer gpa.free(msg);
+            return self.doneThenCleanup(gpa, .failed, msg);
+        }
+        const fid = stringAt(node, &.{"frameId"}) orelse {
+            const msg = try std.fmt.allocPrint(gpa, "the iframe at level {d} has no document yet — wait for it to load, then try again", .{level});
+            defer gpa.free(msg);
+            return self.doneThenCleanup(gpa, .failed, msg);
+        };
+        const cross = at(node, &.{"contentDocument"}) == null;
+        if (self.phase == .pre) {
+            const copy = try gpa.dupe(u8, fid);
+            self.pre_frames.append(gpa, copy) catch |e| {
+                gpa.free(copy);
+                return e;
+            };
+        } else if (self.walk_level >= self.pre_frames.items.len or !std.mem.eql(u8, self.pre_frames.items[self.walk_level], fid)) {
+            // 사본을 만드는 동안 그 자리의 iframe 이 다른 frame 이 되었다(바꿔 끼움·주 문서 이동) — 아무것도 넣지 않는다.
+            return self.doneThenCleanup(gpa, .failed, page_changed_reason);
+        }
+        try replace(gpa, &self.walk_frame, fid);
+        if (cross) {
+            // 다른 사이트의 iframe — 다른 렌더러 프로세스(OOPIF)라 이 연결에서 그 문서가 보이지 않는다(실측 probe-dom-pierce·판정 up-frame-describe).
+            // 그 frame 의 DevTools 타깃(id = frame id)의 자식 세션으로 들어간다 — sidecar 가 붙인다(wire 30, `devtools_frames.zig`). 그 세션의 처음
+            // 호출은 격리 world 만들기다(원격 객체를 싣지 않는 호출만 새로 붙는다 — 공격 A1-3).
+            try replace(gpa, &self.session, fid);
+            var seen = false;
+            for (self.used_sessions.items) |u| if (std.mem.eql(u8, u, fid)) {
+                seen = true;
+            };
+            if (!seen) {
+                const copy = try gpa.dupe(u8, fid);
+                self.used_sessions.append(gpa, copy) catch |e| {
+                    gpa.free(copy);
+                    return e;
+                };
+            }
+        }
+        self.walk_level += 1;
+        return self.walkWorldStep(gpa);
+    }
+
     /// 쥔 객체가 있으면 놓고, 없으면 곧 실패.
     fn failHolding(self: *Op, gpa: std.mem.Allocator, why: []const u8) !Step {
-        if (self.stage == .tree_again) return self.doneThenCleanup(gpa, .failed, why);
+        // iframe 걷기는 tree 앞에서 iframe·대상 요소를 묶음에 쥐었다 — 그 뒤의 tree·world·resolve 끝에서도 놓는다(적대 검증 1·2 회차 MED).
+        if (self.stage == .tree_again or self.framed()) return self.doneThenCleanup(gpa, .failed, why);
         return done(gpa, .failed, why);
     }
 
@@ -510,6 +777,28 @@ pub const Op = struct {
             s.write(moved) catch |e| break :blk e;
             s.objectField("dialog") catch |e| break :blk e;
             s.write(dialog) catch |e| break :blk e;
+            // 폴더: 넣은 수·크기 합·뺀 수(종류별) — L2 가 `files` 의 수와 같은지 본다.
+            if (self.folder_summary) |f| {
+                s.objectField("folder") catch |e| break :blk e;
+                s.beginObject() catch |e| break :blk e;
+                s.objectField("files") catch |e| break :blk e;
+                s.write(self.staged.items.len) catch |e| break :blk e;
+                s.objectField("bytes") catch |e| break :blk e;
+                s.write(f.bytes) catch |e| break :blk e;
+                s.objectField("skipped") catch |e| break :blk e;
+                s.beginObject() catch |e| break :blk e;
+                // 칸마다 곧게 쓴다(반사 없이 — 경계 판정이 `@field` 를 재고에 센다).
+                s.objectField("hidden") catch |e| break :blk e;
+                s.write(f.hidden) catch |e| break :blk e;
+                s.objectField("links") catch |e| break :blk e;
+                s.write(f.links) catch |e| break :blk e;
+                s.objectField("packages") catch |e| break :blk e;
+                s.write(f.packages) catch |e| break :blk e;
+                s.objectField("other") catch |e| break :blk e;
+                s.write(f.other) catch |e| break :blk e;
+                s.endObject() catch |e| break :blk e;
+                s.endObject() catch |e| break :blk e;
+            }
             s.endObject() catch |e| break :blk e;
         }) catch return error.OutOfMemory;
         return aw.toOwnedSlice();
@@ -525,18 +814,38 @@ pub const Op = struct {
             if (stringAt(parsed.value, &.{"message"})) |m| owned = try gpa.dupe(u8, m);
         } else |_| {}
         const message: []const u8 = owned orelse "DevTools error";
-        const context_gone = std.mem.indexOf(u8, message, "Cannot find context") != null or std.mem.indexOf(u8, message, "Could not find object") != null;
+        // wire 30: 다른 사이트 iframe 의 세션이 사라졌다(위젯이 iframe 을 지웠다·그 frame 이 다른 문서로) — sidecar 는 그 세션으로 **보낸** 호출에만 이 글을
+        // 준다(보내지 못한 것은 `send_failed`). 넣기를 보낸 뒤면 처리기가 받았을 수 있다 — 실패로 답하면 다시 올려 두 번 올라간다(공격 A1-3):
+        // 읽기처럼 「넣었다 — 읽을 수 없다」(성공에 navigated:true).
+        const session_gone = std.mem.indexOf(u8, message, "Session with given id not found") != null;
+        if (self.stage == .set and session_gone) {
+            self.given = true;
+            return self.navigated(gpa);
+        }
+        const context_gone = std.mem.indexOf(u8, message, "Cannot find context") != null or std.mem.indexOf(u8, message, "Could not find object") != null or session_gone;
         if (self.stage == .verify and context_gone) return self.navigated(gpa);
         const gone = context_gone or std.mem.indexOf(u8, message, "No node") != null or std.mem.indexOf(u8, message, "No frame") != null;
         if (context_gone) self.armed = false; // 문서가 사라졌다 — 듣는 이도 함께(노드만 떨어졌으면 문서는 살아 있다 — 뗀다)
         const why: []const u8 = switch (self.stage) {
             .set => if (gone) page_changed_reason else if (std.mem.indexOf(u8, message, "not a file input") != null) not_file_input_reason else message,
             .world, .resolve, .check, .tree, .tree_again => if (gone) (if (self.phase == .post) page_changed_reason else detached_reason) else message,
+            .walk_tree, .walk_world, .walk_find, .walk_describe => if (gone) (if (self.phase == .post) page_changed_reason else frame_gone_reason) else message,
             else => message,
         };
         return if (holds) self.doneThenCleanup(gpa, .failed, why) else done(gpa, .failed, why);
     }
 };
+
+/// `Page.getFrameTree` 의 답에서 그 id 의 frame 객체(`frameTree.frame` 꼴 — 자식은 `childFrames`). 깊이는 16 까지(답은 sidecar 가 보낸 것이다).
+fn frameIn(v: std.json.Value, id: []const u8, depth: u8) ?std.json.Value {
+    const node = if (depth == 0) (at(v, &.{"frameTree"}) orelse return null) else v;
+    if (at(node, &.{"frame"})) |f| if (stringAt(f, &.{"id"})) |x| if (std.mem.eql(u8, x, id)) return f;
+    if (depth >= 16) return null;
+    const kids = at(node, &.{"childFrames"}) orelse return null;
+    if (kids != .array) return null;
+    for (kids.array.items) |k| if (frameIn(k, id, depth + 1)) |f| return f;
+    return null;
+}
 
 fn replace(gpa: std.mem.Allocator, slot: *?[]u8, value: []const u8) !void {
     const copy = try gpa.dupe(u8, value);

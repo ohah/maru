@@ -140,7 +140,7 @@ pub const tools = [_]Tool{
         .{ .key = "answer", .kind = .string, .flag = "--answer", .description = "allow, block or dismiss", .required = true },
         .{ .key = "request", .kind = .int, .flag = "--request", .description = "request number from browser_permissions (default: the tab's first)", .min = 1, .max = 9_007_199_254_740_991 },
     }) },
-    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. maru does not ask the user; copying large files can take a while, so allow the call " ++ ask_wait_text ++ ". Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy maru makes of each file. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
+    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. maru does not ask the user; copying large files can take a while, so allow the call " ++ ask_wait_text ++ ". Give one locator (selector, ref, role, by_text or by_label) and either absolute file paths (files, up to 10) or one folder (folder — only for a folder input, <input webkitdirectory>: maru uploads the folder's files the way a person's folder pick does — hidden files, links and packages are skipped; at most 1000 files and 4 GiB (1 GiB when the folder is on another volume and must be copied), and the copies' paths must fit one DevTools call, so in practice about 400 files with short names; the result's folder object counts them). For a file input inside an iframe (a payment, support or embedded form widget), give frame (the iframe's CSS selector; repeat for nested iframes) — the result's origin is then the iframe's. The page gets a copy maru makes of each file. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{ .{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10) — give this or folder", .max_items = browser.max_upload_files }, .{ .key = "folder", .kind = .abs_path, .flag = "--folder", .description = "absolute path of one folder to upload into a folder input (webkitdirectory) — give this or files" }, .{ .key = "frame", .kind = .string_list, .flag = "--frame", .description = "CSS selectors of the iframes that hold the file input, outermost first (1-4); with frame give the input with selector, or no locator for the frame's only file input", .max_items = browser.max_upload_frames } })) },
     .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests (shared-worker requests carry the same mark), and for attempts Chromium restarted (the retry is a separate, newer req). maru does not ask the user. You see requests from when this pane first used the tab on (tabs you opened: from their creation, unless the user clicked, typed or navigated in that tab before your first read); earlier ones are counted as hidden. With browser.agent-network-full off, a tab the user drove is narrowed to the site it showed then, and requests on other sites (and navigations that started on or passed through such a site) are hidden until this pane uses the tab there. Request bodies are not recorded; response bodies are recorded only while browser_network_record is on (each line then shows its body state). WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. dropped counts requests maru did not record because the page made them too fast or held too many unfinished; dropped_sw_inflight_cap counts service-worker requests not recorded because the site's service workers held too many unfinished fetches (sw_inflight_cap — 128 per origin of the worker, 512 in total; page requests are not affected). Service-worker requests of a site no tab shows any more stop counting toward that cap, but they still hold a slot: when the unfinished service-worker requests (counted and released together) fill 1024 slots, maru forgets the oldest released one: such a request stays in the list unfinished (its response and end are not recorded). Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
         .{ .key = "types", .kind = .string, .flag = "--type", .description = "request types separated by commas: document, iframe, stylesheet, script, image, font, xhr (fetch and XHR), media, worker, shared_worker, service_worker, prefetch, favicon, ping, csp_report, object, plugin, preload, other" },
         .{ .key = "method", .kind = .string, .flag = "--method", .description = "HTTP method, like GET or POST" },
@@ -910,6 +910,8 @@ test "W9f: 도구 표의 모든 도구는 CLI 하위 명령이고, 필수 인자
         if (std.mem.eql(u8, t.subcommand, "emulate")) try obj.put(arena, "action", .{ .string = "get" }); // W9e①
         if (std.mem.eql(u8, t.subcommand, "download")) try obj.put(arena, "action", .{ .string = "cancel" }); // 다운로드의 필수 동작
         if (std.mem.eql(u8, t.subcommand, "permission")) try obj.put(arena, "answer", .{ .string = "dismiss" }); // 권한 답의 필수 동작
+        // 업로드는 파일 목록이거나 폴더 하나(2026-11-20 — 스키마는 둘 다 선택이라 하나를 준다).
+        if (std.mem.eql(u8, t.subcommand, "upload")) try obj.put(arena, "files", try jsonOf(arena, "[\"/tmp/a.txt\"]"));
         const extra: ?[]const u8 = if (std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "upload"))
             "selector"
         else if (std.mem.eql(u8, t.subcommand, "wait")) "selector" else null;
@@ -1230,6 +1232,8 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
         // 다운로드 — 자리(path)는 save 와만.
         if (std.mem.eql(u8, t.subcommand, "download")) try obj.put(arena, "action", .{ .string = "save" });
         if (std.mem.eql(u8, t.subcommand, "permission")) try obj.put(arena, "answer", .{ .string = "block" });
+        // 업로드는 파일 목록이거나 폴더 하나(2026-11-20) — 폴더를 볼 때는 파일 없이, 그 밖은 파일 하나와.
+        if (std.mem.eql(u8, t.subcommand, "upload") and !std.mem.eql(u8, opt.key, "folder") and !std.mem.eql(u8, opt.key, "files")) try obj.put(arena, "files", try jsonOf(arena, "[\"/tmp/a.txt\"]"));
         // 이 인자와 함께 써야 하는 짝(로케이터는 하나가 있어야, --name·--exact 는 role 과).
         const needs_locator = std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "wait") or std.mem.eql(u8, t.subcommand, "upload");
         const is_locator = std.mem.eql(u8, opt.key, "selector") or std.mem.eql(u8, opt.key, "ref") or std.mem.eql(u8, opt.key, "role") or std.mem.eql(u8, opt.key, "by_text") or std.mem.eql(u8, opt.key, "by_label");
@@ -1251,6 +1255,7 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             .mock_response => try jsonOf(arena, "{\"status\":200,\"content_type\":\"text/plain\",\"headers\":{\"X-A\":\"1\"},\"body\":\"x\"}"),
             .json_value => .null,
             .abs_path => .{ .string = "/tmp/trace.json.gz" },
+            .path_list => try jsonOf(arena, "[\"/tmp/a.txt\"]"), // 업로드의 files 는 이제 선택(폴더와 둘 중 하나 — 2026-11-20)
             else => .{ .string = if (std.mem.eql(u8, opt.key, "rect")) "0,0,10,10" else if (std.mem.eql(u8, opt.key, "role")) "button" else if (std.mem.eql(u8, opt.key, "url")) "https://e.test/" else if (std.mem.eql(u8, opt.key, "types")) "xhr,image" else if (std.mem.eql(u8, opt.key, "status")) "4xx" else if (std.mem.eql(u8, opt.key, "out")) "/tmp/body" else "x" },
         });
         const a = try argv(arena, t, .{ .object = obj });
@@ -1401,6 +1406,7 @@ test "W9f 적대 리뷰 3 회차: 모든 정수 인자의 스키마 상한은 �
             if (std.mem.eql(u8, t.subcommand, "wait") and std.mem.eql(u8, arg.key, "timeout_ms")) try obj.put(arena, "selector", .{ .string = "#a" });
             if (std.mem.eql(u8, t.subcommand, "download")) try obj.put(arena, "action", .{ .string = "cancel" });
             if (std.mem.eql(u8, t.subcommand, "permission")) try obj.put(arena, "answer", .{ .string = "allow" });
+            if (std.mem.eql(u8, t.subcommand, "upload")) try obj.put(arena, "files", .{ .array = one_path });
             if ((std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "upload")) and !obj.contains("role")) try obj.put(arena, "selector", .{ .string = "#a" });
             try obj.put(arena, arg.key, .{ .integer = value });
             const a = try argv(arena, t, .{ .object = obj });
@@ -1481,7 +1487,7 @@ test "W9c③: browser_upload — 파일은 절대 경로 배열(1..10)로 `--` �
     const a = try argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"by_label\":\"Resume\",\"files\":[\"/tmp/a.txt\",\"/tmp/-h\"]}"));
     const cmd = (try browser.parse(a)).request.upload;
     try testing.expectEqual(@as(u64, 4), cmd.surface_id);
-    try testing.expectEqualStrings("Resume", cmd.locator.label.value);
+    try testing.expectEqualStrings("Resume", cmd.locator.?.label.value);
     try testing.expectEqual(@as(usize, 2), cmd.count);
     try testing.expectEqualStrings("/tmp/-h", cmd.paths()[1]); // `--` 뒤라 도움말이 아니다
     try testing.expectError(error.RelativePath, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":[\"a.txt\"]}")));
@@ -1489,13 +1495,20 @@ test "W9c③: browser_upload — 파일은 절대 경로 배열(1..10)로 `--` �
     try testing.expectError(error.WrongType, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":[]}")));
     try testing.expectError(error.WrongType, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":\"/tmp/a\"}")));
     try testing.expectError(error.WrongType, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":[\"/1\",\"/2\",\"/3\",\"/4\",\"/5\",\"/6\",\"/7\",\"/8\",\"/9\",\"/10\",\"/11\"]}")));
-    try testing.expectError(error.MissingArgument, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\"}")));
+    // 파일도 폴더도 없으면 CLI 파서가 거절한다(스키마는 둘 다 선택 — 하나만 준다, 2026-11-20).
+    try testing.expectError(error.MissingFiles, browser.parse(try argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\"}"))));
+    // 폴더는 절대 경로 하나(`--folder=`) — 파일과 함께면 CLI 가 거절한다. iframe 은 frame 배열(`--frame=` 마다).
+    const fc = (try browser.parse(try argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"frame\":[\"iframe#pay\",\"iframe\"],\"folder\":\"/tmp/pics\"}")))).request.upload;
+    try testing.expect(fc.folder and fc.locator == null and fc.frame_count == 2);
+    try testing.expectEqualStrings("/tmp/pics", fc.paths()[0]);
+    try testing.expectError(error.RelativePath, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#d\",\"folder\":\"pics\"}")));
+    try testing.expectError(error.FolderWithFiles, browser.parse(try argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#d\",\"folder\":\"/p\",\"files\":[\"/a\"]}"))));
     // 상대 경로의 도구 호출은 JSON-RPC 오류가 아니라 isError 결과 — 왜인지 말한다.
     const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"browser_upload\",\"arguments\":{\"surface\":1,\"selector\":\"#f\",\"files\":[\"a.txt\"]}}}")).reply;
     defer testing.allocator.free(r);
     try testing.expect(std.mem.indexOf(u8, r, "must be absolute") != null);
     try testing.expect(std.mem.indexOf(u8, r, "\"isError\":true") != null);
-    // 스키마 — 문자열 배열, 1..10 개, 필수.
+    // 스키마 — 문자열 배열, 1..10 개(폴더와 둘 중 하나 — 2026-11-20).
     const l = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\"}")).reply;
     defer testing.allocator.free(l);
     const lp = try std.json.parseFromSlice(std.json.Value, testing.allocator, l, .{});

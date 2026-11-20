@@ -926,6 +926,12 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
         dbg("sw-attached b={d} sid={s} type=page not ours", .{ browser, sid });
         return;
     }
+    // 사용자 결정 2026-11-20(iframe 업로드): 멈추지 않은 iframe 타깃의 붙음도 다른 주인의 세션이다 — `devtools.zig` 가 다른 사이트 iframe 의 칸에
+    // 넣으려고 붙인 자식 세션(`devtools_frames.zig`). 우리 auto-attach(`filter` — 서비스 워커)는 iframe 을 붙이지 않는다. 떼면 그 업로드가 늘 실패했다(공격 A1-1).
+    if (std.mem.eql(u8, kind, "iframe") and !waiting and rescued == null) {
+        dbg("sw-attached b={d} sid={s} type=iframe not ours", .{ browser, sid });
+        return;
+    }
     // 기록하는 탭이고 걸어 둔 auto-attach 의 서비스 워커면 둔다 — 아니면(밸브로 멈춤·떼는 중·옛 세대·다른 꼴) 곧 뗀다(공격 2 A1).
     // 재검증 7 차(N13): 몫을 넘으면 세워 둔다(`.park` — enable 하지 않고 시한 뒤 뗀다; 곧 떼면 Chromium 이 같은 워커를 곧 다시 붙였다).
     const now = machUs();

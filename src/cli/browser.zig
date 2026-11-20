@@ -69,7 +69,7 @@ pub const browser_help =
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
     \\  permissions --surface <id>                 show the permission requests (notifications, location, camera, microphone, screen sharing …) waiting in this tab or its popups (Chromium tabs)
     \\  permission --surface <id> (--allow | --block | --dismiss) [--request <n>]   answer one like the user's Allow, Block or Close — any request, the user's too; Allow and Block are remembered for that site like the user's answer (camera, microphone and screen answers are not); --request picks one from `permissions` (Chromium tabs)
-    \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
+    \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--frame <iframe css>]... ([--] <file>... | --folder <dir>)   put up to 10 files into a file input, or a folder's files into a folder input (webkitdirectory — hidden files, links and packages are skipped, as when a person picks a folder; at most 1000 files, about 400 with short names); --frame reaches an input inside an iframe (repeat for nested iframes, outermost first; then give the input with --selector, or nothing for the frame's only file input) (Chromium tabs; relative paths are from this directory)
     \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
     \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a new file under the temp folder only; a binary body needs --out; Chromium tabs)
     \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; the tab title shows ◉ while recording)
@@ -620,13 +620,21 @@ pub const upload_dialog_note = "note: the files were set and the page showed a d
 
 /// 한 번에 올리는 파일 수 상한 — 서버(`control_browser.max_upload_files`)와 같다(모달이 파일을 모두 보여야 한다).
 pub const max_upload_files = 10;
+/// `--frame` 의 수 상한 — 서버(`control_browser.max_upload_frames`)와 같다.
+pub const max_upload_frames = 4;
 
 /// `browser upload` — 경로는 인자를 빌린다(상대 경로는 러너가 이 프로세스의 현재 폴더로 붙인다 — `absolutizeUpload`).
 pub const UploadCmd = struct {
     surface_id: u64,
-    locator: Locator,
+    /// `--frame` 이 있으면 selector 이거나 없다(null — 그 frame 의 유일한 파일 칸).
+    locator: ?Locator,
+    /// `--frame <css>`(사용자 결정 2026-11-20 — 여러 번이면 바깥 → 안).
+    frames: [max_upload_frames][]const u8 = undefined,
+    frame_count: usize = 0,
     files: [max_upload_files][]const u8 = undefined,
     count: usize = 0,
+    /// `--folder <dir>`(사용자 결정 2026-11-20) — 참이면 `files[0]` 이 그 폴더(`count` 1)다. 파일 인자와 함께는 안 된다.
+    folder: bool = false,
 
     pub fn paths(self: *const UploadCmd) []const []const u8 {
         return self.files[0..self.count];
@@ -734,6 +742,9 @@ pub const ParseError = error{
     MissingAnswer, // `handle-dialog` 에 `--accept`·`--dismiss` 가 없음
     MissingFiles, // `upload` 에 파일이 없음
     TooManyFiles, // `upload` 에 파일이 10 개 넘게
+    FolderWithFiles, // `upload --folder` 에 파일도
+    TooManyFrames, // `upload --frame` 이 4 개 넘게
+    FrameNeedsSelector, // `upload --frame` 에 `--selector` 가 아닌 로케이터
     ConflictingAnswer, // `handle-dialog` 에 둘 다
     InvalidDialogToken, // `--dialog` 가 1..2^53-1 정수가 아님
     MissingPermissionAnswer, // `permission` 에 `--allow`·`--block`·`--dismiss` 가 없음
@@ -2115,10 +2126,32 @@ fn parseUploadArgs(rest: []const []const u8, diag: *Diag) ParseError!UploadCmd {
     var n_files: usize = 0;
     var i: usize = 0;
     var positional_only = false;
+    var folder: ?[]const u8 = null;
+    var frames: [max_upload_frames][]const u8 = undefined;
+    var n_frames: usize = 0;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
         if (!positional_only and eq(a, "--")) {
             positional_only = true;
+            continue;
+        }
+        // 폴더 하나(사용자 결정 2026-11-20) — 그 폴더의 파일을 사람의 폴더 고르기처럼(숨긴 것·링크·패키지는 빼고) 폴더 칸(`webkitdirectory`)에 넣는다.
+        if (!positional_only and matchOpt(a, "--folder")) {
+            if (folder != null) return diag.unexpected(a);
+            var j = i;
+            folder = try optValue(diag, rest, &j, "--folder");
+            // 빈 값(`--folder ""`·`--folder=` — 빈 변수)은 지금 폴더(`{cwd}/`)로 풀려 프로젝트를 통째로 올렸다(적대 검증 8 회차 MED) — 값이 없는 것으로.
+            if (folder.?.len == 0) return diag.missingValue("--folder");
+            i = j - 1;
+            continue;
+        }
+        // iframe 안의 칸(사용자 결정 2026-11-20) — 그 iframe 의 CSS selector, 여러 번이면 바깥 → 안.
+        if (!positional_only and matchOpt(a, "--frame")) {
+            if (n_frames == max_upload_frames) return error.TooManyFrames;
+            var j = i;
+            frames[n_frames] = try optValue(diag, rest, &j, "--frame");
+            n_frames += 1;
+            i = j - 1;
             continue;
         }
         if (!positional_only and std.mem.startsWith(u8, a, "-")) {
@@ -2139,9 +2172,22 @@ fn parseUploadArgs(rest: []const []const u8, diag: *Diag) ParseError!UploadCmd {
     }
     const aa = try parseActArgs(opts[0..n_opts], .{}, diag);
     const s = aa.surface orelse return error.MissingSurface;
-    const loc = try actLocator(aa);
+    // `--frame` 이면 대상은 `--selector` 이거나 없다(그 frame 의 유일한 파일 칸).
+    const loc: ?Locator = actLocator(aa) catch |e| switch (e) {
+        error.MissingLocator => if (n_frames > 0) null else return e,
+        else => return e,
+    };
+    if (n_frames > 0) if (loc) |l| if (l != .selector) return error.FrameNeedsSelector;
+    if (folder) |f| {
+        if (n_files > 0) return error.FolderWithFiles;
+        var fc: UploadCmd = .{ .surface_id = s, .locator = loc, .count = 1, .folder = true, .frame_count = n_frames };
+        @memcpy(fc.frames[0..n_frames], frames[0..n_frames]);
+        fc.files[0] = f;
+        return fc;
+    }
     if (n_files == 0) return error.MissingFiles;
-    var cmd: UploadCmd = .{ .surface_id = s, .locator = loc, .count = n_files };
+    var cmd: UploadCmd = .{ .surface_id = s, .locator = loc, .count = n_files, .frame_count = n_frames };
+    @memcpy(cmd.frames[0..n_frames], frames[0..n_frames]);
     @memcpy(cmd.files[0..n_files], files[0..n_files]);
     return cmd;
 }
@@ -2430,9 +2476,19 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             var files: std.json.Array = .init(gpa);
             defer files.deinit();
             try obj.put(gpa, "id", .{ .integer = @intCast(u.surface_id) });
-            try putLocator(gpa, &obj, &loc_obj, u.locator);
-            for (u.paths()) |f| try files.append(.{ .string = f });
-            try obj.put(gpa, "files", .{ .array = files });
+            if (u.locator) |l| try putLocator(gpa, &obj, &loc_obj, l);
+            var frame_arr: std.json.Array = .init(gpa);
+            defer frame_arr.deinit();
+            if (u.frame_count > 0) {
+                for (u.frames[0..u.frame_count]) |f| try frame_arr.append(.{ .string = f });
+                try obj.put(gpa, "frame", .{ .array = frame_arr });
+            }
+            if (u.folder) {
+                try obj.put(gpa, "folder", .{ .string = u.files[0] });
+            } else {
+                for (u.paths()) |f| try files.append(.{ .string = f });
+                try obj.put(gpa, "files", .{ .array = files });
+            }
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.upload", .params = .{ .object = obj } } });
         },
         .network => |n| {
@@ -3043,7 +3099,29 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             try w.print("uploaded {d} file{s} to ", .{ files.items.len, if (files.items.len == 1) "" else "s" });
             try writePageText(gpa, w, strField(result.get("origin")), false);
             try w.writeAll("\n");
-            for (files.items) |f| {
+            // 폴더(사용자 결정 2026-11-20): 크기 합·뺀 수 한 줄, 이름은 앞 20 개만(1000 개를 다 찍지 않는다 — 답의 JSON 에는 다 있다).
+            const folder = if (result.get("folder")) |fv| (if (fv == .object) fv.object else null) else null;
+            if (folder) |fo| {
+                try w.print("  from a folder: {d} bytes in all", .{intField(fo.get("bytes")) orelse 0});
+                if (fo.get("skipped")) |sk| if (sk == .object) {
+                    const keys = [_][]const u8{ "hidden", "links", "packages", "other" };
+                    const labels = [_][]const u8{ "hidden", "links", "packages", "other (special files, names maru cannot pass)" };
+                    var any = false;
+                    for (keys, labels) |k, l| {
+                        const n = intField(sk.object.get(k)) orelse 0;
+                        if (n == 0) continue;
+                        try w.print("{s}{d} {s}", .{ if (any) ", " else "; skipped ", n, l });
+                        any = true;
+                    }
+                };
+                try w.writeAll("\n");
+            }
+            const shown_max: usize = if (folder != null) 20 else files.items.len;
+            for (files.items, 0..) |f, fi| {
+                if (fi == shown_max) {
+                    try w.print("  … and {d} more\n", .{files.items.len - shown_max});
+                    break;
+                }
                 const o = switch (f) {
                     .object => |oo| oo,
                     else => continue,
@@ -5585,7 +5663,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one — any dialog, the user's too (--accept on a leave-page question leaves the page; a file chooser can only be dismissed — put files with upload; --dialog picks one from `dialog`; Chromium tabs)
         \\  permissions --surface <id>                 show the permission requests (notifications, location, camera, microphone, screen sharing …) waiting in this tab or its popups (Chromium tabs)
         \\  permission --surface <id> (--allow | --block | --dismiss) [--request <n>]   answer one like the user's Allow, Block or Close — any request, the user's too; Allow and Block are remembered for that site like the user's answer (camera, microphone and screen answers are not); --request picks one from `permissions` (Chromium tabs)
-        \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; relative paths are from this directory)
+        \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--frame <iframe css>]... ([--] <file>... | --folder <dir>)   put up to 10 files into a file input, or a folder's files into a folder input (webkitdirectory — hidden files, links and packages are skipped, as when a person picks a folder; at most 1000 files, about 400 with short names); --frame reaches an input inside an iframe (repeat for nested iframes, outermost first; then give the input with --selector, or nothing for the frame's only file input) (Chromium tabs; relative paths are from this directory)
         \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--mocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped; --mocked only requests a mock rule answered or redirected)
         \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a new file under the temp folder only; a binary body needs --out; Chromium tabs)
         \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; the tab title shows ◉ while recording)
@@ -6644,11 +6722,11 @@ test "W9c① 적대 리뷰 4 회차 재현 C: U+2028·U+2029·NEL(U+0085) 도 ` 
 test "W9c③: upload 파서 — 로케이터는 click 과 같고 위치 인자는 파일 1..10 개, `--` 뒤는 `-` 로 시작해도 파일, 옵션 사이에 섞여도 된다" {
     const a = (try parse(&.{ "upload", "--surface", "9", "--selector", "#f", "a.txt", "/tmp/b.txt" })).request.upload;
     try testing.expectEqual(@as(u64, 9), a.surface_id);
-    try testing.expectEqualStrings("#f", a.locator.selector);
+    try testing.expectEqualStrings("#f", a.locator.?.selector);
     try testing.expectEqual(@as(usize, 2), a.count);
     try testing.expectEqualStrings("a.txt", a.paths()[0]);
     const b = (try parse(&.{ "upload", "x.txt", "--by-label", "Resume", "--surface=3", "--", "-h", "--weird" })).request.upload;
-    try testing.expectEqualStrings("Resume", b.locator.label.value);
+    try testing.expectEqualStrings("Resume", b.locator.?.label.value);
     try testing.expectEqual(@as(usize, 3), b.count);
     try testing.expectEqualStrings("-h", b.paths()[1]);
     try testing.expectEqualStrings("--weird", b.paths()[2]);
@@ -6685,6 +6763,75 @@ test "W9c③: upload 요청은 browser.upload {id, 로케이터, files} — 상�
     try testing.expectEqual(@as(usize, 3), files.len);
     try testing.expectEqualStrings("/abs/c.txt", files[2].string);
     try testing.expectEqual(ResponseKind.upload, (Request{ .upload = abs }).kind());
+}
+
+test "폴더 올리기(2026-11-20): upload --folder <dir> — 파일 인자와 함께는 안 된다, 상대 경로는 현재 폴더로, 요청은 files 대신 folder, 결과는 크기 합·뺀 수 한 줄과 앞 20 개 이름" {
+    const c = (try parse(&.{ "upload", "--surface", "9", "--selector", "#d", "--folder", "photos" })).request.upload;
+    try testing.expect(c.folder);
+    try testing.expectEqual(@as(usize, 1), c.count);
+    const c2 = (try parse(&.{ "upload", "--surface=9", "--folder=/abs/p", "--selector", "#d" })).request.upload;
+    try testing.expectEqualStrings("/abs/p", c2.paths()[0]);
+    try testing.expectError(error.FolderWithFiles, parse(&.{ "upload", "--surface", "9", "--selector", "#d", "--folder", "p", "a.txt" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "upload", "--surface", "9", "--selector", "#d", "--folder", "p", "--folder", "q" }));
+    try testing.expectError(error.MissingOptionValue, parse(&.{ "upload", "--surface", "9", "--selector", "#d", "--folder" }));
+    try testing.expectError(error.MissingOptionValue, parse(&.{ "upload", "--surface", "9", "--selector", "#d", "--folder", "" }));
+    try testing.expectError(error.MissingOptionValue, parse(&.{ "upload", "--surface", "9", "--selector", "#d", "--folder=" }));
+    // `--` 뒤의 `--folder` 는 파일 이름이다.
+    const lit = (try parse(&.{ "upload", "--surface", "9", "--selector", "#d", "--", "--folder" })).request.upload;
+    try testing.expect(!lit.folder);
+    const abs = try absolutizeUpload(testing.allocator, c, "/Users/me/work");
+    defer freeUpload(testing.allocator, abs);
+    const bytes = try buildRequestBytes(testing.allocator, .{ .upload = abs }, .{ .number = 1 });
+    defer testing.allocator.free(bytes);
+    var pm = try cp.parseMessage(testing.allocator, bytes);
+    defer pm.deinit();
+    const params = pm.message.request.params.?.object;
+    try testing.expectEqualStrings("/Users/me/work/photos", params.get("folder").?.string);
+    try testing.expect(params.get("files") == null);
+    // 결과: 25 개 — 이름은 20 개와 「… and 5 more」.
+    var files: std.ArrayList(u8) = .empty;
+    defer files.deinit(testing.allocator);
+    for (0..25) |i| try files.print(testing.allocator, "{s}{{\"name\":\"f{d}.jpg\",\"size\":2}}", .{ if (i == 0) "" else ",", i });
+    const resp = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"origin\":\"https://a.test\",\"files\":[{s}],\"kept\":true,\"navigated\":false,\"dialog\":false,\"folder\":{{\"files\":25,\"bytes\":50,\"skipped\":{{\"hidden\":3,\"links\":0,\"packages\":1,\"other\":0}}}}}}}}", .{files.items});
+    defer testing.allocator.free(resp);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, resp, .upload, &out.writer));
+    const got = out.written();
+    try testing.expect(std.mem.startsWith(u8, got, "uploaded 25 files to https://a.test\n  from a folder: 50 bytes in all; skipped 3 hidden, 1 packages\n  \"f0.jpg\" (2 bytes)\n"));
+    try testing.expect(std.mem.indexOf(u8, got, "  \"f19.jpg\" (2 bytes)\n  … and 5 more\n") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "f20.jpg") == null);
+}
+
+test "iframe 안의 칸(2026-11-20): upload --frame <css> — 여러 번이면 바깥 → 안(4 개까지), 대상은 --selector 이거나 없다, 요청에 frame 배열" {
+    const c = (try parse(&.{ "upload", "--surface", "9", "--frame", "#outer", "--frame=iframe.pay", "--selector", "#f", "a.txt" })).request.upload;
+    try testing.expectEqual(@as(usize, 2), c.frame_count);
+    try testing.expectEqualStrings("iframe.pay", c.frames[1]);
+    const none = (try parse(&.{ "upload", "--surface", "9", "--frame", "iframe", "a.txt" })).request.upload;
+    try testing.expect(none.locator == null);
+    try testing.expectError(error.FrameNeedsSelector, parse(&.{ "upload", "--surface", "9", "--frame", "iframe", "--by-label", "Resume", "a.txt" }));
+    try testing.expectError(error.FrameNeedsSelector, parse(&.{ "upload", "--surface", "9", "--frame", "iframe", "--ref", "n4", "a.txt" }));
+    try testing.expectError(error.TooManyFrames, parse(&.{ "upload", "--surface", "9", "--frame", "a", "--frame", "b", "--frame", "c", "--frame", "d", "--frame", "e", "a.txt" }));
+    try testing.expectError(error.MissingLocator, parse(&.{ "upload", "--surface", "9", "a.txt" })); // frame 이 없으면 대상이 있어야 한다
+    const abs = try absolutizeUpload(testing.allocator, c, "/w");
+    defer freeUpload(testing.allocator, abs);
+    const bytes = try buildRequestBytes(testing.allocator, .{ .upload = abs }, .{ .number = 1 });
+    defer testing.allocator.free(bytes);
+    var pm = try cp.parseMessage(testing.allocator, bytes);
+    defer pm.deinit();
+    const params = pm.message.request.params.?.object;
+    const frames = params.get("frame").?.array.items;
+    try testing.expectEqual(@as(usize, 2), frames.len);
+    try testing.expectEqualStrings("#outer", frames[0].string);
+    try testing.expectEqualStrings("#f", params.get("selector").?.string);
+    // 대상이 없으면 selector 를 싣지 않는다.
+    const abs2 = try absolutizeUpload(testing.allocator, none, "/w");
+    defer freeUpload(testing.allocator, abs2);
+    const bytes2 = try buildRequestBytes(testing.allocator, .{ .upload = abs2 }, .{ .number = 1 });
+    defer testing.allocator.free(bytes2);
+    var pm2 = try cp.parseMessage(testing.allocator, bytes2);
+    defer pm2.deinit();
+    try testing.expect(pm2.message.request.params.?.object.get("selector") == null);
 }
 
 test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 표시 안전하게), 부른 쪽이 떠난 거절은 그 글만(인가 안내 없이), 다른 -32002 는 안내를 붙인다" {

@@ -84,6 +84,8 @@
 #                   again」 없음 — 적대 리뷰 3 회차), 그 alert 는 에이전트 것(cause=agent)이라 handle-dialog 로 답하면 페이지가 내용을 한 번 받는다 ·
 #                   change 처리기가 응답이 40 초 걸리는 주소로 옮기는 칸도 요청 시한 전에 성공에 navigated:true(3 회차 T1) ·
 #                   탭을 닫으면 그 탭의 사본 폴더가 사라진다
+#   w9c-upload-frame-folder (2026-11-20 사용자 결정 「iframe·폴더 둘 다」) 폴더 칸에 `--folder` — 펼친 파일들(숨긴 `.env` 는 빼고)이 진짜
+#                   change 로 · 다른 사이트 iframe(127.0.0.1 위의 localhost) 안의 칸에 `--frame` — 그 iframe 의 세션으로 넣고 출처는 그 iframe 의 것
 #   w9d-network     (W9d①) Chromium 탭의 네트워크 기록: 에이전트가 연 탭은 묻지 않고 태어날 때부터 적는다 — 쿠키를 심고 옮겨 간 첫 페이지,
 #                   다른 사이트 iframe 안의 요청(`[cross-site iframe]`), 인증 헤더 fetch 의 자세히는 쿠키 권한 전에는 `Cookie`·`Authorization` 이 이름만
 #                   (적대 리뷰 3 회차 D1 — 설정 켬이어도), get-cookies 로 그 사이트를 허락받은 뒤(확인 모달, 자동 승인)에는 값 ·
@@ -261,7 +263,7 @@ printf 'for(var i=0;i<300;i++)console.log("k2-old-a-"+i)' > "$root/www/k2fa.js"
 printf 'for(var i=0;i<300;i++)console.log("k2-old-b-"+i)' > "$root/www/k2fb.js"
 printf '<!doctype html><title>con3</title><script>console.log("con3-head")</script><iframe src="http://127.0.0.1:%s/f.html"></iframe><iframe src="http://127.0.0.1:%s/f.html"></iframe><iframe src="http://127.0.0.1:%s/f.html"></iframe>' "$((port + 1))" "$((port + 2))" "$((port + 3))" > "$root/www/con3.html"
 # W9c③: 파일 입력칸 — 넣은 파일을 읽어(FileReader) 이름·크기·내용을 신호로 보낸다. up2 는 같은 칸을 가진 다음 문서(모달 동안 옮겨 간다).
-for pg in up up2; do
+for pg in up up2 upin; do
 cat > "$root/www/$pg.html" <<HTML
 <!doctype html><title>$pg</title><script>
 function rep(el,ev){var fs=Array.prototype.slice.call(el.files),n=fs.length,left=n,parts=[],tag='$pg-'+el.id+'-'+n+'-'+ev.isTrusted;if(!n){new Image().src='/hit?'+tag;return}
@@ -283,9 +285,15 @@ HTML
 done
 # 적대 리뷰 2 회차: change 처리기가 곧 옮겨 가는 칸(nav)의 도착지 — 주소에 받은 파일의 이름·크기를 싣는다(옮겨 가면 이미지 신호는 끊긴다).
 printf '<!doctype html><title>up3</title>up3' > "$root/www/up3.html"
-mkdir -p "$root/files"
+# 2026-11-20: 다른 사이트 iframe(localhost — 다른 렌더러 프로세스) 안의 파일 칸(upin 은 up 과 같은 칸들).
+printf '<!doctype html><title>upi</title><iframe id=w src="http://localhost:%s/upin.html"></iframe>upi' "$port" > "$root/www/upi.html"
+mkdir -p "$root/files" "$root/files/pics/sub"
 printf 'alpha\n' > "$root/files/a.txt"
 printf 'bravo\n' > "$root/files/b.txt"
+# 폴더 — 펼친 두 파일과 숨긴 것 하나(사람의 폴더 고르기처럼 빠진다).
+printf 'one\n' > "$root/files/pics/one.txt"
+printf 'two\n' > "$root/files/pics/sub/two.txt"
+printf 'SECRET=1\n' > "$root/files/pics/.env"
 # W9f: `maru mcp`·`maru browser repl` 이 움직이는 페이지.
 printf '<!doctype html><title>mcp</title><button id=mb style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?mb-&#39;+event.isTrusted">Mcp go</button><input id=mt aria-label=Query style="position:absolute;left:30px;top:100px" oninput="new Image().src=&#39;/hit?mt-&#39;+event.isTrusted+&#39;-&#39;+encodeURIComponent(this.value)"><button id=rb style="position:absolute;left:30px;top:160px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?rb2-&#39;+event.isTrusted">Repl go</button>' > "$root/www/mcp.html"
 # W9f: 에이전트가 MCP 서버를 띄우는 모양 — 새 세션(제어 터미널 없음)·파이프 입출력. 표준 출력의 줄은 모두 JSON-RPC 여야 한다.
@@ -1241,6 +1249,20 @@ b1=\$(date +%s)
 echo "\$((b1 - b0))" > "\$out/up-busy2-secs"
 sleep 14
 "\$cli" browser close --surface "\$upb2" > /dev/null 2>&1 || true
+# 2026-11-20 「iframe·폴더 둘 다」: 폴더 칸에 --folder — 숨긴 것은 빼고 펼친 파일들이 진짜 change 로(칸의 처리기는 webkitdirectory 참을 본다).
+# 새 탭에서(위 단계의 탭은 옮겨 갔다), 앞 단계들의 시각·탭 수에 닿지 않게 업로드 단계의 끝에서.
+"\$cli" browser open --url "http://127.0.0.1:$port/up.html?folder" > "\$out/upf-open" 2>&1
+upf=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/upf-open")
+"\$cli" browser upload --surface "\$upf" --selector '#dir' --folder "$root/files/pics" > "\$out/up-folder" 2>&1; echo "rc=\$?" >> "\$out/up-folder"
+hit_seen 'up-dir-2-true-one.txt%3A4%3Aone%7Ctwo.txt%3A4%3Atwo' && echo yes > "\$out/up-folder-hit" || echo no > "\$out/up-folder-hit"
+"\$cli" browser close --surface "\$upf" > /dev/null 2>&1 || true
+# 다른 사이트 iframe 안의 칸 — --frame 으로 그 iframe 에 들어가(sidecar 의 frame 세션, wire 30) 넣는다.
+"\$cli" browser open --url "http://127.0.0.1:$port/upi.html" > "\$out/upi-open" 2>&1
+upi=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/upi-open")
+sleep 2
+"\$cli" browser upload --surface "\$upi" --frame 'iframe#w' --selector '#multi' "$root/files/a.txt" "$root/files/b.txt" > "\$out/up-frame" 2>&1; echo "rc=\$?" >> "\$out/up-frame"
+hit_seen 'upin-multi-2-true-a.txt%3A6%3Aalpha%7Cb.txt%3A6%3Abravo' && echo yes > "\$out/up-frame-hit" || echo no > "\$out/up-frame-hit"
+"\$cli" browser close --surface "\$upi" > /dev/null 2>&1 || true
 "\$cli" browser close --surface "\$up" > "\$out/up-close" 2>&1
 sleep 0.5
 find "\$HOME/Library/Application Support/maru/web" -path "*upload-staging/\$up" > "\$out/up-after-close" 2>&1
@@ -1752,6 +1774,11 @@ grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-busy2" && grep -q '^rc=
     || fail "an upload whose verify answered ok after 7 s of page work, while 12 more seconds of page work held the release, was not answered at once as kept ($(tr '\n' ' ' < "$out/up-busy2") · $(cat "$out/up-busy2-secs")s)"
 echo "PASS w9c-upload-busy: a verify held by 15 s of page work ends at the 10 s limit as navigated:true ($(cat "$out/up-busy-secs")s), and a verify that answers ok while the page then stays busy is answered at once as kept, not held by the release ($(cat "$out/up-busy2-secs")s)"
 [ ! -s "$out/up-after-close" ] || fail "closing the tab did not remove its upload-staging folder ($(tr '\n' ' ' < "$out/up-after-close"))"
+grep -q '^rc=0$' "$out/up-folder" && grep -q 'from a folder: 8 bytes in all; skipped 1 hidden' "$out/up-folder" && [ "$(cat "$out/up-folder-hit")" = yes ] \
+    || fail "a folder given with --folder did not reach the folder input as a trusted change of its files without the hidden one ($(tr '\n' ' ' < "$out/up-folder") · hit $(cat "$out/up-folder-hit"))"
+grep -q '^rc=0$' "$out/up-frame" && grep -q "^uploaded 2 files to http://localhost:$port" "$out/up-frame" && [ "$(cat "$out/up-frame-hit")" = yes ] \
+    || fail "files given with --frame did not reach the input inside the cross-site iframe as a trusted change with the iframe's origin ($(tr '\n' ' ' < "$out/up-frame") · hit $(cat "$out/up-frame-hit"))"
+echo "PASS w9c-upload-frame-folder: a folder given with --folder reaches the folder (webkitdirectory) input as a trusted change of its two files (the hidden .env skipped), and files given with --frame reach the input inside a cross-site iframe (localhost inside 127.0.0.1) as a trusted change, answered with the iframe's origin"
 echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input, two files into a single-file input and a folder (webkitdirectory) input are refused before inserting, a copy left by an earlier run is wiped when the profile is first held, no dialog is shown (user decision 2026-11-16), an input whose change handler shows an alert is a success with dialog:true (no try again) and the agent answers that alert (cause agent) so the page reads the file once, an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), and so is one whose handler navigates to a server that answers after 40 s (answered in $(cat "$out/up-slow-secs")s, before the request deadline), closing the tab removes its copies"
 grep -q '^rc=0$' "$out/nw-agent" && grep -q ' xhr http://127.0.0.1:[0-9]*/netapi.json?a' "$out/nw-agent" && grep -q 'http://127.0.0.1:[0-9]*/setck' "$out/nw-agent" \
     && grep -q 'netf-api.json.*\[cross-site iframe\]' "$out/nw-agent" \

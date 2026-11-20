@@ -15,6 +15,21 @@
 //!                     넣은 파일이다 — 페이지의 보통 듣는 이가 `change` 에서 칸을 비우기 전, 그 기록은 넣기의 답이 오기 **전에** 이미 있다(같은
 //!                     차례 안에서 낸다). 차례는 창의 캡처 → maru(칸의 캡처) → 칸의 보통 듣는 이 — 페이지가 창의 캡처에서 먼저 비우면 maru 는
 //!                     빈 목록을 본다(그때 maru 는 「받았다」 고 하지 않는다)
+//!   up-folder-path-silent (2026-11-20 폴더) `webkitdirectory` 칸에 폴더 경로를 주면 `{}` 이고 아무것도 안 들어간다(CEF 는 폴더를 펼치지 않는다),
+//!                     보통 칸에 주면 그 폴더가 파일 하나로 들어간다 — maru 는 앱이 펼친 파일 목록을 넣는다
+//!   up-folder-toggle  격리 world 에서 `webkitdirectory` 를 떼고 `multiple` 을 붙여 넣으면 칸이 파일 둘을 진짜 이벤트로 받고(`webkitRelativePath`
+//!                     빈 글), maru 의 캡처 듣는 이가 첫 `input` 에서 되돌리면 칸의 보통 처리기는 `webkitdirectory` 참을 보고 넣은 뒤 속성은 처음대로다
+//!   up-frame-describe (2026-11-20 iframe) iframe 요소의 `DOM.describeNode{objectId}` 는 같은 출처 iframe 이면 `frameId`(프레임 트리의 자식)와
+//!                     `contentDocument` 를, 다른 사이트 iframe(OOPIF)이면 `frameId` 만 싣는다 — maru 의 걷기가 같은 프로세스인지 이것으로 가른다
+//!   up-frame-oopif    다른 사이트 iframe 의 칸: wire 30 `frame` 호출로 sidecar 가 그 frame 의 세션을 붙여 격리 world·찾기·넣기가 되고 칸은 진짜
+//!                     `change` 를 받는다, 그 세션의 프레임 트리 뿌리는 그 frame — 세션이 없을 때 객체를 실은 호출은 보내지 않고(send_failed),
+//!                     허용 목록 밖의 메서드는 거절(invalid_request)
+//!   up-frame-oopif-recording 본문 기록을 켠 탭(net_body 의 관찰자가 root 의 붙음 사건을 본다)에서도 그 세션이 살아 넣기가 된다
+//!   up-maru-js        앱의 격리 world 함수(`web_cdp_upload_js.zig`) 그대로 — 칸 종류 판정, 폴더 넣기의 속성 바꾸기·첫 input 에서 되돌리기·읽기 'ok',
+//!                     넣지 않고 끝나면 떼기가 되돌린다
+//!   up-frame-other-tab 다른 탭의 다른 사이트 iframe 의 frame id 로는 이 탭에서 붙지 않는다(그 탭에서는 붙는다)
+//!   up-frame-session-gone 그 iframe 이 바쁜 사이 지우면 보낸 호출은 CDP 오류로(갔다 — 「안 갔다」 가 아니다), 지운 뒤의 호출은 send_failed
+//!   up-frame-same     같은 출처 iframe 의 격리 world 에서 잡은 칸에 페이지 세션의 `DOM.setFileInputFiles` 가 넣는다(진짜 `change`)
 //!   up-no-picker      위 어느 것도 파일 고르개(`file_dialog`)를 띄우지 않았다
 
 const std = @import("std");
@@ -22,6 +37,8 @@ const protocol = @import("web_sidecar_protocol");
 const os = @import("os.zig");
 const Host = @import("host.zig").Host;
 const browsers_check = @import("browsers_check.zig");
+/// 앱이 보내는 격리 world 함수 그대로(`src/platform/macos/web_cdp_upload_js.zig`) — 폴더 칸의 속성 바꾸기·되돌리기와 칸 종류 판정을 실제 CEF 에서 잰다.
+const upload_js = @import("web_cdp_upload_js");
 
 pub const Report = *const fn (ok: bool, name: []const u8, detail: []const u8) void;
 
@@ -93,9 +110,14 @@ const Run = struct {
 
     /// 부르고 끝까지 기다린다 — 결과는 `result`(ok 면 CDP 의 result, cdp_error 면 error 객체). 시간 안에 안 오면 null.
     fn call(self: *Run, browser: u64, method: []const u8, params: []const u8) !?protocol.message.DevtoolsStatus {
+        return self.callIn(browser, "", method, params);
+    }
+
+    /// wire 30: 그 frame(다른 사이트 iframe)의 세션으로 — sidecar 가 붙인다.
+    fn callIn(self: *Run, browser: u64, frame: []const u8, method: []const u8, params: []const u8) !?protocol.message.DevtoolsStatus {
         self.next_call += 1;
         const id = self.next_call;
-        try self.host.send(.{ .devtools_call = .{ .browser = browser, .call = id, .method = method, .params_size = @intCast(params.len) } });
+        try self.host.send(.{ .devtools_call = .{ .browser = browser, .call = id, .method = method, .params_size = @intCast(params.len), .frame = frame } });
         var off: usize = 0;
         while (off < params.len) {
             const n = @min(chunk, params.len - off);
@@ -175,6 +197,22 @@ const Run = struct {
         return if (v == .string) std.fmt.bufPrint(buf, "{s}", .{v.string[0..@min(v.string.len, buf.len)]}) catch "" else "";
     }
 
+    /// 그 원격 객체에 함수를 인자와 함께(`arguments` JSON 배열 글) — `returnByValue` 의 글 값을 `buf` 에(실패면 빈 글).
+    fn callOnArgs(self: *Run, browser: u64, buf: []u8, object: []const u8, function: []const u8, args: []const u8) ![]const u8 {
+        var pb: [8192]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&pb);
+        try w.writeAll("{\"returnByValue\":true,\"objectId\":");
+        try std.json.Stringify.value(object, .{}, &w);
+        try w.writeAll(",\"functionDeclaration\":");
+        try std.json.Stringify.value(function, .{}, &w);
+        try w.print(",\"arguments\":{s}}}", .{args});
+        if ((try self.call(browser, "Runtime.callFunctionOn", w.buffered())) != .ok) return "";
+        const parsed = std.json.parseFromSlice(std.json.Value, self.gpa, self.result.items, .{}) catch return "";
+        defer parsed.deinit();
+        const v = (parsed.value.object.get("result") orelse return "").object.get("value") orelse return "";
+        return if (v == .string) std.fmt.bufPrint(buf, "{s}", .{v.string[0..@min(v.string.len, buf.len)]}) catch "" else "";
+    }
+
     /// `DOM.setFileInputFiles{files, objectId}` — 상태와 결과 글.
     fn setFiles(self: *Run, browser: u64, object: []const u8, files: []const []const u8) !?protocol.message.DevtoolsStatus {
         var pb: [4096]u8 = undefined;
@@ -190,6 +228,302 @@ const Run = struct {
         return self.call(browser, "DOM.setFileInputFiles", w.buffered());
     }
 };
+
+/// 그 frame 의 격리 world 에서 식 하나의 원격 객체(`objectId` 를 `out` 에). 실패면 빈 글.
+fn isolatedObject(r: *Run, browser: u64, out: []u8, frame: []const u8, world: []const u8, expr: []const u8) ![]const u8 {
+    var pb: [512]u8 = undefined;
+    if ((try r.call(browser, "Page.createIsolatedWorld", try std.fmt.bufPrint(&pb, "{{\"frameId\":\"{s}\",\"worldName\":\"{s}\"}}", .{ frame, world }))) != .ok) return "";
+    const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch return "";
+    const ctx: i64 = if (parsed.value.object.get("executionContextId")) |v| v.integer else 0;
+    parsed.deinit();
+    var w: std.Io.Writer = .fixed(&pb);
+    try w.writeAll("{\"expression\":");
+    try std.json.Stringify.value(expr, .{}, &w);
+    try w.print(",\"contextId\":{d}}}", .{ctx});
+    if ((try r.call(browser, "Runtime.evaluate", w.buffered())) != .ok) return "";
+    return r.objectIdOfResult(out, &.{ "result", "objectId" });
+}
+
+/// `Page.getFrameTree` 의 첫 자식 frame id(같은 프로세스의 하위 frame — 다른 사이트 iframe 은 싣지 않는다).
+fn childFrame(r: *Run, browser: u64, out: []u8) ![]const u8 {
+    if ((try r.call(browser, "Page.getFrameTree", "")) != .ok) return "";
+    const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch return "";
+    defer parsed.deinit();
+    const tree = parsed.value.object.get("frameTree") orelse return "";
+    const kids = tree.object.get("childFrames") orelse return "";
+    if (kids != .array or kids.array.items.len == 0) return "";
+    const id = kids.array.items[0].object.get("frame").?.object.get("id") orelse return "";
+    return std.fmt.bufPrint(out, "{s}", .{id.string}) catch "";
+}
+
+fn mainFrame(r: *Run, browser: u64, out: []u8) ![]const u8 {
+    if ((try r.call(browser, "Page.getFrameTree", "")) != .ok) return "";
+    return r.objectIdOfResult(out, &.{ "frameTree", "frame", "id" });
+}
+
+/// 사용자 결정 2026-11-20 「iframe·폴더 둘 다」 — maru 의 폴더 넣기·iframe 걷기가 기대는 성질.
+fn folderAndFrameChecks(r: *Run, report: Report, files_dir: []const u8, a: []const u8, b: []const u8, port: u16) !void {
+    var detail: [1200]u8 = undefined;
+    var u: [256]u8 = undefined;
+    var vb: [1200]u8 = undefined;
+    var ob: [256]u8 = undefined;
+    var db: [1024]u8 = undefined;
+    const d = try std.fmt.bufPrintSentinel(&db, "{s}/updir", .{files_dir}, 0);
+    _ = std.c.mkdir(d.ptr, 0o700);
+    var pb2: [1024]u8 = undefined;
+    try writeFile(try std.fmt.bufPrintSentinel(&pb2, "{s}/a1.txt", .{d}, 0), "A1\n");
+    // up-folder-path-silent — `webkitdirectory` 칸에 폴더 경로를 주면 `{}` 이고 아무것도 안 들어간다(CEF 는 폴더를 펼치지 않는다), 보통 칸에
+    // 주면 그 폴더 자체가 파일 하나로 들어간다 — maru 는 폴더를 앱이 펼쳐 파일 목록으로 넣는다.
+    try r.host.send(.{ .navigate = .{ .browser = visible_id, .url = browsers_check.url(&u, port, "/upload?folder") } });
+    var loads: u32 = r.loads[0] + 1;
+    _ = r.untilLoads(0, loads);
+    {
+        const obj = try r.objectOf(visible_id, &ob, "dir");
+        const st = try r.setFiles(visible_id, obj, &.{d});
+        const empty = st == .ok and std.mem.eql(u8, r.result.items, "{}");
+        r.pump(800);
+        const n_dir = try r.eval(visible_id, &vb, "String(document.getElementById('dir').files.length)");
+        var nd: [16]u8 = undefined;
+        const n_dir_s = std.fmt.bufPrint(&nd, "{s}", .{n_dir}) catch "";
+        const obj2 = try r.objectOf(visible_id, &ob, "one");
+        _ = try r.setFiles(visible_id, obj2, &.{d});
+        r.pump(300);
+        const one = try r.eval(visible_id, &vb, "(function(f){return f.length+':'+(f.length?f[0].name:'')})(document.getElementById('one').files)");
+        report(empty and std.mem.eql(u8, n_dir_s, "0") and std.mem.eql(u8, one, "1:updir"), "up-folder-path-silent", std.fmt.bufPrint(&detail, "폴더 칸에 폴더 경로 → {s}·{s} 개 · 보통 칸에 폴더 경로 → 「{s}」", .{ statusName(st), n_dir_s, one }) catch "");
+    }
+    // up-folder-toggle — maru 의 승인 뒤 확인처럼 격리 world 에서 `webkitdirectory` 를 떼고 `multiple` 을 붙여 넣고, maru 의 캡처 듣는 이가 첫 진짜
+    // `input` 에서 되돌린다: 칸은 파일 둘을 진짜 이벤트로 받고(`webkitRelativePath` 빈 글 — 사람의 고르개와 같다), 칸의 보통 처리기는
+    // `webkitdirectory` 참을 보고, 넣은 뒤 속성은 처음대로다.
+    try r.host.send(.{ .navigate = .{ .browser = visible_id, .url = browsers_check.url(&u, port, "/upload?toggle") } });
+    loads = r.loads[0] + 1;
+    _ = r.untilLoads(0, loads);
+    {
+        _ = try r.eval(visible_id, &vb, "(function(){var d=document.getElementById('dir');window.__dl=[];d.addEventListener('input',function(e){__dl.push('input:'+e.isTrusted+':dir='+d.webkitdirectory+':mul='+d.multiple)});d.addEventListener('change',function(e){__dl.push('change:'+e.isTrusted+':'+d.files.length+':dir='+d.webkitdirectory)});return 'ok'})()");
+        var fb: [128]u8 = undefined;
+        const main = try mainFrame(r, visible_id, &fb);
+        var iso: [256]u8 = undefined;
+        const obj = try isolatedObject(r, visible_id, &iso, main, "judge-toggle", "document.getElementById('dir')");
+        var tb: [64]u8 = undefined;
+        const armed = try r.callOn(visible_id, &tb, obj, "function(){var t=this,HA=Element.prototype.hasAttribute,SA=Element.prototype.setAttribute,RA=Element.prototype.removeAttribute;var mul=HA.call(t,'multiple');" ++
+            "var back=function(){if(globalThis.__done)return;globalThis.__done=true;if(!HA.call(t,'webkitdirectory'))SA.call(t,'webkitdirectory','');if(!mul&&HA.call(t,'multiple'))RA.call(t,'multiple')};" ++
+            "var h=function(e){if(e.isTrusted===true&&e.target===t)back()};EventTarget.prototype.addEventListener.call(t,'input',h,true);RA.call(t,'webkitdirectory');if(!mul)SA.call(t,'multiple','');return 'ok'}");
+        const st = try r.setFiles(visible_id, obj, &.{ a, b });
+        r.pump(500);
+        const got = try r.eval(visible_id, &vb, "(function(d){var f=d.files,l=[];for(var i=0;i<f.length;i++)l.push(f[i].name+':['+f[i].webkitRelativePath+']');return f.length+'|'+l.join(',')+'|'+__dl.join(',')+'|dir='+d.webkitdirectory+'|mul='+d.multiple})(document.getElementById('dir'))");
+        const want = "2|up-a.txt:[],up-b.txt:[]|input:true:dir=true:mul=false,change:true:2:dir=true|dir=true|mul=false";
+        report(std.mem.eql(u8, armed, "ok") and st == .ok and std.mem.eql(u8, got, want), "up-folder-toggle", std.fmt.bufPrint(&detail, "준비 {s} · 넣기 {s} · 「{s}」", .{ armed, statusName(st), got }) catch "");
+    }
+    // up-maru-js — 앱의 격리 world 함수 그대로: 칸 종류 판정(파일 칸에 폴더 → 'not directory', 폴더 칸에 파일 → 'directory'), 폴더 넣기의 arm(속성
+    // 바꾸기) → 넣기 → 읽기('ok' — 페이지의 보통 처리기는 `webkitdirectory` 참을 보고 속성이 처음대로), arm 뒤 넣지 않고 끝나면 떼기가 되돌린다.
+    try r.host.send(.{ .navigate = .{ .browser = visible_id, .url = browsers_check.url(&u, port, "/upload?js") } });
+    loads = r.loads[0] + 1;
+    _ = r.untilLoads(0, loads);
+    {
+        _ = try r.eval(visible_id, &vb, "(function(){var d=document.getElementById('dir');window.__jl=[];d.addEventListener('input',function(e){__jl.push('input:'+e.isTrusted+':dir='+d.webkitdirectory+':mul='+d.multiple)});return 'ok'})()");
+        var mfb: [128]u8 = undefined;
+        const mf = try mainFrame(r, visible_id, &mfb);
+        var ob1: [256]u8 = undefined;
+        const one = try isolatedObject(r, visible_id, &ob1, mf, "judge-js1", "document.getElementById('one')");
+        var ob2: [256]u8 = undefined;
+        const dir = try isolatedObject(r, visible_id, &ob2, mf, "judge-js2", "document.getElementById('dir')");
+        var b1: [64]u8 = undefined;
+        const v_notdir = try r.callOnArgs(visible_id, &b1, one, upload_js.check_js, "[{\"value\":0},{\"value\":false},{\"value\":\"\"},{\"value\":true}]");
+        var b2: [64]u8 = undefined;
+        const v_dir = try r.callOnArgs(visible_id, &b2, dir, upload_js.check_js, "[{\"value\":1}]");
+        var b3: [64]u8 = undefined;
+        const v_arm = try r.callOnArgs(visible_id, &b3, dir, upload_js.check_js, "[{\"value\":2},{\"value\":true},{\"value\":\"maru-w9c-upload-77\"},{\"value\":true}]");
+        const st = try r.setFiles(visible_id, dir, &.{ a, b });
+        var b4: [64]u8 = undefined;
+        const v_verify = try r.callOnArgs(visible_id, &b4, dir, upload_js.verify_js, "[{\"value\":[\"up-a.txt\",\"up-b.txt\"]},{\"value\":[6,6]},{\"value\":\"maru-w9c-upload-77\"}]");
+        var pg: [256]u8 = undefined;
+        const page = std.fmt.bufPrint(&pg, "{s}", .{try r.eval(visible_id, &vb, "(function(d){return __jl.join(',')+'|dir='+d.webkitdirectory+'|mul='+d.multiple+'|'+d.files.length})(document.getElementById('dir'))")}) catch "";
+        // arm 만 하고(바꾼 채) 넣지 않고 끝나면 떼기가 되돌린다.
+        var b5: [64]u8 = undefined;
+        const v_arm2 = try r.callOnArgs(visible_id, &b5, dir, upload_js.check_js, "[{\"value\":1},{\"value\":true},{\"value\":\"maru-w9c-upload-78\"},{\"value\":true}]");
+        var mid: [64]u8 = undefined;
+        const armed_state = std.fmt.bufPrint(&mid, "{s}", .{try r.eval(visible_id, &vb, "(function(d){return 'dir='+d.webkitdirectory+'|mul='+d.multiple})(document.getElementById('dir'))")}) catch "";
+        var b6: [64]u8 = undefined;
+        _ = try r.callOnArgs(visible_id, &b6, dir, upload_js.disarm_js, "[{\"value\":\"maru-w9c-upload-78\"}]");
+        const after = try r.eval(visible_id, &vb, "(function(d){return 'dir='+d.webkitdirectory+'|mul='+d.multiple})(document.getElementById('dir'))");
+        const ok = std.mem.eql(u8, v_notdir, "not directory") and std.mem.eql(u8, v_dir, "directory") and std.mem.eql(u8, v_arm, "ok") and st == .ok and
+            std.mem.eql(u8, v_verify, "ok") and std.mem.eql(u8, page, "input:true:dir=true:mul=false|dir=true|mul=false|2") and std.mem.eql(u8, v_arm2, "ok") and
+            std.mem.eql(u8, armed_state, "dir=false|mul=true") and std.mem.eql(u8, after, "dir=true|mul=false");
+        report(ok, "up-maru-js", std.fmt.bufPrint(&detail, "파일 칸·폴더 「{s}」 · 폴더 칸·파일 「{s}」 · arm 「{s}」 · 넣기 {s} · 읽기 「{s}」 · 페이지 「{s}」 · arm 만 「{s}」→「{s}」 · 떼기 뒤 「{s}」", .{ v_notdir, v_dir, v_arm, statusName(st), v_verify, page, v_arm2, armed_state, after }) catch "");
+    }
+    // 프레임: 같은 출처 iframe(`same`)과 다른 사이트 iframe(`cross` — localhost↔127.0.0.1).
+    try r.host.send(.{ .navigate = .{ .browser = visible_id, .url = browsers_check.url(&u, port, "/upload-frames") } });
+    loads = r.loads[0] + 1;
+    _ = r.untilLoads(0, loads);
+    r.pump(1500);
+    var fb: [128]u8 = undefined;
+    const main = try mainFrame(r, visible_id, &fb);
+    // up-frame-describe — maru 의 걷기는 iframe 요소의 `DOM.describeNode{objectId}` 로 그 frame id 와 같은 프로세스인지(`contentDocument`)를 본다.
+    var same_frame_buf: [128]u8 = undefined;
+    var same_frame: []const u8 = "";
+    {
+        var o1: [256]u8 = undefined;
+        const same_el = try isolatedObject(r, visible_id, &o1, main, "judge-walk", "document.getElementById('same')");
+        var pb: [512]u8 = undefined;
+        _ = try r.call(visible_id, "DOM.describeNode", try std.fmt.bufPrint(&pb, "{{\"objectId\":\"{s}\"}}", .{same_el}));
+        const same_desc_has_doc = std.mem.indexOf(u8, r.result.items, "\"contentDocument\"") != null;
+        same_frame = blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch break :blk "";
+            defer parsed.deinit();
+            const node = parsed.value.object.get("node") orelse break :blk "";
+            const f = node.object.get("frameId") orelse break :blk "";
+            break :blk std.fmt.bufPrint(&same_frame_buf, "{s}", .{f.string}) catch "";
+        };
+        var o2: [256]u8 = undefined;
+        const cross_el = try isolatedObject(r, visible_id, &o2, main, "judge-walk2", "document.getElementById('cross')");
+        _ = try r.call(visible_id, "DOM.describeNode", try std.fmt.bufPrint(&pb, "{{\"objectId\":\"{s}\"}}", .{cross_el}));
+        const cross_has_frame = std.mem.indexOf(u8, r.result.items, "\"frameId\"") != null;
+        const cross_has_doc = std.mem.indexOf(u8, r.result.items, "\"contentDocument\"") != null;
+        var tf: [128]u8 = undefined;
+        const tree_child = try childFrame(r, visible_id, &tf);
+        report(same_desc_has_doc and same_frame.len > 0 and std.mem.eql(u8, same_frame, tree_child) and cross_has_frame and !cross_has_doc, "up-frame-describe", std.fmt.bufPrint(&detail, "같은 출처: 문서 {} · frame {s}(트리의 자식 {s}) · 다른 사이트: frame {} · 문서 {}", .{ same_desc_has_doc, same_frame, tree_child, cross_has_frame, cross_has_doc }) catch "");
+    }
+    // up-frame-same — 그 frame 의 격리 world 에서 잡은 칸에 페이지 세션의 `DOM.setFileInputFiles` 가 넣는다: 칸은 진짜 `change` 로 파일 둘을 받는다.
+    {
+        var o3: [256]u8 = undefined;
+        const fi = try isolatedObject(r, visible_id, &o3, same_frame, "judge-in", "document.getElementById('fi')");
+        const st = try r.setFiles(visible_id, fi, &.{ a, b });
+        r.pump(800);
+        const msgs = try r.eval(visible_id, &vb, "window.__msgs.join(' ## ')");
+        report(fi.len > 0 and st == .ok and std.mem.indexOf(u8, msgs, "fi:true:up-a.txt:6:,up-b.txt:6:") != null, "up-frame-same", std.fmt.bufPrint(&detail, "칸 {d} · 넣기 {s} · 메시지 「{s}」", .{ fi.len, statusName(st), msgs }) catch "");
+    }
+    // up-frame-oopif — 다른 사이트 iframe(OOPIF)의 칸: 그 frame 의 세션(wire 30 `frame`)으로 격리 world·찾기·넣기 — sidecar 가 getTargets → attach 로 붙인다.
+    // 칸은 진짜 `change` 로 파일 둘을 받는다. 그 세션의 프레임 트리는 그 frame 이 뿌리다(maru 의 tree 단계가 그 frame 의 loaderId·출처를 읽는다).
+    var cross_frame_buf: [128]u8 = undefined;
+    var cross_frame: []const u8 = "";
+    {
+        var o2: [256]u8 = undefined;
+        const cross_el = try isolatedObject(r, visible_id, &o2, main, "judge-walk3", "document.getElementById('cross')");
+        var pb: [512]u8 = undefined;
+        _ = try r.call(visible_id, "DOM.describeNode", try std.fmt.bufPrint(&pb, "{{\"objectId\":\"{s}\"}}", .{cross_el}));
+        cross_frame = blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch break :blk "";
+            defer parsed.deinit();
+            const node = parsed.value.object.get("node") orelse break :blk "";
+            const f = node.object.get("frameId") orelse break :blk "";
+            break :blk std.fmt.bufPrint(&cross_frame_buf, "{s}", .{f.string}) catch "";
+        };
+        // 원격 객체를 싣는 호출은 새로 붙지 않는다(새 세션은 그 객체를 모른다 — 공격 A1-3): 세션이 없을 때 넣기는 보내지 않는다.
+        const st_cold = try r.callIn(visible_id, cross_frame, "DOM.setFileInputFiles", "{\"files\":[],\"objectId\":\"x\"}");
+        // 허용 목록 밖의 메서드는 frame 세션으로 보낼 수 없다.
+        const st_forbid = try r.callIn(visible_id, cross_frame, "Network.getCookies", "{}");
+        const st_w = try r.callIn(visible_id, cross_frame, "Page.createIsolatedWorld", try std.fmt.bufPrint(&pb, "{{\"frameId\":\"{s}\",\"worldName\":\"judge-oopif\"}}", .{cross_frame}));
+        const ctx: i64 = blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch break :blk 0;
+            defer parsed.deinit();
+            break :blk if (parsed.value.object.get("executionContextId")) |v| v.integer else 0;
+        };
+        _ = try r.callIn(visible_id, cross_frame, "Runtime.evaluate", try std.fmt.bufPrint(&pb, "{{\"expression\":\"document.getElementById('fi')\",\"contextId\":{d}}}", .{ctx}));
+        var fo: [256]u8 = undefined;
+        const fi = r.objectIdOfResult(&fo, &.{ "result", "objectId" });
+        var w: std.Io.Writer = .fixed(&pb);
+        try w.print("{{\"files\":[\"{s}\",\"{s}\"],\"objectId\":\"{s}\"}}", .{ a, b, fi });
+        const st = try r.callIn(visible_id, cross_frame, "DOM.setFileInputFiles", w.buffered());
+        r.pump(800);
+        const msgs = try r.eval(visible_id, &vb, "window.__msgs.join(' ## ')");
+        var mb: [600]u8 = undefined;
+        const msgs_s = std.fmt.bufPrint(&mb, "{s}", .{msgs}) catch "";
+        _ = try r.callIn(visible_id, cross_frame, "Page.getFrameTree", "");
+        const root_is_frame = std.mem.indexOf(u8, r.result.items, cross_frame) != null and std.mem.indexOf(u8, r.result.items, "\"securityOrigin\":\"http://localhost:") != null;
+        const ok = cross_frame.len > 0 and st_cold == .send_failed and st_forbid == .invalid_request and st_w == .ok and fi.len > 0 and st == .ok and
+            std.mem.indexOf(u8, msgs_s, "ev|localhost:") != null and std.mem.indexOf(u8, msgs_s, "fi:true:up-a.txt:6:,up-b.txt:6:") != null and root_is_frame;
+        report(ok, "up-frame-oopif", std.fmt.bufPrint(&detail, "frame {s} · 세션 없을 때 넣기 {s} · 막힌 메서드 {s} · world {s} · 칸 {d} · 넣기 {s} · 트리 뿌리 {} · 메시지 「{s}」", .{ cross_frame, statusName(st_cold), statusName(st_forbid), statusName(st_w), fi.len, statusName(st), root_is_frame, msgs_s }) catch "");
+    }
+    // up-frame-oopif-recording — 본문 기록을 켠 탭(net_body 의 관찰자가 root 의 `Target.attachedToTarget` 을 본다 — 공격 A1-1: 서비스 워커가 아닌 붙음을
+    // 떼던 갈래)에서도 다른 사이트 iframe 의 세션이 살아 넣기가 된다.
+    {
+        try r.host.send(.{ .net_watch = .{ .browser = visible_id, .on = true, .full = true, .any_host = true } });
+        try r.host.send(.{ .net_record = .{ .browser = visible_id, .on = true, .session = 9 } });
+        try r.host.send(.{ .navigate = .{ .browser = visible_id, .url = browsers_check.url(&u, port, "/upload-frames?rec") } });
+        loads = r.loads[0] + 1;
+        _ = r.untilLoads(0, loads);
+        r.pump(1500);
+        var fb2: [128]u8 = undefined;
+        const main2 = try mainFrame(r, visible_id, &fb2);
+        var o2: [256]u8 = undefined;
+        const cross_el = try isolatedObject(r, visible_id, &o2, main2, "judge-rec", "document.getElementById('cross')");
+        var pb: [512]u8 = undefined;
+        _ = try r.call(visible_id, "DOM.describeNode", try std.fmt.bufPrint(&pb, "{{\"objectId\":\"{s}\"}}", .{cross_el}));
+        cross_frame = blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch break :blk "";
+            defer parsed.deinit();
+            const node = parsed.value.object.get("node") orelse break :blk "";
+            const f = node.object.get("frameId") orelse break :blk "";
+            break :blk std.fmt.bufPrint(&cross_frame_buf, "{s}", .{f.string}) catch "";
+        };
+        const st_w = try r.callIn(visible_id, cross_frame, "Page.createIsolatedWorld", try std.fmt.bufPrint(&pb, "{{\"frameId\":\"{s}\",\"worldName\":\"judge-oopif2\"}}", .{cross_frame}));
+        const ctx: i64 = blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch break :blk 0;
+            defer parsed.deinit();
+            break :blk if (parsed.value.object.get("executionContextId")) |v| v.integer else 0;
+        };
+        r.pump(500); // net_body 가 붙음 사건을 보고 떼려 했다면 그 사이에
+        _ = try r.callIn(visible_id, cross_frame, "Runtime.evaluate", try std.fmt.bufPrint(&pb, "{{\"expression\":\"document.getElementById('fi')\",\"contextId\":{d}}}", .{ctx}));
+        var fo: [256]u8 = undefined;
+        const fi = r.objectIdOfResult(&fo, &.{ "result", "objectId" });
+        var w: std.Io.Writer = .fixed(&pb);
+        try w.print("{{\"files\":[\"{s}\"],\"objectId\":\"{s}\"}}", .{ a, fi });
+        const st = try r.callIn(visible_id, cross_frame, "DOM.setFileInputFiles", w.buffered());
+        r.pump(800);
+        const msgs = try r.eval(visible_id, &vb, "window.__msgs.join(' ## ')");
+        const ok = st_w == .ok and fi.len > 0 and st == .ok and std.mem.indexOf(u8, msgs, "ev|localhost:") != null and std.mem.indexOf(u8, msgs, "fi:true:up-a.txt:6:") != null;
+        report(ok, "up-frame-oopif-recording", std.fmt.bufPrint(&detail, "world {s} · 칸 {d} · 넣기 {s} · 메시지 「{s}」", .{ statusName(st_w), fi.len, statusName(st), msgs }) catch "");
+        try r.host.send(.{ .net_record = .{ .browser = visible_id, .on = false } });
+        try r.host.send(.{ .net_watch = .{ .browser = visible_id, .on = false } });
+        r.pump(300);
+    }
+    // up-frame-other-tab — 다른 탭(숨긴 탭)의 다른 사이트 iframe 의 frame id 로는 이 탭에서 붙지 않는다(`getTargets` 는 브라우저 전체의 목록이다 — 부모
+    // 사슬이 이 탭의 page 타깃에 닿아야 붙는다, 적대 검증 3·4 회차). 그 탭에서는 붙는다(대조).
+    {
+        try r.host.send(.{ .navigate = .{ .browser = hidden_id, .url = browsers_check.url(&u, port, "/upload-frames?other") } });
+        const hl = r.loads[1] + 1;
+        _ = r.untilLoads(1, hl);
+        r.pump(1500);
+        var hfb: [128]u8 = undefined;
+        const hmain = try mainFrame(r, hidden_id, &hfb);
+        var ho: [256]u8 = undefined;
+        const hcross = try isolatedObject(r, hidden_id, &ho, hmain, "judge-other", "document.getElementById('cross')");
+        var pb: [512]u8 = undefined;
+        _ = try r.call(hidden_id, "DOM.describeNode", try std.fmt.bufPrint(&pb, "{{\"objectId\":\"{s}\"}}", .{hcross}));
+        var off_buf: [128]u8 = undefined;
+        const other_frame: []const u8 = blk: {
+            const parsed = std.json.parseFromSlice(std.json.Value, r.gpa, r.result.items, .{}) catch break :blk "";
+            defer parsed.deinit();
+            const node = parsed.value.object.get("node") orelse break :blk "";
+            const f = node.object.get("frameId") orelse break :blk "";
+            break :blk std.fmt.bufPrint(&off_buf, "{s}", .{f.string}) catch "";
+        };
+        const params = try std.fmt.bufPrint(&pb, "{{\"frameId\":\"{s}\",\"worldName\":\"judge-x\"}}", .{other_frame});
+        const st_cross = try r.callIn(visible_id, other_frame, "Page.createIsolatedWorld", params);
+        var eb: [200]u8 = undefined;
+        const es = std.fmt.bufPrint(&eb, "{s}", .{r.result.items[0..@min(r.result.items.len, 160)]}) catch "";
+        const refused = st_cross == .cdp_error and std.mem.indexOf(u8, r.result.items, "No frame for given id found in this tab") != null;
+        const st_own = try r.callIn(hidden_id, other_frame, "Page.createIsolatedWorld", params);
+        report(other_frame.len > 0 and refused and st_own == .ok, "up-frame-other-tab", std.fmt.bufPrint(&detail, "다른 탭의 frame {s} · 이 탭에서 {s} 「{s}」 · 그 탭에서 {s}", .{ other_frame, statusName(st_cross), es, statusName(st_own) }) catch "");
+    }
+    // up-frame-session-gone — 위젯이 그 iframe 을 지우면 그 세션은 사라진다: 그 뒤의 frame 호출은 답한다(매달리지 않는다) — 세션을 잃은 오류(보냈던 것)나
+    // send_failed(세션이 없어 보내지 않은 것). maru 의 엔진은 넣기 뒤의 세션 잃음을 「넣었다 — 읽을 수 없다」 로 읽는다.
+    {
+        // ① 보낸 채 매달린 호출 — 그 iframe 이 바쁜 사이 바깥 문서가 지운다(다른 프로세스라 바깥의 타이머가 돈다): 그 호출은 갔다 — 「안 갔다」
+        // (send_failed)가 아니라 CDP 오류로 답한다(적대 검증 14 회차: 넣기면 「넣지 않았다」 로 읽어 다시 올렸다).
+        _ = try r.callIn(visible_id, cross_frame, "Page.getFrameTree", "{}"); // 세션이 있게(쉬어 떼어졌으면 다시 붙는다)
+        _ = try r.eval(visible_id, &vb, "(function(){var x=document.getElementById('cross');setTimeout(function(){x.parentNode.removeChild(x)},300);return 'ok'})()");
+        const st1 = try r.callIn(visible_id, cross_frame, "Runtime.evaluate", "{\"expression\":\"(function(){var t=Date.now();while(Date.now()<t+2500){}return 1})()\"}");
+        var eb1: [200]u8 = undefined;
+        const es1 = std.fmt.bufPrint(&eb1, "{s}", .{r.result.items[0..@min(r.result.items.len, 180)]}) catch "";
+        r.pump(600);
+        // ② 지운 뒤 — 세션이 없고 원격 객체를 싣지 않는 호출이라도 새로 붙지 않는 호출(evaluate)은 보내지 않는다.
+        const st = try r.callIn(visible_id, cross_frame, "Runtime.evaluate", "{\"expression\":\"1\"}");
+        var eb: [200]u8 = undefined;
+        const es = std.fmt.bufPrint(&eb, "{s}", .{r.result.items[0..@min(r.result.items.len, 180)]}) catch "";
+        const ok = st1 == .cdp_error and st == .send_failed;
+        report(ok, "up-frame-session-gone", std.fmt.bufPrint(&detail, "바쁜 사이 지움 {s} 「{s}」 · 지운 뒤 {s} 「{s}」", .{ statusName(st1), es1, statusName(st), es }) catch "");
+    }
+}
 
 fn writeFile(path: [:0]const u8, bytes: []const u8) !void {
     const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
@@ -349,5 +683,6 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, f
         const n = try r.eval(hidden_id, &vb, "document.visibilityState+':'+document.getElementById('one').files.length");
         report(ready and st == .ok and std.mem.eql(u8, n, "hidden:1") and took < 2_000, "up-hidden", std.fmt.bufPrint(&detail, "준비 {} · 상태 {s} · {d} ms · 「{s}」", .{ ready, statusName(st), took, n }) catch "");
     }
+    folderAndFrameChecks(&r, report, files_dir, a, b, port) catch |e| report(false, "up-folder-frame", @errorName(e));
     report(r.pickers == 0, "up-no-picker", std.fmt.bufPrint(&detail, "파일 고르개 {d} 번", .{r.pickers}) catch "");
 }

@@ -12,7 +12,7 @@
 //!   af-conn-refused 진짜 접속 거부(닫은 포트)
 //!   af-noncommit   안전하지 않은 리다이렉트·알 수 없는 스킴·페이지가 스스로 간 실패 — 실은 주소는 그 오류 페이지의 주소이거나 빈 글뿐
 //!   af-aborted     문서 없이 끝난 이동(다운로드 — ERR_ABORTED)은 `error_page` 가 없다(주소창은 그대로 — Chrome 과 같다)
-//!   af-flag-holds  (2026-11-20 「더하기」) af-noncommit 의 갈래에서도 `error_page` 뒤에 `url_changed`·`page_started` 가 오지 않는다 — maru 는
+//!   af-flag-holds  (2026-11-20 「더하기」) af-noncommit·ef-http-status 의 갈래에서도 `error_page` 뒤에 `url_changed`·`page_started` 가 오지 않는다 — maru 는
 //!                  그 둘로 오류 페이지 표시(`browser.list`·`getUrl` 의 `error_page`)를 지운다(오면 오류 페이지인데 표시가 꺼진다)
 //!   ef-http-status 본문 있는 404 는 서버의 문서(`error_page` 없음 — 표시가 서지 않는다); 본문 없는 404·500 은 관찰(obs — Chromium 이 제 오류
 //!                  페이지를 세우면 그 번호)
@@ -238,20 +238,30 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
         report(fine, "af-noncommit", std.fmt.bufPrint(&d, "{s} → error_page url 「{s}」(빈 글이거나 {s} 이어야) · url_changed {d} · page_started {d} · 제목 {s}", .{ target, ep_url, shows, r.countFrom(nc_from, .url_changed), r.countFrom(nc_from, .page_started), r.title() }) catch "");
     }
 
-    report(ep_cases > 0 and after_ep == 0, "af-flag-holds", std.fmt.bufPrint(&d, "오류 페이지를 세운 갈래 {d} 개에서 error_page 뒤 3.5 초 안에 온 url_changed·page_started {d} 개(0 이어야 — 오면 maru 가 오류 페이지 표시를 지운다)", .{ ep_cases, after_ep }) catch "");
-
-    // 본문 있는·없는 HTTP 오류 상태(2026-11-20) — 본문 있는 404 는 문서다(오류 페이지 표시가 서지 않는다).
+    // 본문 있는·없는 HTTP 오류 상태(2026-11-20) — 본문 있는 404 는 문서다(오류 페이지 표시가 서지 않는다). 본문 없는 것이 오류 페이지를 세우면
+    // 그 갈래도 af-flag-holds 에 센다(적대 검증 B R20-3).
     for ([_][]const u8{ "/ef-404-body", "/ef-404-empty", "/ef-500-empty" }) |path| {
         const hs_from = r.n;
         try host.send(.{ .navigate = .{ .browser = browser_id, .url = browsers_check.url(&u, port, path), .user = true } });
         r.pump(3000);
         var code: ?i32 = null;
-        for (r.events[hs_from..r.n]) |ev| if (ev.kind == .error_page) {
+        var last_ep: ?usize = null;
+        for (r.events[hs_from..r.n], hs_from..) |ev, i| if (ev.kind == .error_page) {
             code = ev.code;
+            last_ep = i;
         };
+        if (last_ep) |i| {
+            ep_cases += 1;
+            for (r.events[i + 1 .. r.n]) |ev| {
+                if (ev.kind == .url_changed or ev.kind == .page_started) after_ep += 1;
+            }
+        }
         const doc = std.mem.eql(u8, path, "/ef-404-body");
         report(if (doc) code == null else true, if (doc) "ef-http-status" else "ef-http-status(obs)", std.fmt.bufPrint(&d, "{s} → error_page {?d} · page_started {d} · url_changed {d} · 제목 {s}", .{ path, code, r.countFrom(hs_from, .page_started), r.countFrom(hs_from, .url_changed), r.title() }) catch "");
     }
+
+    // 사건 표가 차면 뒤 사건을 버린다(`push`) — 그러면 위 셈이 거짓으로 통과한다(적대 검증 A NIT-3).
+    report(ep_cases > 0 and after_ep == 0 and r.n < r.events.len, "af-flag-holds", std.fmt.bufPrint(&d, "오류 페이지를 세운 갈래 {d} 개(af-noncommit·ef-http-status)에서 error_page 뒤 3 초 넘게 온 url_changed·page_started {d} 개(0 이어야 — 오면 maru 가 오류 페이지 표시를 지운다) · 사건 {d}/{d}", .{ ep_cases, after_ep, r.n, r.events.len }) catch "");
 
     // 문서 없이 끝난 이동(다운로드).
     const ab_from = r.n;

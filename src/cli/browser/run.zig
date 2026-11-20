@@ -764,13 +764,10 @@ fn runPlainRequest(
     defer allocator.free(request_bytes);
     const resp = try control_client.fetchResponse(io, allocator, request_bytes, stderr);
     defer allocator.free(resp);
-    if (!try browser.renderResponse(allocator, resp, kind, stdout)) return error.UnknownCommand;
+    // 2026-11-20 「더하기」: get-url 이 오류 페이지면 안내 한 줄을 stderr 에(주소 한 줄은 stdout 그대로).
+    if (!try browser.renderPlainResponse(allocator, resp, kind, stdout, stderr)) return error.UnknownCommand;
     try stdout.flush();
-    // 2026-11-20 「더하기」: 오류 페이지면 안내 한 줄을 stderr 에(주소 한 줄은 stdout 그대로).
-    if (kind == .get_url) {
-        try browser.writeGetUrlNote(allocator, resp, stderr);
-        try stderr.flush();
-    }
+    stderr.flush() catch {}; // 주소 다음에(안내를 못 써도 결과는 그대로)
 }
 
 fn runExecuteScript(

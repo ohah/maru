@@ -4039,6 +4039,14 @@ fn writeErrorPageLabel(w: *std.Io.Writer, o: std.json.ObjectMap) !void {
     if (intField(o.get("blocked_rule"))) |r| if (r > 0) try w.print(", blocking rule {d}", .{r});
 }
 
+/// 한 번에 답하는 요청의 출력(2026-11-20 — `browser/run.zig` 의 `runPlainRequest`): 결과는 `out`(stdout), get-url 이 오류 페이지면 그 안내는
+/// `err`(stderr — `url=$(maru browser get-url …)` 이 주소 한 줄만 받게, 계획 공격 9). 안내를 쓰지 못해도(stderr 가 닫혔다) 결과는 그대로다.
+pub fn renderPlainResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: ResponseKind, out: *std.Io.Writer, err: *std.Io.Writer) !bool {
+    if (!try renderResponse(gpa, response_bytes, kind, out)) return false;
+    if (kind == .get_url) writeGetUrlNote(gpa, response_bytes, err) catch {};
+    return true;
+}
+
 /// `get-url` 의 오류 페이지 안내 한 줄(2026-11-20 「더하기」) — 부른 쪽이 stderr 에 낸다(stdout 은 주소 한 줄 그대로 — 계획 공격 9; MCP 는 둘을
 /// 이어 붙여 에이전트가 함께 본다). 오류 페이지가 아니거나 응답을 못 읽으면 아무것도 쓰지 않는다.
 pub fn writeGetUrlNote(gpa: std.mem.Allocator, response_bytes: []const u8, w: *std.Io.Writer) !void {
@@ -6870,6 +6878,18 @@ test "오류 페이지 표시(2026-11-20 「더하기」): get-url 은 stdout �
         "not json",
     }) |r| try writeGetUrlNote(testing.allocator, r, &note.writer);
     try testing.expectEqualStrings("", note.written());
+    // 실제로 부르는 길(`renderPlainResponse` — run.zig): 주소는 out, 안내는 err(적대 검증 B R20-2). 다른 종류는 안내가 없다.
+    var o2: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer o2.deinit();
+    var e2: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer e2.deinit();
+    try testing.expect(try renderPlainResponse(testing.allocator, resp, .get_url, &o2.writer, &e2.writer));
+    try testing.expectEqualStrings("https://b.test/x\n", o2.written());
+    try testing.expect(std.mem.startsWith(u8, e2.written(), "note: error page (ERR_CONNECTION_REFUSED) — "));
+    e2.clearRetainingCapacity();
+    o2.clearRetainingCapacity();
+    try testing.expect(try renderPlainResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}", .navigate, &o2.writer, &e2.writer));
+    try testing.expectEqualStrings("", e2.written());
 }
 
 // W9d② 적대 리뷰 3 회차 재현 D1: 본문 글은 줄바꿈을 그대로 찍고 끝 표시가 없다 — 페이지가 본문 끝에 「more: --offset 0」 을 두면 maru 가 찍는

@@ -170,12 +170,13 @@ pub const PaneGrantStore = struct {
     }
 
     /// W9d① 적대 리뷰 1 회차 F5(설정 `browser.agent-network-full` 이 꺼졌을 때): 사용자가 그 탭을 몰았다(2 회차 N3 — 켜진 동안 몰았고 이제
-    /// 꺼졌다) — 그 탭의 어느 호스트든 grant 를 몰기 전의 사이트(`host`)에 묶는다. 다른 사이트는 다시 묻는다. 번호는 그대로다(새 동의가
+    /// 꺼졌다) — 그 탭의 어느 호스트든 grant 를 몰기 전의 사이트(`host`)에 묶는다. 다른 사이트에서는 다음 요청에 전권이 그 지금 호스트로 다시 넣는다
+    /// (`fullAccessPlanFor` — 묻지 않는다, 2026-11-16 전에는 다시 물었다). 번호는 그대로다(새 동의가
     /// 아니라 좁힘 — 더 숨기는 쪽). 바꿨으면 참.
     pub fn narrowAnyHost(self: *PaneGrantStore, target: u64, host: GrantHost) bool {
         var changed = false;
-        // W9d②: 본문 기록의 태어날 때 grant 도 같이 좁힌다(같은 몰기 — 설정이 꺼졌으면 다른 사이트의 본문도 다시 묻는다).
-        // W9d③: 막기의 태어날 때 grant 도(같은 몰기 — 다른 사이트에서는 다시 묻는다).
+        // W9d②: 본문 기록의 태어날 때 grant 도 같이 좁힌다(같은 몰기 — 설정이 꺼졌으면 다른 사이트의 본문도 그 사이트로 다시 넣는다).
+        // W9d③: 막기의 태어날 때 grant 도(같은 몰기 — 다른 사이트에서는 그 사이트로 다시 넣는다).
         // W9e①: 흉내의 태어날 때 grant 는 좁히지 않는다 — 설정 `browser.agent-network-full` 은 읽기의 투영이고 흉내는 읽기가 아니다(계획 §3).
         for (self.grants[0..self.len]) |*e| if (e.target == target and newConsentScope(e.scope) and e.scope != .browser_emulation and e.any_host) {
             e.any_host = false;

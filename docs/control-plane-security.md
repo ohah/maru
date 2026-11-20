@@ -267,14 +267,15 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
   `child_pid`)를 가진 살아 있는 터미널 pane 을 찾는다. pane 의 셸은 뿌리(`/usr/bin/login`)가 연 세션 안에 있어 세션 번호 = 뿌리
   pid 다(실측 — in-process·세션 호스트 pane 모두). 뿌리 `login` 은 root 소유라 앱이 `proc_pidinfo` 로 읽을 수 없어(EPERM) 이
   관계(권한 검사 없는 `getsid`)로 잇는다.
-- **결과**: 찾은 pane 이 **browser 확인 grant 의 pane** 이 된다(셀렉터 불필요). 셀렉터는 찾은 pane 과 같을 때만 metadata 앵커로
+- **결과**: 찾은 pane 이 **browser grant 의 pane** 이 된다(셀렉터 불필요 — 2026-11-16 부터 확인 없이 전권, §8.9). 셀렉터는 찾은 pane 과 같을 때만 metadata 앵커로
   남고, 다르거나 못 찾았으면 버린다 — metadata 는 셀렉터 없는 연결처럼 전체(아래 문단, 사용자 결정 「목록은 지금처럼」), browser 는
-  찾은 pane 으로만 묻는다. 그래서 남의 pane 번호를 대도 그 pane 의 기억된 grant 를 못 탄다(1g 전에는 in-process pane 의 grant 를
+  찾은 pane 으로만 grant 를 받는다. 그래서 남의 pane 번호를 대도 그 pane 의 기억된 grant 를 못 탄다(1g 전에는 in-process pane 의 grant 를
   모달 없이 탔다).
 - **통과·거절**(실측 — `mise run macos-control-self-origin-smoke`, 세션 유지·in-process 두 모드): pane 셸에서 직접, pane 안
   setsid 자식(Claude Code 모양), 새 process group 자식(Codex 모양), 셸이 쉬는 동안의 `&` → 통과. 다른 작업이 foreground 인
   동안의 `&`, pane 밖에서 pane 번호를 댐 → 거절. launchd 아래 데몬·고아는 제어 터미널 조상이 없어 거절, 다른 터미널은 세션이 달라
-  거절. 확인 모달을 승인한 뒤의 재처리 전에 그 조상이 아직 foreground 인지 다시 본다.
+  거절. 업로드는 파일을 연 뒤 사본을 만들기 전에 그 조상이 아직 foreground 인지 한 번 더 본다(떠났으면 `-32002` — 2026-11-16 전에는 확인
+  모달을 승인한 뒤의 재처리 전에도 다시 봤다).
 - **누가 grant 를 쓰나**: grant 는 pane 단위(Model B)라, 그 pane 의 foreground 작업의 **자손 전부**가 쓴다 — 에이전트 본체만이
   아니라 그것이 띄운 도구·MCP 서버·플러그인, pane 셸이 쉬는 동안 그 셸이 띄워 둔 setsid 데몬도. 연결 하나의 출처는 연결에
   고정되고, 같은 fd 를 물려받은 프로세스는 그 조상이 foreground 인 동안 같은 출처로 요청한다.
@@ -307,7 +308,8 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
   ssh·다른 작업이 터미널을 쥔 동안의 백그라운드·maru 밖 프로그램이 아니라」 와 「maru 는 묻지 않는다」 를 붙인다(서버는 이유를 주지 않는다 —
   클라이언트가 이미 아는 사실만).
 - **진단**: browser 요청이나 셀렉터를 댄 요청에서 pane 을 못 찾은 이유(출처 거절 사유·foreground 를 잃음·maru pane 의 세션이
-  아님)와 모달 승인 뒤 재확인 실패는 앱 로그(`control` info)에 남는다. 클라이언트에게는 §8.3 균일 unauthorized 다.
+  아님)는 앱 로그(`control` info)에 남는다. 클라이언트에게는 §8.3 균일 unauthorized 다. 업로드의 사본 전 재확인 실패(2026-11-16 전에는
+  모달 승인 뒤 재확인)도 앱 로그에 남고, 그 답은 까닭 글을 싣는 `-32002` 다(부른 쪽 자신의 상태라 숨길 것이 없다).
 - **한계**: 최선의 노력이지 하드 경계가 아니다 — 같은 uid 는 그 pane 안에서 명령을 띄울 수 있다(rc 파일, 접근성 키 입력 등).
   pane 과 출처를 세션 번호 = 뿌리 pid 라는 숫자로만 잇는다 — pane 의 셸이 끝난 뒤 앱이 그것을 보기 전의 짧은 틈에 같은 pid 를 받은
   세션은 가리지 못한다(터미널 장치 대조는 세션 호스트 쪽 PTY 장치 번호가 필요해 후속). pane 안에서 띄운 터미널 안의 터미널(screen·
@@ -322,7 +324,7 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 
 멀티윈도우와 quick terminal 처리:
 
-- 일반 창 A/B와 quick terminal은 모두 앱 전역 `surface_id` 공간을 공유하므로 ID 충돌을 만들지 않는다. 창 A의 CLI가 창 B의 selector를 복사해 보내면 그 셀렉터는 서버가 찾은 pane(A)과 달라 버려진다(1g) — metadata 는 셀렉터 없는 연결처럼 전체, browser 는 A 로만 묻는다.
+- 일반 창 A/B와 quick terminal은 모두 앱 전역 `surface_id` 공간을 공유하므로 ID 충돌을 만들지 않는다. 창 A의 CLI가 창 B의 selector를 복사해 보내면 그 셀렉터는 서버가 찾은 pane(A)과 달라 버려진다(1g) — metadata 는 셀렉터 없는 연결처럼 전체, browser 는 A 로만 grant 를 받는다.
 - quick terminal은 `window_kind=quick`인 window에 속한 surface다. quick 안의 CLI는 quick 자기 surface의 `metadata:self`만 얻는다. 일반 창의 CLI는 quick을 기본으로 보지 못하고, quick CLI도 primary 창을 기본으로 보지 못한다.
 - quick이 숨겨져 있어도 PTY/session이 살아 있으면 selector는 live일 수 있다. 단, lifecycle/write는 기본 거부이고 quick 제어는 별도 explicit grant가 필요하다.
 
@@ -341,7 +343,7 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 - fd payload는 magic/version/header를 포함한다. shell startup script가 같은 fd 번호를 닫거나 재사용하면 CLI는 임의 데이터를 nonce로 오해하지 말고 `capability-fd-invalid`로 실패한다. CLI는 nonce를 읽은 직후 capability fd를 닫거나 `FD_CLOEXEC`로 바꿔 pager/editor/helper 프로세스에 fd가 새지 않게 한다.
 - **위협: capability fd는 셸 서브트리 전체가 읽는 ambient grant다(headline).** CLI가 fd를 상속하려면 **셸**이 그 fd를 `CLOEXEC` 없이 열어둬야 하는데(§8.5 실측: 셸이 fd를 닫으면 grant 실패로 취급), 그러면 그 셸이 exec하는 **모든 명령**(사용자가 실행한 curl·python·untrusted 자동화 포함 — 위협모델이 격리하려던 바로 그 저권한 코드)이 `pread(MARU_CONTROL_CAP_FD, 0)`로 같은 nonce를 얻는다. nonce는 bytes라 SCM_RIGHTS 없이 다른 프로세스로 forward도 된다. CLI가 자기 복사본을 닫아도 셸 복사본·형제 프로세스는 못 막는다. TTL/revocation은 창을 좁힐 뿐 형제 상속 자체는 못 막는다. 따라서 "fd 상속 = 프로세스 신원 증명"이라는 가정을 폐기한다:
   - `read-output`을 default grant에서 제외하고 **per-invocation 짧은 TTL + 명시 one-shot UX**로만 발급한다(현 §8.3 보수화에 "서브트리 전체 노출·과거 스크롤백 history 유출" 위협을 명시적 근거로 추가).
-  - cap fd는 **single-scope**만 싣는다. `write`/`lifecycle`은 어떤 상속 fd 경로로도 발급하지 않는다(상속 fd로 `write`가 새면 same-uid untrusted 코드가 셸에 키 주입 = macOS `TIOCSTI` 제거 후 새로 생기는 권한). 이 둘은 per-request `SCM_RIGHTS` fd-passing 또는 명시 확인 UX로만. **1e 구현(`control_capability.zig` `validateFdIssuance`)**: `write`/`lifecycle` fd 발급 거부, `read-output`은 TTL(`expires_at`) 필수. `bind`/`browser`는 §8.5가 명시 금지하지 않아 현재 fd 허용이나, 그 채널을 실제 여는 Phase 5(`browser`)·Phase 7(`bind`)이 자체 발급 UX에서 더 조일지 재검토한다(코드는 `Scope.allowedViaInheritedFd` 한 곳). **재검토 결과(browser, 2026-07-13)**: `browser`의 **대화형 주 경로는 fd 상속이 아니라 pane-bound confirm-grant**(§9.2 Model B — grant를 tty-검증 pane 신원에 묶고 확인 모달로 게이트, bearer nonce/fd 없음)로 정한다. fd 경로(`allowedViaInheritedFd=true`)는 비대화형/상속 시나리오·스모크용으로 남기되 주 경로 아님. `browser_storage`는 fd 금지(§9.4 D5) — grant도 confirm-grant로만.
+  - cap fd는 **single-scope**만 싣는다. `write`/`lifecycle`은 어떤 상속 fd 경로로도 발급하지 않는다(상속 fd로 `write`가 새면 same-uid untrusted 코드가 셸에 키 주입 = macOS `TIOCSTI` 제거 후 새로 생기는 권한). 이 둘은 per-request `SCM_RIGHTS` fd-passing 또는 명시 확인 UX로만. **1e 구현(`control_capability.zig` `validateFdIssuance`)**: `write`/`lifecycle` fd 발급 거부, `read-output`은 TTL(`expires_at`) 필수. `bind`/`browser`는 §8.5가 명시 금지하지 않아 현재 fd 허용이나, 그 채널을 실제 여는 Phase 5(`browser`)·Phase 7(`bind`)이 자체 발급 UX에서 더 조일지 재검토한다(코드는 `Scope.allowedViaInheritedFd` 한 곳). **재검토 결과(browser, 2026-07-13)**: `browser`의 **대화형 주 경로는 fd 상속이 아니라 pane-bound confirm-grant**(§9.2 Model B — grant를 tty-검증 pane 신원에 묶고 확인 모달로 게이트, bearer nonce/fd 없음)로 정한다(2026-11-16 부터 확인 모달은 없다 — 신원 판정을 지난 pane 이 전권 grant 를 받는다, §8.9; pane 에 묶인 grant 가 주 경로이고 fd 를 쓰지 않는 것은 그대로다). fd 경로(`allowedViaInheritedFd=true`)는 비대화형/상속 시나리오·스모크용으로 남기되 주 경로 아님. `browser_storage`는 fd 금지(§9.4 D5) — grant도 pane grant로만(2026-11-16 전에는 confirm-grant, 지금은 전권이 넣는다).
   - 대안 배포: 셸 통합이 rc에서 fd를 1회 읽고 즉시 `CLOEXEC`/close해 이후 명령이 상속하지 않게 한 뒤, CLI 호출마다 fresh per-invocation 채널을 mint한다.
 - 실측 gate(2026-06-29, macOS Darwin 25.5): read-only unlinked fd는 offset 0 `pread` 재호출이 같은 payload를 돌려주고 write는 `EBADF`로 실패했다. 현재 macOS PTY login wrapper(`/usr/bin/login -flp ... /bin/bash --noprofile --norc -c "exec -l <shell> ..."`)는 `MARU_CONTROL_CAP_FD` env는 보존하지만 fd 자체는 닫았다(zsh/bash 모두 `EBADF`). 반면 non-login 직접 exec의 zsh/bash/sh 자식은 fd payload를 읽었다. 따라서 Phase 1의 `read-output` capability fd grant는 일반 login shell이 아니라 non-login trusted agent/control profile에서 먼저 구현한다. login shell에서 read-output이 필요하면 env bearer token으로 후퇴하지 말고 별도 one-shot grant UX를 설계한다.
 - shell·daemon 영향 실측: synthetic `ZDOTDIR/.zshenv`가 fd를 닫으면 CLI는 fd read 실패로 닫힌다. 일반 background child는 fd를 유지했다. 이 환경의 tmux/screen pane은 env는 보존했지만 fd는 닫혀 있었다. 그래서 tmux/screen이 fd를 늘린다고 단정하지 않되, fd가 background/daemon에 남는 경우를 TTL+revocation 테스트로 계속 막는다. `sudo -n -E`는 로컬에서 비밀번호 요구로 미검증이므로 controlled sudoers 환경 또는 수동 gate로 둔다.

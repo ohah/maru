@@ -8597,7 +8597,16 @@ fn wakeCdpSleepers() void {
                 finishCdp(run, .failed, "the request was cancelled");
                 continue;
             }
-            p.nav = if (session_mod.web_osr.agentNavState(run.surface_id)) |st| .{ .done = st.done, .loaded = st.loaded, .before_unload = st.before_unload, .started = st.saw_loading or st.saw_started, .blocked_rule = st.blocked_rule, .mocked_rule = st.mocked_rule } else null;
+            p.nav = if (session_mod.web_osr.agentNavState(run.surface_id)) |st| .{
+                .done = st.done,
+                .loaded = st.loaded,
+                .before_unload = st.before_unload,
+                .started = st.saw_loading or st.saw_started,
+                .blocked_rule = st.blocked_rule,
+                .mocked_rule = st.mocked_rule,
+                // 2026-11-20 「붙이기」: 이 이동이 지켜보는 동안 실패했고 탭이 지금도 오류 페이지다(앞 이동의 늦은 실패·이미 지운 표시는 아니다 — 계획 공격 1).
+                .net_error = if (st.net_error != 0 and session_mod.web_osr.errorPage(run.surface_id) != null) st.net_error else 0,
+            } else null;
         };
         run.op.input_scale = session_mod.web_osr.emulationInputScale(run.surface_id); // W9e①
         const step = run.op.wake(allocator) catch {
@@ -9015,10 +9024,16 @@ fn completeTabStatus(async_id: u64, status: control_browser.BrowserCompletionSta
     maru_macos_control_complete_browser_op(async_id, @backingInt(status), result.ptr, result.len);
 }
 
-fn completeAgentOpen(async_id: u64, tab: u64, url: []const u8, loaded: bool) void {
+/// 2026-11-20 「붙이기」: `error_page` — 첫 불러오기가 오류 페이지로 끝났다(그 번호·막기 규칙). 그때 `loaded` 는 거짓이다(navigate 와 같은 뜻 — 불러온
+/// 페이지가 없다; 오류 페이지의 끝도 `page_loads` 를 세어 전에는 `loaded:true` 였다). L2 `.open` 이 칸을 옮긴다.
+fn completeAgentOpen(async_id: u64, tab: u64, url: []const u8, loaded: bool, error_page: ?session_mod.web_osr.ErrorPage) void {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    std.json.Stringify.value(.{ .id = tab, .url = url, .loaded = loaded }, .{}, &aw.writer) catch return completeTabStatus(async_id, .failed, "out of memory");
+    const ok = if (error_page) |ep|
+        std.json.Stringify.value(.{ .id = tab, .url = url, .loaded = false, .net_error = ep.net_error, .blocked_rule = ep.blocked_rule }, .{}, &aw.writer)
+    else
+        std.json.Stringify.value(.{ .id = tab, .url = url, .loaded = loaded }, .{}, &aw.writer);
+    ok catch return completeTabStatus(async_id, .failed, "out of memory");
     completeTabStatus(async_id, .success, aw.written());
 }
 
@@ -9093,7 +9108,7 @@ fn startAgentOpen(refs: []const ControlSessionRef, async_id: u64, pane: u64, arg
         .pane = pane,
         .want_load = parsed.value.url != null,
         .deadline_ms = cdpNowMs() + parsed.value.timeout_ms,
-    }) catch return completeAgentOpen(async_id, tab, "", false);
+    }) catch return completeAgentOpen(async_id, tab, "", false, null);
 }
 
 fn startAgentClose(refs: []const ControlSessionRef, async_id: u64, op: control_browser.BrowserOp) void {
@@ -9227,12 +9242,13 @@ fn pollAgentOpen(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
             return true;
         }
         if (now < r.deadline_ms) return false;
-        completeAgentOpen(r.async_id, r.tab, "", false);
+        completeAgentOpen(r.async_id, r.tab, "", false, null);
         return true;
     };
     const ready = if (r.want_load) st.loads > 0 else st.created;
     if (!ready and now < r.deadline_ms) return false;
-    completeAgentOpen(r.async_id, r.tab, session_mod.web_osr.shownUrl(r.tab) orelse st.url, ready); // 보이는 주소(오류 페이지면 실패한 주소)
+    // 보이는 주소(오류 페이지면 실패한 주소). 끝났는데 오류 페이지면 그 표시(2026-11-20 「붙이기」 — 시한으로 끝난 것에는 싣지 않는다: 느림은 실패가 아니다).
+    completeAgentOpen(r.async_id, r.tab, session_mod.web_osr.shownUrl(r.tab) orelse st.url, ready, if (ready) session_mod.web_osr.errorPage(r.tab) else null);
     return true;
 }
 
@@ -14601,6 +14617,59 @@ test "W9b③ 적대 리뷰 1 회차: 대화상자(떠나기 확인·alert)가 �
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
 }
 
+test "오류 페이지 표시(2026-11-20 「붙이기」): open 의 첫 불러오기가 오류 페이지로 끝나면 loaded:false 와 list 같은 칸(전에는 loaded:true) — 시한은 칸 없이" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.open\",\"params\":{\"url\":\"http://127.0.0.1:61999/refused\"}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    startAgentOpen(&refs, id, shell, "{\"url\":\"http://127.0.0.1:61999/refused\",\"timeout_ms\":25000}");
+    const tab = pane.terms.items[1].surfaceId();
+    // 실제 차례(live 실측): 브라우저가 만들어지고(첫 about:blank 의 끝은 넘긴다) 그 주소로 이동을 보낸다 — 실패는 error_page 가 끝(load_finished 0)보다
+    // 먼저(판정 af-order), 그 끝이 첫 불러오기로 센다(전에는 그래서 loaded:true 였다).
+    session_mod.web_osr.navigate(ta, tab, "http://127.0.0.1:61999/refused"); // 창 tick 의 첫 주소(`pending_url`) — 만들어지면 보낸다
+    session_mod.web_osr.testApply(ta, .{ .browser_created = tab });
+    session_mod.web_osr.testApply(ta, .{ .load_finished = .{ .browser = tab, .http_status = 0 } }); // 첫 about:blank
+    pollTabRuns(&refs);
+    try std.testing.expect(pending.response == null);
+    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = tab, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    session_mod.web_osr.testApply(ta, .{ .error_page = .{ .browser = tab, .error_code = -102, .url = "http://127.0.0.1:61999/refused" } });
+    session_mod.web_osr.testApply(ta, .{ .load_finished = .{ .browser = tab, .http_status = 0 } });
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&pending);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("http://127.0.0.1:61999/refused", r.get("url").?.string);
+        try std.testing.expect(!r.get("loaded").?.bool);
+        try std.testing.expect(r.get("error_page").?.bool);
+        try std.testing.expectEqual(@as(i64, -102), r.get("net_error").?.integer);
+        try std.testing.expectEqualStrings("ERR_CONNECTION_REFUSED", r.get("net_error_name").?.string);
+    }
+    // 시한(느림) — 칸 없이 loaded:false.
+    var slow: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const slow_id = try control_server_storage.deferRequest(&slow, std.math.maxInt(i128));
+    startAgentOpen(&refs, slow_id, shell, "{\"url\":\"https://e.test/slow\",\"timeout_ms\":25000}");
+    tab_runs.items[0].deadline_ms = 0;
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&slow);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expect(!r.get("loaded").?.bool and r.get("error_page") == null);
+    }
+}
+
 test "W9b③ 적대 리뷰 1 회차: 탭 op 이 있으면 has_pending 이 1, drain 이 확인을 돈다 — 물었는데 탭이 남으면 kept open" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
@@ -14844,6 +14913,71 @@ test "W9a: navigate 는 이동을 보내고 첫 불러오기를 기다려 loaded
     startCdpOp(try w9aRequest(&p3, nav_req, 71, .navigate), 71, .navigate, "https://b.test/");
     try expectPendingErrorCode(&p3, .internal_error);
     try std.testing.expectEqualStrings("https://a.test/b", session_mod.web_osr.testLastUrl(71).?);
+}
+
+test "오류 페이지 표시(2026-11-20 「붙이기」): navigate 가 오류 페이지로 끝나면 loaded:false 와 list 같은 칸 — 앞 이동의 늦은 실패·지워진 표시는 싣지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 75);
+    defer {
+        session_mod.web_osr.destroy(ta, 75);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(75);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 75, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const nav_req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.navigate\",\"params\":{\"id\":75,\"url\":\"https://a.test/\"}}";
+    // ① 실패(DNS) — error_page 가 끝(load_finished 0)보다 먼저 온다(판정 af-order).
+    var p1: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p1, nav_req, 75, .navigate), 75, .navigate, "https://x.invalid/");
+    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = 75, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    session_mod.web_osr.testApply(ta, .{ .error_page = .{ .browser = 75, .error_code = -105, .url = "https://x.invalid/" } });
+    session_mod.web_osr.testApply(ta, .{ .load_finished = .{ .browser = 75, .http_status = 0 } });
+    w9aWakeNow();
+    {
+        const r = try w9b3Result(&p1);
+        defer r.deinit();
+        const o = r.value.object.get("result").?.object;
+        try std.testing.expect(!o.get("loaded").?.bool);
+        try std.testing.expect(o.get("error_page").?.bool);
+        try std.testing.expectEqual(@as(i64, -105), o.get("net_error").?.integer);
+        try std.testing.expectEqualStrings("ERR_NAME_NOT_RESOLVED", o.get("net_error_name").?.string);
+    }
+    // ② 앞 이동의 늦은 실패가 지켜보는 동안 왔지만 새 문서가 섰다 — 불러온 끝, 칸 없음(계획 공격 1).
+    var p2: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p2, nav_req, 75, .navigate), 75, .navigate, "https://a.test/ok");
+    session_mod.web_osr.testApply(ta, .{ .error_page = .{ .browser = 75, .error_code = -102, .url = "https://y.test/" } });
+    session_mod.web_osr.testApply(ta, .{ .page_started = 75 });
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 75, .url = "https://a.test/ok" } });
+    session_mod.web_osr.testApply(ta, .{ .load_finished = .{ .browser = 75, .http_status = 200 } });
+    w9aWakeNow();
+    {
+        const r = try w9b3Result(&p2);
+        defer r.deinit();
+        const o = r.value.object.get("result").?.object;
+        try std.testing.expect(o.get("loaded").?.bool);
+        try std.testing.expect(o.get("error_page") == null and o.get("net_error") == null);
+    }
+    // ③ 실패했지만 끝나기 전에 그 오류 페이지가 지워졌다(주소 확정) — 탭이 지금 오류 페이지가 아니면 싣지 않는다.
+    var p3: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p3, nav_req, 75, .navigate), 75, .navigate, "https://x.invalid/2");
+    session_mod.web_osr.testApply(ta, .{ .error_page = .{ .browser = 75, .error_code = -105, .url = "https://x.invalid/2" } });
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 75, .url = "https://a.test/ok" } });
+    session_mod.web_osr.testApply(ta, .{ .load_finished = .{ .browser = 75, .http_status = 0 } });
+    w9aWakeNow();
+    {
+        const r = try w9b3Result(&p3);
+        defer r.deinit();
+        const o = r.value.object.get("result").?.object;
+        try std.testing.expect(!o.get("loaded").?.bool);
+        try std.testing.expect(o.get("error_page") == null);
+    }
 }
 
 // ── P0-3: 브라우저 제어의 시각 일은 `maru_macos_control_tick` 이 한다 ─────────────────────────────────────────────────────────────

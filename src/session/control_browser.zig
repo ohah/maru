@@ -2262,7 +2262,7 @@ pub fn serializeNavigateResult(gpa: std.mem.Allocator, id: cp.Id) std.mem.Alloca
 }
 
 fn writeNavigateResult(s: *std.json.Stringify, id: cp.Id) !void {
-    try writeNavigateLoadedResult(s, id, null, null, null);
+    try writeNavigateLoadedResult(s, id, null, null, null, 0);
 }
 
 /// `browser.navigate` 성공 — Chromium 탭은 첫 불러오기를 기다려 `loaded` 를 싣는다(W9a — 엔진이 결과 `"true"`/`"false"` 로 준다).
@@ -2276,8 +2276,11 @@ pub fn serializeNavigateLoadedResult(gpa: std.mem.Allocator, id: cp.Id, result: 
     // W9d④: 주 프레임 문서가 가짜였다 — `{"loaded":…,"mocked":true,"mock_rule":N}`.
     var block_rule: ?u32 = null;
     var mock_rule: ?u32 = null;
+    var net_error: i32 = 0;
     if (result.len > 0 and result[0] == '{') {
-        const parsed = std.json.parseFromSlice(struct { loaded: bool = false, blocked: bool = false, block_rule: u32 = 0, mocked: bool = false, mock_rule: u32 = 0 }, gpa, result, .{}) catch |e| switch (e) {
+        // 2026-11-20 「붙이기」: `net_error` — 그 이동이 오류 페이지로 끝났다(엔진이 불러오지 않은 끝에만 싣는다). 모르는 칸은 거절하는 풀기라 이 칸이
+        // 빠지면 `loaded` 까지 잃는다(계획 공격 3 — 시험이 정확한 글로 지킨다).
+        const parsed = std.json.parseFromSlice(struct { loaded: bool = false, blocked: bool = false, block_rule: u32 = 0, mocked: bool = false, mock_rule: u32 = 0, net_error: i32 = 0 }, gpa, result, .{}) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => null,
         };
@@ -2286,13 +2289,14 @@ pub fn serializeNavigateLoadedResult(gpa: std.mem.Allocator, id: cp.Id, result: 
             loaded = p.value.loaded;
             if (p.value.blocked and p.value.block_rule != 0) block_rule = p.value.block_rule;
             if (p.value.mocked and p.value.mock_rule != 0) mock_rule = p.value.mock_rule;
+            if (!p.value.loaded and p.value.net_error < 0) net_error = p.value.net_error; // 불러온 끝에는 싣지 않는다
         }
     }
-    (writeNavigateLoadedResult(&s, id, loaded, block_rule, mock_rule)) catch return error.OutOfMemory;
+    (writeNavigateLoadedResult(&s, id, loaded, block_rule, mock_rule, net_error)) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool, block_rule: ?u32, mock_rule: ?u32) !void {
+fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool, block_rule: ?u32, mock_rule: ?u32, net_error: i32) !void {
     try beginResult(s, id);
     try s.objectField("ok");
     try s.write(true);
@@ -2312,6 +2316,8 @@ fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool, b
         try s.objectField("mock_rule");
         try s.write(r);
     }
+    // 2026-11-20 「붙이기」: list·getUrl 과 같은 칸(막힘이면 `blocked_rule` 은 `block_rule` 과 같은 값).
+    if (net_error < 0) try writeErrorPageFields(s, net_error, block_rule orelse 0);
     try endResult(s);
 }
 
@@ -3235,6 +3241,9 @@ fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, 
             const url = o.get("url") orelse return error.InvalidTabPayload;
             const loaded = o.get("loaded") orelse return error.InvalidTabPayload;
             if (tab != .integer or tab.integer <= 0 or url != .string or loaded != .bool) return error.InvalidTabPayload;
+            // 2026-11-20 「붙이기」: 첫 불러오기가 오류 페이지로 끝났다(app 은 그때 `loaded:false`). 꼴이 틀리면 칸만 버린다 — 탭은 이미 열렸다(계획 공격 8).
+            const net_error: i32 = if (o.get("net_error")) |v| (if (v == .integer and v.integer < 0 and v.integer >= std.math.minInt(i32) and !loaded.bool) @intCast(v.integer) else 0) else 0;
+            const open_rule: u32 = if (o.get("blocked_rule")) |v| (if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) @intCast(v.integer) else 0) else 0;
             (blk: {
                 beginResult(&s, id) catch |e| break :blk e;
                 s.objectField("id") catch |e| break :blk e;
@@ -3243,6 +3252,7 @@ fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, 
                 s.write(url.string) catch |e| break :blk e;
                 s.objectField("loaded") catch |e| break :blk e;
                 s.write(loaded.bool) catch |e| break :blk e;
+                if (net_error < 0) writeErrorPageFields(&s, net_error, open_rule) catch |e| break :blk e;
                 endResult(&s) catch |e| break :blk e;
             }) catch return error.OutOfMemory;
         },
@@ -6597,6 +6607,42 @@ test "W9a: Chromium 탭의 navigate 는 loaded 를 싣고, WebKit 의 빈 결과
     defer testing.allocator.free(resp);
     try testing.expectEqualStrings(cases[1].want, resp);
     try testing.expect(engineSupports(.chromium, .navigate) and engineSupports(.chromium, .get_url) and engineSupports(.chromium, .screenshot));
+}
+
+test "오류 페이지 표시(2026-11-20 「붙이기」): navigate 결과는 불러오지 않은 끝의 net_error 를 list 와 같은 칸으로 — 막힘이면 blocked_rule 은 block_rule 과 같다" {
+    const cases = [_]struct { result: []const u8, want: []const u8 }{
+        .{ .result = "{\"loaded\":false,\"net_error\":-105}", .want = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true,\"loaded\":false,\"error_page\":true,\"net_error\":-105,\"net_error_name\":\"ERR_NAME_NOT_RESOLVED\"}}" },
+        .{ .result = "{\"loaded\":false,\"blocked\":true,\"block_rule\":3,\"net_error\":-20}", .want = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true,\"loaded\":false,\"blocked\":true,\"block_rule\":3,\"error_page\":true,\"net_error\":-20,\"net_error_name\":\"ERR_BLOCKED_BY_CLIENT\",\"blocked_rule\":3}}" },
+        .{ .result = "{\"loaded\":false,\"mocked\":true,\"mock_rule\":4,\"net_error\":-9999}", .want = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true,\"loaded\":false,\"mocked\":true,\"mock_rule\":4,\"error_page\":true,\"net_error\":-9999}}" },
+        // 불러온 끝·0 이상 번호는 싣지 않는다.
+        .{ .result = "{\"loaded\":true,\"mocked\":true,\"mock_rule\":4,\"net_error\":-105}", .want = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true,\"loaded\":true,\"mocked\":true,\"mock_rule\":4}}" },
+        .{ .result = "{\"loaded\":false,\"net_error\":5}", .want = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true,\"loaded\":false}}" },
+    };
+    for (cases) |c| {
+        const wire = try serializeNavigateLoadedResult(testing.allocator, .{ .number = 3 }, c.result);
+        defer testing.allocator.free(wire);
+        try testing.expectEqualStrings(c.want, wire);
+    }
+}
+
+test "오류 페이지 표시(2026-11-20 「붙이기」): open 결과는 app 이 준 net_error·blocked_rule 을 loaded:false 일 때만 같은 칸으로 — 꼴이 틀린 칸은 버리고 open 은 그대로" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"https://e.test/\"}}";
+    const cases = [_]struct { payload: []const u8, want: []const u8 }{
+        .{ .payload = "{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"net_error\":-102,\"blocked_rule\":0}", .want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"error_page\":true,\"net_error\":-102,\"net_error_name\":\"ERR_CONNECTION_REFUSED\"}}" },
+        .{ .payload = "{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"net_error\":-20,\"blocked_rule\":7}", .want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"error_page\":true,\"net_error\":-20,\"net_error_name\":\"ERR_BLOCKED_BY_CLIENT\",\"blocked_rule\":7}}" },
+        // 칸이 없거나(시한·보통) 꼴이 틀리면(글·0 이상·i32 밖·loaded:true) 칸 없이.
+        .{ .payload = "{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false}", .want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false}}" },
+        .{ .payload = "{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"net_error\":\"x\"}", .want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false}}" },
+        .{ .payload = "{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"net_error\":3}", .want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false}}" },
+        .{ .payload = "{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"net_error\":-9999999999}", .want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false}}" },
+        .{ .payload = "{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":true,\"net_error\":-102}", .want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":true}}" },
+        .{ .payload = "{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"net_error\":-102,\"blocked_rule\":-1}", .want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"error_page\":true,\"net_error\":-102,\"net_error_name\":\"ERR_CONNECTION_REFUSED\"}}" },
+    };
+    for (cases) |c| {
+        const wire = try serializeBrowserResponseStatus(testing.allocator, req, .success, c.payload);
+        defer testing.allocator.free(wire);
+        try testing.expectEqualStrings(c.want, wire);
+    }
 }
 
 test "W9a 적대 리뷰 2 회차 재현: 진단 메시지의 \\n·\\t 는 2 바이트로 센다(WebKit escapedDiagnostic·Zig 쓰개와 같다) — 상한까지 자른 여러 줄 메시지가 폴백으로 바뀌었다" {

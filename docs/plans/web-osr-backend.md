@@ -5273,6 +5273,11 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   `@field(c, name) == code` 로 CEF 와 맞춘다. CLI: list 줄 끝 `[error page: ERR_…]`, get-url 은 stdout 주소 한 줄 그대로 + stderr `note:`(대본 호환 — 공격 9).
   쿠키·저장소 op 의 거절도 이 표시로(실패 주소를 받지 못한 오류 페이지에서도). 판정자 `--addr-failed` 에 `af-flag-holds`(오류 페이지 뒤 `url_changed`·
   `page_started` 0 — 모든 갈래)·`ef-http-status`(본문 있는 404 는 문서; 본문 없는 404·500 은 Chromium 오류 페이지 -379 — obs). 기록 `$S/agent_equal/error_flag/`.
+- **open·navigate 결과에도(사용자 결정 2026-11-20 「붙이기」, `feat/browser-open-error-flag`)**: `browser.open` 은 첫 불러오기가 오류 페이지로 끝나면
+  `loaded:false` 에 list 와 같은 칸(전에는 오류 페이지의 끝도 첫 불러오기로 세어 `loaded:true` — 격리 실측), 시한(느림)에는 칸이 없다. `browser.navigate` 는
+  `AgentNav.net_error`(지켜보는 동안 온 `error_page`, `page_started` 가 지운다)와 탭이 지금 오류 페이지인지를 함께 보고 불러오지 않은 끝에만 싣는다. CLI 는
+  첫 줄(`opened N URL`·`ok`) 그대로, 둘째 줄 `warning: [error page: ERR_…] — …`. 판정자 `af-order`(error_page 가 그 이동의 load_finished 앞 — 갈래 일곱).
+  wire 무변경. 기록 `$S/agent_equal/open_error_flag/`.
 - **A2 주인 넘기기**: 막기 규칙·막기 엄격·가짜 규칙·가짜 엄격·탭의 흉내·탭의 trace 는 각각 주인 pane 이 하나. 어느 pane 이든 바꾸고 지운다 — **실제로
   바꾼 호출의 pane 이 주인**, 그대로 두는 호출(같은 규칙·같은 응답(실행 사이트까지)·같은 사이트 엄격·같은 값의 흉내)은 주인을 옮기지 않는다. 철회·pane
   닫힘은 그 순간 주인인 것만 거둔다 — 20 회 검증 B DEF-3·W9d④ v2 R13(다시 켠 pane 이 주인이 되고 그 pane 의 철회가 처음 pane 의 엄격을 지웠다)을 이

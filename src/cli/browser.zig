@@ -4056,21 +4056,26 @@ fn writeErrorPageLabel(w: *std.Io.Writer, o: std.json.ObjectMap) !void {
     if (intField(o.get("blocked_rule"))) |r| if (r > 0) try w.print(", blocking rule {d}", .{r});
 }
 
-/// open·navigate 가 오류 페이지로 끝났다는 둘째 줄(2026-11-20 「붙이기」) — 첫 줄(`opened N URL`·`ok`)은 대본이 읽어 그대로 두고, 표지는 list 와 같은 꼴.
 /// 탭 상한 알림(`tab_limit` — `control_browser.validTabLimit` 의 모양)의 경고 줄 — 이 입력의 것(`input`)과 앞서 버린 것(`dropped`)이 한 줄씩. 글은 앱이
-/// 판정한 사실만: 이 입력이 팝업을 열려 했는지는 모른다(「막힌다」 — 「막혔다」 가 아니다).
+/// 판정한 사실만(적대 검증 — 에이전트가 닫지 말아야 할 탭을 닫거나 누름을 되풀이하게 하지 않게):
+///   - 이 입력이 팝업을 열려 했는지는 모른다, 그리고 사람이 그 탭을 막 눌렀으면 그 장으로 사람의 탭이 열릴 수 있다 — 그래서 「이 pane 의 에이전트 탭으로는
+///     열리지 않는다」 와 「되풀이하기 전에 list 를 보라」.
+///   - 버린 수는 그 pane 의 탭을 누른 다른 pane 의 입력일 수도 있고, 알릴 때는 자리가 났을 수 있다 — 과거형, 지금 수가 상한보다 작으면 닫으라 하지 않는다.
+///   - 닫으라는 것은 「이 pane 이 연 에이전트 탭」 뿐이다(close 는 사람의 탭도 닫는다 — 그것은 사용자에게 묻는다).
 fn writeTabLimitWarnings(w: *std.Io.Writer, t: std.json.ObjectMap) !void {
     if (boolField(t.get("input"))) {
-        try w.writeAll("warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page)");
-        try writeTabLimitTail(w, t);
+        try w.writeAll("warning: [tab limit] a popup or new tab the page opens from this input will not open as this pane's agent tab (the input itself reached the page; check maru browser list before repeating it)");
+        try writeTabLimitTail(w, t, false);
     }
     if (intField(t.get("dropped"))) |n| if (n > 0) {
-        try w.print("warning: [tab limit] {d} popup(s) or new tab(s) a page opened after your earlier input did not open", .{n});
-        try writeTabLimitTail(w, t);
+        try w.print("warning: [tab limit] {d} popup(s) or new tab(s) a page opened after an earlier click or key press on this pane's tabs did not open", .{n});
+        try writeTabLimitTail(w, t, true);
     };
 }
 
-fn writeTabLimitTail(w: *std.Io.Writer, t: std.json.ObjectMap) !void {
+const tab_limit_close_advice = "close an agent tab you opened and no longer need with maru browser close --surface <id>";
+
+fn writeTabLimitTail(w: *std.Io.Writer, t: std.json.ObjectMap, past: bool) !void {
     const app = std.mem.eql(u8, strField(t.get("reason")), "app");
     if (boolField(t.get("other_pane"))) {
         try w.writeAll(if (app)
@@ -4079,19 +4084,26 @@ fn writeTabLimitTail(w: *std.Io.Writer, t: std.json.ObjectMap) !void {
             " — the pane that opened this tab is at its limit of agent tabs; those are another agent's tabs — leave them\n");
         return;
     }
-    if (app) try w.writeAll(" — maru's table of agent-controlled tabs is full (all panes); close tabs you no longer need with maru browser close --surface <id>, or ask the user to choose Revoke All in the Browser Grants menu") else {
-        try w.writeAll(" — this pane is at its limit of ");
-        if (intField(t.get("max"))) |m| try w.print("{d} ", .{m});
-        try w.writeAll("agent tabs; close one you no longer need with maru browser close --surface <id>");
+    const tabs: []const std.json.Value = if (t.get("tabs")) |v| (if (v == .array) v.array.items else &.{}) else &.{};
+    if (app) {
+        try w.print(" — maru's table of agent-controlled tabs {s} full (all panes); " ++ tab_limit_close_advice ++ ", or ask the user to close tabs or to choose Revoke All in the Browser Grants menu", .{if (past) "was" else "is"});
+    } else {
+        const max = intField(t.get("max"));
+        try w.print(" — this pane {s} at its limit of ", .{if (past) "was" else "is"});
+        if (max) |m| try w.print("{d} ", .{m});
+        try w.writeAll("agent tabs");
+        // 알릴 때 자리가 났다(그 사이 닫았다) — 더 닫으라 하지 않는다.
+        if (past and max != null and tabs.len < max.?) try w.writeAll(" then and has room now") else try w.writeAll("; to let one open, " ++ tab_limit_close_advice);
     }
-    if (t.get("tabs")) |tabs| if (tabs == .array and tabs.array.items.len > 0) {
-        try w.writeAll(" (this pane's agent tabs:");
-        for (tabs.array.items) |id| if (id == .integer) try w.print(" {d}", .{id.integer});
+    if (tabs.len > 0) {
+        try w.writeAll(" (this pane's agent tabs (◈):");
+        for (tabs) |id| if (id == .integer) try w.print(" {d}", .{id.integer});
         try w.writeAll(")");
-    };
+    }
     try w.writeAll("\n");
 }
 
+/// open·navigate 가 오류 페이지로 끝났다는 둘째 줄(2026-11-20 「붙이기」) — 첫 줄(`opened N URL`·`ok`)은 대본이 읽어 그대로 두고, 표지는 list 와 같은 꼴.
 fn writeErrorPageWarning(w: *std.Io.Writer, result: std.json.ObjectMap) !void {
     try w.writeAll("warning: [error page: ");
     try writeErrorPageLabel(w, result);
@@ -6033,15 +6045,22 @@ test "W9b③ 적대 리뷰 3 회차: 누른 뒤 페이지가 대화상자를 띄
 
 // 사용자 결정 2026-11-20 「상한 두고 알리기」: 상한에 닿은 pane 의 누름은 전에는 `ok` 만 찍어 팝업이 왜 안 뜨는지 몰랐다. 경고는 사실만 —
 // 이 입력이 팝업을 열려 했는지는 모른다(「막힌다」), 앞서 버린 것은 수로. 다른 pane 의 탭이면 닫으라 하지 않는다.
-test "TCN render: tab_limit 은 ok 뒤에 [tab limit] 경고 — 이 입력·앞서 버린 것·다른 pane·grant 표" {
-    var buf: [2048]u8 = undefined;
+test "TCN render: tab_limit 은 ok 뒤에 [tab limit] 경고 — 이 입력·앞서 버린 것(지금 자리가 났으면 닫으라 하지 않는다)·다른 pane·grant 표" {
+    var buf: [4096]u8 = undefined;
+    const input = "warning: [tab limit] a popup or new tab the page opens from this input will not open as this pane's agent tab (the input itself reached the page; check maru browser list before repeating it)";
+    const dropped2 = "warning: [tab limit] 2 popup(s) or new tab(s) a page opened after an earlier click or key press on this pane's tabs did not open";
+    const dropped1 = "warning: [tab limit] 1 popup(s) or new tab(s) a page opened after an earlier click or key press on this pane's tabs did not open";
+    const advice = "close an agent tab you opened and no longer need with maru browser close --surface <id>";
+    const table = "maru's table of agent-controlled tabs";
     const cases = [_]struct { tab_limit: []const u8, want: []const u8 }{
-        .{ .tab_limit = "{\"reason\":\"pane\",\"max\":8,\"tabs\":[3,9],\"input\":true}", .want = "warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page) — this pane is at its limit of 8 agent tabs; close one you no longer need with maru browser close --surface <id> (this pane's agent tabs: 3 9)\n" },
-        .{ .tab_limit = "{\"reason\":\"pane\",\"max\":8,\"tabs\":[],\"dropped\":2}", .want = "warning: [tab limit] 2 popup(s) or new tab(s) a page opened after your earlier input did not open — this pane is at its limit of 8 agent tabs; close one you no longer need with maru browser close --surface <id>\n" },
-        .{ .tab_limit = "{\"reason\":\"pane\",\"other_pane\":true,\"input\":true}", .want = "warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page) — the pane that opened this tab is at its limit of agent tabs; those are another agent's tabs — leave them\n" },
-        .{ .tab_limit = "{\"reason\":\"app\",\"tabs\":[4],\"input\":true,\"dropped\":1}", .want = "warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page) — maru's table of agent-controlled tabs is full (all panes); close tabs you no longer need with maru browser close --surface <id>, or ask the user to choose Revoke All in the Browser Grants menu (this pane's agent tabs: 4)\n" ++
-            "warning: [tab limit] 1 popup(s) or new tab(s) a page opened after your earlier input did not open — maru's table of agent-controlled tabs is full (all panes); close tabs you no longer need with maru browser close --surface <id>, or ask the user to choose Revoke All in the Browser Grants menu (this pane's agent tabs: 4)\n" },
-        .{ .tab_limit = "{\"reason\":\"app\",\"other_pane\":true,\"input\":true}", .want = "warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page) — maru's table of agent-controlled tabs is full (all panes); ask the user to close tabs or to choose Revoke All in the Browser Grants menu\n" },
+        .{ .tab_limit = "{\"reason\":\"pane\",\"max\":8,\"tabs\":[3,9],\"input\":true}", .want = input ++ " — this pane is at its limit of 8 agent tabs; to let one open, " ++ advice ++ " (this pane's agent tabs (◈): 3 9)\n" },
+        // 버린 뒤 닫아 자리가 났다 — 과거형, 닫으라 하지 않는다.
+        .{ .tab_limit = "{\"reason\":\"pane\",\"max\":8,\"tabs\":[1,2],\"dropped\":2}", .want = dropped2 ++ " — this pane was at its limit of 8 agent tabs then and has room now (this pane's agent tabs (◈): 1 2)\n" },
+        .{ .tab_limit = "{\"reason\":\"pane\",\"max\":2,\"tabs\":[1,2],\"dropped\":2}", .want = dropped2 ++ " — this pane was at its limit of 2 agent tabs; to let one open, " ++ advice ++ " (this pane's agent tabs (◈): 1 2)\n" },
+        .{ .tab_limit = "{\"reason\":\"pane\",\"other_pane\":true,\"input\":true}", .want = input ++ " — the pane that opened this tab is at its limit of agent tabs; those are another agent's tabs — leave them\n" },
+        .{ .tab_limit = "{\"reason\":\"app\",\"tabs\":[4],\"input\":true,\"dropped\":1}", .want = input ++ " — " ++ table ++ " is full (all panes); " ++ advice ++ ", or ask the user to close tabs or to choose Revoke All in the Browser Grants menu (this pane's agent tabs (◈): 4)\n" ++
+            dropped1 ++ " — " ++ table ++ " was full (all panes); " ++ advice ++ ", or ask the user to close tabs or to choose Revoke All in the Browser Grants menu (this pane's agent tabs (◈): 4)\n" },
+        .{ .tab_limit = "{\"reason\":\"app\",\"other_pane\":true,\"input\":true}", .want = input ++ " — " ++ table ++ " is full (all panes); ask the user to close tabs or to choose Revoke All in the Browser Grants menu\n" },
     };
     for (cases) |c| {
         var w: std.Io.Writer = .fixed(&buf);

@@ -23,14 +23,19 @@ The first `open` does.
 - A pane holds at most 8 agent tabs, about 157 MB each. A ninth `open` fails until you `close` one.
   Pages a page opens after your real click (`target=_blank`, `window.open`) also become your agent tabs, behind the
   user's, and count — in any tab, the user's too (an older Maru: only in a tab you opened; on a user's tab nothing
-  opened). With 8 agent tabs the page's new tab does not open — the `click`, `type` or `press` then prints `ok` and
-  `warning: [tab limit] popups and new tabs from this input are blocked …`, ending with the ids of your pane's agent tabs. The
-  input itself happened; only the new tab is missing. If you need that tab, `close` one of the listed tabs you no
-  longer need, then repeat the input only if repeating it is harmless (a "Sign in with …" button usually is, a
-  "Pay" button is not — check the page first). `warning: [tab limit] N popup(s) … did not open` reports new tabs a
-  page opened later, after an earlier input. A `warning: [tab limit]` that says the tabs are another agent's means
-  the tab you clicked belongs to another pane: leave those tabs alone. One that says Maru's table is full counts all
-  panes: close agent tabs you opened or ask the user. A ninth `open` fails and its message lists your pane's agent tabs.
+  opened). With 8 agent tabs the page's new tab does not open as an agent tab — the `click`, `type` or `press` then
+  prints `ok` and `warning: [tab limit] a popup or new tab the page opens from this input will not open as this pane's
+  agent tab …`, ending with the ids of this pane's agent tabs (◈). The input itself happened. If the user clicked that
+  tab a moment before, the page may still open it as the user's tab: run `list` before you repeat anything. If you
+  need that tab, close an agent tab you opened and no longer need, then repeat the input only if repeating it is
+  harmless (a "Sign in with …" button usually is, a "Pay" button is not — check the page first). The ids can include
+  tabs an earlier session in this pane opened, or pages another pane's agent opened from this pane's tabs: ask the
+  user before you close one you do not remember opening. `warning: [tab limit] N popup(s) … did not open` reports new
+  tabs a page opened a little later, after an earlier click or key press on this pane's tabs; "has room now" there
+  means nothing needs closing. A `warning: [tab limit]` that says the tabs are another agent's means the tab you
+  clicked belongs to another pane: leave those tabs alone. One that says Maru's table is full counts all panes: close
+  agent tabs you opened, or ask the user. A ninth `open` fails and its message lists this pane's agent tabs. An older
+  Maru prints no `[tab limit]` warning: there the new tab silently does not open.
 - Agent tabs are not remembered across an app restart, and become the user's tabs when your pane closes.
   After that they are user tabs. When the user revokes in the Browser Grants menu, what you set there is removed
   but the tab stays yours (◈); your next command gets full access again (an older Maru made it a user tab).

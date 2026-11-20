@@ -5979,10 +5979,14 @@ take 안에서** 나갔다 — P1 이 그 take·drain 을 지우면 함께 사�
   실패했지만 어느 탭이 에이전트 탭인지 말하지 않았다(누름이 연 팝업도 센다).
 - **구현**: `agentTabLimit`(까닭 — `pane`·`app`, 자리 판정 `agentTabRoom` 이 같은 것을 쓴다). `grantAgentNewTabCredit` 이 활성 입력의 장을 주지 못하면 `TabLimitNote` 를 돌려주고
   `cdpAdvance` 가 `CdpRun.tab_limit` 에 둔다. `onAgentTabRoom` 은 거짓을 줄 때 그 pane 의 「버린 수」 를 센다(부르는 곳은 `insertNewTab` 하나 — 거짓이면 곧 버린다; pane 16 칸,
-  pane 이 닫히면 지운다). `finishCdp` 가 click·type·press·hover·scroll 의 성공에 `tab_limit` 을 더한다(`withTabLimit` — 원래 칸은 그대로, 메모리가 모자라면 원래 결과 — 입력은
-  갔다). L2 `serializeActMatchedResult` 가 칸을 검사해 싣는다(`validTabLimit`; 그것만 있는 결과도 받는다 — 전에는 `matched`·`dialog` 없는 객체가 내부 오류였다). CLI `warning: [tab limit] …`,
-  open 실패 글에 그 pane 의 에이전트 탭 번호. CLI 의 close 전용 거절 안내(「only tabs this pane opened … can be closed」)는 걷고 일반 안내로(close 는 2026-11-17 A1 로 어느 탭이든).
+  pane 이 닫히면 지운다, 마지막으로 버린 뒤 `tab_limit_drop_keep_ms` 가 지나면 싣지 않고 버린다 — 적대 검증: 시효가 없어 다음 세션의 첫 입력이 지금 일로 읽었다). `finishCdp` 가 click·type·press·hover·scroll 의 성공에 `tab_limit` 을 더한다(`withTabLimit` — 원래 칸은 그대로, 메모리가 모자라면 원래 결과 — 입력은
+  갔다). L2 `serializeActMatchedResult` 가 칸을 검사해 싣는다(`validTabLimit`; 그것만 있는 결과도 받는다 — 전에는 `matched`·`dialog` 없는 객체가 내부 오류였다). CLI `warning: [tab limit] …`(적대 검증 20 회의 MED 로 글을 좁혔다 — 이 입력은 「그 pane 의 에이전트 탭으로 열리지 않는다」(사람이 막 누른 장으로는 사람의
+  탭이 될 수 있어 「막혔다」 가 아니다)·되풀이 전에 `list`, 버린 것은 과거형이고 지금 자리가 나 있으면 닫으라 하지 않는다, 닫으라는 것은 「이 pane 이 연 에이전트 탭」 뿐),
+  open 실패 글에 그 pane 의 에이전트 탭 번호(◈). CLI 의 close 전용 거절 안내(「only tabs this pane opened … can be closed」)는 걷고 일반 안내로(close 는 2026-11-17 A1 로 어느 탭이든).
   MCP `browser_open`·`browser_click`·`browser_press`, 플러그인 SKILL·tabs·errors(0.1.21). ABI 265·wire 29 그대로.
 - **남은 틈**: 입력의 알림은 페이지가 팝업을 열려 했는지 모른다(sidecar 가 장 없는 팝업을 알리지 않는다 — 알리려면 wire 메시지가 하나 더 필요하다), 사람이 5 초 안에 그 탭을
   누른 장으로는 열릴 수 있다, 버린 수는 그 pane 의 다음 입력 op 성공에만 간다(`snapshot`·`list` 에는 없다 — `list` 는 부른 pane 을 모른다), 실패·시한으로 끝난 입력(입력은 갔을 수
-  있다)에는 싣지 않는다, `exec` 의 `window.open` 은 상한과 무관하게 늘 막힌다(활성 입력이 아니다). 기록 `$S/agent_equal/tab_cap_notice/`.
+  있다)에는 싣지 않는다, `exec` 의 `window.open` 은 상한과 무관하게 늘 막힌다(활성 입력이 아니다). 버린 수는 그 팝업을 연 탭의 주인 pane 에 센다 — 다른 pane 이
+  그 pane 의 에이전트 탭을 눌러 늦게 버려지면 누른 pane 은 모르고 주인 pane 이 듣는다. pane 16 칸이 차면 가장 오래된 알림을 잃는다. 번호에는 이 세션이 열지 않은 에이전트
+  탭(같은 pane 의 앞 세션)도 든다 — 스킬은 기억에 없는 번호를 닫기 전에 사용자에게 묻게 한다. 앱 표가 차서 open 이 실패하는 글(「too many tabs are under agent control」)은
+  번호를 싣지 않는다(그대로). 기록 `$S/agent_equal/tab_cap_notice/`.

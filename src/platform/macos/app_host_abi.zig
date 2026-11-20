@@ -8975,21 +8975,27 @@ fn onAgentTabRoom(pane: u64) bool {
 }
 
 /// 늦게 버린 팝업(위)을 pane 마다 센다 — 그 pane 의 다음 입력 op 이 가져간다. 고정 크기, 차면 가장 오래된 칸을 민다(그 알림은 잃는다).
-const TabLimitDrops = struct { pane: u64, count: u32, why: TabLimit };
+const TabLimitDrops = struct { pane: u64, count: u32, why: TabLimit, at_ms: i64 };
 var tab_limit_drops: [16]TabLimitDrops = undefined;
 var tab_limit_drops_len: usize = 0;
+/// 버린 수를 그 pane 의 다음 입력 op 에 싣는 동안(마지막으로 버린 때부터). 넘으면 말없이 버린다 — 몇 분·몇 시간 뒤(같은 pane 의 다음 세션)의
+/// 첫 입력이 「앞선 입력 뒤 열리지 않았다」 를 들으면 지금 일로 읽는다(적대 검증 — 시효가 없어 지금 상태와 어긋났다). 팝업은 그 입력 뒤 수 초
+/// 안(장의 수명 `new_tab.activation_ms` + 전달 여유)에 닿고 에이전트의 다음 입력은 대개 그 뒤 곧이라 넉넉히 잡는다.
+const tab_limit_drop_keep_ms: i64 = 60_000;
 
 fn noteTabLimitDrop(pane: u64, why: TabLimit) void {
+    const now = cdpNowMs();
     for (tab_limit_drops[0..tab_limit_drops_len]) |*d| if (d.pane == pane) {
         d.count +|= 1;
         d.why = why;
+        d.at_ms = now;
         return;
     };
     if (tab_limit_drops_len == tab_limit_drops.len) {
         std.mem.copyForwards(TabLimitDrops, tab_limit_drops[0 .. tab_limit_drops.len - 1], tab_limit_drops[1..]);
         tab_limit_drops_len -= 1;
     }
-    tab_limit_drops[tab_limit_drops_len] = .{ .pane = pane, .count = 1, .why = why };
+    tab_limit_drops[tab_limit_drops_len] = .{ .pane = pane, .count = 1, .why = why, .at_ms = now };
     tab_limit_drops_len += 1;
 }
 
@@ -8998,6 +9004,16 @@ fn takeTabLimitDrops(pane: u64) ?TabLimitDrops {
         std.mem.copyForwards(TabLimitDrops, tab_limit_drops[i .. tab_limit_drops_len - 1], tab_limit_drops[i + 1 .. tab_limit_drops_len]);
         tab_limit_drops_len -= 1;
         return d;
+    };
+    return null;
+}
+
+/// 그 pane 의 산 버린 수(시효 안) — 시효가 지난 칸은 여기서 지운다.
+fn liveTabLimitDrops(pane: u64) ?TabLimitDrops {
+    for (tab_limit_drops[0..tab_limit_drops_len]) |d| if (d.pane == pane) {
+        if (cdpNowMs() - d.at_ms <= tab_limit_drop_keep_ms) return d;
+        _ = takeTabLimitDrops(pane);
+        return null;
     };
     return null;
 }
@@ -9147,10 +9163,10 @@ fn completeAgentOpenFull(async_id: u64, pane: u64) void {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     (blk: {
-        aw.writer.print("this pane already has {d} agent tabs (the tabs it opened and the pages they or your clicks opened):", .{max_agent_tabs_per_pane}) catch |e| break :blk e;
+        aw.writer.print("this pane already has {d} agent tabs (◈):", .{max_agent_tabs_per_pane}) catch |e| break :blk e;
         var buf: [max_agent_tabs_per_pane]u64 = undefined;
         for (paneAgentTabs(pane, &buf)) |t| aw.writer.print(" {d}", .{t}) catch |e| break :blk e;
-        aw.writer.writeAll(" — close one you no longer need first (maru browser close --surface <id>)") catch |e| break :blk e;
+        aw.writer.writeAll(" — close an agent tab you opened and no longer need first (maru browser close --surface <id>)") catch |e| break :blk e;
     }) catch return completeTabStatus(async_id, .failed, "this pane already has its limit of agent tabs — close one first (maru browser close)");
     completeTabStatus(async_id, .failed, aw.written());
 }
@@ -9557,7 +9573,8 @@ fn withTabLimit(result: []const u8, note: ?TabLimitNote, caller: ?u64) ?[]u8 {
     const own_note = if (note) |n| caller != null and n.pane == caller.? else false;
     // 다른 pane 몫의 알림과 함께면 버린 수는 다음 op 으로 둔다(한 칸에 두 pane 을 섞지 않는다).
     const can_take_drops = caller != null and (note == null or own_note);
-    if (note == null and !(can_take_drops and hasTabLimitDrops(caller.?))) return null;
+    const live_drops = if (can_take_drops) liveTabLimitDrops(caller.?) else null;
+    if (note == null and live_drops == null) return null;
     var parsed: ?std.json.Parsed(std.json.Value) = null;
     defer if (parsed) |*p| p.deinit();
     if (!std.mem.eql(u8, result, "true")) {
@@ -9567,7 +9584,7 @@ fn withTabLimit(result: []const u8, note: ?TabLimitNote, caller: ?u64) ?[]u8 {
         const ok = parsed.?.value.object.get("ok") orelse return null;
         if (ok != .bool or !ok.bool) return null;
     }
-    const drops = if (can_take_drops) takeTabLimitDrops(caller.?) else null;
+    const drops = if (live_drops != null) takeTabLimitDrops(caller.?) else null;
     const pane = if (note) |n| n.pane else caller.?;
     const why = if (note) |n| n.why else drops.?.why;
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -9625,6 +9642,7 @@ fn restoreTabLimitDrops(d: TabLimitDrops) void {
     noteTabLimitDrop(d.pane, d.why);
     for (tab_limit_drops[0..tab_limit_drops_len]) |*e| if (e.pane == d.pane) {
         e.count = d.count;
+        e.at_ms = d.at_ms;
     };
 }
 
@@ -14793,9 +14811,11 @@ fn tcnReset() void {
     tab_limit_drops_len = 0;
 }
 
-/// 입력 op 하나를 끝까지 — `press` 가 있으면 그 호출을 `cdpAdvance` 로 보낸 뒤(누름·떼기 — 새 탭 장을 줄 자리), `finishCdp` 로 `result` 와 함께
-/// 끝낸다. 부른 pane 은 `caller`. 응답 JSON 을 돌려준다(부른 쪽이 놓는다). 엔진 표지(`tab`)는 부른 쪽이 쥔다.
-fn tcnFinishInput(kind: web_cdp_ops.Kind, tab: u64, caller: u64, press: ?[]const u8, result: []const u8) !std.json.Parsed(std.json.Value) {
+const TcnCall = struct { method: []const u8, params: []const u8 };
+
+/// 입력 op 하나를 끝까지 — `calls` 를 차례로 `cdpAdvance` 로 보낸 뒤(누름·떼기 — 새 탭 장을 줄 자리; 제품처럼 누름 뒤 떼기까지), `finishCdp` 로
+/// `result` 와 함께 끝낸다. 부른 pane 은 `caller`. 응답 JSON 을 돌려준다(부른 쪽이 놓는다). 엔진 표지(`tab`)는 부른 쪽이 쥔다.
+fn tcnFinishInput(kind: web_cdp_ops.Kind, tab: u64, caller: u64, calls: []const TcnCall, result: []const u8) !std.json.Parsed(std.json.Value) {
     const request = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.click\",\"params\":{\"id\":51,\"selector\":\"#b\"}}";
     var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .browser_pane = caller };
     const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
@@ -14803,19 +14823,25 @@ fn tcnFinishInput(kind: web_cdp_ops.Kind, tab: u64, caller: u64, press: ?[]const
     try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = tab, .method = .click, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = caller, .target = tab, .scope = .browser } } });
     _ = active_browser_executions.markRunning(id);
     const run = try allocator.create(CdpRun);
-    run.* = .{ .async_id = id, .surface_id = tab, .op = try web_cdp_ops.Op.init(allocator, kind, "{\"selector\":\"#b\"}", id), .started = true };
-    run.op.stage = .mouse_down;
+    const arg = switch (kind) {
+        .press => "{\"key\":\"Enter\",\"selector\":\"#b\"}",
+        .wait => "{\"condition\":\"selector\",\"selector\":\"#b\",\"timeout_ms\":5000}",
+        else => "{\"selector\":\"#b\"}",
+    };
+    run.* = .{ .async_id = id, .surface_id = tab, .op = try web_cdp_ops.Op.init(allocator, kind, arg, id), .started = true };
+    run.op.stage = if (kind == .press) .key_down else .mouse_down;
     try cdp_runs.append(allocator, run);
-    if (press) |params| {
-        cdpAdvance(run, .{ .call = .{ .method = "Input.dispatchMouseEvent", .params = try allocator.dupe(u8, params) } });
+    for (calls) |call| {
+        cdpAdvance(run, .{ .call = .{ .method = call.method, .params = try allocator.dupe(u8, call.params) } });
         try std.testing.expectEqual(@as(usize, 1), cdp_runs.items.len); // 보냈다 — 답을 기다린다
     }
     finishCdp(run, .success, result);
     return w9b3Result(&pending);
 }
 
-/// 에이전트 탭(pane 9 의 51)을 `caller` 가 누른다. `fill` 이면 pane 9 의 에이전트 탭을 상한까지 채운 뒤.
-fn tcnClickResult(ta: std.mem.Allocator, fill: bool, caller: u64, press_params: []const u8) !std.json.Parsed(std.json.Value) {
+/// 에이전트 탭(pane 9 의 51)을 `caller` 가 누른다(`calls` — 누름·떼기). `fill` 이면 pane 9 의 에이전트 탭을 상한까지 채운 뒤 — 큰 번호부터 넣는다
+/// (결과의 「작은 번호부터」 가 정렬의 몫이게). `drops` 면 그 전에 부른 pane 에 늦게 버린 팝업 하나를 적어 둔다.
+fn tcnClickResult(ta: std.mem.Allocator, fill: bool, caller: u64, kind: web_cdp_ops.Kind, calls: []const TcnCall, drops: bool) !std.json.Parsed(std.json.Value) {
     try session_mod.web_osr.testHold(ta, 51);
     defer {
         session_mod.web_osr.destroy(ta, 51);
@@ -14827,12 +14853,23 @@ fn tcnClickResult(ta: std.mem.Allocator, fill: bool, caller: u64, press_params: 
     defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
     tcnReset();
     defer tcnReset();
-    try std.testing.expect(onAgentPageTab(9, 51));
-    if (fill) for (1..max_agent_tabs_per_pane) |i| try agent_tabs.append(allocator, .{ .pane = 9, .tab = 600 + i });
-    return tcnFinishInput(.click, 51, caller, press_params, "true");
+    if (fill) {
+        var i: usize = max_agent_tabs_per_pane - 1;
+        while (i >= 1) : (i -= 1) try agent_tabs.append(allocator, .{ .pane = 9, .tab = 600 + i });
+    }
+    try std.testing.expect(adoptAgentTab(9, 51)); // 표의 마지막(채웠으면 여덟째)
+    if (drops) noteTabLimitDrop(caller, .pane);
+    return tcnFinishInput(kind, 51, caller, calls, "true");
 }
 
 const tcn_press = "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}";
+const tcn_release = "{\"type\":\"mouseReleased\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}";
+/// 제품의 click 차례 — 누름 뒤 떼기(떼기가 앞의 알림을 지우지 않는지).
+const tcn_click = [_]TcnCall{ .{ .method = "Input.dispatchMouseEvent", .params = tcn_press }, .{ .method = "Input.dispatchMouseEvent", .params = tcn_release } };
+const tcn_enter = [_]TcnCall{
+    .{ .method = "Input.dispatchKeyEvent", .params = "{\"type\":\"keyDown\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"modifiers\":0,\"text\":\"\\r\",\"unmodifiedText\":\"\\r\"}" },
+    .{ .method = "Input.dispatchKeyEvent", .params = "{\"type\":\"keyUp\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"modifiers\":0}" },
+};
 
 fn tcnLimit(r: std.json.Parsed(std.json.Value)) ?std.json.ObjectMap {
     const res = r.value.object.get("result").?.object;
@@ -14840,19 +14877,20 @@ fn tcnLimit(r: std.json.Parsed(std.json.Value)) ?std.json.ObjectMap {
     return t.object;
 }
 
-test "TCN1 탭 상한 알림(2026-11-20 「상한 두고 알리기」): 상한(8)에 닿은 pane 의 누름은 ok 에 tab_limit(까닭·그 pane 의 에이전트 탭)을 싣는다 — 전에는 말없이 ok 였다" {
+test "TCN1 탭 상한 알림(2026-11-20 「상한 두고 알리기」): 상한(8)에 닿은 pane 의 누름·키 누름은 ok 에 tab_limit(까닭·그 pane 의 에이전트 탭)을 싣는다 — 전에는 말없이 ok 였다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
     installTransferTestServer();
     defer uninstallTransferTestServer();
     const ta = std.testing.allocator;
-    {
-        const r = try tcnClickResult(ta, true, 9, tcn_press);
+    // 누름 뒤 떼기(제품의 click 차례 — 떼기가 알림을 지우지 않는다), 키 누름·뗌(press — 링크에서 Enter).
+    for ([_]struct { kind: web_cdp_ops.Kind, calls: []const TcnCall }{ .{ .kind = .click, .calls = &tcn_click }, .{ .kind = .press, .calls = &tcn_enter } }) |case| {
+        const r = try tcnClickResult(ta, true, 9, case.kind, case.calls, false);
         defer r.deinit();
         try std.testing.expect(r.value.object.get("result").?.object.get("ok").?.bool);
         const limit = tcnLimit(r) orelse {
-            std.debug.print("TCN1: the click result at the cap has no tab_limit — the agent is not told its popup was blocked\n", .{});
+            std.debug.print("TCN1: the {s} result at the cap has no tab_limit — the agent is not told its popup was blocked\n", .{@tagName(case.kind)});
             return error.TestUnexpectedResult;
         };
         try std.testing.expectEqualStrings("pane", limit.get("reason").?.string);
@@ -14861,19 +14899,28 @@ test "TCN1 탭 상한 알림(2026-11-20 「상한 두고 알리기」): 상한(8
         try std.testing.expect(limit.get("dropped") == null and limit.get("other_pane") == null);
         const tabs = limit.get("tabs").?.array.items;
         try std.testing.expectEqual(max_agent_tabs_per_pane, tabs.len);
-        try std.testing.expectEqual(@as(i64, 51), tabs[0].integer); // 작은 번호부터
+        // 작은 번호부터 — 표에는 607…601, 51 의 차례로 들었다.
+        try std.testing.expectEqual(@as(i64, 51), tabs[0].integer);
         try std.testing.expectEqual(@as(i64, 601), tabs[1].integer);
         try std.testing.expectEqual(@as(i64, 607), tabs[7].integer);
     }
     // 대조: 자리가 있으면 싣지 않는다(판정이 공허하지 않다).
     {
-        const r = try tcnClickResult(ta, false, 9, tcn_press);
+        const r = try tcnClickResult(ta, false, 9, .click, &tcn_click, false);
         defer r.deinit();
         try std.testing.expect(tcnLimit(r) == null);
     }
+    // 같은 pane 에 늦게 버린 것도 있으면 한 결과에 둘 다(input·dropped).
+    {
+        const r = try tcnClickResult(ta, true, 9, .click, &tcn_click, true);
+        defer r.deinit();
+        const limit = tcnLimit(r) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(limit.get("input").?.bool);
+        try std.testing.expectEqual(@as(i64, 1), limit.get("dropped").?.integer);
+    }
 }
 
-test "TCN2 탭 상한 알림: 활성 아닌 호출(떼기)은 싣지 않는다, 다른 pane 이 누르면 other_pane 만(그 pane 의 탭 번호 없음), grant 표가 차면 app" {
+test "TCN2 탭 상한 알림: 활성 아닌 호출(떼기)은 싣지 않는다, 다른 pane 이 누르면 other_pane 만(번호·그 pane 의 버린 수 없음), grant 표가 차면 app, 둘 다 차면 pane" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -14881,19 +14928,19 @@ test "TCN2 탭 상한 알림: 활성 아닌 호출(떼기)은 싣지 않는다, 
     defer uninstallTransferTestServer();
     const ta = std.testing.allocator;
     {
-        const r = try tcnClickResult(ta, true, 9, "{\"type\":\"mouseReleased\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}");
+        const r = try tcnClickResult(ta, true, 9, .click, &.{.{ .method = "Input.dispatchMouseEvent", .params = tcn_release }}, false);
         defer r.deinit();
         try std.testing.expect(tcnLimit(r) == null);
     }
     {
-        // pane 4 의 에이전트가 pane 9 의 에이전트 탭을 눌렀다 — 장의 주인은 그 탭의 주인(pane 9)이고 그 pane 이 상한이다.
-        const r = try tcnClickResult(ta, true, 4, tcn_press);
+        // pane 4 의 에이전트가 pane 9 의 에이전트 탭을 눌렀다 — 장의 주인은 그 탭의 주인(pane 9)이고 그 pane 이 상한이다. pane 4 에 쌓인 버린
+        // 수는 이 결과에 섞지 않는다(다른 pane 의 꼬리 「another agent's tabs — leave them」 가 제 팝업을 남의 것이라 말하게 된다) — 다음 op 으로 둔다.
+        const r = try tcnClickResult(ta, true, 4, .click, &tcn_click, true);
         defer r.deinit();
         const limit = tcnLimit(r) orelse return error.TestUnexpectedResult;
         try std.testing.expect(limit.get("other_pane").?.bool and limit.get("input").?.bool);
-        try std.testing.expect(limit.get("tabs") == null and limit.get("max") == null);
+        try std.testing.expect(limit.get("tabs") == null and limit.get("max") == null and limit.get("dropped") == null);
     }
-    // grant 표가 찼다(앱 전체 64 쌍 — 다른 pane 의 탭들) — 까닭은 app, 그 pane 의 에이전트 탭 번호는 싣는다(닫으면 자리가 난다).
     try session_mod.web_osr.testHold(ta, 51);
     defer {
         session_mod.web_osr.destroy(ta, 51);
@@ -14905,19 +14952,25 @@ test "TCN2 탭 상한 알림: 활성 아닌 호출(떼기)은 싣지 않는다, 
     defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
     tcnReset();
     defer tcnReset();
-    try std.testing.expect(onAgentPageTab(9, 51));
+    try std.testing.expect(adoptAgentTab(9, 51));
+    // grant 표가 찼다(앱 전체 — 다른 pane 의 탭들) — 까닭은 app, 그 pane 의 에이전트 탭 번호는 싣는다(닫으면 자리가 난다).
     var n: u64 = 0;
     while (control_pane_grant_store.room(false)) : (n += 1) try control_pane_grant_store.grant(.{ .pane = 1000 + n, .target = 2000 + n, .scope = .browser });
     try std.testing.expectEqual(TabLimit.app, agentTabLimit(9).?);
-    const r = try tcnFinishInput(.click, 51, 9, tcn_press, "true");
-    defer r.deinit();
-    const limit = tcnLimit(r) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("app", limit.get("reason").?.string);
-    try std.testing.expect(limit.get("max") == null);
-    try std.testing.expectEqual(@as(usize, 1), limit.get("tabs").?.array.items.len);
+    {
+        const r = try tcnFinishInput(.click, 51, 9, &tcn_click, "true");
+        defer r.deinit();
+        const limit = tcnLimit(r) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("app", limit.get("reason").?.string);
+        try std.testing.expect(limit.get("max") == null);
+        try std.testing.expectEqual(@as(usize, 1), limit.get("tabs").?.array.items.len);
+    }
+    // 둘 다 찼다 — 그 pane 의 상한을 먼저 말한다(닫을 것이 그 pane 의 탭이다).
+    for (1..max_agent_tabs_per_pane) |i| try agent_tabs.append(allocator, .{ .pane = 9, .tab = 600 + i });
+    try std.testing.expectEqual(TabLimit.pane, agentTabLimit(9).?);
 }
 
-test "TCN3 탭 상한 알림: 장을 준 뒤 자리가 차 늦게 버린 팝업(제품 콜백·실제 AppSession tick)은 그 pane 의 다음 입력 op 이 dropped 로 싣고, 그다음은 없다" {
+test "TCN3 탭 상한 알림: 장을 준 뒤 자리가 차 늦게 버린 팝업(제품 콜백·실제 AppSession tick)은 그 pane 의 다음 입력 op 이 dropped 로 싣고, 그다음은 없다 — wait 는 가져가지 않고, 시효가 지나면 버린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();
@@ -14950,11 +15003,15 @@ test "TCN3 탭 상한 알림: 장을 준 뒤 자리가 차 늦게 버린 팝업(
     try std.testing.expectEqual(terms_before, pane.terms.items.len); // 열지 않았다(상한 그대로)
     try std.testing.expect(!session_mod.web_osr.newTabPending(tab));
     {
-        // 그 pane 의 다음 입력(활성 입력 없음 — 결과만)에 실린다. 다른 pane 의 입력은 가져가지 않는다.
-        const other = try tcnFinishInput(.hover, tab, shell + 1, null, "true");
+        // wait 는 입력 op 이 아니다 — 가져가지 않는다(계획 공격 2-4). 다른 pane 의 입력도 가져가지 않는다.
+        const waited = try tcnFinishInput(.wait, tab, shell, &.{}, "true");
+        defer waited.deinit();
+        try std.testing.expect(tcnLimit(waited) == null);
+        const other = try tcnFinishInput(.hover, tab, shell + 1, &.{}, "true");
         defer other.deinit();
         try std.testing.expect(tcnLimit(other) == null);
-        const r = try tcnFinishInput(.hover, tab, shell, null, "true");
+        // 그 pane 의 다음 입력(활성 입력 없음 — 결과만)에 실린다.
+        const r = try tcnFinishInput(.hover, tab, shell, &.{}, "true");
         defer r.deinit();
         const limit = tcnLimit(r) orelse {
             std.debug.print("TCN3: the late-dropped popup was not reported to the pane's next input\n", .{});
@@ -14966,25 +15023,35 @@ test "TCN3 탭 상한 알림: 장을 준 뒤 자리가 차 늦게 버린 팝업(
         try std.testing.expectEqual(max_agent_tabs_per_pane, limit.get("tabs").?.array.items.len);
     }
     {
-        const r = try tcnFinishInput(.hover, tab, shell, null, "true");
+        const r = try tcnFinishInput(.hover, tab, shell, &.{}, "true");
         defer r.deinit();
         try std.testing.expect(tcnLimit(r) == null); // 가져갔다
     }
-    // 실패로 끝난 결과(`false` — 요소 없음)는 가져가지 않는다; 다음 성공이 싣는다. pane 이 닫히면 지운다.
+    // 실패로 끝난 결과(`false` — 요소 없음)는 가져가지 않는다; 다음 성공이 싣는다(원래 칸은 그대로). 두 번 버리면 2.
+    noteTabLimitDrop(shell, .pane);
     noteTabLimitDrop(shell, .pane);
     {
-        const r = try tcnFinishInput(.hover, tab, shell, null, "false");
+        const r = try tcnFinishInput(.hover, tab, shell, &.{}, "false");
         defer r.deinit();
         try std.testing.expect(tcnLimit(r) == null);
         try std.testing.expect(hasTabLimitDrops(shell));
     }
     {
-        const r = try tcnFinishInput(.scroll, tab, shell, null, "{\"ok\":true,\"matched\":{\"ref\":\"n3\",\"name\":\"이름\"},\"dialog\":true}");
+        const r = try tcnFinishInput(.scroll, tab, shell, &.{}, "{\"ok\":true,\"matched\":{\"ref\":\"n3\",\"name\":\"이름\"},\"dialog\":true}");
         defer r.deinit();
         const res = r.value.object.get("result").?.object;
-        try std.testing.expectEqualStrings("이름", res.get("matched").?.object.get("name").?.string); // 원래 칸은 그대로
+        try std.testing.expectEqualStrings("이름", res.get("matched").?.object.get("name").?.string);
         try std.testing.expect(res.get("dialog").?.bool);
-        try std.testing.expectEqual(@as(i64, 1), tcnLimit(r).?.get("dropped").?.integer);
+        try std.testing.expectEqual(@as(i64, 2), tcnLimit(r).?.get("dropped").?.integer);
+    }
+    // 시효(`tab_limit_drop_keep_ms`)가 지난 버린 수는 싣지 않고 지운다(몇 분 뒤·다음 세션의 첫 입력이 지금 일로 읽지 않게).
+    noteTabLimitDrop(shell, .pane);
+    tab_limit_drops[0].at_ms -= tab_limit_drop_keep_ms + 1;
+    {
+        const r = try tcnFinishInput(.hover, tab, shell, &.{}, "true");
+        defer r.deinit();
+        try std.testing.expect(tcnLimit(r) == null);
+        try std.testing.expect(!hasTabLimitDrops(shell));
     }
     noteTabLimitDrop(shell, .pane);
     forgetAgentTab(shell);

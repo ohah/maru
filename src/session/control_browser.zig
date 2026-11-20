@@ -3544,8 +3544,11 @@ fn serializeActMatchedResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const
     }
     // 입력 뒤 페이지가 JS 대화상자를 띄웠다(W9b③ 적대 리뷰 3 회차) — true 일 때만 싣는다. 그때는 matched 없이도(selector·ref 로 누른 것).
     const dialog = if (parsed.value.object.get("dialog")) |d| d == .bool and d.bool else false;
+    // 2026-11-20 「상한 두고 알리기」: 탭 상한 알림(앱이 입력 op 의 성공에 싣는다 — `app_host_abi.withTabLimit`). 모양을 본 뒤 그대로 싣는다.
+    const tab_limit = parsed.value.object.get("tab_limit");
+    if (tab_limit) |t| if (!validTabLimit(t)) return error.InvalidActPayload;
     const matched_value = parsed.value.object.get("matched");
-    if (matched_value == null and !dialog) return error.InvalidActPayload;
+    if (matched_value == null and !dialog and tab_limit == null) return error.InvalidActPayload;
     var ref: ?[]const u8 = null;
     var name: []const u8 = "";
     if (matched_value) |matched| {
@@ -3561,8 +3564,35 @@ fn serializeActMatchedResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    writeActMatched(&s, id, ok.bool, ref, name, ambiguous, dialog) catch return error.OutOfMemory;
+    writeActMatched(&s, id, ok.bool, ref, name, ambiguous, dialog, tab_limit) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
+}
+
+/// 탭 상한 알림 한 덩어리의 모양 — `{reason:"pane"|"app", max?:N≥1, tabs?:[u64…](64 개까지), input?:true, dropped?:N≥1, other_pane?:true}`, 모르는 칸은 거절.
+/// `input`·`dropped` 가운데 하나는 있어야 한다(알릴 것이 없으면 싣지 않는다).
+fn validTabLimit(v: std.json.Value) bool {
+    if (v != .object) return false;
+    var it = v.object.iterator();
+    var reason = false;
+    var news = false;
+    while (it.next()) |kv| {
+        const k = kv.key_ptr.*;
+        const x = kv.value_ptr.*;
+        if (eq(k, "reason")) {
+            if (x != .string or !(eq(x.string, "pane") or eq(x.string, "app"))) return false;
+            reason = true;
+        } else if (eq(k, "max") or eq(k, "dropped")) {
+            if (x != .integer or x.integer < 1) return false;
+            news = news or eq(k, "dropped");
+        } else if (eq(k, "input") or eq(k, "other_pane")) {
+            if (x != .bool or !x.bool) return false;
+            news = news or eq(k, "input");
+        } else if (eq(k, "tabs")) {
+            if (x != .array or x.array.items.len > 64) return false;
+            for (x.array.items) |t| if (t != .integer or t.integer < 0) return false;
+        } else return false;
+    }
+    return reason and news;
 }
 
 fn writeActHint(s: *std.json.Stringify, id: cp.Id, hint: []const u8) !void {
@@ -3574,7 +3604,7 @@ fn writeActHint(s: *std.json.Stringify, id: cp.Id, hint: []const u8) !void {
     try endResult(s);
 }
 
-fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: ?[]const u8, name: []const u8, ambiguous: bool, dialog: bool) !void {
+fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: ?[]const u8, name: []const u8, ambiguous: bool, dialog: bool, tab_limit: ?std.json.Value) !void {
     try beginResult(s, id);
     try s.objectField("ok");
     try s.write(ok);
@@ -3594,6 +3624,10 @@ fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: ?[]const u8
     if (dialog) {
         try s.objectField("dialog");
         try s.write(true);
+    }
+    if (tab_limit) |t| { // 모양은 `validTabLimit` 이 봤다
+        try s.objectField("tab_limit");
+        try s.write(t);
     }
     try endResult(s);
 }
@@ -6580,6 +6614,37 @@ test "W9b③ 적대 리뷰 3 회차: act 결과의 dialog(누른 뒤 페이지�
     defer testing.allocator.free(located);
     try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n1\",\"name\":\"Go\"},\"dialog\":true}}", located);
     try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 7 }, "{\"ok\":true}"));
+}
+
+// 사용자 결정 2026-11-20 「상한 두고 알리기」: 앱이 입력 op 의 성공에 싣는 탭 상한 알림(`tab_limit`)이 L2 를 그대로 지나야 에이전트에게 닿는다 — 전에는
+// 이 함수가 아는 칸만 다시 써 그 칸이 사라졌고, `matched`·`dialog` 없는 결과는 내부 오류였다(그러면 상한에서 모든 누름이 실패로 보인다).
+test "TCN L2: act 결과의 tab_limit 은 모양을 본 뒤 그대로 싣는다 — 그것만 있어도 받고, 틀린 모양은 내부 오류" {
+    const cases = [_]struct { payload: []const u8, want: []const u8 }{
+        .{ .payload = "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"max\":8,\"tabs\":[3,9],\"input\":true}}", .want = "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"max\":8,\"tabs\":[3,9],\"input\":true}}}" },
+        .{ .payload = "{\"ok\":true,\"matched\":{\"ref\":\"n1\",\"name\":\"Go\"},\"dialog\":true,\"tab_limit\":{\"reason\":\"app\",\"tabs\":[],\"dropped\":2}}", .want = "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n1\",\"name\":\"Go\"},\"dialog\":true,\"tab_limit\":{\"reason\":\"app\",\"tabs\":[],\"dropped\":2}}}" },
+        .{ .payload = "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"other_pane\":true,\"input\":true}}", .want = "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"other_pane\":true,\"input\":true}}}" },
+    };
+    for (cases) |c| {
+        const w = try serializeActMatchedResult(testing.allocator, .{ .number = 5 }, c.payload);
+        defer testing.allocator.free(w);
+        try testing.expectEqualStrings(c.want, w);
+    }
+    for ([_][]const u8{
+        "{\"ok\":true,\"tab_limit\":{\"reason\":\"other\",\"input\":true}}", // 모르는 까닭
+        "{\"ok\":true,\"tab_limit\":{\"input\":true}}", // 까닭 없음
+        "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"tabs\":[1]}}", // 알릴 것(input·dropped)이 없다
+        "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"input\":false}}",
+        "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"dropped\":0}}",
+        "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"input\":true,\"tabs\":[-1]}}",
+        "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"input\":true,\"tabs\":\"3\"}}",
+        "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"input\":true,\"url\":\"x\"}}", // 모르는 칸
+        "{\"ok\":true,\"tab_limit\":[1]}",
+    }) |bad| try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 5 }, bad));
+    // 앱 차례의 응답(요청에서 메서드를 읽는다) — click 이 그대로 그 칸을 싣는다.
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.click\",\"params\":{\"id\":1,\"selector\":\"#a\"}}";
+    const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"ok\":true,\"tab_limit\":{\"reason\":\"pane\",\"max\":8,\"tabs\":[4],\"dropped\":1}}");
+    defer testing.allocator.free(w);
+    try testing.expect(std.mem.indexOf(u8, w, "\"tab_limit\":{\"reason\":\"pane\",\"max\":8,\"tabs\":[4],\"dropped\":1}") != null);
 }
 
 test "W9f 적대 리뷰 5 회차: WebKit snapshot 이 아주 깊어도 앱이 죽지 않는다 — Chromium 과 같은 깊이(100)에서 자식을 끊는다" {

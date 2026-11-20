@@ -5968,3 +5968,21 @@ take 안에서** 나갔다 — P1 이 그 take·drain 을 지우면 함께 사�
   `SitePermissionsWindow`(사이트·권한·허용/차단·지우기, 안내 줄, 밑 줄), 이 창이 키면 메뉴의 터미널 동작을 막고 ⌘W 는 이 창을 닫는다. 문장은 Zig i18n(`sp_*`).
 - **남은 틈**: 닫기를 되풀이해 Chromium 이 잠깐 막은 사이트(embargo — `permission_autoblocking_data`)는 표에 없고 여기서 풀 수 없다, 와일드카드·임베드 패턴은 수만
   보인다, 탭 없이 창을 열면 띄운 sidecar 는 앱이 끝날 때까지 남는다(다음 탭이 쓴다), 표는 100 행까지.
+
+### 탭 상한 알림 — 막힌 새 탭을 에이전트에게(2026-11-20, 완료)
+
+사용자 결정(2026-11-20 「상한 두고 알리기」 — `$S/agent_equal/remaining/INVENTORY2.md` A2 의 답): pane 하나의 에이전트 탭 8 개(`max_agent_tabs_per_pane`, 숨긴 탭 하나 약 157 MB)는 그대로, 그 상한에 막힌
+팝업·새 탭을 에이전트가 알게 한다. 앱 전체 grant 표(64 쌍 `grants_full`)도 그대로. 계약은 [`browser.*` 코어](../control-plane-browser.md) `browser.open`·`browser.click` 행.
+
+- **재실측(착수 전)**: 자리가 없으면 `grantAgentNewTabCredit` 이 장을 주지 않고 돌아가 sidecar 가 그 팝업을 말없이 취소했고(`new_tab.zig` `beforePopup`·`request`), 누름은 `{"ok":true}` 뿐이었다
+  (시험 TCN1 이 고치기 전 FAIL). 장을 준 뒤 팝업이 닿기 전에 자리가 차면 `insertNewTab` 이 `AgentTabLimit` 으로 닫았다 — 역시 말없이. `browser.open` 은 상한에서 이미 분명히
+  실패했지만 어느 탭이 에이전트 탭인지 말하지 않았다(누름이 연 팝업도 센다).
+- **구현**: `agentTabLimit`(까닭 — `pane`·`app`, 자리 판정 `agentTabRoom` 이 같은 것을 쓴다). `grantAgentNewTabCredit` 이 활성 입력의 장을 주지 못하면 `TabLimitNote` 를 돌려주고
+  `cdpAdvance` 가 `CdpRun.tab_limit` 에 둔다. `onAgentTabRoom` 은 거짓을 줄 때 그 pane 의 「버린 수」 를 센다(부르는 곳은 `insertNewTab` 하나 — 거짓이면 곧 버린다; pane 16 칸,
+  pane 이 닫히면 지운다). `finishCdp` 가 click·type·press·hover·scroll 의 성공에 `tab_limit` 을 더한다(`withTabLimit` — 원래 칸은 그대로, 메모리가 모자라면 원래 결과 — 입력은
+  갔다). L2 `serializeActMatchedResult` 가 칸을 검사해 싣는다(`validTabLimit`; 그것만 있는 결과도 받는다 — 전에는 `matched`·`dialog` 없는 객체가 내부 오류였다). CLI `warning: [tab limit] …`,
+  open 실패 글에 그 pane 의 에이전트 탭 번호. CLI 의 close 전용 거절 안내(「only tabs this pane opened … can be closed」)는 걷고 일반 안내로(close 는 2026-11-17 A1 로 어느 탭이든).
+  MCP `browser_open`·`browser_click`·`browser_press`, 플러그인 SKILL·tabs·errors(0.1.21). ABI 265·wire 29 그대로.
+- **남은 틈**: 입력의 알림은 페이지가 팝업을 열려 했는지 모른다(sidecar 가 장 없는 팝업을 알리지 않는다 — 알리려면 wire 메시지가 하나 더 필요하다), 사람이 5 초 안에 그 탭을
+  누른 장으로는 열릴 수 있다, 버린 수는 그 pane 의 다음 입력 op 성공에만 간다(`snapshot`·`list` 에는 없다 — `list` 는 부른 pane 을 모른다), 실패·시한으로 끝난 입력(입력은 갔을 수
+  있다)에는 싣지 않는다, `exec` 의 `window.open` 은 상한과 무관하게 늘 막힌다(활성 입력이 아니다). 기록 `$S/agent_equal/tab_cap_notice/`.

@@ -60,7 +60,7 @@ pub const browser_help =
     \\  reload  --surface <id>                     reload the page (Chromium tabs)
     \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
     \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
-    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load — an error page adds a warning line with [error page: ERR_…]; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
+    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load — an error page adds a warning line with [error page: ERR_…]; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind; at most 8 per pane — then open fails, listing them)
     \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
     \\  show    --surface <id>                     bring a tab to the front of its pane, like clicking its tab (Chromium tabs; keys the user types stay out of the page until they click it; never switches workspace or window)
     \\  downloads                                  list every download in the app, like the downloads window: key, state, name, bytes, tab, saved path (Chromium)
@@ -2705,7 +2705,6 @@ const unsupported_by_engine_code: i64 = -32008;
 /// executeScript 의 스크립트 오류 — data 에 `{kind, name, message, stack, diagnostics_truncated}`.
 const script_error_code: i64 = -32006;
 const timeout_code: i64 = -32004;
-const close_hint = "hint: only tabs this pane opened with `browser open` can be closed\n";
 /// 균일 거절(`data` 없음 + 기본 글)의 안내 — 서버가 일부러 까닭을 숨기는 자리(§8.3 존재 oracle 금지)라 **고정 글**이고 응답의 무엇에도
 /// 기대지 않는다. 사용자 결정 2026-11-16(「AI 가 모든 접근」) 뒤로 그 자리의 까닭은 거의 하나다: maru pane(그 foreground job 과 자손, pane
 /// 안 tmux)에서 부르지 않았다 — 확인 창·권한은 없다. 닫힌 탭·없는 id 도 같은 글이다.
@@ -2763,9 +2762,10 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         // 서버 정보가 새지 않는다. 까닭이 붙은 거절(`data.reason` — 네트워크 권한 먼저·권한 철회·에이전트 탭에서만)과 사용자의 답인
         // 업로드 거절은 그 글이 이유다 — 안내를 붙이면 틀린 방향을 가리킨다(M7: 전에는 모든 -32002 에 pane 안내를 붙였고, 업로드만
         // 「nothing was uploaded」 글자 검사로 뺐다).
-        // W9b③: close 의 거절은 그 pane 이 연 탭이 아니어서다 — 일반 안내는 이유를 가린다(적대 리뷰 1 회차).
+        // close 도 같은 안내다(2026-11-20): 2026-11-17 A1 로 close 는 어느 탭이든 닫아, 그 거절도 pane 밖 호출·닫힌·없는 id 뿐이다 — 옛 close 전용 글
+        // 「only tabs this pane opened … can be closed」 는 낡았다(그 전에는 그 pane 이 연 탭이 아니어서였다 — W9b③ 적대 리뷰 1 회차).
         if (e.code == unauthorized_code and (e.data == null or e.data.? == .null) and std.mem.eql(u8, e.message, cp.ErrorCode.unauthorized.defaultMessage()))
-            try w.writeAll(if (kind == .close) close_hint else unauthorized_hint);
+            try w.writeAll(unauthorized_hint);
         // 로케이터 wait 의 시한 — 마지막 확인에 숨은 일치가 있었다(W9b②-3 적대 리뷰 1 회차 — data 에만 있어 보이지 않았다).
         if (e.code == timeout_code) if (e.data) |d| if (d == .object) if (d.object.get("hidden")) |h| if (h == .integer and h.integer > 0)
             try w.print("hint: {d} matching element(s) are hidden (not rendered, aria-hidden or off-page)\n", .{h.integer});
@@ -2896,6 +2896,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             if (boolField(result.get("ambiguous"))) try w.writeAll("warning: ambiguous — the locator matches several elements; act with the matched ref, --exact or --nth\n");
             // 입력 뒤 페이지가 대화상자를 띄웠다(W9b③ 적대 리뷰 3 회차) — 입력은 갔다: 다시 하면 두 번 간다.
             if (boolField(result.get("dialog"))) try w.writeAll("warning: the page opened a dialog right after the input — the input reached the page, do not repeat it; see it with maru browser dialog and answer it with maru browser handle-dialog\n");
+            // 2026-11-20 「상한 두고 알리기」: 그 pane 의 에이전트 탭이 상한이라 이 입력(또는 앞선 입력)의 팝업·새 탭이 열리지 않는다 — 전에는 말없이.
+            if (result.get("tab_limit")) |t| if (t == .object) try writeTabLimitWarnings(w, t.object);
         },
         // get-local-storage → {value}. 값은 페이지가 쓴 글 — 걸러 낸다(W9f 적대 리뷰 5 회차: OSC 52·화면 지우기·줄바꿈이 그대로 나갔다).
         .value => {
@@ -4055,6 +4057,41 @@ fn writeErrorPageLabel(w: *std.Io.Writer, o: std.json.ObjectMap) !void {
 }
 
 /// open·navigate 가 오류 페이지로 끝났다는 둘째 줄(2026-11-20 「붙이기」) — 첫 줄(`opened N URL`·`ok`)은 대본이 읽어 그대로 두고, 표지는 list 와 같은 꼴.
+/// 탭 상한 알림(`tab_limit` — `control_browser.validTabLimit` 의 모양)의 경고 줄 — 이 입력의 것(`input`)과 앞서 버린 것(`dropped`)이 한 줄씩. 글은 앱이
+/// 판정한 사실만: 이 입력이 팝업을 열려 했는지는 모른다(「막힌다」 — 「막혔다」 가 아니다).
+fn writeTabLimitWarnings(w: *std.Io.Writer, t: std.json.ObjectMap) !void {
+    if (boolField(t.get("input"))) {
+        try w.writeAll("warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page)");
+        try writeTabLimitTail(w, t);
+    }
+    if (intField(t.get("dropped"))) |n| if (n > 0) {
+        try w.print("warning: [tab limit] {d} popup(s) or new tab(s) a page opened after your earlier input did not open", .{n});
+        try writeTabLimitTail(w, t);
+    };
+}
+
+fn writeTabLimitTail(w: *std.Io.Writer, t: std.json.ObjectMap) !void {
+    const app = std.mem.eql(u8, strField(t.get("reason")), "app");
+    if (boolField(t.get("other_pane"))) {
+        try w.writeAll(if (app)
+            " — maru's table of agent-controlled tabs is full (all panes); ask the user to close tabs or to choose Revoke All in the Browser Grants menu\n"
+        else
+            " — the pane that opened this tab is at its limit of agent tabs; those are another agent's tabs — leave them\n");
+        return;
+    }
+    if (app) try w.writeAll(" — maru's table of agent-controlled tabs is full (all panes); close tabs you no longer need with maru browser close --surface <id>, or ask the user to choose Revoke All in the Browser Grants menu") else {
+        try w.writeAll(" — this pane is at its limit of ");
+        if (intField(t.get("max"))) |m| try w.print("{d} ", .{m});
+        try w.writeAll("agent tabs; close one you no longer need with maru browser close --surface <id>");
+    }
+    if (t.get("tabs")) |tabs| if (tabs == .array and tabs.array.items.len > 0) {
+        try w.writeAll(" (this pane's agent tabs:");
+        for (tabs.array.items) |id| if (id == .integer) try w.print(" {d}", .{id.integer});
+        try w.writeAll(")");
+    };
+    try w.writeAll("\n");
+}
+
 fn writeErrorPageWarning(w: *std.Io.Writer, result: std.json.ObjectMap) !void {
     try w.writeAll("warning: [error page: ");
     try writeErrorPageLabel(w, result);
@@ -4787,7 +4824,8 @@ test "M7: 까닭이 붙은 -32002 에는 안내가 없고, 균일 거절에만 p
             const out = try renderedError(json, kind, &buf);
             try testing.expectEqualStrings("error: Unauthorized (-32002)\n" ++ unauthorized_hint, out);
         }
-        try testing.expectEqualStrings("error: Unauthorized (-32002)\n" ++ close_hint, try renderedError(json, .close, &buf));
+        // close 도 같은 안내(2026-11-20 — 옛 「only tabs this pane opened … can be closed」 는 close 가 어느 탭이든 닫는 지금 틀린 방향이었다).
+        try testing.expectEqualStrings("error: Unauthorized (-32002)\n" ++ unauthorized_hint, try renderedError(json, .close, &buf));
     }
     // 까닭은 pane 밖이다(사용자 결정 2026-11-16 — 확인 창·권한이 없다), pane 안 tmux 는 된다고 말한다. 서버의 무엇에도 기대지 않는 고정 글이다.
     try testing.expect(std.mem.indexOf(u8, unauthorized_hint, "foreground") != null);
@@ -5526,7 +5564,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  reload  --surface <id>                     reload the page (Chromium tabs)
         \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
         \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
-        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load — an error page adds a warning line with [error page: ERR_…]; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
+        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load — an error page adds a warning line with [error page: ERR_…]; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind; at most 8 per pane — then open fails, listing them)
         \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
         \\  show    --surface <id>                     bring a tab to the front of its pane, like clicking its tab (Chromium tabs; keys the user types stay out of the page until they click it; never switches workspace or window)
         \\  downloads                                  list every download in the app, like the downloads window: key, state, name, bytes, tab, saved path (Chromium)
@@ -5873,11 +5911,11 @@ test "parse·build: open(W9b③) — 대상 없이 [--url] [--timeout], close �
 }
 
 test "render: open(W9b③) 은 id·주소(다 못 불렀으면 경고), close 는 closed 또는 not closed: 이유(실패)" {
-    var buf: [512]u8 = undefined;
+    var buf: [2048]u8 = undefined;
     const cases = [_]struct { bytes: []const u8, kind: ResponseKind, want: []const u8, ok: bool }{
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":42,\"url\":\"https://e.test/\",\"loaded\":true}}", .kind = .open, .want = "opened 42 https://e.test/\n", .ok = true },
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":42,\"url\":\"\",\"loaded\":false}}", .kind = .open, .want = "opened 42\nwarning: the page did not finish loading in time — wait --load before acting\n", .ok = true },
-        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .kind = .close, .want = "error: Unauthorized (-32002)\nhint: only tabs this pane opened with `browser open` can be closed\n", .ok = false },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .kind = .close, .want = "error: Unauthorized (-32002)\n" ++ unauthorized_hint, .ok = false },
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"closed\":true}}", .kind = .close, .want = "closed\n", .ok = true },
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"closed\":false,\"reason\":\"asks \\u001b[31m\"}}", .kind = .close, .want = "not closed: asks [31m\n", .ok = false },
     };
@@ -5991,6 +6029,33 @@ test "W9b③ 적대 리뷰 3 회차: 누른 뒤 페이지가 대화상자를 띄
     var w: std.Io.Writer = .fixed(&buf);
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"dialog\":true}}", .ok, &w));
     try testing.expectEqualStrings("ok\nwarning: the page opened a dialog right after the input — the input reached the page, do not repeat it; see it with maru browser dialog and answer it with maru browser handle-dialog\n", w.buffered());
+}
+
+// 사용자 결정 2026-11-20 「상한 두고 알리기」: 상한에 닿은 pane 의 누름은 전에는 `ok` 만 찍어 팝업이 왜 안 뜨는지 몰랐다. 경고는 사실만 —
+// 이 입력이 팝업을 열려 했는지는 모른다(「막힌다」), 앞서 버린 것은 수로. 다른 pane 의 탭이면 닫으라 하지 않는다.
+test "TCN render: tab_limit 은 ok 뒤에 [tab limit] 경고 — 이 입력·앞서 버린 것·다른 pane·grant 표" {
+    var buf: [2048]u8 = undefined;
+    const cases = [_]struct { tab_limit: []const u8, want: []const u8 }{
+        .{ .tab_limit = "{\"reason\":\"pane\",\"max\":8,\"tabs\":[3,9],\"input\":true}", .want = "warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page) — this pane is at its limit of 8 agent tabs; close one you no longer need with maru browser close --surface <id> (this pane's agent tabs: 3 9)\n" },
+        .{ .tab_limit = "{\"reason\":\"pane\",\"max\":8,\"tabs\":[],\"dropped\":2}", .want = "warning: [tab limit] 2 popup(s) or new tab(s) a page opened after your earlier input did not open — this pane is at its limit of 8 agent tabs; close one you no longer need with maru browser close --surface <id>\n" },
+        .{ .tab_limit = "{\"reason\":\"pane\",\"other_pane\":true,\"input\":true}", .want = "warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page) — the pane that opened this tab is at its limit of agent tabs; those are another agent's tabs — leave them\n" },
+        .{ .tab_limit = "{\"reason\":\"app\",\"tabs\":[4],\"input\":true,\"dropped\":1}", .want = "warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page) — maru's table of agent-controlled tabs is full (all panes); close tabs you no longer need with maru browser close --surface <id>, or ask the user to choose Revoke All in the Browser Grants menu (this pane's agent tabs: 4)\n" ++
+            "warning: [tab limit] 1 popup(s) or new tab(s) a page opened after your earlier input did not open — maru's table of agent-controlled tabs is full (all panes); close tabs you no longer need with maru browser close --surface <id>, or ask the user to choose Revoke All in the Browser Grants menu (this pane's agent tabs: 4)\n" },
+        .{ .tab_limit = "{\"reason\":\"app\",\"other_pane\":true,\"input\":true}", .want = "warning: [tab limit] popups and new tabs from this input are blocked (the input itself reached the page) — maru's table of agent-controlled tabs is full (all panes); ask the user to close tabs or to choose Revoke All in the Browser Grants menu\n" },
+    };
+    for (cases) |c| {
+        var w: std.Io.Writer = .fixed(&buf);
+        const bytes = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"ok\":true,\"tab_limit\":{s}}}}}", .{c.tab_limit});
+        defer testing.allocator.free(bytes);
+        try testing.expect(try renderResponse(testing.allocator, bytes, .ok, &w));
+        const out = w.buffered();
+        try testing.expect(std.mem.startsWith(u8, out, "ok\n"));
+        try testing.expectEqualStrings(c.want, out[3..]);
+    }
+    // 알림 없는 결과는 그대로 한 줄.
+    var w: std.Io.Writer = .fixed(&buf);
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}", .ok, &w));
+    try testing.expectEqualStrings("ok\n", w.buffered());
 }
 
 // ── W9f: repl ─────────────────────────────────────────────────────────────────────────────────────────────

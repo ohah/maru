@@ -6044,7 +6044,7 @@ test "W9b③ 적대 리뷰 3 회차: 누른 뒤 페이지가 대화상자를 띄
 }
 
 // 사용자 결정 2026-11-20 「상한 두고 알리기」: 상한에 닿은 pane 의 누름은 전에는 `ok` 만 찍어 팝업이 왜 안 뜨는지 몰랐다. 경고는 사실만 —
-// 이 입력이 팝업을 열려 했는지는 모른다(「막힌다」), 앞서 버린 것은 수로. 다른 pane 의 탭이면 닫으라 하지 않는다.
+// 이 입력이 팝업을 열려 했는지는 모른다(「그 pane 의 에이전트 탭으로 열리지 않는다」), 앞서 버린 것은 수로(과거형). 다른 pane 의 탭이면 닫으라 하지 않는다.
 test "TCN render: tab_limit 은 ok 뒤에 [tab limit] 경고 — 이 입력·앞서 버린 것(지금 자리가 났으면 닫으라 하지 않는다)·다른 pane·grant 표" {
     var buf: [4096]u8 = undefined;
     const input = "warning: [tab limit] a popup or new tab the page opens from this input will not open as this pane's agent tab (the input itself reached the page; check maru browser list before repeating it)";

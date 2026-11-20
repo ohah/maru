@@ -14,7 +14,8 @@
 //!
 //! 자격 증명(W9d① 적대 리뷰 3 회차 D1 — 사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」): `Cookie`·`Set-Cookie`·`Authorization`(과 같은
 //! 갈래의 `Proxy-Authorization`) 값과 주소의 사용자 정보는 설정과 무관하게 읽는 쪽이 그 요청의 호스트를 덮는 `browser_storage` grant 를 쥘 때만
-//! 보인다(`credentialHeader` — 투영은 maru 가 한다, 꺼져 있으면 sidecar 가 늘 덜어 낸다).
+//! 보인다(`credentialHeader` — 투영은 maru 가 한다, 꺼져 있으면 sidecar 가 늘 덜어 낸다). 전권(사용자 결정 2026-11-16)이 넣는 쿠키 권한은 어느
+//! 호스트든이라 모든 호스트를 덮는다(`cookieCovers` — 쿠키 op 의 인가 `authorizes` 와 같은 뜻).
 //! 주소를 싣는 헤더(W9d① 적대 리뷰 4 회차 C1): `Location`·`Refresh`·`Content-Location`·`Link`(와 `Referer`) 값 안 주소의 사용자 정보도 주소
 //! 칸과 같은 규칙이다 — 켬이면 읽는 쪽의 쿠키 권한이 **그 주소의 호스트**를 덮을 때만 보이고(maru), 끔이면 sidecar 가 늘 지운다
 //! (`maskHeaderUserinfo` — 서버가 고른 글이라 GURL 보다 너그럽게 찾는다: 더 지우는 쪽).
@@ -42,6 +43,15 @@ pub fn hostCovers(granted: []const u8, current: []const u8) bool {
     if (current.len < granted.len + 1) return false;
     const tail = current[current.len - granted.len ..];
     return current[current.len - granted.len - 1] == '.' and std.ascii.eqlIgnoreCase(tail, granted);
+}
+
+/// 읽는 쪽의 쿠키 권한(`browser_storage` grant)이 그 호스트를 덮는가 — 어느 호스트든(`any_host` — 전권, 사용자 결정 2026-11-16 「그냥 AI가 모든
+/// 접근 가능하게」)이면 모든 호스트를(모르는 빈 호스트도 — 쿠키 op 의 인가 `control_pane_grant.authorizes` 가 어느 호스트든이면 호스트를 보지 않는
+/// 것과 같은 뜻), 아니면 그 grant 호스트와 그 하위 도메인만(`hostCovers` — 없으면 빈 글이라 아무것도). 자격 증명 헤더 값·주소의 사용자 정보
+/// (maru `web_osr_network.View.credentials`)와 쿠키 실린 본문(`bodyAccess` 의 UB1)이 이 판정 하나를 쓴다 — 둘이 갈리면 전권에서 한쪽만 가려진다
+/// (A0 — 예전 판은 어느 호스트든 grant 의 호스트를 빈 글로 넘겨 둘 다 영영 가렸다).
+pub fn cookieCovers(any_host: bool, granted: []const u8, host: []const u8) bool {
+    return any_host or hostCovers(granted, host);
 }
 
 /// http(s) URL 의 호스트. 다른 스킴(data:·about:·file: — 쿠키가 없다)이나 호스트 없는 URL 은 null. `control_pane_grant.hostOfUrl` 의
@@ -432,7 +442,7 @@ pub fn crossSiteIframe(flags: message.NetFlags, resource_type: u8, url_host: []c
 ///   ③ 본문 권한이 묶인 사이트가 아닌 페이지에서 난 요청이면 `hidden`(그 사이트로 받은 동의가 덮지 않는다 — 헤더의 F2 와 같은 규칙).
 ///   ④ 그 권한을 받기 전에 시작한 요청이면 `before_body_permission`(사용자 탭은 허락 뒤의 것만 — 사용자 결정 U7 과 같은 갈래).
 ///   ⑤ UB1(사용자 결정 2026-10-15 「적용」): 쿠키나 인증 헤더가 실제로 실린 응답(`credentialed`)이 본문 권한이 덮지 않는 호스트에서 왔으면 그
-///      호스트를 덮는 쿠키 권한(`browser_storage`)이 있어야 한다 — 없으면 `needs_cookie_permission`. 다른 사이트의 로그인 쿠키로 받은 개인
+///      호스트를 덮는 쿠키 권한(`browser_storage` — 전권의 것은 어느 호스트든이라 모두 덮는다, `cookieCovers`)이 있어야 한다 — 없으면 `needs_cookie_permission`. 다른 사이트의 로그인 쿠키로 받은 개인
 ///      본문이다(스크립트·스타일도 — J13: 다른 사이트의 `<script>`·`<link>` 는 쿠키로 만든 본문도 받혔다). 기록한 사이트 제 응답과 자격 증명이
 ///      실리지 않은 응답은 그대로 보인다.
 pub const BodyAccess = enum { visible, needs_body_permission, hidden, before_body_permission, needs_cookie_permission };
@@ -452,13 +462,15 @@ pub const BodyFacts = struct {
     credentialed: bool,
     /// 이 읽는 쪽이 그 탭에 쥔 쿠키 권한의 호스트(없으면 빈 글).
     cookie_host: []const u8 = "",
+    /// 그 쿠키 권한이 어느 호스트든이다(전권 — `cookieCovers`). 참이면 `cookie_host` 는 보지 않는다.
+    cookie_any_host: bool = false,
 };
 
 pub fn bodyAccess(f: BodyFacts) BodyAccess {
     if (!f.has_body_grant) return .needs_body_permission;
     if (!f.response_visible or !f.page_covered) return .hidden;
     if (!f.after_grant) return .before_body_permission;
-    if (f.credentialed and !hostCovers(f.body_host, f.final_host) and !hostCovers(f.cookie_host, f.final_host)) return .needs_cookie_permission;
+    if (f.credentialed and !hostCovers(f.body_host, f.final_host) and !cookieCovers(f.cookie_any_host, f.cookie_host, f.final_host)) return .needs_cookie_permission;
     return .visible;
 }
 
@@ -487,6 +499,13 @@ test "W9d②: 본문이 보이는가의 판 — 본문 권한·응답 투영·�
     try testing.expectEqual(BodyAccess.visible, bodyAccess(f));
     f.cookie_host = "app.test"; // 다른 사이트의 쿠키 권한은 덮지 않는다
     try testing.expectEqual(BodyAccess.needs_cookie_permission, bodyAccess(f));
+    // A0: 전권의 쿠키 권한(어느 호스트든)은 그 다른 사이트도 덮는다 — 호스트 칸에 다른 사이트가 남아 있어도, 모르는(빈) 응답 호스트도.
+    f.cookie_any_host = true;
+    try testing.expectEqual(BodyAccess.visible, bodyAccess(f));
+    f.final_host = "";
+    try testing.expectEqual(BodyAccess.visible, bodyAccess(f));
+    f.final_host = "bank.test";
+    f.cookie_any_host = false;
     // 실리지 않은 다른 사이트 응답은 그대로 보인다(설정 켬 — 「다 보여 줌」).
     f.credentialed = false;
     try testing.expectEqual(BodyAccess.visible, bodyAccess(f));
@@ -757,6 +776,16 @@ test "W9d① 적대 리뷰 5 회차 재현 N1: 33 바이트를 넘는 스킴 —
     try testing.expectError(error.InvalidNetwork, net_fields.checkBegin(.{ .browser = 1, .request = 1, .url = url, .flags = .{ .url_truncated = true } }));
 }
 
+test "A0: cookieCovers — 어느 호스트든 쿠키 권한(전권)은 모든 호스트를(빈 호스트도), 사이트에 묶인 것은 그 호스트와 하위 도메인만, 없으면 아무것도" {
+    try testing.expect(cookieCovers(true, "", "bank.test"));
+    try testing.expect(cookieCovers(true, "", ""));
+    try testing.expect(cookieCovers(true, "a.test", "bank.test")); // 어느 호스트든이면 호스트 칸은 보지 않는다
+    try testing.expect(cookieCovers(false, "bank.test", "api.bank.test"));
+    try testing.expect(!cookieCovers(false, "bank.test", "evilbank.test"));
+    try testing.expect(!cookieCovers(false, "api.bank.test", "bank.test"));
+    try testing.expect(!cookieCovers(false, "", "bank.test"));
+}
+
 // ── W9d② v20 A R7(적대 검증 — 권한): bodyAccess 의 판 전체를 따로 쓴 기준 모델과 맞춘다(불 다섯 × 호스트 관계). 경계: 빈 호스트(모름 — 3 회차 C1 의
 // top_inexact 가 주는 빈 body_host), 점 경계(evil 접두), 하위 도메인 쿠키 권한이 부모를 덮지 않음, 빈 쿠키 권한.
 test "W9d② v20 A R7: bodyAccess 판 전체 — 기준 모델과 같다(빈 호스트·점 경계·하위 도메인 쿠키 권한 포함), 자격 증명 본문은 덮지 않는 쪽으로 닫힌다" {
@@ -775,13 +804,14 @@ test "W9d② v20 A R7: bodyAccess 판 전체 — 기준 모델과 같다(빈 호
             if (!f.after_grant) return .before_body_permission;
             if (!f.credentialed) return .visible;
             if (covers(f.body_host, f.final_host)) return .visible;
+            if (f.cookie_any_host) return .visible; // A0: 전권의 쿠키 권한은 모든 호스트(빈 호스트도)를 덮는다
             if (covers(f.cookie_host, f.final_host)) return .visible;
             return .needs_cookie_permission;
         }
     };
     var n: usize = 0;
     var cookie_needed: usize = 0;
-    for (0..32) |bits| for (hosts) |body_host| for (hosts) |final_host| for (cookies) |cookie_host| {
+    for (0..64) |bits| for (hosts) |body_host| for (hosts) |final_host| for (cookies) |cookie_host| {
         const f: BodyFacts = .{
             .has_body_grant = bits & 1 != 0,
             .response_visible = bits & 2 != 0,
@@ -791,6 +821,7 @@ test "W9d② v20 A R7: bodyAccess 판 전체 — 기준 모델과 같다(빈 호
             .body_host = body_host,
             .final_host = final_host,
             .cookie_host = cookie_host,
+            .cookie_any_host = bits & 32 != 0,
         };
         const want = Ref.model(f);
         errdefer std.debug.print("R7 bodyAccess: bits={b} body={s} final={s} cookie={s} want {s}\n", .{ bits, body_host, final_host, cookie_host, @tagName(want) });
@@ -798,7 +829,7 @@ test "W9d② v20 A R7: bodyAccess 판 전체 — 기준 모델과 같다(빈 호
         if (want == .needs_cookie_permission) cookie_needed += 1;
         n += 1;
     };
-    try testing.expectEqual(@as(usize, 32 * hosts.len * hosts.len * cookies.len), n);
+    try testing.expectEqual(@as(usize, 64 * hosts.len * hosts.len * cookies.len), n);
     try testing.expect(cookie_needed > 0);
     // 대조(정상): 기록한 사이트 제 응답은 자격 증명이 실려도 보인다.
     try testing.expectEqual(BodyAccess.visible, bodyAccess(.{ .has_body_grant = true, .response_visible = true, .page_covered = true, .after_grant = true, .body_host = "app.test", .final_host = "api.app.test", .credentialed = true }));

@@ -17,7 +17,8 @@
 //! W9d① 적대 리뷰 3 회차: 덮이는지는 sidecar 가 온 주소에서 읽어 싣는 호스트 칸(요청·홉 — `host`)으로만 가른다 — 주소 글에서 호스트를 다시 읽지
 //! 않는다(T1 — 2 KiB 에서 잘린 주소가 긴 사용자 정보 안에서 끊겨 덮이는 사이트로 읽혔다). 자격 증명 헤더(`Cookie`·`Set-Cookie`·`Authorization`)
 //! 값과 주소의 사용자 정보는 읽는 쪽이 그 헤더를 보내거나 받은 호스트를 덮는 `browser_storage` grant(`View.cookie_host`)를 쥘 때만 — 설정이
-//! 켜져 있어도(D1 — 사용자 결정 2026-10-15). sidecar 가 다시 뜨면(브라우저가 다시 만들어지면) 진행 중이던 요청은 끝난 것으로 치고 번호 표를
+//! 켜져 있어도(D1 — 사용자 결정 2026-10-15). 전권(사용자 결정 2026-11-16)의 쿠키 권한은 어느 호스트든이라 모든 호스트를 덮는다(`View.cookie_any_host`
+//! — A0: 예전 판은 그 권한을 「없음」 으로 읽어 전권에서도 값이 영영 가려졌다). sidecar 가 다시 뜨면(브라우저가 다시 만들어지면) 진행 중이던 요청은 끝난 것으로 치고 번호 표를
 //! 비운다(T2 — 새 프로세스는 이동 요청 번호를 같게 다시 쓴다).
 //! W9d②: 기록하는 탭(`browser.networkRecord`)의 응답 본문을 기록마다 쥔다(sidecar 의 `net_body_data`·`net_body_end` — 하나 1 MiB·탭 8 MiB·앱 32 MiB,
 //! 넘으면 이 탭의 오래된 본문부터 `evicted`, 메모리에만). 본문은 새것부터 찾아 붙인다(끝은 대개 그 요청의 `net_end` 뒤에 온다). 같은 번호로
@@ -408,9 +409,12 @@ pub const View = struct {
     /// 없으면 수만(N6 — 「허락 없는 탭」 은 이 읽는 쪽에게 허락되지 않은 탭이다).
     reader_tabs: []const u64 = &.{},
     /// 이 읽는 쪽이 이 탭에 쥔 `browser_storage` grant 의 호스트(W9d① 적대 리뷰 3 회차 D1 — 쿠키 권한). 자격 증명 헤더 값과 주소의 사용자 정보는
-    /// 그 헤더를 보내거나 받은 호스트를 이것이 덮을 때만 보인다 — 설정이 켜져 있어도(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」), 어느
-    /// 호스트든 grant(에이전트 탭)여도. 비면 아무것도.
+    /// 그 헤더를 보내거나 받은 호스트를 이것이 덮을 때만 보인다 — 설정이 켜져 있어도(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」), 네트워크
+    /// grant 가 어느 호스트든(에이전트 탭)이어도. 비면 아무것도(`cookie_any_host` 가 아니면).
     cookie_host: []const u8 = "",
+    /// 그 쿠키 권한이 어느 호스트든이다 — 전권(사용자 결정 2026-11-16)이 넣는 값. 그러면 모든 호스트의 자격 증명 값과 주소의 사용자 정보가 보인다
+    /// (설정이 켜져 있을 때 — 꺼져 있으면 sidecar 가 늘 덜어 낸다), 다른 사이트에서 쿠키를 싣고 온 본문도(A0 — `net_policy.cookieCovers`).
+    cookie_any_host: bool = false,
     /// W9d③: 이 읽는 쪽(pane)이 이 탭에 둔 막기 규칙의 패턴 — 막힌 기록에 `block_pattern` 으로 싣는다(다른 pane 의 규칙은 번호만).
     block_patterns: []const BlockPattern = &.{},
     /// W9d④: 이 읽는 쪽(pane)이 이 탭에 둔 가짜 규칙 — 가짜였던 기록에 `mock_pattern`, 본문(`body_state:"mocked"`)은 그 규칙의 지금 본문에서
@@ -445,7 +449,7 @@ pub const View = struct {
     /// D1: 그 호스트가 보내거나 받은 자격 증명(쿠키·인증 헤더 값, 주소의 사용자 정보)을 보여도 되는가 — 설정이 켜졌고(꺼졌으면 sidecar 가 늘
     /// 덜어 낸다) 이 읽는 쪽의 쿠키 권한이 그 호스트를 덮을 때만.
     fn credentials(self: View, host: []const u8) bool {
-        return self.full and policy.hostCovers(self.cookie_host, host);
+        return self.full and policy.cookieCovers(self.cookie_any_host, self.cookie_host, host);
     }
 };
 
@@ -1081,8 +1085,8 @@ pub const Ring = struct {
 
     /// W9d②: 본문 읽기의 관점 — 본문 권한이 있으면 그 읽는 쪽의 본문 시작점을 정한다(읽을 때마다 — 미룬 시작점은 첫 읽기로).
     fn bodyView(self: *Ring, bq: BodyQuery, view: View) BodyView {
-        const who = bq.who orelse return .{ .q = bq, .cookie_host = view.cookie_host };
-        return .{ .q = bq, .start = self.body_readers.startFor(who, self.next_seq), .cookie_host = view.cookie_host };
+        const who = bq.who orelse return .{ .q = bq, .cookie_host = view.cookie_host, .cookie_any_host = view.cookie_any_host };
+        return .{ .q = bq, .start = self.body_readers.startFor(who, self.next_seq), .cookie_host = view.cookie_host, .cookie_any_host = view.cookie_any_host };
     }
 };
 
@@ -1104,6 +1108,7 @@ const BodyView = struct {
     /// 이 번호 이상의 요청의 본문을 본다.
     start: u64 = 0,
     cookie_host: []const u8 = "",
+    cookie_any_host: bool = false,
 };
 
 /// 그 요청이 난 페이지의 호스트 — 주 프레임 문서면 그 주소, 아니면 그때 탭의 맨 위 문서(F2 — 모르면 빈 글).
@@ -1133,6 +1138,7 @@ fn bodyAccessOf(e: *const Entry, view: View, body: BodyView) policy.BodyAccess {
         // 다 받은 바이트만 가른다 — 받지 않은 상태(크기 넘침·글 아님 …)는 이미 보이는 응답의 사실이다.
         .credentialed = e.body_state == .captured and e.body_flags.credentialed,
         .cookie_host = body.cookie_host,
+        .cookie_any_host = body.cookie_any_host,
     });
 }
 
@@ -1431,7 +1437,8 @@ fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []
 /// 헤더 목록 — 설정이 켜졌으면 그대로, 꺼졌으면 규칙대로(이름만인 것은 `redacted:true`). 자격 증명 헤더(`net_policy.credentialHeader`)는 이 읽는
 /// 쪽의 쿠키 권한이 그 헤더를 보내거나 받은 호스트(`host`)를 덮을 때만 값 — 아니면 켜져 있어도 이름만이고 `needs_cookie_permission:true`(3 회차 D1).
 /// 주소를 싣는 헤더(`Location`·`Refresh`·`Content-Location`·`Link`·`Referer`)의 값은 그 안 주소의 사용자 정보를 지운다 — 이 읽는 쪽의 쿠키
-/// 권한이 **그 주소의 호스트**를 덮을 때만 둔다(4 회차 C1 — 주소 칸 `shownUrl` 과 같은 규칙, 끔이면 늘 지운다).
+/// 권한이 **그 주소의 호스트**를 덮을 때만 둔다(4 회차 C1 — 주소 칸 `shownUrl` 과 같은 규칙, 끔이면 늘 지운다). 어느 호스트든 쿠키 권한(전권 — A0)은
+/// 모든 주소를 덮으므로 값 그대로다.
 /// 보이지 않는 곳의 헤더는 이 함수를 부르지 않는다.
 fn writeHeaders(s: *std.json.Stringify, h: Headers, view: View, host: []const u8) !void {
     try s.beginArray();
@@ -1440,8 +1447,10 @@ fn writeHeaders(s: *std.json.Stringify, h: Headers, view: View, host: []const u8
     var mb: [msg.max_net_headers_bytes]u8 = undefined;
     const full = view.full and !h.stripped;
     const creds = full and view.credentials(host);
-    // 주소의 사용자 정보를 둘 수 있는 쿠키 권한 — 끔·덜어 낸 덩어리면 없다(`View.credentials` 와 같은 조건).
+    // 주소의 사용자 정보를 둘 수 있는 쿠키 권한 — 끔·덜어 낸 덩어리면 없다(`View.credentials` 와 같은 조건). 어느 호스트든이면(A0) 어느 주소든 둔다 —
+    // `net_policy.cookieCovers(true, …)` 가 늘 참인 것과 같다(가리기를 부르지 않는다).
     const url_cookie_host = if (full) view.cookie_host else "";
+    const url_cookie_any = full and view.cookie_any_host;
     while (it.next()) |hd| {
         try s.beginObject();
         try s.objectField("name");
@@ -1451,7 +1460,7 @@ fn writeHeaders(s: *std.json.Stringify, h: Headers, view: View, host: []const u8
         switch (rule) {
             .value, .covered_only => {
                 try s.objectField("value");
-                try s.write(policy.maskHeaderUserinfo(hd.name, hd.value, url_cookie_host, &mb));
+                try s.write(if (url_cookie_any) hd.value else policy.maskHeaderUserinfo(hd.name, hd.value, url_cookie_host, &mb));
             },
             .origin_only => {
                 try s.objectField("value");
@@ -2413,6 +2422,89 @@ test "W9d① 적대 리뷰 3 회차 T2: 브라우저가 다시 만들어지면 �
     defer done.deinit();
     try testing.expectEqualStrings("done", done.value.object.get("state").?.string); // 끝난 요청은 그대로
     try testing.expectEqual(@as(usize, 3), t.ring.entries.len); // 새 요청은 제 기록(#3)으로
+}
+
+test "A0 전권: 어느 호스트든 쿠키 권한(cookie_any_host)이면 모든 호스트의 자격 증명 헤더 값·주소의 사용자 정보(주소 칸·주소를 싣는 헤더)가 보이고 목록 거르기도 같다 — 설정을 끄면 그대로 가린다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    var req_h: net_fields.HeaderBuilder = .{};
+    _ = req_h.add("Cookie", "bank_sid=SECRET");
+    _ = req_h.add("Authorization", "Bearer TOKEN");
+    var hop_h: net_fields.HeaderBuilder = .{};
+    _ = hop_h.add("Set-Cookie", "sso=HOPSECRET");
+    _ = hop_h.add("Location", "https://u:p@sso.test/login");
+    _ = hop_h.add("Link", "<https://u:p@cdn.test/l>; rel=preload");
+    var resp_h: net_fields.HeaderBuilder = .{};
+    _ = resp_h.add("Set-Cookie", "sso_sid=NEW");
+    _ = resp_h.add("Proxy-Authorization", "Basic PROXY");
+    try t.begin(1, "https://alice:pw@bank.test/start", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "bank.test", .headers = req_h.block() });
+    try t.redirect(1, 302, "https://u:p@sso.test/login", .{ .headers = hop_h.block() });
+    try t.respond(1, 200, resp_h.block());
+    // 호스트 칸에 다른 사이트가 남아 있어도 어느 호스트든이면 보지 않는다(전권 grant 의 호스트 칸은 비지만 그 값에 기대지 않는다).
+    for ([_][]const u8{ "", "a.test" }) |stale| {
+        const p = try detailJson(&t, 7, .{ .full = true, .cookie_host = stale, .cookie_any_host = true }, 1);
+        defer p.deinit();
+        const o = p.value.object;
+        const rq = o.get("request_headers").?.array.items;
+        try testing.expectEqualStrings("bank_sid=SECRET", headerOf(rq, "Cookie").?.get("value").?.string);
+        try testing.expectEqualStrings("Bearer TOKEN", headerOf(rq, "Authorization").?.get("value").?.string);
+        const hop = o.get("redirects").?.array.items[0].object;
+        try testing.expectEqualStrings("https://u:p@sso.test/login", hop.get("url").?.string);
+        const hh = hop.get("headers").?.array.items;
+        try testing.expectEqualStrings("sso=HOPSECRET", headerOf(hh, "Set-Cookie").?.get("value").?.string);
+        try testing.expectEqualStrings("https://u:p@sso.test/login", headerOf(hh, "Location").?.get("value").?.string);
+        try testing.expectEqualStrings("<https://u:p@cdn.test/l>; rel=preload", headerOf(hh, "Link").?.get("value").?.string);
+        const rs = o.get("response_headers").?.array.items;
+        try testing.expectEqualStrings("sso_sid=NEW", headerOf(rs, "Set-Cookie").?.get("value").?.string);
+        try testing.expectEqualStrings("Basic PROXY", headerOf(rs, "Proxy-Authorization").?.get("value").?.string);
+        try testing.expectEqualStrings("https://alice:pw@bank.test/start", o.get("url").?.string);
+    }
+    // 목록의 거르기도 같은 투영 — 어느 호스트든이면 사용자 정보로도 찾는다.
+    {
+        const q = try t.listJson(7, .{ .full = true, .cookie_any_host = true }, .{ .url_contains = "alice" });
+        defer q.deinit();
+        try testing.expectEqual(@as(usize, 1), q.value.object.get("requests").?.array.items.len);
+    }
+    // 대조: 어느 호스트든이 아니면(같은 빈 호스트 칸) 이름만과 그 까닭 — 이 고침 전의 전권이 늘 이랬다.
+    {
+        const p = try detailJson(&t, 7, .{ .full = true }, 1);
+        defer p.deinit();
+        const cookie = headerOf(p.value.object.get("request_headers").?.array.items, "Cookie").?;
+        try testing.expect(cookie.get("value") == null and cookie.get("needs_cookie_permission").?.bool);
+        try testing.expectEqualStrings("https://bank.test/start", p.value.object.get("url").?.string);
+    }
+    // 설정을 끄면 어느 호스트든 쿠키 권한이어도 이름만(끔은 sidecar 가 덜어 내는 쪽 — 바뀌지 않는다), 주소의 사용자 정보도 지운다.
+    {
+        const p = try detailJson(&t, 7, .{ .full = false, .grant_host = "bank.test", .cookie_any_host = true }, 1);
+        defer p.deinit();
+        const o = p.value.object;
+        const cookie = headerOf(o.get("request_headers").?.array.items, "Cookie").?;
+        try testing.expect(cookie.get("value") == null and cookie.get("needs_cookie_permission") == null);
+        try testing.expectEqualStrings("https://bank.test/start", o.get("url").?.string);
+    }
+}
+
+test "A0 전권: 다른 사이트에서 쿠키를 싣고 온 본문(UB1)은 어느 호스트든 쿠키 권한이면 보인다(목록도) — 쿠키 권한이 없으면 대조로 가린다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 72, .birth = true }});
+    const any: BodyQuery = .{ .who = 72, .any_host = true, .want = true };
+    try bodyBegin(&t, 1, "https://bank.test/me", "app.test"); // app.test 페이지의 은행 요청 — 쿠키가 실렸다
+    try bodyFeed(&t, 1, "{\"balance\":1}", .{ .credentialed = true });
+    try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 1, any, "")); // 대조
+    const d = try t.ring.detail(testing.allocator, 7, .{ .cookie_any_host = true }, 1, any);
+    defer testing.allocator.free(d);
+    const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, d, .{});
+    defer p.deinit();
+    try testing.expectEqualStrings("captured", p.value.object.get("body_state").?.string);
+    try testing.expectEqualStrings("{\"balance\":1}", p.value.object.get("body").?.string);
+    // 목록에도 같은 상태.
+    const json = try t.ring.list(testing.allocator, 7, .{ .cookie_any_host = true }, .{ .page_size = max_page_size }, any);
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.indexOf(u8, json, "needs_cookie_permission") == null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"body_state\":\"captured\"") != null);
 }
 
 // ── W9d① 적대 리뷰 4 회차 재현(리뷰 후보 C1·C2 — 코드 읽기에서 나온 것을 붙여 실패를 본 뒤 고친다) ──

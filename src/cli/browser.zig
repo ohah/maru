@@ -36,7 +36,7 @@ pub const browser_help =
     \\
     \\commands:
     \\  list                                   list open web panels (id, url, title, engine — for discovery; a tab on an error page ends with [error page: ERR_…])
-    \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load; an error page adds a warning line with [error page: ERR_…])
+    \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load; on an error page the output has [error page: ERR_…] — on the blocked: line if a blocking rule stopped it, otherwise on a warning: line)
     \\  get-url     --surface <id>             print the tab's address (on an error page, the address it tried, plus a note on stderr)
     \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
     \\  get-cookies --surface <id>             print cookies for the current document host as JSON
@@ -5500,7 +5500,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\
         \\commands:
         \\  list                                   list open web panels (id, url, title, engine — for discovery; a tab on an error page ends with [error page: ERR_…])
-        \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load; an error page adds a warning line with [error page: ERR_…])
+        \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load; on an error page the output has [error page: ERR_…] — on the blocked: line if a blocking rule stopped it, otherwise on a warning: line)
         \\  get-url     --surface <id>             print the tab's address (on an error page, the address it tried, plus a note on stderr)
         \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
         \\  get-cookies --surface <id>             print cookies for the current document host as JSON

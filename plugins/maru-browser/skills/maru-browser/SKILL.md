@@ -65,8 +65,8 @@ maru browser close --surface 12                      # always, when done
   the page until they click it) — see [tabs-and-permissions.md](references/tabs-and-permissions.md).
 - `click`, `type`, `press` and `hover` send real input. `ok` plus a dialog warning means the input landed:
   do not repeat it — see [dialogs-and-uploads.md](references/dialogs-and-uploads.md). A pane holds at most 8 agent tabs;
-  at that limit `ok` is followed by `warning: [tab limit] …` — the page's new tabs from that input are blocked (see
-  [tabs-and-permissions.md](references/tabs-and-permissions.md)).
+  at that limit a click or key press prints `ok` and `warning: [tab limit] …` — a new tab the page opens from it does
+  not open as your agent tab (see [tabs-and-permissions.md](references/tabs-and-permissions.md)).
 
 ## 3. The user's tabs
 

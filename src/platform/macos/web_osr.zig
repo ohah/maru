@@ -9680,6 +9680,13 @@ test "오류 페이지 표시(2026-11-20 「붙이기」): 에이전트가 지�
     try std.testing.expect(agentNavigate(gpa, 73, "https://z.test/"));
     testApply(gpa, .{ .error_page = .{ .browser = 73, .error_code = 0, .url = "https://z.test/" } });
     try std.testing.expectEqual(@as(i32, -2), agentNavState(73).?.net_error);
+    // 막힘(서비스 워커 길 -2 + 규칙) — 막힘이 이동을 끝내기 전에 번호를 적는다(적대 검증 B R20 MED-1: 막힘 갈래가 번호를 잃어도 시험이 몰랐다).
+    try std.testing.expect(agentNavigate(gpa, 73, "https://b.test/sw"));
+    testApply(gpa, .{ .error_page = .{ .browser = 73, .error_code = -2, .blocked_rule = 2, .url = "https://b.test/sw" } });
+    const blocked = agentNavState(73).?;
+    try std.testing.expect(blocked.done and !blocked.loaded);
+    try std.testing.expectEqual(@as(u32, 2), blocked.blocked_rule);
+    try std.testing.expectEqual(@as(i32, -2), blocked.net_error);
 }
 
 test "오류 페이지 표시(2026-11-20 「더하기」): error_page 의 번호·막기 규칙을 주소와 한 번에 낸다 — 실패 주소를 받지 않아도 세우고, 번호만 바뀌어도 다시 내며, 새 문서·주소 확정·새 브라우저가 지운다" {

@@ -3753,13 +3753,15 @@ fn sendNetWatch(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
 /// W9d①: 네트워크를 읽는 쪽 — 읽는 쪽 번호(`consoleAuthorizer`), grant 를 쥔 pane(적대 리뷰 2 회차 N6 — null 은 시험만: 읽는 탭만 제 것이다.
 /// `browser_network` 는 cap 으로 발급하지 않아 읽는 쪽은 늘 pane grant 다 — 5 회차 N2), grant 호스트(지금 값 —
 /// 좁혀졌으면 좁힌 사이트), 그 grant 가 그 호스트에 묶였는가(모달로 받은 grant·좁힌 태어날 때 grant), 그 읽는 쪽이 이 탭에 쥔 `browser_storage`
-/// grant 의 호스트(3 회차 D1 — 쿠키 권한: 자격 증명 값은 그 호스트를 덮을 때만, 없으면 빈 글).
+/// grant 의 호스트(3 회차 D1 — 쿠키 권한: 자격 증명 값은 그 호스트를 덮을 때만, 없으면 빈 글), 그 쿠키 권한이 어느 호스트든인가(`cookie_any_host` —
+/// 전권의 값, A0: 모든 호스트를 덮는다).
 pub const NetReader = struct {
     who: u64,
     pane: ?u64 = null,
     grant_host: []const u8 = "",
     host_bound: bool = false,
     cookie_host: []const u8 = "",
+    cookie_any_host: bool = false,
     /// W9d②: 그 pane 이 이 탭에 쥔 `browser_network_body` grant 의 읽는 쪽 번호(없으면 null — 본문은 `needs_body_permission`), 그 호스트(어느
     /// 호스트든이면 `body_any_host`).
     body_who: ?u64 = null,
@@ -3801,7 +3803,7 @@ fn netView(s: ?*const Surface, read_tab: u64, reader: NetReader, lists: *NetView
             at += o.len;
         }
     }
-    return .{ .full = net_full, .grant_host = host, .top_bound = reader.host_bound, .shared_sw_origins = lists.shared.items, .shared_sw_unknown = shared_unknown, .reader_tabs = lists.tabs.items, .cookie_host = reader.cookie_host };
+    return .{ .full = net_full, .grant_host = host, .top_bound = reader.host_bound, .shared_sw_origins = lists.shared.items, .shared_sw_unknown = shared_unknown, .reader_tabs = lists.tabs.items, .cookie_host = reader.cookie_host, .cookie_any_host = reader.cookie_any_host };
 }
 
 /// W9d① 적대 리뷰 4 회차 C3: 네트워크 판정에 쓸 탭의 지금 주소 — 새 문서의 주소가 아직 오지 않았으면(`url_stale` — 32 KiB 를 넘는 주소는 끝내

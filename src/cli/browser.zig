@@ -3816,9 +3816,11 @@ fn renderNetworkHeaders(gpa: std.mem.Allocator, w: *std.Io.Writer, title: []cons
         try w.writeAll("  ");
         try writePageText(gpa, w, strField(o.get("name")), false);
         try w.writeAll(": ");
-        // W9d① 적대 리뷰 3 회차 D1: 자격 증명 값은 그 사이트의 쿠키 권한이 있어야 한다(설정이 켜져 있어도) — 까닭이 다르면 안내도 다르다.
+        // W9d① 적대 리뷰 3 회차 D1: 자격 증명 값은 그 사이트의 쿠키 권한이 있어야 한다(설정이 켜져 있어도) — 까닭이 다르면 안내도 다르다. A0: 전권의 쿠키
+        // 권한은 어느 호스트든이라 이 표시는 그 pane 이 그 탭의 쿠키 권한을 받지 못했을 때(표가 꽉 찼을 때 — `grants_full`)만 온다. 모달이 걷혀
+        // 「get-cookies 가 묻는다」 는 더는 참이 아니다.
         if (boolField(o.get("needs_cookie_permission")))
-            try w.writeAll("(hidden — needs this site's cookie permission: maru browser get-cookies asks for it)")
+            try w.writeAll("(hidden — this pane holds no cookie permission for this tab; maru gives one with full access unless the browser grant table is full: close tabs that are no longer needed or ask the user to choose Revoke All in the Browser Grants menu, then retry)")
         else if (boolField(o.get("redacted")))
             try w.writeAll("(hidden — browser.agent-network-full is off)")
         else
@@ -3902,7 +3904,7 @@ fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std
     else if (std.mem.eql(u8, body, "needs_body_permission"))
         "hidden — needs the permission to record this tab's bodies: maru browser network-record --on asks for it"
     else if (std.mem.eql(u8, body, "needs_cookie_permission"))
-        "hidden — this response carried another site's cookies or login: navigate the tab to that site, then maru browser get-cookies asks for its cookie permission (it covers the tab's current site)"
+        "hidden — this response carried another site's cookies or login and this pane holds no cookie permission for this tab; maru gives one with full access unless the browser grant table is full: close tabs that are no longer needed or ask the user to choose Revoke All in the Browser Grants menu, then retry"
     else if (std.mem.eql(u8, body, "before_body_permission"))
         "hidden — made before your permission to record bodies"
     else if (std.mem.eql(u8, body, "restarted"))
@@ -6756,7 +6758,7 @@ test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈�
         "  302 → https://sso.test/x\n" ++
         "request headers:\n" ++
         "  Cookie: (hidden — browser.agent-network-full is off)\n" ++
-        "  Authorization: (hidden — needs this site's cookie permission: maru browser get-cookies asks for it)\n" ++
+        "  Authorization: (hidden — this pane holds no cookie permission for this tab; maru gives one with full access unless the browser grant table is full: close tabs that are no longer needed or ask the user to choose Revoke All in the Browser Grants menu, then retry)\n" ++
         "  X-Evil: aSet-Cookie: x\n" ++
         "response headers:\n" ++
         "  Content-Type: text/html\n" ++
@@ -6860,7 +6862,7 @@ test "W9d②: 본문 렌더 — 글은 줄바꿈을 남기고 ESC·양방향 글
     try testing.expect(std.mem.indexOf(u8, out.written(), "/wB7") == null);
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"needs_cookie_permission\"}}", .network_request, &out.writer));
-    try testing.expect(std.mem.indexOf(u8, out.written(), "body: hidden — this response carried another site's cookies or login: navigate the tab to that site, then maru browser get-cookies asks for its cookie permission") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: hidden — this response carried another site's cookies or login and this pane holds no cookie permission for this tab; maru gives one with full access unless the browser grant table is full") != null);
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"over_cap\",\"body_decoded_size\":2097152}}", .network_request, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "body: over_cap (2097152 bytes — over the 1 MiB body limit, which counts both the received bytes and the decoded text; this is the larger)\n") != null);

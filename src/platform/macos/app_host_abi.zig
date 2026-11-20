@@ -7871,11 +7871,14 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
         current = if (now.any_host) .{} else now.host;
         break :blk current.slice();
     };
-    // 적대 리뷰 3 회차 D1(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」): 그 pane 이 이 탭에 쥔 쿠키 권한(`browser_storage` — 늘 사이트에
-    // 묶인다)의 호스트. 자격 증명 헤더 값·주소의 사용자 정보는 그것이 덮는 호스트의 것만 보인다 — 설정과 무관, 어느 호스트든 grant 여도.
+    // 적대 리뷰 3 회차 D1(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」): 그 pane 이 이 탭에 쥔 쿠키 권한(`browser_storage`). 자격 증명 헤더
+    // 값·주소의 사용자 정보는 그것이 덮는 호스트의 것만 보인다 — 설정과 무관, 네트워크 grant 가 어느 호스트든이어도. A0: 전권(사용자 결정 2026-11-16)이
+    // 넣는 쿠키 권한은 어느 호스트든이고 그것은 모든 호스트를 덮는다(`cookie_any` — 쿠키 op 의 인가와 같은 뜻). 예전 판은 그때 호스트를 빈 글로만
+    // 넘겨 「권한 없음」 이 되었고, 모달이 걷혀 그 권한을 받을 길이 없어 값이 영영 가려졌다.
     var cookie: control_pane_grant.GrantHost = .{};
+    var cookie_any = false;
     if (control_pane_grant_store.get(g.pane, op.surface_id, .browser_storage)) |sg| {
-        if (!sg.any_host) cookie = sg.host;
+        if (sg.any_host) cookie_any = true else cookie = sg.host;
     }
     // 설정이 꺼졌을 때 서비스 워커 요청을 가르는 읽는 쪽(적대 리뷰 2 회차 N6 — 그 pane 에게 허락되지 않은 탭).
     // W9d②: 그 pane 이 이 탭에 쥔 본문 grant(`browser_network_body`) — 본문의 읽는 쪽은 그 grant 의 번호(네트워크 grant 와 따로 시작점을 쥔다),
@@ -7888,7 +7891,7 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
         body_any = bg.any_host;
         if (!bg.any_host) body_host = bg.host;
     }
-    const reader: session_mod.web_osr.NetReader = .{ .who = who, .pane = g.pane, .grant_host = grant_host, .host_bound = host_bound, .cookie_host = cookie.slice(), .body_who = body_who, .body_host = body_host.slice(), .body_any_host = body_any };
+    const reader: session_mod.web_osr.NetReader = .{ .who = who, .pane = g.pane, .grant_host = grant_host, .host_bound = host_bound, .cookie_host = cookie.slice(), .cookie_any_host = cookie_any, .body_who = body_who, .body_host = body_host.slice(), .body_any_host = body_any };
     switch (op.method) {
         .network => {
             const parsed = std.json.parseFromSlice(struct {
@@ -17081,6 +17084,127 @@ test "W9d① 적대 리뷰 3 회차 D1(사용자 결정 「쿠키 권한 있을 
     r9d1Begin(199, 93, "https://bank.test/next", "bank.test", r9d1_cookie_bank);
     try std.testing.expect(!try r9d1DetailHas(199, w9d1Grant(6, 199), 2, "bank=SECRET1"));
     try std.testing.expect(try r9d1DetailHas(199, w9d1Grant(6, 199), 2, "https://bank.test/next"));
+}
+
+// ── A0(사용자 결정 2026-11-16 전권 — §8.9 「쿠키·인증 헤더 값·응답 본문을 읽고」): 전권이 넣는 쿠키 권한(`browser_storage`)은 어느 호스트든이다. 그
+// 권한은 어느 사이트의 자격 증명 값이든 덮는다 — 예전에는 읽는 쪽이 「사이트에 묶인 쿠키 권한」 만 보아 전권에서 값이 영영 가려졌다(모달이 걷혀
+// 그 권한을 받을 길도 없었다). 시험은 제품과 같은 길(`grantFullAccess`)로 grant 를 넣는다.
+
+/// 시험: 한 탭짜리 snapshot 으로 `browser.network` 요청의 전권 grant 를 (pane, 탭) 에 넣는다(제품의 `handleControlRequest` 가 디스패치 전에 하는 일).
+fn a0FullAccess(pane: u64, tab: u64, url: []const u8) !void {
+    const surfaces = [_]control_surface.SurfaceDto{.{ .surface_id = tab, .title = "tab", .window = 1, .detail = .{ .web = .{ .url = url, .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true } } }};
+    const ids = [_]u64{tab};
+    const windows = [_]maru.session.WindowMembershipSnapshot{.{ .window_id = 1, .window_kind = .normal, .surface_ids = &ids }};
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &surfaces, .windows = &windows };
+    var req_buf: [128]u8 = undefined;
+    const request = try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.network\",\"params\":{{\"id\":{d}}}}}", .{tab});
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .browser_pane = pane };
+    grantFullAccess(&control_server_storage, &pending, snapshot);
+    try std.testing.expect(pending.response == null);
+}
+
+/// 은행 로그인 요청 하나 — 주소의 사용자 정보, Cookie·Authorization 을 보내고 Set-Cookie 와 사용자 정보가 든 Location 을 받는다.
+fn a0BankRequest(tab: u64, request: u64) void {
+    const ta = std.testing.allocator;
+    const url = "https://al:pw@bank.test/login";
+    session_mod.web_osr.testApply(ta, .{ .net_begin = .{ .browser = tab, .request = request, .url = url, .host = "bank.test", .site = "bank.test", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .headers = .{ .count = 2, .bytes = "\x06Cookie\x00\x0cbank=SECRET1\x0dAuthorization\x00\x10Bearer TOKEN-BK1" } } });
+    session_mod.web_osr.testApply(ta, .{ .net_response = .{ .browser = tab, .request = request, .status = 200, .mime = "text/html", .headers = .{ .count = 2, .bytes = "\x0aSet-Cookie\x00\x12bank_sid=NEWSECRET\x08Location\x00\x1bhttps://al:pw@sso.test/next" } } });
+    session_mod.web_osr.testApply(ta, .{ .net_end = .{ .browser = tab, .request = request, .received = 10 } });
+}
+
+fn a0ExpectCredentialsShown(tab: u64, pane: u64, req: u64) !void {
+    const g = w9d1Grant(pane, tab);
+    try std.testing.expect(try r9d1DetailHas(tab, g, req, "{\"name\":\"Cookie\",\"value\":\"bank=SECRET1\"}"));
+    try std.testing.expect(try r9d1DetailHas(tab, g, req, "{\"name\":\"Authorization\",\"value\":\"Bearer TOKEN-BK1\"}"));
+    try std.testing.expect(try r9d1DetailHas(tab, g, req, "{\"name\":\"Set-Cookie\",\"value\":\"bank_sid=NEWSECRET\"}"));
+    try std.testing.expect(try r9d1DetailHas(tab, g, req, "https://al:pw@sso.test/next")); // Location 안 주소의 사용자 정보
+    try std.testing.expect(try r9d1DetailHas(tab, g, req, "\"url\":\"https://al:pw@bank.test/login\"")); // 요청 주소의 사용자 정보
+    try std.testing.expect(!try r9d1DetailHas(tab, g, req, "needs_cookie_permission"));
+}
+
+fn a0ExpectCredentialsHidden(tab: u64, pane: u64, req: u64) !void {
+    const g = w9d1Grant(pane, tab);
+    try std.testing.expect(!try r9d1DetailHas(tab, g, req, "bank=SECRET1"));
+    try std.testing.expect(!try r9d1DetailHas(tab, g, req, "TOKEN-BK1"));
+    try std.testing.expect(!try r9d1DetailHas(tab, g, req, "NEWSECRET"));
+    try std.testing.expect(!try r9d1DetailHas(tab, g, req, "al:pw@"));
+}
+
+test "A0 전권: 사람의 탭 — 전권의 쿠키 권한(어느 호스트든)이면 다른 사이트(은행)의 Cookie·Authorization·Set-Cookie 값과 주소의 사용자 정보가 보인다, 다른 pane 도 제 전권으로, 쿠키 권한만 철회하면 가려지고 다음 요청이 다시 넣는다, 설정을 끄면 가려진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const tab: u64 = 4761;
+    try w9c2Hold(ta, &.{tab});
+    defer w9c2Forget(ta, &.{tab});
+    defer session_mod.web_osr.setNetworkFull(true);
+    defer {
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = tab, .url = "https://a.test/" } });
+    try a0FullAccess(5, tab, "https://a.test/");
+    const sg = control_pane_grant_store.get(5, tab, .browser_storage) orelse return error.ExpectedGrant;
+    try std.testing.expect(sg.any_host); // 전권의 쿠키 권한 — 사이트에 묶이지 않는다
+    try std.testing.expect(!isAgentTab(tab)); // 사람의 탭 그대로
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = tab, .url = "https://bank.test/" } });
+    a0BankRequest(tab, 1);
+    try a0ExpectCredentialsShown(tab, 5, 1);
+    // 다른 pane — 그 pane 의 전권으로(제 grant 뒤의 요청만 — 시작점은 그대로).
+    try a0FullAccess(6, tab, "https://bank.test/");
+    a0BankRequest(tab, 2);
+    try a0ExpectCredentialsShown(tab, 6, 2);
+    try a0ExpectCredentialsShown(tab, 5, 2);
+    // 쿠키 권한만 철회(메뉴 한 줄) — 그 읽는 쪽에게는 곧 가려진다(다른 pane 은 그대로).
+    control_pane_grant_store.revoke(5, tab, .browser_storage);
+    try a0ExpectCredentialsHidden(tab, 5, 2);
+    try std.testing.expect(try r9d1DetailHas(tab, w9d1Grant(5, tab), 2, "\"needs_cookie_permission\":true"));
+    try a0ExpectCredentialsShown(tab, 6, 2);
+    // 다음 요청이 전권을 다시 넣는다 — 값이 다시 보인다.
+    try a0FullAccess(5, tab, "https://bank.test/");
+    try a0ExpectCredentialsShown(tab, 5, 2);
+    // 설정 `browser.agent-network-full` 을 끄면 헤더 값은 허용 목록만이다(sidecar 가 덜어 낸다) — 쿠키 권한이 어느 호스트든이어도.
+    session_mod.web_osr.setNetworkFull(false);
+    try a0ExpectCredentialsHidden(tab, 6, 2);
+}
+
+test "A0 전권: 에이전트 탭 — 다른 사이트에서 쿠키를 싣고 온 응답 본문이 needs_cookie_permission 이 아니라 그대로 보인다(전권의 쿠키 권한), 쿠키 권한이 없으면 대조로 가려진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const tab: u64 = 4762;
+    try w9c2Hold(ta, &.{tab});
+    defer w9c2Forget(ta, &.{tab});
+    defer {
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    try std.testing.expect(adoptAgentTab(5, tab)); // browser.open — 태어날 때 grant(네트워크·본문 …), 쿠키 권한은 아직 없다
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = tab, .url = "https://a.test/" } });
+    {
+        const p = try w9d2Record(tab, w9d2BodyGrant(5, tab), true);
+        defer p.deinit();
+    }
+    // 대조: 쿠키 권한이 없는 동안의 다른 사이트(cdn.test)의 쿠키 실린 본문은 가려진다(UB1).
+    w9d2Body(tab, 1, "https://cdn.test/me.json", "{\"acct\":\"CDN-SECRET\"}", .{ .credentialed = true });
+    try std.testing.expectEqualStrings("needs_cookie_permission", try v20bState2(tab, w9d1Grant(5, tab), 1));
+    // 다음 요청이 전권을 넣는다(쿠키 권한 — 어느 호스트든).
+    try a0FullAccess(5, tab, "https://a.test/");
+    try std.testing.expect(control_pane_grant_store.get(5, tab, .browser_storage).?.any_host);
+    try std.testing.expectEqualStrings("captured", try v20bState2(tab, w9d1Grant(5, tab), 1));
+    w9d2Body(tab, 2, "https://cdn.test/me2.json", "{\"acct\":\"CDN-SECRET-2\"}", .{ .credentialed = true });
+    try std.testing.expectEqualStrings("captured", try v20bState2(tab, w9d1Grant(5, tab), 2));
+    {
+        const p = try w9d2Detail(tab, w9d1Grant(5, tab), "{\"req\":2,\"body\":true,\"body_offset\":0,\"body_max_bytes\":65536}");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("{\"acct\":\"CDN-SECRET-2\"}", p.value.object.get("result").?.object.get("body").?.string);
+    }
 }
 
 // ── W9c③: 에이전트의 파일 올리기(`browser.upload`) — 앱 쪽: 파일 열기·묻지 않는 사본·이어가기·정리(확인 모달은 2026-11-16 걷혔다) ──────────

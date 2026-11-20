@@ -64,7 +64,9 @@ maru browser close --surface 12                      # always, when done
 - `show --surface 12` brings a tab to the front of its pane when the user should see it (their keys stay out of
   the page until they click it) — see [tabs-and-permissions.md](references/tabs-and-permissions.md).
 - `click`, `type`, `press` and `hover` send real input. `ok` plus a dialog warning means the input landed:
-  do not repeat it — see [dialogs-and-uploads.md](references/dialogs-and-uploads.md). A pane holds at most 8 agent tabs.
+  do not repeat it — see [dialogs-and-uploads.md](references/dialogs-and-uploads.md). A pane holds at most 8 agent tabs;
+  at that limit `ok` is followed by `warning: [tab limit] …` — the page's new tabs from that input are blocked (see
+  [tabs-and-permissions.md](references/tabs-and-permissions.md)).
 
 ## 3. The user's tabs
 

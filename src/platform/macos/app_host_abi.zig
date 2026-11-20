@@ -8559,6 +8559,8 @@ const CdpRun = struct {
     upload_approved: bool = false,
     /// W9c③: 사본을 만들기 전에 부른 쪽이 그 pane 의 foreground 를 떠났다 — `unauthorized`(-32002) 로 끝낸다.
     upload_refused: bool = false,
+    /// 2026-11-20 「상한 두고 알리기」: 이 op 의 누름·키 누름이 자리가 없어 새 탭 장을 받지 못했다 — 성공 결과에 `tab_limit` 을 싣는다(`finishCdp`).
+    tab_limit: ?TabLimitNote = null,
 };
 
 /// 실행 중이거나 기다리는 Chromium op(도착 순).
@@ -8901,6 +8903,7 @@ fn isAgentTab(tab: u64) bool {
 /// 그 탭(또는 그 pane — 에이전트가 끝났다)의 항목을 뺀다. pane 이 닫히면 그 탭들은 사람의 탭처럼 다룬다 — 장·상한·자리를 그 pane
 /// 이름으로 쥐지 않는다(W9b③ 적대 리뷰 2 회차).
 fn forgetAgentTab(surface_id: u64) void {
+    forgetTabLimitDrops(surface_id);
     if (std.mem.indexOfScalar(u64, credit_panes[0..credit_panes_len], surface_id)) |k| {
         std.mem.copyForwards(u64, credit_panes[k .. credit_panes_len - 1], credit_panes[k + 1 .. credit_panes_len]);
         credit_panes_len -= 1;
@@ -8911,10 +8914,20 @@ fn forgetAgentTab(surface_id: u64) void {
     }
 }
 
-/// 그 pane 이 에이전트 탭을 하나 더 가질 자리가 있는가 — 상한(8)과 grant 표(제어 grant 는 보통 자리 안, 태어날 때 네트워크 grant 는 그 밖 —
-/// W9d① 적대 리뷰 1 회차 F6).
+/// 에이전트 탭을 더 둘 자리가 없는 까닭(2026-11-20 「상한 두고 알리기」 — 에이전트에게 무엇이 찼는지 말한다): 그 pane 의 에이전트 탭이 상한이다(`pane`),
+/// 앱 전체 grant 표가 찼다(`app` — 64 쌍, 사용자 결정으로 그대로).
+const TabLimit = enum { pane, app };
+
+/// 그 pane 이 에이전트 탭을 하나 더 가질 자리가 없으면 그 까닭 — 상한(8)과 grant 표(제어 grant 는 보통 자리 안, 태어날 때 네트워크 grant 는 그 밖 —
+/// W9d① 적대 리뷰 1 회차 F6). 자리 판정(`agentTabRoom`)과 알림이 이 하나를 쓴다(두 벌로 갈리지 않게).
+fn agentTabLimit(pane: u64) ?TabLimit {
+    if (agentTabCount(pane) >= max_agent_tabs_per_pane) return .pane;
+    if (!control_pane_grant_store.room(false) or !control_pane_grant_store.birthRoom(5)) return .app; // W9d②·③·④·W9e①: 네트워크·본문·막기·가짜·흉내
+    return null;
+}
+
 fn agentTabRoom(pane: u64) bool {
-    return agentTabCount(pane) < max_agent_tabs_per_pane and control_pane_grant_store.room(false) and control_pane_grant_store.birthRoom(5); // W9d②·③·④·W9e①: 네트워크·본문·막기·가짜·흉내
+    return agentTabLimit(pane) == null;
 }
 
 /// W9d①: 그 (pane, tab) 의 `browser_network` grant 가 탭과 함께 생긴 것인가(번호까지 — 철회 뒤 다시 받은 grant 는 아니다).
@@ -8951,9 +8964,46 @@ fn onAgentTabKnown(tab: u64) bool {
     return isAgentTab(tab);
 }
 
-/// 에이전트 탭의 페이지가 새 탭을 열려 한다 — 자리가 없으면 열지 않는다(`AppSession.agent_tab_room_callback`).
+/// 에이전트 탭의 페이지가 새 탭을 열려 한다 — 자리가 없으면 열지 않는다(`AppSession.agent_tab_room_callback`). 부르는 곳은 `insertNewTab` 하나이고
+/// 거짓이면 그 팝업은 곧 버려진다(`AgentTabLimit`) — 장을 준 뒤 팝업이 닿기 전에 자리가 찼다. 그래서 거짓을 줄 때 그 pane 에 「버렸다」 를 센다
+/// (2026-11-20 「상한 두고 알리기」 — 그 pane 의 다음 입력 op 결과가 싣는다, `takeTabLimitDrops`). 순수 판정으로 부르지 않는다.
 fn onAgentTabRoom(pane: u64) bool {
-    return control_server_active and agentTabRoom(pane);
+    if (!control_server_active) return false;
+    const why = agentTabLimit(pane) orelse return true;
+    noteTabLimitDrop(pane, why);
+    return false;
+}
+
+/// 늦게 버린 팝업(위)을 pane 마다 센다 — 그 pane 의 다음 입력 op 이 가져간다. 고정 크기, 차면 가장 오래된 칸을 민다(그 알림은 잃는다).
+const TabLimitDrops = struct { pane: u64, count: u32, why: TabLimit };
+var tab_limit_drops: [16]TabLimitDrops = undefined;
+var tab_limit_drops_len: usize = 0;
+
+fn noteTabLimitDrop(pane: u64, why: TabLimit) void {
+    for (tab_limit_drops[0..tab_limit_drops_len]) |*d| if (d.pane == pane) {
+        d.count +|= 1;
+        d.why = why;
+        return;
+    };
+    if (tab_limit_drops_len == tab_limit_drops.len) {
+        std.mem.copyForwards(TabLimitDrops, tab_limit_drops[0 .. tab_limit_drops.len - 1], tab_limit_drops[1..]);
+        tab_limit_drops_len -= 1;
+    }
+    tab_limit_drops[tab_limit_drops_len] = .{ .pane = pane, .count = 1, .why = why };
+    tab_limit_drops_len += 1;
+}
+
+fn takeTabLimitDrops(pane: u64) ?TabLimitDrops {
+    for (tab_limit_drops[0..tab_limit_drops_len], 0..) |d, i| if (d.pane == pane) {
+        std.mem.copyForwards(TabLimitDrops, tab_limit_drops[i .. tab_limit_drops_len - 1], tab_limit_drops[i + 1 .. tab_limit_drops_len]);
+        tab_limit_drops_len -= 1;
+        return d;
+    };
+    return null;
+}
+
+fn forgetTabLimitDrops(pane: u64) void {
+    _ = takeTabLimitDrops(pane);
 }
 
 /// 그 pane 의 에이전트 탭으로 등록하고 곧 제어하게 grant 를 넣는다(사용자 결정 2026-10-10). 상한·grant 표가 차면 거짓(아무것도 남기지 않는다).
@@ -9090,13 +9140,38 @@ fn startTabOp(refs: []const ControlSessionRef, async_id: u64, op: control_browse
 }
 
 const agent_open_pane_missing = "the calling pane was not found in an open window";
+
+/// 2026-11-20 「상한 두고 알리기」: open 의 상한 실패에 그 pane 의 에이전트 탭 번호를 싣는다 — 누름이 연 팝업도 세는데 에이전트는 그 번호를
+/// 모른다(`list` 는 주인을 보이지 않는다). 그 번호로 닫을 것을 고른다.
+fn completeAgentOpenFull(async_id: u64, pane: u64) void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    (blk: {
+        aw.writer.print("this pane already has {d} agent tabs (the tabs it opened and the pages they or your clicks opened):", .{max_agent_tabs_per_pane}) catch |e| break :blk e;
+        var buf: [max_agent_tabs_per_pane]u64 = undefined;
+        for (paneAgentTabs(pane, &buf)) |t| aw.writer.print(" {d}", .{t}) catch |e| break :blk e;
+        aw.writer.writeAll(" — close one you no longer need first (maru browser close --surface <id>)") catch |e| break :blk e;
+    }) catch return completeTabStatus(async_id, .failed, "this pane already has its limit of agent tabs — close one first (maru browser close)");
+    completeTabStatus(async_id, .failed, aw.written());
+}
+
+/// 그 pane 의 에이전트 탭 번호(작은 것부터, `out` 크기까지). 알림·open 실패 글이 쓴다.
+fn paneAgentTabs(pane: u64, out: []u64) []u64 {
+    var n: usize = 0;
+    for (agent_tabs.items) |t| if (t.pane == pane and n < out.len) {
+        out[n] = t.tab;
+        n += 1;
+    };
+    std.mem.sort(u64, out[0..n], {}, std.sort.asc(u64));
+    return out[0..n];
+}
 const agent_open_tabs_hidden = "this window hides its tab bar — a new tab could not be shown";
 
 fn startAgentOpen(refs: []const ControlSessionRef, async_id: u64, pane: u64, arg: []const u8) void {
     const parsed = std.json.parseFromSlice(struct { url: ?[]const u8 = null, timeout_ms: u32 }, allocator, arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
     defer parsed.deinit();
     const app = appSessionOwningSurface(refs, pane) orelse return completeTabStatus(async_id, .failed, agent_open_pane_missing);
-    if (agentTabCount(pane) >= max_agent_tabs_per_pane) return completeTabStatus(async_id, .failed, "this pane already has 8 tabs it opened — close one first (browser close)");
+    if (agentTabCount(pane) >= max_agent_tabs_per_pane) return completeAgentOpenFull(async_id, pane);
     const tab = session_mod.web_ops.openAgentTab(app, pane, parsed.value.url) catch |e| return completeTabStatus(async_id, .failed, switch (e) {
         error.TabsHidden => agent_open_tabs_hidden,
         error.CallerNotFound => agent_open_pane_missing,
@@ -9278,16 +9353,22 @@ fn pollAgentClose(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
 /// 에이전트가 탭에 진짜 누름·키를 보낸다 — 페이지가 새 탭을 열 수 있는 장을 준다(사람의 입력처럼 — 결정 ④가 돌게). 2026-11-17 A3(「에이전트는
 /// 사용자와 같은 힘」): 사용자 탭에도 준다 — 그 장으로 열린 새 탭은 누른 pane(`caller`)의 에이전트 탭이 된다(◈·뒤쪽·그 pane 의 8 개 상한). 에이전트
 /// 탭이면 지금처럼 그 탭의 주인 pane 의 것. pane 이 없는 연결(cap)은 장을 주지 않는다(주인이 없다).
-fn grantAgentNewTabCredit(tab: u64, caller: ?u64, method: []const u8, params: []const u8) void {
+/// 장을 주지 못했으면(자리 없음) 그 pane 과 까닭을 돌려준다 — 그 op 의 결과가 「이 입력의 팝업·새 탭은 막힌다」 를 싣는다(2026-11-20 「상한 두고
+/// 알리기」; 전에는 말없이 막혔다 — sidecar 는 장 없는 팝업을 취소하고 maru 에 알리지 않는다). 페이지가 팝업을 열려 했는지는 모른다.
+fn grantAgentNewTabCredit(tab: u64, caller: ?u64, method: []const u8, params: []const u8) ?TabLimitNote {
     const pane = for (agent_tabs.items) |t| {
         if (t.tab == tab) break t.pane;
-    } else caller orelse return;
+    } else caller orelse return null;
+    if (!session_mod.web_osr.devtoolsInputActivates(method, params)) return null;
     // 그 pane 이 에이전트 탭을 더 가질 자리가 없으면 장을 주지 않는다 — 팝업으로 상한이 뚫렸다(적대 리뷰 1 회차).
-    if (!agentTabRoom(pane)) return;
-    if (!session_mod.web_osr.devtoolsInputActivates(method, params)) return;
+    if (agentTabLimit(pane)) |why| return .{ .pane = pane, .why = why };
     noteCreditPane(pane);
     session_mod.web_osr.grantNewTabCredit(allocator, tab, pane);
+    return null;
 }
+
+/// 입력이 장을 받지 못한 pane 과 까닭(`grantAgentNewTabCredit`) — `CdpRun.tab_limit`.
+const TabLimitNote = struct { pane: u64, why: TabLimit };
 
 /// 그 op 을 부른 pane(신원 판정 — 1g). cap 으로 온 요청·끝난 요청은 null.
 fn cdpCallerPane(async_id: u64) ?u64 {
@@ -9331,7 +9412,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             // 움직이지 않는다).
             if (web_cdp_ops.acting(run.op.kind) or run.op.uploadSetting()) session_mod.web_osr.noteAgentInput(run.surface_id);
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
-            grantAgentNewTabCredit(run.surface_id, cdpCallerPane(run.async_id), next.method, next.params);
+            if (grantAgentNewTabCredit(run.surface_id, cdpCallerPane(run.async_id), next.method, next.params)) |note| run.tab_limit = note;
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
             // required 는 Busy, best_effort 는 주 호출만(`web_cdp_kick.Kick` — web_osr 가 그대로 받는다).
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
@@ -9412,6 +9493,9 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
     const kind = run.op.kind;
     const started = run.started;
     const refused = run.upload_refused;
+    const tab_limit = run.tab_limit;
+    // 부른 pane(신원 판정) — 아직 in-flight 라 읽힌다(완료가 놓기 전에).
+    const caller = cdpCallerPane(async_id);
     // W9c③: 업로드의 끝 — 작업을 놓고(연 fd 를 닫는다), 사본이 페이지에 가지 않았으면 그 op 의 사본을 곧 지운다(갔으면 탭이 닫힐 때까지 둔다 —
     // 뒤로가기가 그 파일을 새 문서에 되살린다).
     if (run.upload) |job| {
@@ -9446,6 +9530,12 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
             .too_large => maru_macos_control_complete_browser_result_too_large(async_id, exec_max + 1),
             .plain => completeCdp(async_id, status, result),
         },
+        // 2026-11-20 「상한 두고 알리기」: 입력 op 의 성공에 탭 상한 알림을 싣는다(있을 때만 — 결과를 다시 쓴다).
+        .click, .type_text, .press, .hover, .scroll => {
+            const noted = withTabLimit(result, tab_limit, caller);
+            defer if (noted) |n| allocator.free(n);
+            completeCdp(async_id, status, noted orelse result);
+        },
         else => completeCdp(async_id, status, result),
     } else if (refused)
         // W9c③: 사본 전에 부른 프로그램이 그 pane 의 foreground 를 떠났다(`uploadApprove` — 2026-11-16 전에는 사용자의 거부·물을 창 없음도)
@@ -9454,6 +9544,93 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
     else
         completeCdp(async_id, status, result);
     startNextCdp(surface_id);
+}
+
+/// 입력 op 의 성공 결과(`true` 또는 `{"ok":true,…}`)에 `tab_limit` 을 더한 새 JSON(부른 쪽이 놓는다) — 더할 것이 없거나 결과가 성공이 아니거나
+/// 메모리가 모자라면 null(원래 결과 그대로 — 입력은 이미 갔다, 실패로 바꾸면 다시 해 두 번 누른다).
+/// `tab_limit` = `{reason:"pane"|"app", max?, tabs?:[…], input?:true, dropped?:N, other_pane?:true}`:
+///   - `input` — 이 op 의 입력이 장을 받지 못했다(`note`). 그 탭의 주인 pane 이 부른 pane 이 아니면 `other_pane` 만(그 pane 의 탭 번호는 싣지 않는다 —
+///     남의 에이전트 탭을 닫으라 하지 않는다).
+///   - `dropped` — 앞선 입력 뒤 늦게 닿은 팝업을 그 pane 의 자리가 없어 버린 수(`onAgentTabRoom`). 부른 pane 의 것만 가져간다(가져가면 지운다).
+///   - `tabs`·`max` — 그 pane 의 지금 에이전트 탭(작은 번호부터)과 상한. 판정 뒤 닫혔을 수 있어 수가 상한보다 작을 수 있다.
+fn withTabLimit(result: []const u8, note: ?TabLimitNote, caller: ?u64) ?[]u8 {
+    const own_note = if (note) |n| caller != null and n.pane == caller.? else false;
+    // 다른 pane 몫의 알림과 함께면 버린 수는 다음 op 으로 둔다(한 칸에 두 pane 을 섞지 않는다).
+    const can_take_drops = caller != null and (note == null or own_note);
+    if (note == null and !(can_take_drops and hasTabLimitDrops(caller.?))) return null;
+    var parsed: ?std.json.Parsed(std.json.Value) = null;
+    defer if (parsed) |*p| p.deinit();
+    if (!std.mem.eql(u8, result, "true")) {
+        if (result.len == 0 or result[0] != '{') return null;
+        parsed = std.json.parseFromSlice(std.json.Value, allocator, result, .{}) catch return null;
+        if (parsed.?.value != .object) return null;
+        const ok = parsed.?.value.object.get("ok") orelse return null;
+        if (ok != .bool or !ok.bool) return null;
+    }
+    const drops = if (can_take_drops) takeTabLimitDrops(caller.?) else null;
+    const pane = if (note) |n| n.pane else caller.?;
+    const why = if (note) |n| n.why else drops.?.why;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |e| break :blk e;
+        if (parsed) |p| {
+            var it = p.value.object.iterator();
+            while (it.next()) |kv| {
+                s.objectField(kv.key_ptr.*) catch |e| break :blk e;
+                s.write(kv.value_ptr.*) catch |e| break :blk e;
+            }
+        } else {
+            s.objectField("ok") catch |e| break :blk e;
+            s.write(true) catch |e| break :blk e;
+        }
+        s.objectField("tab_limit") catch |e| break :blk e;
+        s.beginObject() catch |e| break :blk e;
+        s.objectField("reason") catch |e| break :blk e;
+        s.write(@tagName(why)) catch |e| break :blk e;
+        if (note != null and !own_note) {
+            s.objectField("other_pane") catch |e| break :blk e;
+            s.write(true) catch |e| break :blk e;
+        } else {
+            if (why == .pane) {
+                s.objectField("max") catch |e| break :blk e;
+                s.write(max_agent_tabs_per_pane) catch |e| break :blk e;
+            }
+            var buf: [max_agent_tabs_per_pane]u64 = undefined;
+            s.objectField("tabs") catch |e| break :blk e;
+            s.write(paneAgentTabs(pane, &buf)) catch |e| break :blk e;
+        }
+        if (note != null) {
+            s.objectField("input") catch |e| break :blk e;
+            s.write(true) catch |e| break :blk e;
+        }
+        if (drops) |d| {
+            s.objectField("dropped") catch |e| break :blk e;
+            s.write(d.count) catch |e| break :blk e;
+        }
+        s.endObject() catch |e| break :blk e;
+        s.endObject() catch |e| break :blk e;
+    }) catch {
+        if (drops) |d| restoreTabLimitDrops(d); // 가져간 버린 수는 되돌린다(다음 op 이 싣는다)
+        return null;
+    };
+    return aw.toOwnedSlice() catch {
+        if (drops) |d| restoreTabLimitDrops(d);
+        return null;
+    };
+}
+
+fn restoreTabLimitDrops(d: TabLimitDrops) void {
+    noteTabLimitDrop(d.pane, d.why);
+    for (tab_limit_drops[0..tab_limit_drops_len]) |*e| if (e.pane == d.pane) {
+        e.count = d.count;
+    };
+}
+
+fn hasTabLimitDrops(pane: u64) bool {
+    for (tab_limit_drops[0..tab_limit_drops_len]) |d| if (d.pane == pane) return true;
+    return false;
 }
 
 // ── W9a②: 시한·철회 뒤의 executeScript 멈추기 ───────────────────────────────────────────────────────────────────
@@ -13702,7 +13879,20 @@ test "W9b③: open — 부른 pane 의 창에 뒤쪽 탭을 열고 grant·에이
     var full: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
     const full_id = try control_server_storage.deferRequest(&full, std.math.maxInt(i128));
     startAgentOpen(&refs, full_id, shell, "{\"timeout_ms\":25000}");
-    try expectPendingErrorCode(&full, .internal_error);
+    {
+        // 2026-11-20 「상한 두고 알리기」: 그 pane 의 에이전트 탭 번호를 싣는다(누름이 연 팝업도 세는데 에이전트는 그 번호를 모른다).
+        const response = full.response orelse return error.ExpectedResponse;
+        defer allocator.free(response);
+        full.response = null;
+        var pm = try control_plane.parseMessage(std.testing.allocator, response);
+        defer pm.deinit();
+        const err = pm.message.response.err.?;
+        try std.testing.expectEqual(@as(i64, @backingInt(control_plane.ErrorCode.internal_error)), err.code);
+        try std.testing.expect(std.mem.startsWith(u8, err.message, "this pane already has 8 agent tabs"));
+        var first: [24]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, err.message, try std.fmt.bufPrint(&first, " {d} ", .{pane.terms.items[1].surfaceId()})) != null);
+        try std.testing.expect(std.mem.endsWith(u8, err.message, "(maru browser close --surface <id>)"));
+    }
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
 }
 
@@ -14546,7 +14736,7 @@ test "W9b③·2026-11-17 A3: 에이전트의 누름·키 누름이 새 탭 장�
         .{ .tab = 42, .caller = null, .method = "Input.dispatchMouseEvent", .params = press, .credit = false }, // pane 없는 연결 — 주인이 없다
     };
     for (cases) |case| {
-        grantAgentNewTabCredit(case.tab, case.caller, case.method, case.params);
+        _ = grantAgentNewTabCredit(case.tab, case.caller, case.method, case.params);
         session_mod.web_osr.testApplyNow(ta, .{ .open_tab = .{ .browser = case.tab, .placement = .foreground, .url = "https://e.test/n" } });
         try std.testing.expectEqual(case.credit, session_mod.web_osr.newTabPending(case.tab));
         if (session_mod.web_osr.takeNewTab(case.tab)) |n| {
@@ -14586,9 +14776,219 @@ test "W9b③ 적대 리뷰 1 회차: 상한(8)에 닿은 pane 의 에이전트 �
     try std.testing.expect(onAgentPageTab(9, 51));
     for (1..max_agent_tabs_per_pane) |i| try agent_tabs.append(allocator, .{ .pane = 9, .tab = 600 + i });
     try std.testing.expectEqual(max_agent_tabs_per_pane, agentTabCount(9));
-    grantAgentNewTabCredit(51, 9, "Input.dispatchMouseEvent", "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}");
+    _ = grantAgentNewTabCredit(51, 9, "Input.dispatchMouseEvent", "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}");
     session_mod.web_osr.testApplyNow(ta, .{ .open_tab = .{ .browser = 51, .placement = .foreground, .url = "https://e.test/n" } });
     try std.testing.expect(!session_mod.web_osr.newTabPending(51));
+}
+
+// ── 탭 상한 알림(사용자 결정 2026-11-20 「상한 두고 알리기」) ──────────────────────────────────────────────────────────────────────
+// 상한(8)·grant 표가 찬 pane 의 누름·키 누름은 새 탭 장을 받지 못해 그 입력의 팝업·새 탭이 말없이 막혔다(sidecar 는 장 없는 팝업을 취소하고 maru 에
+// 알리지 않는다). 장을 준 뒤 팝업이 닿기 전에 자리가 차면 `insertNewTab` 이 버렸다. 이 시험들은 그 둘이 그 pane 의 입력 op 결과(`tab_limit`)로
+// 에이전트에게 닿는지 — 앱 차례(`cdpAdvance`·`finishCdp`)에서 L2 직렬화까지 — 잰다. 상한 자체는 그대로다(장은 여전히 주지 않는다).
+
+fn tcnReset() void {
+    agent_tabs.clearAndFree(allocator);
+    control_pane_grant_store.clearAll();
+    credit_panes_len = 0;
+    tab_limit_drops_len = 0;
+}
+
+/// 입력 op 하나를 끝까지 — `press` 가 있으면 그 호출을 `cdpAdvance` 로 보낸 뒤(누름·떼기 — 새 탭 장을 줄 자리), `finishCdp` 로 `result` 와 함께
+/// 끝낸다. 부른 pane 은 `caller`. 응답 JSON 을 돌려준다(부른 쪽이 놓는다). 엔진 표지(`tab`)는 부른 쪽이 쥔다.
+fn tcnFinishInput(kind: web_cdp_ops.Kind, tab: u64, caller: u64, press: ?[]const u8, result: []const u8) !std.json.Parsed(std.json.Value) {
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.click\",\"params\":{\"id\":51,\"selector\":\"#b\"}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io, .browser_pane = caller };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    try control_pane_grant_store.grant(.{ .pane = caller, .target = tab, .scope = .browser });
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = tab, .method = .click, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = caller, .target = tab, .scope = .browser } } });
+    _ = active_browser_executions.markRunning(id);
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = tab, .op = try web_cdp_ops.Op.init(allocator, kind, "{\"selector\":\"#b\"}", id), .started = true };
+    run.op.stage = .mouse_down;
+    try cdp_runs.append(allocator, run);
+    if (press) |params| {
+        cdpAdvance(run, .{ .call = .{ .method = "Input.dispatchMouseEvent", .params = try allocator.dupe(u8, params) } });
+        try std.testing.expectEqual(@as(usize, 1), cdp_runs.items.len); // 보냈다 — 답을 기다린다
+    }
+    finishCdp(run, .success, result);
+    return w9b3Result(&pending);
+}
+
+/// 에이전트 탭(pane 9 의 51)을 `caller` 가 누른다. `fill` 이면 pane 9 의 에이전트 탭을 상한까지 채운 뒤.
+fn tcnClickResult(ta: std.mem.Allocator, fill: bool, caller: u64, press_params: []const u8) !std.json.Parsed(std.json.Value) {
+    try session_mod.web_osr.testHold(ta, 51);
+    defer {
+        session_mod.web_osr.destroy(ta, 51);
+        session_mod.web_osr.testDevtoolsReset(ta);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(51);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    tcnReset();
+    defer tcnReset();
+    try std.testing.expect(onAgentPageTab(9, 51));
+    if (fill) for (1..max_agent_tabs_per_pane) |i| try agent_tabs.append(allocator, .{ .pane = 9, .tab = 600 + i });
+    return tcnFinishInput(.click, 51, caller, press_params, "true");
+}
+
+const tcn_press = "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}";
+
+fn tcnLimit(r: std.json.Parsed(std.json.Value)) ?std.json.ObjectMap {
+    const res = r.value.object.get("result").?.object;
+    const t = res.get("tab_limit") orelse return null;
+    return t.object;
+}
+
+test "TCN1 탭 상한 알림(2026-11-20 「상한 두고 알리기」): 상한(8)에 닿은 pane 의 누름은 ok 에 tab_limit(까닭·그 pane 의 에이전트 탭)을 싣는다 — 전에는 말없이 ok 였다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    {
+        const r = try tcnClickResult(ta, true, 9, tcn_press);
+        defer r.deinit();
+        try std.testing.expect(r.value.object.get("result").?.object.get("ok").?.bool);
+        const limit = tcnLimit(r) orelse {
+            std.debug.print("TCN1: the click result at the cap has no tab_limit — the agent is not told its popup was blocked\n", .{});
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqualStrings("pane", limit.get("reason").?.string);
+        try std.testing.expect(limit.get("input").?.bool);
+        try std.testing.expectEqual(@as(i64, max_agent_tabs_per_pane), limit.get("max").?.integer);
+        try std.testing.expect(limit.get("dropped") == null and limit.get("other_pane") == null);
+        const tabs = limit.get("tabs").?.array.items;
+        try std.testing.expectEqual(max_agent_tabs_per_pane, tabs.len);
+        try std.testing.expectEqual(@as(i64, 51), tabs[0].integer); // 작은 번호부터
+        try std.testing.expectEqual(@as(i64, 601), tabs[1].integer);
+        try std.testing.expectEqual(@as(i64, 607), tabs[7].integer);
+    }
+    // 대조: 자리가 있으면 싣지 않는다(판정이 공허하지 않다).
+    {
+        const r = try tcnClickResult(ta, false, 9, tcn_press);
+        defer r.deinit();
+        try std.testing.expect(tcnLimit(r) == null);
+    }
+}
+
+test "TCN2 탭 상한 알림: 활성 아닌 호출(떼기)은 싣지 않는다, 다른 pane 이 누르면 other_pane 만(그 pane 의 탭 번호 없음), grant 표가 차면 app" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    {
+        const r = try tcnClickResult(ta, true, 9, "{\"type\":\"mouseReleased\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}");
+        defer r.deinit();
+        try std.testing.expect(tcnLimit(r) == null);
+    }
+    {
+        // pane 4 의 에이전트가 pane 9 의 에이전트 탭을 눌렀다 — 장의 주인은 그 탭의 주인(pane 9)이고 그 pane 이 상한이다.
+        const r = try tcnClickResult(ta, true, 4, tcn_press);
+        defer r.deinit();
+        const limit = tcnLimit(r) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(limit.get("other_pane").?.bool and limit.get("input").?.bool);
+        try std.testing.expect(limit.get("tabs") == null and limit.get("max") == null);
+    }
+    // grant 표가 찼다(앱 전체 64 쌍 — 다른 pane 의 탭들) — 까닭은 app, 그 pane 의 에이전트 탭 번호는 싣는다(닫으면 자리가 난다).
+    try session_mod.web_osr.testHold(ta, 51);
+    defer {
+        session_mod.web_osr.destroy(ta, 51);
+        session_mod.web_osr.testDevtoolsReset(ta);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(51);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    tcnReset();
+    defer tcnReset();
+    try std.testing.expect(onAgentPageTab(9, 51));
+    var n: u64 = 0;
+    while (control_pane_grant_store.room(false)) : (n += 1) try control_pane_grant_store.grant(.{ .pane = 1000 + n, .target = 2000 + n, .scope = .browser });
+    try std.testing.expectEqual(TabLimit.app, agentTabLimit(9).?);
+    const r = try tcnFinishInput(.click, 51, 9, tcn_press, "true");
+    defer r.deinit();
+    const limit = tcnLimit(r) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("app", limit.get("reason").?.string);
+    try std.testing.expect(limit.get("max") == null);
+    try std.testing.expectEqual(@as(usize, 1), limit.get("tabs").?.array.items.len);
+}
+
+test "TCN3 탭 상한 알림: 장을 준 뒤 자리가 차 늦게 버린 팝업(제품 콜백·실제 AppSession tick)은 그 pane 의 다음 입력 op 이 dropped 로 싣고, 그다음은 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    tcnReset();
+    defer tcnReset();
+    // 제품과 같은 콜백(`maru_macos_app_session_create` 이 다는 것).
+    session.agent_page_tab_callback = onAgentPageTab;
+    session.agent_tab_room_callback = onAgentTabRoom;
+    session.agent_pane_known_callback = onAgentPaneKnown;
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const tab = try session_mod.web_ops.openAgentTab(session, shell, null);
+    try std.testing.expect(adoptAgentTab(shell, tab));
+    try session_mod.web_osr.testHold(ta, tab);
+    session_mod.web_osr.testRunning(tab);
+    // 자리가 있을 때 누른다 — 장을 받는다(알림 없음).
+    try std.testing.expect(grantAgentNewTabCredit(tab, shell, "Input.dispatchMouseEvent", tcn_press) == null);
+    // 팝업이 닿기 전에 그 pane 이 상한에 닿았다(다른 open·다른 팝업).
+    while (agentTabCount(shell) < max_agent_tabs_per_pane) try agent_tabs.append(allocator, .{ .pane = shell, .tab = 700_000 + agent_tabs.items.len });
+    session_mod.web_osr.testApplyNow(ta, .{ .open_tab = .{ .browser = tab, .placement = .foreground, .url = "https://e.test/popup" } });
+    try std.testing.expect(session_mod.web_osr.newTabPending(tab));
+    const terms_before = pane.terms.items.len;
+    session_mod.web_ops.tickWebOsr(session);
+    try std.testing.expectEqual(terms_before, pane.terms.items.len); // 열지 않았다(상한 그대로)
+    try std.testing.expect(!session_mod.web_osr.newTabPending(tab));
+    {
+        // 그 pane 의 다음 입력(활성 입력 없음 — 결과만)에 실린다. 다른 pane 의 입력은 가져가지 않는다.
+        const other = try tcnFinishInput(.hover, tab, shell + 1, null, "true");
+        defer other.deinit();
+        try std.testing.expect(tcnLimit(other) == null);
+        const r = try tcnFinishInput(.hover, tab, shell, null, "true");
+        defer r.deinit();
+        const limit = tcnLimit(r) orelse {
+            std.debug.print("TCN3: the late-dropped popup was not reported to the pane's next input\n", .{});
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqual(@as(i64, 1), limit.get("dropped").?.integer);
+        try std.testing.expectEqualStrings("pane", limit.get("reason").?.string);
+        try std.testing.expect(limit.get("input") == null);
+        try std.testing.expectEqual(max_agent_tabs_per_pane, limit.get("tabs").?.array.items.len);
+    }
+    {
+        const r = try tcnFinishInput(.hover, tab, shell, null, "true");
+        defer r.deinit();
+        try std.testing.expect(tcnLimit(r) == null); // 가져갔다
+    }
+    // 실패로 끝난 결과(`false` — 요소 없음)는 가져가지 않는다; 다음 성공이 싣는다. pane 이 닫히면 지운다.
+    noteTabLimitDrop(shell, .pane);
+    {
+        const r = try tcnFinishInput(.hover, tab, shell, null, "false");
+        defer r.deinit();
+        try std.testing.expect(tcnLimit(r) == null);
+        try std.testing.expect(hasTabLimitDrops(shell));
+    }
+    {
+        const r = try tcnFinishInput(.scroll, tab, shell, null, "{\"ok\":true,\"matched\":{\"ref\":\"n3\",\"name\":\"이름\"},\"dialog\":true}");
+        defer r.deinit();
+        const res = r.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("이름", res.get("matched").?.object.get("name").?.string); // 원래 칸은 그대로
+        try std.testing.expect(res.get("dialog").?.bool);
+        try std.testing.expectEqual(@as(i64, 1), tcnLimit(r).?.get("dropped").?.integer);
+    }
+    noteTabLimitDrop(shell, .pane);
+    forgetAgentTab(shell);
+    try std.testing.expect(!hasTabLimitDrops(shell));
 }
 
 test "W9b③ 적대 리뷰 1 회차: 대화상자(떠나기 확인·alert)가 떠 있는 탭의 op 은 30 초 기다리지 않고 곧 실패한다 — 페이지가 멈춰 있다" {

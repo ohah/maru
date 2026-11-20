@@ -174,6 +174,10 @@ fn handle(conn: c_int) void {
     // 실패한 이동의 주소(`addr_failed_check`): 실패하는 주소로 가는 리다이렉트(마지막 홉), 안전하지 않은 리다이렉트(http → file:).
     if (std.mem.eql(u8, path, "/af-redirect")) return redirect(conn, "http://127.0.0.1:1/af-hop");
     if (std.mem.eql(u8, path, "/af-unsafe-redirect")) return redirect(conn, "file:///etc/hosts");
+    // 오류 페이지 표시(2026-11-20): 본문 없는·있는 HTTP 오류 상태 — Chromium 이 제 오류 페이지를 세우는가(`error_page`), 서버의 문서인가.
+    if (std.mem.eql(u8, path, "/ef-404-empty")) return status(conn, "404 Not Found", "");
+    if (std.mem.eql(u8, path, "/ef-500-empty")) return status(conn, "500 Internal Server Error", "");
+    if (std.mem.eql(u8, path, "/ef-404-body")) return status(conn, "404 Not Found", "<!doctype html><title>ef-404-body</title>not here");
     // 페이지가 스스로(렌더러) 실패하는 주소로 간다 — 알 수 없는 스킴(오류 페이지를 세우지 않을 수 있다 — 옛 문서가 남으면 실패 주소를 싣지 않아야)·
     // 거절되는 주소.
     if (std.mem.eql(u8, path, "/af-js")) {
@@ -195,6 +199,13 @@ fn handle(conn: c_int) void {
     // `/perm?a=nsandbox` 는 CSP sandbox 로 — 주 프레임이 불투명 출처가 된다(같은 프로세스에 남는다).
     const csp = if (std.mem.eql(u8, path, "/perm") and std.mem.eql(u8, query, "nsandbox")) "Content-Security-Policy: sandbox allow-scripts\r\n" else "";
     const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nCache-Control: no-store\r\n{s}Connection: close\r\n\r\n", .{ content_type, body.len, csp }) catch return;
+    _ = std.c.write(conn, head.ptr, head.len);
+    _ = std.c.write(conn, body.ptr, body.len);
+}
+
+fn status(conn: c_int, line: []const u8, body: []const u8) void {
+    var hb: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(&hb, "HTTP/1.1 {s}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{ line, body.len }) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
     _ = std.c.write(conn, body.ptr, body.len);
 }

@@ -37,3 +37,5 @@ pub const trace_fields = @import("trace_fields.zig");
 pub const human_use = @import("human_use.zig");
 /// 페이지 찾기(P0-2 — wire 27 `find`·`find_stop`·`find_result`)의 짝 맞추기 — sidecar 가 CEF 의 답을 지금 찾기의 것만 골라 정리한다.
 pub const find = @import("find.zig");
+/// Chromium net 오류 번호의 이름(2026-11-20 — `browser.list`·`getUrl` 의 오류 페이지 표시). sidecar 가 CEF 의 번호와 같은지 comptime 으로 본다.
+pub const net_error = @import("net_error.zig");

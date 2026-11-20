@@ -174,6 +174,11 @@ pub const WebMeta = struct {
     /// 페이지는 실패 주소의 문서가 아니다: 페이지가 실패 이동으로 고른 호스트에 grant·모달·규칙 사이트가 묶이지 않게, 계획 공격 1). 직렬화하지 않는다.
     doc_url: ?[]const u8 = null,
     doc_url_set: bool = false,
+    /// 2026-11-20 「더하기」: 이 탭이 오류 페이지를 보이면 그 Chromium net 오류 번호(음수 — `url` 은 실패한 주소이거나, 실패 주소를 받지 못했으면 앞
+    /// 주소다), 아니면 0. `browser.list` 가 `error_page`·`net_error`·`net_error_name` 으로 싣는다(`surface.list` 는 싣지 않는다).
+    net_error: i32 = 0,
+    /// 그 오류 페이지를 막기 규칙이 세웠으면 그 번호(아니면 0) — `browser.list` 의 `blocked_rule`.
+    blocked_rule: u32 = 0,
     /// 패널 종류(markdown|browser).
     panel_kind: PanelKind,
     /// 로딩 중인가.

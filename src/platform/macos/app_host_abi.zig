@@ -8721,12 +8721,22 @@ fn beginCdp(run: *CdpRun) void {
             if (!session_mod.web_osr.agentNavigate(gpa, run.surface_id, p.target.?)) return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id));
         },
         // 주소창·`browser.list` 와 같은 보이는 주소(오류 페이지면 실패한 주소 — 2026-11-18). 쿠키 op 의 `doc_url` 은 아래처럼 확정 주소다.
-        .get_url => p.url = session_mod.web_osr.shownUrl(run.surface_id) orelse return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id)),
+        .get_url => {
+            const url = session_mod.web_osr.shownUrl(run.surface_id) orelse return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id));
+            // 2026-11-20 「더하기」: 오류 페이지면 주소와 함께 그 표시(net 오류 번호·막기 규칙)를 — L2 `serializeGetUrlResult` 가 풀어 칸을 싣는다. 주소와
+            // 번호를 여기 한 곳에서 함께 읽는다(계획 공격 5). 글은 op 이 쥔다(`target` — `deinit` 이 놓는다).
+            if (session_mod.web_osr.errorPage(run.surface_id)) |ep| {
+                const body = control_browser.getUrlErrorPageResult(allocator, url, ep.net_error, ep.blocked_rule) catch return finishCdp(run, .failed, "out of memory");
+                p.target = body;
+                p.url = body;
+            } else p.url = url;
+        },
         .screenshot => {},
     };
     // W9a③: 확인한 문서 주소를 복사해 op 에 준다 — 쿠키 저장소 op 은 grant 호스트가 그 주소를 덮는지 다시 본다(그사이 다른 사이트로 갔을 수 있다).
     if (run.op.storage) |*st| {
         // 2026-11-18: 오류 페이지면 주소창·`get_url` 은 실패한 주소인데 확정 문서는 앞 문서다 — 저장소 op 이 앞 문서의 저장소를 만지지 않게 곧 실패한다.
+        // 2026-11-20: 실패 주소를 받지 못한 오류 페이지(주소창은 앞 주소)도 — 문서가 없기는 같다.
         if (session_mod.web_osr.showsErrorPage(run.surface_id)) return finishCdp(run, .failed, "the tab shows an error page (its last navigation failed) — cookie and storage ops need a loaded document; navigate first");
         const url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdpUnavailableReason(run.surface_id))).url;
         run.doc_url = allocator.dupe(u8, url) catch return finishCdp(run, .failed, "out of memory");
@@ -14939,6 +14949,63 @@ test "P0-3: Swift 는 앱 tick 마다 control tick 을 WKWebView op drain 과 �
     try std.testing.expect(std.mem.indexOf(u8, ops, "maru_macos_control_tick") == null);
 }
 
+test "오류 페이지 표시(2026-11-20 「더하기」): getUrl 은 오류 페이지면 주소와 함께 error_page·net_error·net_error_name·blocked_rule 을 싣고, 새 문서가 서면 주소만 — 실패 주소를 받지 못한 오류 페이지도 표시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 74);
+    defer {
+        session_mod.web_osr.destroy(ta, 74);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(74);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 74, .url = "https://a.test/x" } });
+    session_mod.web_osr.testApply(ta, .{ .error_page = .{ .browser = 74, .error_code = -20, .blocked_rule = 3, .url = "https://b.test/blocked" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 74, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.getUrl\",\"params\":{\"id\":74}}";
+    var p1: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p1, req, 74, .get_url), 74, .get_url, "");
+    {
+        const r = try w9b3Result(&p1);
+        defer r.deinit();
+        const o = r.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("https://b.test/blocked", o.get("url").?.string);
+        try std.testing.expect(o.get("error_page").?.bool);
+        try std.testing.expectEqual(@as(i64, -20), o.get("net_error").?.integer);
+        try std.testing.expectEqualStrings("ERR_BLOCKED_BY_CLIENT", o.get("net_error_name").?.string);
+        try std.testing.expectEqual(@as(i64, 3), o.get("blocked_rule").?.integer);
+    }
+    // 실패 주소를 받지 못한 오류 페이지(http(s) 밖) — 주소는 앞 문서 주소, 표시는 선다.
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 74, .url = "https://a.test/y" } });
+    session_mod.web_osr.testApply(ta, .{ .error_page = .{ .browser = 74, .error_code = -302, .url = "maru-x:y" } });
+    var p2: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p2, req, 74, .get_url), 74, .get_url, "");
+    {
+        const r = try w9b3Result(&p2);
+        defer r.deinit();
+        const o = r.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("https://a.test/y", o.get("url").?.string);
+        try std.testing.expect(o.get("error_page").?.bool);
+        try std.testing.expectEqualStrings("ERR_UNKNOWN_URL_SCHEME", o.get("net_error_name").?.string);
+        try std.testing.expect(o.get("blocked_rule") == null);
+    }
+    // 새 문서 — 주소만.
+    session_mod.web_osr.testApply(ta, .{ .page_started = 74 });
+    var p3: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p3, req, 74, .get_url), 74, .get_url, "");
+    {
+        const r = try w9b3Result(&p3);
+        defer r.deinit();
+        const o = r.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("https://a.test/y", o.get("url").?.string);
+        try std.testing.expect(o.get("error_page") == null and o.get("net_error") == null);
+    }
+}
+
 test "W9a: getUrl 은 maru 가 아는 주소, 한 번도 보이지 않은 탭은 실패 — 같은 탭의 앞선 op 뒤에 답한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
@@ -15506,6 +15573,19 @@ test "실패한 이동의 주소창(2026-11-18) 적대 검증 B R16: 오류 페�
     // 새 문서가 서면 다시 된다(오류 페이지 표시가 지워진다).
     session_mod.web_osr.testApply(ta, .{ .page_started = 79 });
     try std.testing.expect(!session_mod.web_osr.showsErrorPage(79));
+    // 2026-11-20: 실패 주소를 받지 못한 오류 페이지(빈 글 — 주소창은 앞 주소)도 곧 실패한다(문서가 없기는 같다).
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 79, .url = "https://a.test/x" } });
+    session_mod.web_osr.testApply(ta, .{ .error_page = .{ .browser = 79, .error_code = -311, .url = "" } });
+    try std.testing.expectEqualStrings("https://a.test/x", session_mod.web_osr.shownUrl(79).?);
+    var p2: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id2 = try control_server_storage.deferRequest(&p2, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id2, .surface_id = 79, .method = .clear_storage, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 79, .scope = .browser_storage, .host = host } } });
+    startCdpOpHost(id2, 79, .clear_storage, "", host);
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    const response2 = p2.response orelse return error.ExpectedResponse;
+    defer allocator.free(response2);
+    p2.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response2, "shows an error page") != null);
 }
 
 test "W9a③ 적대 리뷰 7 회차 재현 F1: deleteCookie 가 쿠키를 읽는 동안 grant 가 철회되면 지우기를 보내지 않아야 한다 — 첫 지우기는 보내기 전에 committed" {

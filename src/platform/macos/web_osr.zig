@@ -72,6 +72,10 @@ pub const NavUpdate = struct {
     url: []const u8,
     can_go_back: bool,
     can_go_forward: bool,
+    /// 오류 페이지면 그 net 오류 번호(음수), 아니면 0 — 주소와 한 번에 낸다(2026-11-20 「더하기」 — list 의 주소와 표시가 tick 하나 어긋나지 않게).
+    net_error: i32 = 0,
+    /// 그 오류 페이지가 막기 규칙 때문이면 그 규칙 번호(아니면 0).
+    blocked_rule: u32 = 0,
 };
 
 const restart_window_ms: i64 = 60_000;
@@ -100,6 +104,12 @@ const Surface = struct {
     /// (공격 7) — 그때는 옛 주소를 그대로 보인다. 새 문서(`page_started`)·주소 확정(`url_changed`)·새 브라우저(`browser_created`)가 지운다. **보이는
     /// 주소일 뿐**이다 — 확정된 문서 주소(`url` — grant 호스트·쿠키 op·네트워크 판정)는 바꾸지 않는다(오류 페이지는 그 주소의 문서가 아니다).
     failed_url: ?[]u8 = null,
+    /// 이 탭이 오류 페이지를 보이는가 — 그 net 오류 번호(sidecar 의 `error_page.error_code`, 늘 음수; 0 = 아님. 2026-11-20 「더하기」 — `browser.list`·
+    /// `getUrl` 의 `error_page`). `failed_url` 과 따로 세운다: 실패 주소를 받지 않은 오류 페이지(빈 글 — 프레임 주소가 달랐다, http(s) 밖, 상한 넘음)도
+    /// 오류 페이지다(그때 주소창은 앞 주소다 — 계획 공격 1). `failed_url` 과 같은 때 지운다(`endErrorPage`).
+    error_page_code: i32 = 0,
+    /// 그 오류 페이지를 막기 규칙이 세웠으면 그 번호(서비스 워커 길로 막히면 번호가 -2 라 번호만으로는 막힘을 가르지 못한다 — 계획 공격 3).
+    error_page_rule: u32 = 0,
     can_go_back: bool = false,
     can_go_forward: bool = false,
     /// Chromium 이 이 탭을 불러오는 중인가(`nav_state.loading` — 이동이 막 시작된 것도 참이다, W9b①b 의 wait --load).
@@ -3077,7 +3087,7 @@ pub fn takeNavUpdate(surface_id: u64) ?NavUpdate {
     const s = surfaces.getPtr(surface_id) orelse return null;
     if (!s.nav_dirty) return null;
     s.nav_dirty = false;
-    return .{ .surface_id = surface_id, .url = shownOf(s) orelse "", .can_go_back = s.can_go_back, .can_go_forward = s.can_go_forward };
+    return .{ .surface_id = surface_id, .url = shownOf(s) orelse "", .can_go_back = s.can_go_back, .can_go_forward = s.can_go_forward, .net_error = s.error_page_code, .blocked_rule = s.error_page_rule };
 }
 
 /// 실패한 주소를 보이는 상한 — 주소창 이동·저장 상한(`app_session.addr_nav_url_cap`)과 같다(넘으면 그 탭이 저장되지 않는다 — app_session 시험이
@@ -3106,17 +3116,44 @@ fn clearFailedUrl(gpa: std.mem.Allocator, s: *Surface) void {
     s.nav_dirty = true;
 }
 
+/// 오류 페이지가 섰다 — 그 번호·막기 규칙(0 이상 번호는 sidecar 가 -2 로 바꿔 보낸다 — 0 이 와도 오류 페이지로 센다). 바뀌면 주소창·nav 상태를 다시 낸다
+/// (같은 실패 주소로 번호만 바뀌어도 — DNS 오류가 접속 거부로, 계획 공격 5).
+fn setErrorPage(s: *Surface, code: i32, rule: u32) void {
+    const c: i32 = if (code < 0) code else -2;
+    if (s.error_page_code == c and s.error_page_rule == rule) return;
+    s.error_page_code = c;
+    s.error_page_rule = rule;
+    s.nav_dirty = true;
+}
+
+/// 오류 페이지가 끝났다(새 문서·주소 확정·새 브라우저) — 실패 주소와 번호를 함께 지운다.
+fn endErrorPage(gpa: std.mem.Allocator, s: *Surface) void {
+    clearFailedUrl(gpa, s);
+    if (s.error_page_code == 0 and s.error_page_rule == 0) return;
+    s.error_page_code = 0;
+    s.error_page_rule = 0;
+    s.nav_dirty = true;
+}
+
 /// 그 탭의 보이는 주소(주소창·`browser.list`·`get_url` 과 같은 것 — 오류 페이지면 실패한 주소). 모르는 탭은 null.
 pub fn shownUrl(surface_id: u64) ?[]const u8 {
     const s = surfaces.getPtr(surface_id) orelse return null;
     return shownOf(s) orelse "";
 }
 
-/// 그 탭이 실패한 이동의 오류 페이지를 보이는가(주소창이 실패한 주소 — 확정 문서 주소와 다르다). 쿠키·저장소 op 이 곧 실패하는 데 쓴다 —
-/// `get_url` 은 실패 주소를 답하는데 그 op 은 앞 문서의 저장소를 만지면 에이전트가 다른 사이트의 저장소를 지운다(적대 검증 B R16).
+/// 그 탭이 실패한 이동의 오류 페이지를 보이는가. 쿠키·저장소 op 이 곧 실패하는 데 쓴다 — `get_url` 은 실패 주소를 답하는데 그 op 은 앞 문서의
+/// 저장소를 만지면 에이전트가 다른 사이트의 저장소를 지운다(적대 검증 B R16). 실패 주소를 받지 않은 오류 페이지도 참이다(2026-11-20 — 문서가 없기는 같다).
 pub fn showsErrorPage(surface_id: u64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
-    return s.failed_url != null;
+    return s.error_page_code != 0;
+}
+
+/// 그 탭의 오류 페이지 표시(2026-11-20 「더하기」 — `getUrl`). 오류 페이지가 아니거나 모르는 탭이면 null.
+pub const ErrorPage = struct { net_error: i32, blocked_rule: u32 };
+pub fn errorPage(surface_id: u64) ?ErrorPage {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (s.error_page_code == 0) return null;
+    return .{ .net_error = s.error_page_code, .blocked_rule = s.error_page_rule };
 }
 
 /// 그 탭의 확정된 문서 주소(보안 판단 — collector snapshot 의 `doc_url`, grant 호스트). 모르는 탭은 null, 아직 없으면 빈 글.
@@ -7076,7 +7113,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         }) |s| {
             s.created = true;
             s.initial_load_pending = true;
-            clearFailedUrl(gpa, s); // 새 브라우저(처음이거나 엔진이 다시 떴다) — 옛 오류 페이지는 없다
+            endErrorPage(gpa, s); // 새 브라우저(처음이거나 엔진이 다시 떴다) — 옛 오류 페이지는 없다
             dropPopup(s);
             // P0-2: 새 브라우저(처음이거나 sidecar 가 다시 떴다)에는 찾기가 없다 — 창이 `findLive` 로 알고 지금 검색어로 다시 낸다.
             s.find_request = 0;
@@ -7174,7 +7211,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.url = owned;
             s.url_stale = false;
             s.nav_dirty = true;
-            clearFailedUrl(gpa, s); // 주소가 확정됐다 — 오류 페이지가 아니다
+            endErrorPage(gpa, s); // 주소가 확정됐다 — 오류 페이지가 아니다(판정 `af-flag-holds` — 오류 페이지 뒤에는 오지 않는다)
             // 다른 사이트로 옮기면 Chromium 이 렌더러를 바꾸고 새 렌더러는 포커스를 모른다 — 키는 닿아도 페이지 `focus`
             // 가 안 오고 입력기 조합이 버려졌다(W4c 실측). 포커스를 줘야 하는 탭이면 다시 준다.
             if (s.focused and s.created) send(gpa, .{ .set_focus = .{ .browser = v.browser, .value = true } });
@@ -7190,7 +7227,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             } else if (dropPendingAdopt(gpa, id)) abandonPopup(gpa, id) else s.page_closed = true;
         } else if (!parked.contains(id)) send(gpa, .{ .destroy_browser = id }),
         .page_started => |id| if (surfaces.getPtr(id)) |s| {
-            clearFailedUrl(gpa, s); // 새 문서 — 오류 페이지의 실패 주소는 끝났다(판정 `af-back`)
+            endErrorPage(gpa, s); // 새 문서 — 오류 페이지의 실패 주소는 끝났다(판정 `af-back`)
             s.last_nav_ms = monotonicNow();
             s.url_stale = true; // 4 회차 C3: 이 문서의 주소가 오기 전까지(32 KiB 를 넘으면 오지 않는다)
             s.console.newDocument(); // W9c①: 묶이지 않은 쪽은 이 문서의 줄부터 본다
@@ -7300,6 +7337,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // 사용자 결정 2026-11-18 「사람이 친 주소」: 주소창은 실패한 주소(Chrome 과 같다 — 막힘·접속 거부·DNS 모두). CEF 는 실패한 주 프레임
             // 이동에 주소를 알리지 않는다(`url_changed` 가 없다 — 판정 `af-no-address`) — sidecar 가 `error_page` 에 싣는다(wire 29).
             setFailedUrl(gpa, s, v.url);
+            // 2026-11-20 「더하기」: 오류 페이지 표시는 실패 주소를 받지 않았어도 세운다(그 탭에는 문서가 없다).
+            setErrorPage(s, v.error_code, v.blocked_rule);
             s.console.newDocument();
             s.block.newDocument();
             s.mock.newDocument();
@@ -9560,7 +9599,7 @@ test "실패한 이동의 주소창(2026-11-18 「사람이 친 주소」): 오�
     try std.testing.expectEqualStrings("https://a.test/old", docUrl(71).?);
     try std.testing.expectEqualStrings("https://a.test/old", pageState(71).?.url); // 쿠키 op 의 doc_url
     // 같은 주소로 다시 실패(새로 고침) — 바뀐 것이 없다.
-    testApply(gpa, .{ .error_page = .{ .browser = 71, .error_code = -20, .url = "https://b.test/typed" } });
+    testApply(gpa, .{ .error_page = .{ .browser = 71, .error_code = -20, .blocked_rule = 3, .url = "https://b.test/typed" } });
     try std.testing.expect(takeNavUpdate(71) == null);
     // 다른 실패(접속 거부) — 그 주소로.
     testApply(gpa, .{ .error_page = .{ .browser = 71, .error_code = -102, .url = "http://c.test:81/x" } });
@@ -9594,6 +9633,67 @@ test "실패한 이동의 주소창(2026-11-18 「사람이 친 주소」): 오�
     // 새 브라우저(엔진이 다시 떴다)가 지운다.
     testApply(gpa, .{ .browser_created = 71 });
     try std.testing.expectEqualStrings("https://a.test/again", shownUrl(71).?);
+}
+
+test "오류 페이지 표시(2026-11-20 「더하기」): error_page 의 번호·막기 규칙을 주소와 한 번에 낸다 — 실패 주소를 받지 않아도 세우고, 번호만 바뀌어도 다시 내며, 새 문서·주소 확정·새 브라우저가 지운다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try std.testing.expect(errorPage(72) == null and !showsErrorPage(72)); // 모르는 탭
+    try testHold(gpa, 72);
+    testRunning(72);
+    testApply(gpa, .{ .url_changed = .{ .browser = 72, .url = "https://a.test/old" } });
+    const first = takeNavUpdate(72).?;
+    try std.testing.expect(first.net_error == 0 and first.blocked_rule == 0 and errorPage(72) == null and !showsErrorPage(72));
+    // 막힘 — 주소와 번호·규칙이 한 번에.
+    testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = -20, .blocked_rule = 4, .url = "https://b.test/x" } });
+    const blocked = takeNavUpdate(72).?;
+    try std.testing.expectEqualStrings("https://b.test/x", blocked.url);
+    try std.testing.expectEqual(@as(i32, -20), blocked.net_error);
+    try std.testing.expectEqual(@as(u32, 4), blocked.blocked_rule);
+    try std.testing.expectEqual(ErrorPage{ .net_error = -20, .blocked_rule = 4 }, errorPage(72).?);
+    try std.testing.expect(showsErrorPage(72));
+    // 같은 실패 주소로 번호만 바뀌었다(DNS → 접속 거부) — 다시 낸다(계획 공격 5), 막기 규칙은 내려간다.
+    testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = -102, .url = "https://b.test/x" } });
+    const refused = takeNavUpdate(72).?;
+    try std.testing.expect(refused.net_error == -102 and refused.blocked_rule == 0);
+    // 같은 것이 또 오면 낼 것이 없다.
+    testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = -102, .url = "https://b.test/x" } });
+    try std.testing.expect(takeNavUpdate(72) == null);
+    // 실패 주소를 받지 않은 오류 페이지(빈 글·http(s) 밖) — 주소창은 앞 문서 주소지만 오류 페이지 표시는 선다(계획 공격 1).
+    testApply(gpa, .{ .page_started = 72 });
+    testApply(gpa, .{ .url_changed = .{ .browser = 72, .url = "https://a.test/doc" } });
+    try std.testing.expect(takeNavUpdate(72).?.net_error == 0 and !showsErrorPage(72));
+    for ([_][]const u8{ "", "maru-x:y" }) |bad| {
+        testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = -302, .url = bad } });
+        const nav = takeNavUpdate(72).?;
+        try std.testing.expectEqualStrings("https://a.test/doc", nav.url);
+        try std.testing.expectEqual(@as(i32, -302), nav.net_error);
+        try std.testing.expect(showsErrorPage(72)); // 쿠키·저장소 op 은 곧 실패한다(앞 문서의 저장소를 만지지 않게)
+        testApply(gpa, .{ .url_changed = .{ .browser = 72, .url = "https://a.test/doc" } });
+        try std.testing.expect(takeNavUpdate(72).?.net_error == 0 and errorPage(72) == null);
+    }
+    // 0 이상 번호는 sidecar 가 보내지 않지만 와도 오류 페이지(-2)로 센다.
+    testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = 0, .url = "https://b.test/z" } });
+    try std.testing.expectEqual(@as(i32, -2), takeNavUpdate(72).?.net_error);
+    // 새 문서가 지운다(주소는 아직 옛 확정 주소).
+    testApply(gpa, .{ .page_started = 72 });
+    const started = takeNavUpdate(72).?;
+    try std.testing.expect(started.net_error == 0 and started.blocked_rule == 0 and errorPage(72) == null);
+    // 새 브라우저(엔진이 다시 떴다)가 지운다.
+    testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = -105, .blocked_rule = 0, .url = "http://nx.invalid/" } });
+    _ = takeNavUpdate(72);
+    testApply(gpa, .{ .browser_created = 72 });
+    try std.testing.expect(takeNavUpdate(72).?.net_error == 0 and !showsErrorPage(72));
+    // 렌더러가 죽어도 오류 페이지 표시는 그대로다(다음 새 문서·새 브라우저까지 — 문서에 적는다).
+    testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = -105, .url = "http://nx.invalid/" } });
+    _ = takeNavUpdate(72);
+    testApply(gpa, .{ .renderer_gone = .{ .browser = 72, .reason = .crashed } });
+    try std.testing.expect(showsErrorPage(72));
 }
 
 test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오류 페이지가 문서를 가르고, 버린 수는 표지로, 모르는 탭은 버린다" {

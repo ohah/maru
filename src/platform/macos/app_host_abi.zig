@@ -15046,6 +15046,11 @@ test "TCN3 탭 상한 알림: 장을 준 뒤 자리가 차 늦게 버린 팝업(
         defer r.deinit();
         try std.testing.expect(tcnLimit(r) == null);
         try std.testing.expect(hasTabLimitDrops(shell));
+        // 숨은 일치만 찾은 로케이터(`{ok:false, hint}`)도 실패다 — 가져가면 L2 가 hint 만 실어 그 수를 잃는다.
+        const hinted = try tcnFinishInput(.hover, tab, shell, &.{}, "{\"ok\":false,\"hint\":\"1 matching element(s) are hidden\"}");
+        defer hinted.deinit();
+        try std.testing.expect(tcnLimit(hinted) == null);
+        try std.testing.expect(hasTabLimitDrops(shell));
     }
     {
         const r = try tcnFinishInput(.scroll, tab, shell, &.{}, "{\"ok\":true,\"matched\":{\"ref\":\"n3\",\"name\":\"이름\"},\"dialog\":true}");

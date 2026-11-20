@@ -51,6 +51,8 @@ maru browser close --surface 12                      # always, when done
   Work there, with the id it printed — the ids in `list` are mostly the user's tabs (section 3).
 - Target by locator (`--role button --name "Sign in"`, `--by-text`, `--by-label`) or ref; CSS `--selector` last.
   Refs come from the latest snapshot and last while that document lives: after a navigation, snapshot again.
+- `open` and `navigate` print `warning: [error page: ERR_…] — …` on a second line when the address did not load
+  (blocked, refused, no DNS): that is a failure, not a slow page — do not wait for it.
 - `navigate`, `back`, `forward` and `reload` move the tab; `get-url` prints its address (on an error page, the
   address it tried — like the address bar — plus a `note: error page (ERR_…)` line; `list` ends that tab's line
   with `[error page: ERR_…]` (or `net error -N`): no page loaded there, so do not read or act on it as one); `wait` takes a locator

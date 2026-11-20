@@ -62,7 +62,9 @@ pub const Op = struct {
     /// 시작하지 않으면 `navigate_start_wait_ms` 뒤 실패(전에는 25 초 뒤 ok, 적대 리뷰 2 회차).
     /// W9d③: `blocked_rule` — 막기 규칙이 그 이동을 막았다(그 규칙 번호 — 결과에 `blocked:true, block_rule`).
     /// W9d④: `mocked_rule` — 그 이동의 주 프레임 문서를 가짜 규칙이 줬다(결과에 `mocked:true, mock_rule`).
-    pub const NavState = struct { done: bool = false, loaded: bool = false, before_unload: bool = false, started: bool = true, blocked_rule: u32 = 0, mocked_rule: u32 = 0 };
+    /// 2026-11-20 「붙이기」: `net_error` — 그 이동이 오류 페이지로 끝났다(부른 쪽이 「지켜보는 동안 온 번호」 이고 탭이 지금 오류 페이지일 때만
+    /// 넣는다 — 0 = 아님). 불러오지 않은 끝(`done and !loaded`)의 결과 글에 `net_error` 로 싣는다(시한으로 끝난 것에는 싣지 않는다 — 느림은 실패가 아니다).
+    pub const NavState = struct { done: bool = false, loaded: bool = false, before_unload: bool = false, started: bool = true, blocked_rule: u32 = 0, mocked_rule: u32 = 0, net_error: i32 = 0 };
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.target) |t| gpa.free(t);
@@ -123,15 +125,10 @@ pub const Op = struct {
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
         const st = self.nav orelse return done(gpa, .failed, "the tab closed");
         if (st.before_unload) return done(gpa, .failed, leave_page_reason);
-        if (st.done and st.blocked_rule != 0) {
-            var buf: [96]u8 = undefined;
-            return done(gpa, .success, std.fmt.bufPrint(&buf, "{{\"loaded\":false,\"blocked\":true,\"block_rule\":{d}}}", .{st.blocked_rule}) catch "false");
+        if (st.done) {
+            var buf: [nav_result_cap]u8 = undefined;
+            return done(gpa, .success, navResult(&buf, st));
         }
-        if (st.done and st.mocked_rule != 0) {
-            var buf: [96]u8 = undefined;
-            return done(gpa, .success, std.fmt.bufPrint(&buf, "{{\"loaded\":{},\"mocked\":true,\"mock_rule\":{d}}}", .{ st.loaded, st.mocked_rule }) catch "false");
-        }
-        if (st.done) return done(gpa, .success, if (st.loaded) "true" else "false");
         if (!st.started and self.now_ms - self.start_ms >= navigate_start_wait_ms) return done(gpa, .failed, not_started_reason);
         if (self.now_ms >= self.deadline_ms) return done(gpa, .success, "false");
         return .{ .sleep = navigate_poll_ms };
@@ -254,6 +251,29 @@ fn cdpMessage(e: []const u8) []const u8 {
     return rest[0..end];
 }
 
+/// navigate 결과 글의 상한 — 가장 긴 꼴(막힘·u32 최댓값 규칙·i32 최솟값 번호)이 들어간다(시험이 잰다 — 계획 공격 3: 넘치면 `blocked` 를 잃었다).
+const nav_result_cap = 128;
+
+/// 끝난 이동(`st.done`)의 결과 글: 불러왔으면 `true`, 아니면 `false` — 막힘(`blocked`·`block_rule`)·가짜(`mocked`·`mock_rule`)·오류 페이지(`net_error` —
+/// 불러오지 않은 끝에만, 2026-11-20 「붙이기」)가 있으면 JSON.
+fn navResult(buf: []u8, st: Op.NavState) []const u8 {
+    const net_error: i32 = if (st.loaded) 0 else st.net_error;
+    if (st.blocked_rule == 0 and st.mocked_rule == 0 and net_error == 0) return if (st.loaded) "true" else "false";
+    var w: std.Io.Writer = .fixed(buf);
+    (blk: {
+        if (st.blocked_rule != 0) {
+            w.print("{{\"loaded\":false,\"blocked\":true,\"block_rule\":{d}", .{st.blocked_rule}) catch |e| break :blk e;
+        } else if (st.mocked_rule != 0) {
+            w.print("{{\"loaded\":{},\"mocked\":true,\"mock_rule\":{d}", .{ st.loaded, st.mocked_rule }) catch |e| break :blk e;
+        } else {
+            w.writeAll("{\"loaded\":false") catch |e| break :blk e;
+        }
+        if (net_error != 0) w.print(",\"net_error\":{d}", .{net_error}) catch |e| break :blk e;
+        w.writeAll("}") catch |e| break :blk e;
+    }) catch return if (st.loaded) "true" else "false";
+    return w.buffered();
+}
+
 fn done(gpa: std.mem.Allocator, status: Status, result: []const u8) !Step {
     return .{ .done = .{ .status = status, .result = try gpa.dupe(u8, result) } };
 }
@@ -301,6 +321,35 @@ test "W9a navigate: 끝·떠나기 확인·탭 닫힘·시한" {
     op.nav = null;
     try expectDone(try op.wake(gpa), .failed, "the tab closed");
     op.nav = .{};
+    op.now_ms = 1000;
+    try expectDone(try op.wake(gpa), .success, "false");
+}
+
+test "오류 페이지 표시(2026-11-20 「붙이기」): navigate 결과 글 — 불러오지 않은 끝에만 net_error, 막힘·가짜와 함께, 가장 긴 꼴도 상한 안, 시한으로 끝난 것에는 없다" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .navigate, "https://a.test/");
+    defer op.deinit(gpa);
+    op.deadline_ms = 1000;
+    _ = try op.start(gpa);
+    op.now_ms = 10;
+    op.nav = .{ .done = true, .loaded = false, .net_error = -105 };
+    try expectDone(try op.wake(gpa), .success, "{\"loaded\":false,\"net_error\":-105}");
+    op.nav = .{ .done = true, .loaded = true, .net_error = -105 }; // 불러온 끝에는 싣지 않는다
+    try expectDone(try op.wake(gpa), .success, "true");
+    op.nav = .{ .done = true, .loaded = false, .blocked_rule = 3, .net_error = -20 };
+    try expectDone(try op.wake(gpa), .success, "{\"loaded\":false,\"blocked\":true,\"block_rule\":3,\"net_error\":-20}");
+    op.nav = .{ .done = true, .loaded = false, .blocked_rule = 3 };
+    try expectDone(try op.wake(gpa), .success, "{\"loaded\":false,\"blocked\":true,\"block_rule\":3}");
+    op.nav = .{ .done = true, .loaded = false, .mocked_rule = 4, .net_error = -379 };
+    try expectDone(try op.wake(gpa), .success, "{\"loaded\":false,\"mocked\":true,\"mock_rule\":4,\"net_error\":-379}");
+    op.nav = .{ .done = true, .loaded = true, .mocked_rule = 4, .net_error = -379 };
+    try expectDone(try op.wake(gpa), .success, "{\"loaded\":true,\"mocked\":true,\"mock_rule\":4}");
+    // 가장 긴 꼴이 상한 안(넘치면 `blocked` 를 잃었다 — 계획 공격 3).
+    var buf: [nav_result_cap]u8 = undefined;
+    const longest = navResult(&buf, .{ .done = true, .loaded = false, .blocked_rule = std.math.maxInt(u32), .mocked_rule = std.math.maxInt(u32), .net_error = std.math.minInt(i32) });
+    try testing.expectEqualStrings("{\"loaded\":false,\"blocked\":true,\"block_rule\":4294967295,\"net_error\":-2147483648}", longest);
+    // 시한으로 끝났다(끝나지 않았다) — 번호가 있어도 「느림」 이다.
+    op.nav = .{ .net_error = -105 };
     op.now_ms = 1000;
     try expectDone(try op.wake(gpa), .success, "false");
 }

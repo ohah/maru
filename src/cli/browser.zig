@@ -36,7 +36,7 @@ pub const browser_help =
     \\
     \\commands:
     \\  list                                   list open web panels (id, url, title, engine — for discovery; a tab on an error page ends with [error page: ERR_…])
-    \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load)
+    \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load; an error page adds a warning line with [error page: ERR_…])
     \\  get-url     --surface <id>             print the tab's address (on an error page, the address it tried, plus a note on stderr)
     \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
     \\  get-cookies --surface <id>             print cookies for the current document host as JSON
@@ -60,7 +60,7 @@ pub const browser_help =
     \\  reload  --surface <id>                     reload the page (Chromium tabs)
     \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
     \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
-    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
+    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load — an error page adds a warning line with [error page: ERR_…]; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
     \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
     \\  show    --surface <id>                     bring a tab to the front of its pane, like clicking its tab (Chromium tabs; keys the user types stay out of the page until they click it; never switches workspace or window)
     \\  downloads                                  list every download in the app, like the downloads window: key, state, name, bytes, tab, saved path (Chromium)
@@ -2851,13 +2851,23 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             }
             // W9d③: 막기 규칙이 그 이동을 막았다 — 탭은 Chromium 의 「막혔다」 페이지를 보이고 주소창은 막힌 주소다(2026-11-18 「사람이 친 주소」).
             if (boolField(result.get("blocked"))) {
-                try w.print("blocked: request-blocking rule {d} stopped this navigation (the tab shows Chromium's ERR_BLOCKED_BY_CLIENT page) — see maru browser network-block --list\n", .{intField(result.get("block_rule")) orelse 0});
+                // 2026-11-20 「붙이기」: 오류 페이지 표지가 있으면 그 이름으로(서비스 워커 길로 막히면 -2 — ERR_BLOCKED_BY_CLIENT 라 단정하지 않는다).
+                try w.print("blocked: request-blocking rule {d} stopped this navigation ", .{intField(result.get("block_rule")) orelse 0});
+                if (boolField(result.get("error_page"))) {
+                    try w.writeAll("[error page: ");
+                    try writeErrorPageLabel(w, result);
+                    try w.writeAll("]");
+                } else try w.writeAll("(the tab shows Chromium's ERR_BLOCKED_BY_CLIENT page)");
+                try w.writeAll(" — see maru browser network-block --list\n");
                 return true;
             }
             // W9d④: 주 프레임 문서를 가짜 규칙이 줬다 — 주소창은 진짜 주소를 보인다(그 탭에 ▣).
             if (boolField(result.get("mocked"))) try w.print("mocked: mock rule {d} answered this page (the address bar shows the real address) — see maru browser network-mock --list\n", .{intField(result.get("mock_rule")) orelse 0});
             // Chromium 탭은 첫 불러오기를 기다린다(W9a) — 불러온 문서가 없으면 경고 한 줄(이동 자체는 보냈다).
-            if (result.get("loaded")) |l| if (l == .bool and !l.bool) try w.writeAll("warning: no page finished loading (an error page, an empty response, a download, a same-page link, or the time ran out) — get-url shows the address the tab tried\n");
+            if (result.get("loaded")) |l| if (l == .bool and !l.bool) {
+                // 2026-11-20 「붙이기」: 오류 페이지로 끝났으면 그렇다고(느림이 아니다 — 기다려도 소용없다).
+                if (boolField(result.get("error_page"))) try writeErrorPageWarning(w, result) else try w.writeAll("warning: no page finished loading (an error page, an empty response, a download, a same-page link, or the time ran out) — get-url shows the address the tab tried\n");
+            };
         },
         .ok => { // set-cookie/delete-cookie/set·remove-local-storage/clear-storage 성공 = {ok:true}
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else {
@@ -2898,7 +2908,10 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             const url = strField(result.get("url"));
             var safe_url: [2048]u8 = undefined;
             if (url.len == 0) try w.print("opened {d}\n", .{tab}) else try w.print("opened {d} {s}\n", .{ tab, safe_url[0..displaySafe(url[0..@min(url.len, safe_url.len)], &safe_url)] });
-            if (!boolField(result.get("loaded"))) try w.writeAll("warning: the page did not finish loading in time — wait --load before acting\n");
+            // 2026-11-20 「붙이기」: 첫 불러오기가 오류 페이지로 끝났으면 그렇다고(느림과 가른다 — `wait --load` 는 오류 페이지에서도 곧 끝나 도움이 안 된다).
+            if (boolField(result.get("error_page")))
+                try writeErrorPageWarning(w, result)
+            else if (!boolField(result.get("loaded"))) try w.writeAll("warning: the page did not finish loading in time — wait --load before acting\n");
         },
         .close => {
             if (boolField(result.get("closed"))) try w.writeAll("closed\n") else {
@@ -4037,6 +4050,13 @@ fn writeErrorPageLabel(w: *std.Io.Writer, o: std.json.ObjectMap) !void {
         try w.writeAll(safe[0..displaySafe(name[0..@min(name.len, safe.len)], &safe)]);
     } else try w.print("net error {d}", .{intField(o.get("net_error")) orelse 0});
     if (intField(o.get("blocked_rule"))) |r| if (r > 0) try w.print(", blocking rule {d}", .{r});
+}
+
+/// open·navigate 가 오류 페이지로 끝났다는 둘째 줄(2026-11-20 「붙이기」) — 첫 줄(`opened N URL`·`ok`)은 대본이 읽어 그대로 두고, 표지는 list 와 같은 꼴.
+fn writeErrorPageWarning(w: *std.Io.Writer, result: std.json.ObjectMap) !void {
+    try w.writeAll("warning: [error page: ");
+    try writeErrorPageLabel(w, result);
+    try w.writeAll("] — the navigation failed and no page is loaded (waiting will not help); get-url shows the address it tried\n");
 }
 
 /// 한 번에 답하는 요청의 출력(2026-11-20 — `browser/run.zig` 의 `runPlainRequest`): 결과는 `out`(stdout), get-url 이 오류 페이지면 그 안내는
@@ -5480,7 +5500,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\
         \\commands:
         \\  list                                   list open web panels (id, url, title, engine — for discovery; a tab on an error page ends with [error page: ERR_…])
-        \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load)
+        \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load; an error page adds a warning line with [error page: ERR_…])
         \\  get-url     --surface <id>             print the tab's address (on an error page, the address it tried, plus a note on stderr)
         \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
         \\  get-cookies --surface <id>             print cookies for the current document host as JSON
@@ -5504,7 +5524,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  reload  --surface <id>                     reload the page (Chromium tabs)
         \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
         \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
-        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
+        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load — an error page adds a warning line with [error page: ERR_…]; Chromium; from a maru pane; the tab uses the user's logged-in sites; a tab a page opens after your click — on any tab — is yours too, behind)
         \\  close   --surface <id>                     close a tab — any tab, the user's too, like ⌘W (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog; a window's last tab stays open)
         \\  show    --surface <id>                     bring a tab to the front of its pane, like clicking its tab (Chromium tabs; keys the user types stay out of the page until they click it; never switches workspace or window)
         \\  downloads                                  list every download in the app, like the downloads window: key, state, name, bytes, tab, saved path (Chromium)
@@ -5862,6 +5882,29 @@ test "render: open(W9b③) 은 id·주소(다 못 불렀으면 경고), close �
     for (cases) |c| {
         var w: std.Io.Writer = .fixed(&buf);
         try testing.expectEqual(c.ok, try renderResponse(testing.allocator, c.bytes, c.kind, &w));
+        try testing.expectEqualStrings(c.want, w.buffered());
+    }
+}
+
+test "오류 페이지 표시(2026-11-20 「붙이기」): open·navigate 는 첫 줄 그대로, 오류 페이지면 둘째 줄이 [error page: …] 경고 — 시한·옛 서버는 옛 경고, 막힘 줄은 표지로" {
+    var buf: [1024]u8 = undefined;
+    const cases = [_]struct { bytes: []const u8, kind: ResponseKind, want: []const u8 }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"error_page\":true,\"net_error\":-102,\"net_error_name\":\"ERR_CONNECTION_REFUSED\"}}", .kind = .open, .want = "opened 5 http://x.test/\nwarning: [error page: ERR_CONNECTION_REFUSED] — the navigation failed and no page is loaded (waiting will not help); get-url shows the address it tried\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"error_page\":true,\"net_error\":-9999}}", .kind = .open, .want = "opened 5 http://x.test/\nwarning: [error page: net error -9999] — the navigation failed and no page is loaded (waiting will not help); get-url shows the address it tried\n" },
+        // 시한(느림) — 옛 경고 그대로.
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false}}", .kind = .open, .want = "opened 5 http://x.test/\nwarning: the page did not finish loading in time — wait --load before acting\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"loaded\":false,\"error_page\":true,\"net_error\":-105,\"net_error_name\":\"ERR_NAME_NOT_RESOLVED\"}}", .kind = .navigate, .want = "ok\nwarning: [error page: ERR_NAME_NOT_RESOLVED] — the navigation failed and no page is loaded (waiting will not help); get-url shows the address it tried\n" },
+        // 옛 서버·끝나지 않은 이동 — 옛 경고 그대로.
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"loaded\":false}}", .kind = .navigate, .want = "ok\nwarning: no page finished loading (an error page, an empty response, a download, a same-page link, or the time ran out) — get-url shows the address the tab tried\n" },
+        // 막힘 — 서비스 워커 길(-2)이면 그 이름(ERR_BLOCKED_BY_CLIENT 라 단정하지 않는다), 옛 서버는 옛 괄호.
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"loaded\":false,\"blocked\":true,\"block_rule\":2,\"error_page\":true,\"net_error\":-2,\"net_error_name\":\"ERR_FAILED\",\"blocked_rule\":2}}", .kind = .navigate, .want = "ok\nblocked: request-blocking rule 2 stopped this navigation [error page: ERR_FAILED, blocking rule 2] — see maru browser network-block --list\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"loaded\":false,\"blocked\":true,\"block_rule\":2}}", .kind = .navigate, .want = "ok\nblocked: request-blocking rule 2 stopped this navigation (the tab shows Chromium's ERR_BLOCKED_BY_CLIENT page) — see maru browser network-block --list\n" },
+        // 표지의 이름은 서버가 준 글 — 표시 안전하게.
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":5,\"url\":\"http://x.test/\",\"loaded\":false,\"error_page\":true,\"net_error\":-2,\"net_error_name\":\"ERR_\\u001b[2JX\"}}", .kind = .open, .want = "opened 5 http://x.test/\nwarning: [error page: ERR_[2JX] — the navigation failed and no page is loaded (waiting will not help); get-url shows the address it tried\n" },
+    };
+    for (cases) |c| {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, c.bytes, c.kind, &w));
         try testing.expectEqualStrings(c.want, w.buffered());
     }
 }

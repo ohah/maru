@@ -14,6 +14,8 @@
 //!   af-aborted     문서 없이 끝난 이동(다운로드 — ERR_ABORTED)은 `error_page` 가 없다(주소창은 그대로 — Chrome 과 같다)
 //!   af-flag-holds  (2026-11-20 「더하기」) af-noncommit·ef-http-status 의 갈래에서도 `error_page` 뒤에 `url_changed`·`page_started` 가 오지 않는다 — maru 는
 //!                  그 둘로 오류 페이지 표시(`browser.list`·`getUrl` 의 `error_page`)를 지운다(오면 오류 페이지인데 표시가 꺼진다)
+//!   af-order       (2026-11-20 「붙이기」) 오류 페이지 갈래마다 `error_page` 가 그 이동의 `load_finished` 보다 먼저 온다 — maru 의 open·navigate 는
+//!                  그 끝에 표시를 읽는다
 //!   ef-http-status 본문 있는 404 는 서버의 문서(`error_page` 없음 — 표시가 서지 않는다); 본문 없는 404·500 은 관찰(obs — Chromium 이 제 오류
 //!                  페이지를 세우면 그 번호)
 
@@ -30,7 +32,7 @@ pub const Report = *const fn (ok: bool, name: []const u8, detail: []const u8) vo
 const browser_id: u64 = 41;
 const wait_ms = 15_000;
 
-const Kind = enum { url_changed, page_started, error_page };
+const Kind = enum { url_changed, page_started, error_page, load_finished };
 const Event = struct { kind: Kind, url: [256]u8 = undefined, url_len: usize = 0, code: i32 = 0, rule: u32 = 0 };
 
 const Run = struct {
@@ -60,6 +62,8 @@ const Run = struct {
             .url_changed => |v| if (v.browser == browser_id) self.push(.url_changed, v.url, 0, 0),
             .page_started => |id| if (id == browser_id) self.push(.page_started, "", 0, 0),
             .error_page => |v| if (v.browser == browser_id) self.push(.error_page, v.url, v.error_code, v.blocked_rule),
+            // 2026-11-20 「붙이기」: 불러오기 끝(`code` = http 상태 — 오류 페이지는 0) — af-order 가 차례를 본다.
+            .load_finished => |v| if (v.browser == browser_id) self.push(.load_finished, "", v.http_status, 0),
             .title_changed => |v| if (v.browser == browser_id) {
                 self.title_len = @min(v.text.len, self.title_buf.len);
                 @memcpy(self.title_buf[0..self.title_len], v.text[0..self.title_len]);
@@ -94,6 +98,18 @@ const Run = struct {
         }
         for (self.events[from..self.n]) |e| if (e.kind == .error_page) return e;
         return null;
+    }
+
+    /// af-order: `from` 뒤 첫 `error_page` 가 첫 끝(`load_finished`, 0 이상 — 음수는 앞 문서가 끊긴 것)보다 앞인가. maru 의 open·navigate 는 그 끝에
+    /// 탭의 오류 페이지 표시를 읽는다(오류 번호가 끝보다 늦으면 「불러왔다」 로 답한다).
+    fn errorBeforeEnd(self: *const Run, from: usize) bool {
+        var ep: ?usize = null;
+        var end: ?usize = null;
+        for (self.events[from..self.n], from..) |e, i| {
+            if (e.kind == .error_page and ep == null) ep = i;
+            if (e.kind == .load_finished and e.code >= 0 and end == null) end = i;
+        }
+        return ep != null and end != null and ep.? < end.?;
     }
 
     fn countFrom(self: *const Run, from: usize, kind: Kind) usize {
@@ -144,10 +160,14 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     if (!r.untilTitle("af-start", wait_ms)) return error.StartPageNotReady;
     r.pump(300);
     var follow: usize = 0; // 오류 페이지 뒤에 따라온 url_changed·page_started 수(모든 경우의 합)
+    var order_bad: usize = 0; // af-order: error_page 가 그 이동의 끝(load_finished)보다 늦었거나 둘 중 하나가 없던 경우 수
+    var order_cases: usize = 0;
 
     // 접속 거절(안전하지 않은 포트).
     const refused = "http://127.0.0.1:1/af-refused";
     const a = try r.failNav(refused);
+    order_cases += 1;
+    if (!r.errorBeforeEnd(a.from)) order_bad += 1;
     follow += r.countFrom(a.from, .url_changed) + r.countFrom(a.from, .page_started);
     report(a.ep != null and std.mem.eql(u8, urlOf(&a.ep), refused), "af-refused", std.fmt.bufPrint(&d, "error_page {?d} · url {s}(가려던 {s} 이어야)", .{ if (a.ep) |e| e.code else null, urlOf(&a.ep), refused }) catch "");
 
@@ -155,17 +175,23 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     var cb: [96]u8 = undefined;
     const conn_refused = std.fmt.bufPrint(&cb, "http://127.0.0.1:{d}/af-conn-refused", .{try http.closedPort()}) catch unreachable;
     const a2 = try r.failNav(conn_refused);
+    order_cases += 1;
+    if (!r.errorBeforeEnd(a2.from)) order_bad += 1;
     follow += r.countFrom(a2.from, .url_changed) + r.countFrom(a2.from, .page_started);
     report(a2.ep != null and std.mem.eql(u8, urlOf(&a2.ep), conn_refused), "af-conn-refused", std.fmt.bufPrint(&d, "error_page {?d} · url {s}", .{ if (a2.ep) |x| x.code else null, urlOf(&a2.ep) }) catch "");
 
     // 풀리지 않는 호스트.
     const dns = "http://maru-af-test.invalid/af-dns";
     const b = try r.failNav(dns);
+    order_cases += 1;
+    if (!r.errorBeforeEnd(b.from)) order_bad += 1;
     follow += r.countFrom(b.from, .url_changed) + r.countFrom(b.from, .page_started);
     report(b.ep != null and std.mem.eql(u8, urlOf(&b.ep), dns), "af-dns", std.fmt.bufPrint(&d, "error_page {?d} · url {s}", .{ if (b.ep) |e| e.code else null, urlOf(&b.ep) }) catch "");
 
     // 리다이렉트 — 마지막 홉.
     const c = try r.failNav(browsers_check.url(&u, port, "/af-redirect"));
+    order_cases += 1;
+    if (!r.errorBeforeEnd(c.from)) order_bad += 1;
     follow += r.countFrom(c.from, .url_changed) + r.countFrom(c.from, .page_started);
     report(c.ep != null and std.mem.eql(u8, urlOf(&c.ep), "http://127.0.0.1:1/af-hop"), "af-redirect", std.fmt.bufPrint(&d, "error_page {?d} · url {s}(마지막 홉 http://127.0.0.1:1/af-hop 이어야)", .{ if (c.ep) |e| e.code else null, urlOf(&c.ep) }) catch "");
 
@@ -179,6 +205,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     while (r.state_gen != 1 and os.nowMs() < until) r.step();
     const blocked = browsers_check.url(&ub2, port, "/title?t=af-blocked");
     const e = try r.failNav(blocked);
+    order_cases += 1;
+    if (!r.errorBeforeEnd(e.from)) order_bad += 1;
     follow += r.countFrom(e.from, .url_changed) + r.countFrom(e.from, .page_started);
     report(e.ep != null and std.mem.eql(u8, urlOf(&e.ep), blocked) and e.ep.?.code == -20 and e.ep.?.rule == 7, "af-blocked", std.fmt.bufPrint(&d, "error_page {?d} · 규칙 {?d} · url {s}", .{ if (e.ep) |x| x.code else null, if (e.ep) |x| x.rule else null, urlOf(&e.ep) }) catch "");
 
@@ -255,6 +283,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
             for (r.events[i + 1 .. r.n]) |ev| {
                 if (ev.kind == .url_changed or ev.kind == .page_started) after_ep += 1;
             }
+            order_cases += 1;
+            if (!r.errorBeforeEnd(hs_from)) order_bad += 1;
         }
         const doc = std.mem.eql(u8, path, "/ef-404-body");
         report(if (doc) code == null else true, if (doc) "ef-http-status" else "ef-http-status(obs)", std.fmt.bufPrint(&d, "{s} → error_page {?d} · page_started {d} · url_changed {d} · 제목 {s}", .{ path, code, r.countFrom(hs_from, .page_started), r.countFrom(hs_from, .url_changed), r.title() }) catch "");
@@ -262,6 +292,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
 
     // 사건 표가 차면 뒤 사건을 버린다(`push`) — 그러면 위 셈이 거짓으로 통과한다(적대 검증 A NIT-3).
     report(ep_cases > 0 and after_ep == 0 and r.n < r.events.len, "af-flag-holds", std.fmt.bufPrint(&d, "오류 페이지를 세운 갈래 {d} 개(af-noncommit·ef-http-status)에서 error_page 뒤 3 초 넘게 온 url_changed·page_started {d} 개(0 이어야 — 오면 maru 가 오류 페이지 표시를 지운다) · 사건 {d}/{d}", .{ ep_cases, after_ep, r.n, r.events.len }) catch "");
+
+    report(order_cases >= 7 and order_bad == 0, "af-order", std.fmt.bufPrint(&d, "오류 페이지 갈래 {d} 개(거절·진짜 거절·DNS·리다이렉트·막힘·본문 없는 404·500) 가운데 error_page 가 그 이동의 load_finished 보다 늦었거나 없던 것 {d} 개(0 이어야 — maru 의 open·navigate 가 그 끝에 오류 페이지 표시를 읽는다)", .{ order_cases, order_bad }) catch "");
 
     // 문서 없이 끝난 이동(다운로드).
     const ab_from = r.n;

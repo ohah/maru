@@ -358,6 +358,9 @@ pub const AgentNav = struct {
     blocked_rule: u32 = 0,
     /// W9d④: 그 이동의 주 프레임 문서를 가짜 규칙이 줬다(기록의 주 프레임 문서 끝 — `net_end.flags.mocked`).
     mocked_rule: u32 = 0,
+    /// 2026-11-20 「붙이기」: 지켜보는 동안 온 `error_page` 의 net 오류 번호(음수, 0 = 없음). 새 문서(`page_started`)가 지운다 — 앞 이동이 늦게 세운
+    /// 오류 페이지를 이번 이동 탓으로 내지 않게(계획 공격 1). navigate 결과는 이것과 탭이 **지금** 오류 페이지인지(`errorPage`)를 함께 본다.
+    net_error: i32 = 0,
 };
 
 /// 페이지에 물은 닫기의 진행(W6j).
@@ -7249,6 +7252,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             }
             // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
             if (s.agent_nav.active and !s.agent_nav.done and !s.initial_load_pending) s.agent_nav.saw_started = true;
+            s.agent_nav.net_error = 0; // 2026-11-20: 새 문서 — 앞의 실패는 이 이동의 것이 아니다
             // (아래 `else` — 주차한 브라우저의 새 문서는 `parkedDocument` 가 본다.)
             // W10c: 닫기 대신 보낸 about:blank 가 열렸다(떠나기 확인이 없었거나 떠나기) — 창이 그 탭을 닫는다.
             if (s.close_park and (s.close_ask == .asking or s.close_ask == .asked)) {
@@ -7342,6 +7346,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             setFailedUrl(gpa, s, v.url);
             // 2026-11-20 「더하기」: 오류 페이지 표시는 실패 주소를 받지 않았어도 세운다(그 탭에는 문서가 없다).
             setErrorPage(s, v.error_code, v.blocked_rule);
+            // 2026-11-20 「붙이기」: 에이전트가 지켜보는 이동이면 그 번호(navigate 결과의 `error_page` — `setErrorPage` 와 같은 0 → -2 규칙, 같은 번호로
+            // 다시 실패해도 적는다).
+            if (s.agent_nav.active and !s.agent_nav.done) s.agent_nav.net_error = if (v.error_code < 0) v.error_code else -2;
             s.console.newDocument();
             s.block.newDocument();
             s.mock.newDocument();
@@ -9636,6 +9643,43 @@ test "실패한 이동의 주소창(2026-11-18 「사람이 친 주소」): 오�
     // 새 브라우저(엔진이 다시 떴다)가 지운다.
     testApply(gpa, .{ .browser_created = 71 });
     try std.testing.expectEqualStrings("https://a.test/again", shownUrl(71).?);
+}
+
+test "오류 페이지 표시(2026-11-20 「붙이기」): 에이전트가 지켜보는 이동의 error_page 번호를 적고 새 문서가 지운다 — 지켜보지 않을 때·끝난 뒤의 실패는 적지 않는다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try testHold(gpa, 73);
+    testRunning(73);
+    testApply(gpa, .{ .url_changed = .{ .browser = 73, .url = "https://a.test/" } });
+    // 지켜보지 않을 때의 실패(사람의 이동)는 적지 않는다.
+    testApply(gpa, .{ .error_page = .{ .browser = 73, .error_code = -105, .url = "https://x.test/" } });
+    try std.testing.expectEqual(@as(i32, 0), agentNavState(73).?.net_error);
+    // 지켜보는 이동이 실패했다 — 그 번호(같은 번호로 다시 실패해도), 끝(load_finished 0) 뒤에도 남는다.
+    try std.testing.expect(agentNavigate(gpa, 73, "https://x.test/"));
+    testApply(gpa, .{ .error_page = .{ .browser = 73, .error_code = -105, .url = "https://x.test/" } });
+    try std.testing.expectEqual(@as(i32, -105), agentNavState(73).?.net_error);
+    testApply(gpa, .{ .load_finished = .{ .browser = 73, .http_status = 0 } });
+    try std.testing.expect(agentNavState(73).?.done and !agentNavState(73).?.loaded);
+    try std.testing.expectEqual(@as(i32, -105), agentNavState(73).?.net_error);
+    // 끝난 뒤의 실패는 이 이동의 것이 아니다.
+    testApply(gpa, .{ .error_page = .{ .browser = 73, .error_code = -102, .url = "https://y.test/" } });
+    try std.testing.expectEqual(@as(i32, -105), agentNavState(73).?.net_error);
+    // 새 이동 — 앞 이동의 늦은 실패가 오고 새 문서가 서면 지운다(계획 공격 1).
+    try std.testing.expect(agentNavigate(gpa, 73, "https://a.test/next"));
+    try std.testing.expectEqual(@as(i32, 0), agentNavState(73).?.net_error);
+    testApply(gpa, .{ .error_page = .{ .browser = 73, .error_code = -102, .url = "https://y.test/" } });
+    try std.testing.expectEqual(@as(i32, -102), agentNavState(73).?.net_error);
+    testApply(gpa, .{ .page_started = 73 });
+    try std.testing.expectEqual(@as(i32, 0), agentNavState(73).?.net_error);
+    // 0 이상 번호는 -2 로(setErrorPage 와 같은 규칙).
+    try std.testing.expect(agentNavigate(gpa, 73, "https://z.test/"));
+    testApply(gpa, .{ .error_page = .{ .browser = 73, .error_code = 0, .url = "https://z.test/" } });
+    try std.testing.expectEqual(@as(i32, -2), agentNavState(73).?.net_error);
 }
 
 test "오류 페이지 표시(2026-11-20 「더하기」): error_page 의 번호·막기 규칙을 주소와 한 번에 낸다 — 실패 주소를 받지 않아도 세우고, 번호만 바뀌어도 다시 내며, 새 문서·주소 확정·새 브라우저가 지운다" {

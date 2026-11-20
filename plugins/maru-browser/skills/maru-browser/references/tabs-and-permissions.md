@@ -14,7 +14,8 @@ The first `open` does.
 
 - `maru browser open --url https://example.com` opens a hidden tab behind the user's current tab in your pane and
   prints `opened <id> <url>`. The user's view and focus stay where they are. It waits for the first
-  load (at most 25 s, `--timeout` to change).
+  load (at most 25 s, `--timeout` to change). If that load ended on Chromium's error page, a second line
+  `warning: [error page: ERR_…]` says so — the address did not load; waiting will not help.
 - Current Maru opens it without asking the user (an older build asks once per pane; if the user declines there,
   `open` fails with `agent_tabs_declined` — tell the user instead of retrying). Agent tabs show ◈ in the tab bar.
 - Your pane owns it: every command works there, on any site it goes to. Give long calls (`trace`, a large `upload`)

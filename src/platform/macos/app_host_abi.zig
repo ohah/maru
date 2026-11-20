@@ -8983,9 +8983,17 @@ var tab_limit_drops_len: usize = 0;
 /// 안(장의 수명 `new_tab.activation_ms` + 전달 여유)에 닿고 에이전트의 다음 입력은 대개 그 뒤 곧이라 넉넉히 잡는다.
 const tab_limit_drop_keep_ms: i64 = 60_000;
 
+/// 시효의 시계 — 잠자기를 넣어 센다(`.boot`; `cdpNowMs` 의 `.awake` 는 macOS 에서 잠든 시간을 빼 덮개를 닫았다 연 몇 시간이 몇 초로 셌다 — 적대 검증 21 회차).
+fn tabLimitNowMs() i64 {
+    const ns = std.Io.Clock.boot.now(appHostIo()).nanoseconds;
+    return @intCast(@divFloor(ns, std.time.ns_per_ms));
+}
+
 fn noteTabLimitDrop(pane: u64, why: TabLimit) void {
-    const now = cdpNowMs();
+    const now = tabLimitNowMs();
     for (tab_limit_drops[0..tab_limit_drops_len]) |*d| if (d.pane == pane) {
+        // 시효가 지난 칸에 이어 세지 않는다(그 수는 이미 버린 것이다 — 21 회차).
+        if (now - d.at_ms > tab_limit_drop_keep_ms) d.count = 0;
         d.count +|= 1;
         d.why = why;
         d.at_ms = now;
@@ -9011,7 +9019,7 @@ fn takeTabLimitDrops(pane: u64) ?TabLimitDrops {
 /// 그 pane 의 산 버린 수(시효 안) — 시효가 지난 칸은 여기서 지운다.
 fn liveTabLimitDrops(pane: u64) ?TabLimitDrops {
     for (tab_limit_drops[0..tab_limit_drops_len]) |d| if (d.pane == pane) {
-        if (cdpNowMs() - d.at_ms <= tab_limit_drop_keep_ms) return d;
+        if (tabLimitNowMs() - d.at_ms <= tab_limit_drop_keep_ms) return d;
         _ = takeTabLimitDrops(pane);
         return null;
     };
@@ -9369,8 +9377,8 @@ fn pollAgentClose(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
 /// 에이전트가 탭에 진짜 누름·키를 보낸다 — 페이지가 새 탭을 열 수 있는 장을 준다(사람의 입력처럼 — 결정 ④가 돌게). 2026-11-17 A3(「에이전트는
 /// 사용자와 같은 힘」): 사용자 탭에도 준다 — 그 장으로 열린 새 탭은 누른 pane(`caller`)의 에이전트 탭이 된다(◈·뒤쪽·그 pane 의 8 개 상한). 에이전트
 /// 탭이면 지금처럼 그 탭의 주인 pane 의 것. pane 이 없는 연결(cap)은 장을 주지 않는다(주인이 없다).
-/// 장을 주지 못했으면(자리 없음) 그 pane 과 까닭을 돌려준다 — 그 op 의 결과가 「이 입력의 팝업·새 탭은 막힌다」 를 싣는다(2026-11-20 「상한 두고
-/// 알리기」; 전에는 말없이 막혔다 — sidecar 는 장 없는 팝업을 취소하고 maru 에 알리지 않는다). 페이지가 팝업을 열려 했는지는 모른다.
+/// 장을 주지 못했으면(자리 없음) 그 pane 과 까닭을 돌려준다 — 그 op 의 결과가 「이 입력의 팝업·새 탭은 그 pane 의 에이전트 탭으로 열리지 않는다」 를
+/// 싣는다(2026-11-20 「상한 두고 알리기」; 전에는 말없이 막혔다 — sidecar 는 장 없는 팝업을 취소하고 maru 에 알리지 않는다). 페이지가 팝업을 열려 했는지는 모른다.
 fn grantAgentNewTabCredit(tab: u64, caller: ?u64, method: []const u8, params: []const u8) ?TabLimitNote {
     const pane = for (agent_tabs.items) |t| {
         if (t.tab == tab) break t.pane;
@@ -14826,6 +14834,7 @@ fn tcnFinishInput(kind: web_cdp_ops.Kind, tab: u64, caller: u64, calls: []const 
     const arg = switch (kind) {
         .press => "{\"key\":\"Enter\",\"selector\":\"#b\"}",
         .wait => "{\"condition\":\"selector\",\"selector\":\"#b\",\"timeout_ms\":5000}",
+        .type_text => "{\"selector\":\"#b\",\"text\":\"x\"}",
         else => "{\"selector\":\"#b\"}",
     };
     run.* = .{ .async_id = id, .surface_id = tab, .op = try web_cdp_ops.Op.init(allocator, kind, arg, id), .started = true };
@@ -15020,6 +15029,8 @@ test "TCN3 탭 상한 알림: 장을 준 뒤 자리가 차 늦게 버린 팝업(
         try std.testing.expectEqual(@as(i64, 1), limit.get("dropped").?.integer);
         try std.testing.expectEqualStrings("pane", limit.get("reason").?.string);
         try std.testing.expect(limit.get("input") == null);
+        // 버린 수만 있어도 상한을 싣는다(CLI 의 「has room now」 는 `tabs` 와 `max` 를 견준다).
+        try std.testing.expectEqual(@as(i64, max_agent_tabs_per_pane), limit.get("max").?.integer);
         try std.testing.expectEqual(max_agent_tabs_per_pane, limit.get("tabs").?.array.items.len);
     }
     {
@@ -15044,8 +15055,23 @@ test "TCN3 탭 상한 알림: 장을 준 뒤 자리가 차 늦게 버린 팝업(
         try std.testing.expect(res.get("dialog").?.bool);
         try std.testing.expectEqual(@as(i64, 2), tcnLimit(r).?.get("dropped").?.integer);
     }
-    // 시효(`tab_limit_drop_keep_ms`)가 지난 버린 수는 싣지 않고 지운다(몇 분 뒤·다음 세션의 첫 입력이 지금 일로 읽지 않게).
+    // type 도 싣는다. 버린 뒤 탭 하나를 닫아 자리가 났다 — 지금 수(7)와 상한(8)을 함께(CLI 가 「has room now」 로 닫으라 하지 않는다).
     noteTabLimitDrop(shell, .pane);
+    _ = agent_tabs.pop();
+    {
+        const r = try tcnFinishInput(.type_text, tab, shell, &.{}, "true");
+        defer r.deinit();
+        const limit = tcnLimit(r) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(i64, 1), limit.get("dropped").?.integer);
+        try std.testing.expectEqual(@as(i64, max_agent_tabs_per_pane), limit.get("max").?.integer);
+        try std.testing.expectEqual(max_agent_tabs_per_pane - 1, limit.get("tabs").?.array.items.len);
+    }
+    // 시효(`tab_limit_drop_keep_ms`)가 지난 버린 수는 싣지 않고 지운다(몇 분 뒤·다음 세션의 첫 입력이 지금 일로 읽지 않게), 시효가 지난 칸에 새로
+    // 버린 것은 1 부터 센다.
+    noteTabLimitDrop(shell, .pane);
+    tab_limit_drops[0].at_ms -= tab_limit_drop_keep_ms + 1;
+    noteTabLimitDrop(shell, .pane);
+    try std.testing.expectEqual(@as(u32, 1), tab_limit_drops[0].count);
     tab_limit_drops[0].at_ms -= tab_limit_drop_keep_ms + 1;
     {
         const r = try tcnFinishInput(.hover, tab, shell, &.{}, "true");

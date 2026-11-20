@@ -818,6 +818,14 @@ pub fn jsonDepthWithin(bytes: []const u8, max: usize) bool {
 pub fn checkDevtoolsCall(value: message.DevtoolsCall) Error!void {
     if (value.call == 0 or value.params_size > message.max_devtools_params_bytes) return error.InvalidDevtools;
     try checkDevtoolsMethod(value.method);
+    try checkDevtoolsFrame(value.frame);
+}
+
+/// wire 30: 호출의 frame — 빈 글이거나 16 진 글자 1..`max_devtools_frame_bytes`(sidecar 가 JSON 에 그대로 싣는다 — 따옴표·역슬래시가 들어오면
+/// 메시지 모양을 바꿀 수 있다).
+pub fn checkDevtoolsFrame(frame: []const u8) Error!void {
+    if (frame.len > message.max_devtools_frame_bytes) return error.InvalidDevtools;
+    for (frame) |b| if (!std.ascii.isHex(b)) return error.InvalidDevtools;
 }
 
 pub fn checkDevtoolsData(value: message.DevtoolsData) Error!void {

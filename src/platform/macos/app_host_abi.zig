@@ -9440,7 +9440,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
             // required 는 Busy, best_effort 는 주 호출만(`web_cdp_kick.Kick` — web_osr 가 그대로 받는다).
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
-            const sent = session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
+            const sent = session_mod.web_osr.devtoolsCallKickIn(gpa, run.surface_id, next.frame orelse "", next.method, next.params, sink, next.kick);
             if (sent) |call| {
                 if (run.op.uploadVerifying()) uploadBudgetVerify(run, call);
                 // W9c③ 적대 리뷰 4 회차 L1: 넣기가 실제로 나갔다 — 그 뒤 요청 시한이 오면 맨 시한이 아니라 「넣었다」(`uploadLateSuccess`).
@@ -9509,6 +9509,13 @@ fn cdpReply(outcome: session_mod.web_osr.DevtoolsOutcome, result: []const u8) we
         // 보냈을 수도 있다 — 누름이면 op 이 떼기·놓기를 거쳐 동작의 결과로 답한다(그 호출들은 대화상자 동안 곧 거절된다).
         .dialog => .{ .failed = web_cdp_ops.dialog_reason },
     };
+}
+
+/// 실패로 끝내되 글을 만들어(업로드의 폴더 거절 — 까닭을 싣는다).
+fn finishCdpFmt(run: *CdpRun, comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return finishCdp(run, .failed, upload_folder_refused_reason);
+    finishCdp(run, .failed, msg);
 }
 
 fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void {
@@ -9791,6 +9798,8 @@ comptime {
 
 comptime {
     std.debug.assert(web_cdp_ops.web_cdp_upload.max_files == control_browser.max_upload_files);
+    std.debug.assert(web_upload_stage.max_folder_files == control_browser.max_upload_folder_files);
+    std.debug.assert(web_cdp_ops.web_cdp_upload.max_frames == control_browser.max_upload_frames);
 }
 
 /// 파일을 열고 사본을 만드는 동안의 요청 시한(그동안 in-flight 시한을 늘린다 — 큰 파일·느린 볼륨). 사본이 끝나면 보통 op 의 시한으로 돌아간다.
@@ -9801,6 +9810,8 @@ const upload_prepare_timeout_ns: i128 = 120 * std.time.ns_per_s;
 const upload_files_refused_reason = "cannot upload these files — each must be an existing regular file maru can read (not a folder, device, pipe or socket), listed once; maru does not say which file or why (the reason is in maru's log)";
 /// W9c③ 적대 리뷰 1 회차: 사본을 만들기 전에 부른 프로세스가 더는 그 pane 의 foreground 가 아니다(파일을 여는 동안 떠났다).
 const upload_caller_gone_reason = "the program that asked is no longer in the foreground of its pane — nothing was uploaded";
+/// 폴더 올리기(사용자 결정 2026-11-20)의 있고 없음·종류 거절 — 파일 쪽 글과 같은 까닭으로 하나의 글(자세한 이유는 앱 로그에만).
+const upload_folder_refused_reason = "cannot upload this folder — it must be an existing folder maru can read (given with --folder); maru does not say why (the reason is in maru's log)";
 /// W9c③ 적대 리뷰 1 회차: 파일 열기·사본을 기다리는 업로드는 실행 자리(전체 8)를 느린 볼륨에 묶을 수 있다 — 부른 쪽(pane·cap)마다
 /// 하나, 모두 합쳐 넷까지만 받는다(나머지 넷은 다른 op 의 자리). 넘으면 `resource_busy`(다시 해도 된다). 그 하나·넷에는 요청이 끝났는데 아직 도는
 /// 파일 작업 스레드도 든다(적대 리뷰 4 회차 N4·5 회차 — `upload_orphans`, 부른 쪽의 몫에도).
@@ -9833,6 +9844,10 @@ const UploadJob = struct {
     /// 사본의 경로(소유, prepared 와 같은 차례).
     staged: std.ArrayList([]u8) = .empty,
     stage_failed: ?web_upload_stage.StageError = null,
+    /// 폴더 올리기(사용자 결정 2026-11-20): `paths` 는 그 폴더 하나다. 파일 작업이 펼친 것(`folder`) 또는 펼치지 못한 까닭(`folder_refused`).
+    is_folder: bool = false,
+    folder: ?web_upload_stage.Folder = null,
+    folder_refused: ?web_upload_stage.FolderRefusal = null,
     /// 복사로 쓴 바이트(탭 예산에서 뺀다).
     copied: u64 = 0,
     /// `copied` 를 탭 예산(`upload_tab_copied`)에 더했다 — 넣기 전에 끝나 사본을 지우면 돌려준다(적대 리뷰 1 회차).
@@ -9840,20 +9855,23 @@ const UploadJob = struct {
     out_of_memory: bool = false,
 
     fn fromArg(arg: []const u8, tab: u64, op: u64) !*UploadJob {
-        const parsed = try std.json.parseFromSlice(struct { files: []const []const u8 }, allocator, arg, .{ .ignore_unknown_fields = true });
+        // 파일 목록이거나 폴더 하나(`folder` — L2 가 둘 중 하나만 받았다).
+        const parsed = try std.json.parseFromSlice(struct { files: ?[]const []const u8 = null, folder: ?[]const u8 = null }, allocator, arg, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
-        const paths = try allocator.alloc([]u8, parsed.value.files.len);
+        const one = [_][]const u8{parsed.value.folder orelse ""};
+        const list: []const []const u8 = if (parsed.value.folder != null) &one else parsed.value.files orelse return error.InvalidArg;
+        const paths = try allocator.alloc([]u8, list.len);
         var n: usize = 0;
         errdefer {
             for (paths[0..n]) |p| allocator.free(p);
             allocator.free(paths);
         }
-        for (parsed.value.files) |f| {
+        for (list) |f| {
             paths[n] = try allocator.dupe(u8, f);
             n += 1;
         }
         const job = try allocator.create(UploadJob);
-        job.* = .{ .paths = paths, .tab = tab, .op = op };
+        job.* = .{ .paths = paths, .tab = tab, .op = op, .is_folder = parsed.value.folder != null };
         return job;
     }
 
@@ -9865,6 +9883,7 @@ const UploadJob = struct {
         self.prepared.deinit(allocator);
         for (self.staged.items) |p| allocator.free(p);
         self.staged.deinit(allocator);
+        if (self.folder) |*f| f.deinit(allocator);
         allocator.destroy(self);
     }
 
@@ -9875,6 +9894,18 @@ const UploadJob = struct {
 };
 
 fn uploadPrepareAll(job: *UploadJob) void {
+    // 폴더: 펼치기만 한다(파일은 열지 않는다 — 사본 단계가 파일마다 열고 곧 닫는다, `web_upload_stage.stageFolderEntry`). 메인이 놓으면(state 2) 곧 그만둔다.
+    if (job.is_folder) {
+        const r = web_upload_stage.enumerateFolder(allocator, job.paths[0], &job.state) catch {
+            job.out_of_memory = true;
+            return;
+        };
+        switch (r) {
+            .ok => |f| job.folder = f,
+            .refused => |why| job.folder_refused = why,
+        }
+        return;
+    }
     // 내용 해시(적대 리뷰 3 회차 M1)는 이 호출의 파일들이 함께 1 GiB 까지 — 사본 전에 이 스레드가 읽는다(사본이 그만큼 늦게 시작한다).
     var hash_budget: u64 = web_upload_stage.hash_cap_per_call;
     for (job.paths, 0..) |path, i| {
@@ -9903,6 +9934,7 @@ fn uploadPrepareAll(job: *UploadJob) void {
 }
 
 fn uploadStageAll(job: *UploadJob) void {
+    if (job.folder != null) return uploadStageFolder(job);
     var budget = job.budget;
     for (job.prepared.items, 0..) |*p, i| {
         const r = (if (builtin.is_test and upload_force_copy_for_test)
@@ -9926,6 +9958,53 @@ fn uploadStageAll(job: *UploadJob) void {
     }
     job.copied = job.budget - budget;
     if (job.out_of_memory or job.stage_failed != null) job.removeOpDir(); // 반쯤 만든 사본은 남기지 않는다
+}
+
+/// 폴더의 사본(작업 스레드): 먼저 사본 경로 목록이 DevTools 인자 한 번에 드는지 실제 뿌리로 센다(넘으면 사본 하나 만들지 않는다 — 공격 A2-2), 그 뒤
+/// 파일마다 열고(펼칠 때와 같은 inode·크기여야) 사본을 만들고 곧 닫는다. 하나라도 안 되면 통째로 실패·반쯤 만든 사본은 지운다(공격 A2-1). 메인이
+/// 놓으면(state 2 — 시한·철회) 파일 사이에서 그만둔다(공격 A2-4).
+fn uploadStageFolder(job: *UploadJob) void {
+    const folder = &job.folder.?;
+    const cap = session_mod.web_osr.ws_message.max_devtools_params_bytes;
+    if (!web_upload_stage.folderListFits(folder, job.root.?, job.tab, job.op, cap, upload_folder_params_overhead)) {
+        job.stage_failed = .folder_list_too_long;
+        return;
+    }
+    var budget = job.budget;
+    var hash_budget: u64 = web_upload_stage.hash_cap_per_call;
+    const try_clone = !(builtin.is_test and upload_force_copy_for_test);
+    for (folder.entries.items, 0..) |_, i| {
+        if (job.state.load(.acquire) == 2) {
+            job.stage_failed = .folder_changed; // 요청이 끝났다 — 누구도 이 답을 보지 않는다(정리만)
+            break;
+        }
+        const r = web_upload_stage.stageFolderEntry(allocator, folder, i, job.root.?, job.tab, job.op, &hash_budget, &budget, try_clone) catch {
+            job.out_of_memory = true;
+            break;
+        };
+        switch (r) {
+            .ok => |path| job.staged.append(allocator, path) catch {
+                allocator.free(path);
+                job.out_of_memory = true;
+                break;
+            },
+            .failed => |e| {
+                job.stage_failed = e;
+                break;
+            },
+        }
+    }
+    job.copied = job.budget - budget;
+    if (!job.out_of_memory and job.stage_failed == null and job.staged.items.len != folder.entries.items.len) job.stage_failed = .folder_changed;
+    if (job.out_of_memory or job.stage_failed != null) job.removeOpDir();
+}
+
+/// 폴더의 사본 경로 목록 밖의 인자 바이트(넣기의 objectId·키, 읽기의 함수 본문·키 — 읽기 함수가 약 1.6 KiB 다). 넉넉히 잡는다.
+const upload_folder_params_overhead: usize = 4096;
+
+comptime {
+    // 읽기 인자의 함수 본문(JSON 이스케이프로 늘어도)과 키가 그 여유 안이다.
+    std.debug.assert(web_cdp_ops.web_cdp_upload.verify_params_room <= upload_folder_params_overhead);
 }
 
 fn uploadWorker(job: *UploadJob) void {
@@ -10096,6 +10175,13 @@ fn uploadApprove(run: *CdpRun) void {
 /// 사본이 다 됐다 — 시한을 보통 op 의 것으로 되돌리고 엔진 차례를 잇는다(로케이터 다시 풀기부터).
 fn uploadResume(run: *CdpRun) void {
     const job = run.upload.?;
+    // 공격 A2-9: 사본이 오래 걸렸을 수 있다(폴더 — 파일 1000 개, 다른 볼륨의 복사) — 넣으러 가기 전에 부른 프로그램이 아직 그 pane 의 foreground 인지
+    // 한 번 더 본다(떠났으면 사본은 페이지에 가지 않았다 — `finishCdp` 가 지운다).
+    if (!uploadCallerStillHere(run.async_id)) {
+        control_log.info("control: the upload's caller left the pane's foreground while the copies were made — refused", .{});
+        run.upload_refused = true;
+        return finishCdp(run, .failed, upload_caller_gone_reason);
+    }
     if (job.copied > 0) {
         // 예산을 적지 못하면(메모리) 잇지 않는다 — 적지 않은 채 이으면 4 GiB 상한이 새었다(적대 리뷰 1 회차: `catch {}`).
         const used = upload_tab_copied.get(run.surface_id) orelse 0;
@@ -10107,10 +10193,20 @@ fn uploadResume(run: *CdpRun) void {
         const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
         _ = control_server_storage.updateInFlightDeadline(run.async_id, now_ns + browser_op_timeout_ns);
     }
-    var staged: [web_cdp_ops.web_cdp_upload.max_files]web_cdp_ops.web_cdp_upload.Staged = undefined;
-    for (job.staged.items, job.prepared.items, 0..) |path, *p, i| staged[i] = .{ .path = path, .name = p.name(), .size = p.size };
+    // 공격 A3-2: 폴더는 10 개를 넘는다 — 힙에(이름·크기는 폴더면 펼친 목록, 아니면 연 파일).
+    const staged = allocator.alloc(web_cdp_ops.web_cdp_upload.Staged, job.staged.items.len) catch return finishCdp(run, .failed, "out of memory");
+    defer allocator.free(staged);
+    var summary: ?web_cdp_ops.web_cdp_upload.FolderSummary = null;
+    if (job.folder) |*f| {
+        if (f.entries.items.len != job.staged.items.len) return finishCdp(run, .failed, web_upload_stage.StageError.folder_changed.text());
+        for (job.staged.items, f.entries.items, 0..) |path, *e, i| staged[i] = .{ .path = path, .name = e.name(), .size = e.size };
+        summary = .{ .bytes = f.bytes, .hidden = f.skipped.hidden, .links = f.skipped.links, .packages = f.skipped.packages, .other = f.skipped.other };
+    } else {
+        if (job.prepared.items.len != job.staged.items.len) return finishCdp(run, .failed, web_upload_stage.StageError.io.text());
+        for (job.staged.items, job.prepared.items, 0..) |path, *p, i| staged[i] = .{ .path = path, .name = p.name(), .size = p.size };
+    }
     run.op.now_ms = cdpNowMs();
-    const step = run.op.resumeUpload(allocator, staged[0..job.staged.items.len]) catch return finishCdp(run, .failed, "out of memory");
+    const step = run.op.resumeUploadWith(allocator, staged, summary) catch return finishCdp(run, .failed, "out of memory");
     cdpAdvance(run, step);
 }
 
@@ -10153,7 +10249,7 @@ fn uploadSendCleanup(run: *CdpRun) void {
     const gpa = session_mod.web_osr.gpaRef();
     while (run.op.takeUploadCleanup(allocator) catch null) |step| {
         defer allocator.free(step.call.params);
-        if (gpa) |g| session_mod.web_osr.devtoolsCleanup(g, run.surface_id, step.call.method, step.call.params);
+        if (gpa) |g| session_mod.web_osr.devtoolsCleanupIn(g, run.surface_id, step.call.frame orelse "", step.call.method, step.call.params);
     }
 }
 
@@ -10188,6 +10284,14 @@ fn pollUploadRun(run: *CdpRun) void {
     if (run.upload_approved) {
         if (job.stage_failed) |e| return finishCdp(run, .failed, e.text());
         return uploadResume(run);
+    }
+    if (job.folder_refused) |why| {
+        // 폴더 쪽 거절 — 모양의 까닭(상한·빈 폴더)은 말하고, 있고 없음·종류(없음·폴더 아님·읽을 수 없음·제어 문자)는 파일 쪽처럼 한 글로(이유는 앱 로그에만).
+        control_log.info("control: folder upload refused before copying ({s}): {s}", .{ job.paths[0], why.text() });
+        return switch (why) {
+            .not_found, .not_folder, .unreadable, .control_chars => finishCdp(run, .failed, upload_folder_refused_reason),
+            else => finishCdpFmt(run, "cannot upload this folder — {s}", .{why.text()}),
+        };
     }
     if (job.refused) |r| {
         // 에이전트에게는 하나의 글(어느 파일·왜를 말하지 않는다 — 적대 리뷰 1 회차), 자세한 이유는 앱 로그에만.
@@ -17730,12 +17834,17 @@ fn w9c3Start(pending: *control_server_mod.PendingRequest, request: []const u8, t
 
 /// `w9c3Start` 와 같은데 부른 pane(grant 의 pane)을 고른다.
 fn w9c3StartFrom(pending: *control_server_mod.PendingRequest, request: []const u8, tab: u64, files_json: []const u8, pane: u64) !*CdpRun {
+    const arg = try std.fmt.allocPrint(allocator, "{{\"selector\":\"#f\",\"files\":{s}}}", .{files_json});
+    defer allocator.free(arg);
+    return w9c3StartArg(pending, request, tab, arg, pane);
+}
+
+/// 엔진 인자(op.arg)를 그대로 준다 — 폴더(`{"selector","folder"}`)도.
+fn w9c3StartArg(pending: *control_server_mod.PendingRequest, request: []const u8, tab: u64, arg: []const u8, pane: u64) !*CdpRun {
     pending.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
     const id = try control_server_storage.deferRequest(pending, std.math.maxInt(i128));
     try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = tab, .method = .upload, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = pane, .target = tab, .scope = .browser } } });
     _ = active_browser_executions.markRunning(id);
-    const arg = try std.fmt.allocPrint(allocator, "{{\"selector\":\"#f\",\"files\":{s}}}", .{files_json});
-    defer allocator.free(arg);
     const run = try allocator.create(CdpRun);
     run.* = .{ .async_id = id, .surface_id = tab, .op = try web_cdp_ops.Op.init(allocator, .upload, arg, id), .started = true };
     run.upload = try UploadJob.fromArg(arg, tab, id);
@@ -17809,6 +17918,182 @@ test "W9c③: 업로드는 묻지 않는다(사용자 결정 2026-11-16) — 파
         w9c3Drain(&.{&p});
         try std.testing.expectEqual(@as(usize, 0), upload_runs.items.len);
         _ = round;
+    }
+}
+
+test "W9c③: 사본을 만들기 전에 부른 프로그램이 그 pane 의 foreground 를 떠났으면 -32002(그 글) — 사본은 만들지 않는다" {
+    // 문서 리뷰(2026-11-20)가 짚은 빈자리: R13 은 출처가 아예 없는 갈래만 본다 — 출처는 있고 그 프로세스가 더는 그 pane 의 foreground 가 아닌
+    // 갈래(`control_self_origin.stillForeground` 가 거짓 — 파일을 여는 동안 떠났다)와 그 글을 보는 시험이 없었다. 출처의 맨 위 pid 가 없는 pid 다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    upload_base_for_test = base;
+    defer {
+        upload_base_for_test = null;
+        if (upload_root) |r| allocator.free(r);
+        upload_root = null;
+    }
+    try w9c3Write(tmp.dir, "a.txt", "left\n");
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 79, .scope = .browser });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const files = try std.fmt.bufPrint(&path_buf, "[\"{s}/a.txt\"]", .{base});
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.upload\",\"params\":{\"id\":79,\"selector\":\"#f\",\"files\":[\"/x\"]}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9c3Start(&p, req, 79, files);
+    const id = run.async_id;
+    // 이 요청은 pane 의 self-origin 으로 왔다 — 그 출처(맨 위 pid)가 이제 없다.
+    p.browser_pane = 5;
+    p.peer_origin = .{ .ctty_pid = std.math.maxInt(i32) - 7, .ctty_start_us = 1, .sid = 1 };
+    pollUploadRuns(&refs);
+    const msg = try w9c3Message(&p);
+    defer ta.free(msg);
+    try std.testing.expectEqualStrings("-32002 " ++ upload_caller_gone_reason, msg);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    // 사본은 만들지 않았다 — 그 op 의 폴더가 없다.
+    var gone_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const op_dir = try std.fmt.bufPrintSentinel(&gone_buf, "{s}/upload-staging/79/{d}", .{ base, id }, 0);
+    try std.testing.expect(std.c.open(op_dir.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0)) < 0);
+}
+
+test "공격 A2-9: 사본이 다 된 뒤 넣으러 가기 전에 부른 프로그램이 foreground 를 떠났으면 -32002 — 사본은 지운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    upload_base_for_test = base;
+    defer {
+        upload_base_for_test = null;
+        if (upload_root) |r| allocator.free(r);
+        upload_root = null;
+    }
+    try w9c3Write(tmp.dir, "a.txt", "late\n");
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 76, .scope = .browser });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const files = try std.fmt.bufPrint(&path_buf, "[\"{s}/a.txt\"]", .{base});
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.upload\",\"params\":{\"id\":76,\"selector\":\"#f\",\"files\":[\"/x\"]}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9c3Start(&p, req, 76, files);
+    const id = run.async_id;
+    pollUploadRuns(&refs); // 사본을 만들었다(그때는 다시 볼 출처가 없다 — cap 처럼)
+    try std.testing.expectEqual(@as(usize, 1), run.upload.?.staged.items.len);
+    // 이제 그 요청이 pane 의 self-origin 이고 그 프로세스가 사라졌다.
+    p.browser_pane = 5;
+    p.peer_origin = .{ .ctty_pid = std.math.maxInt(i32) - 7, .ctty_start_us = 1, .sid = 1 };
+    pollUploadRuns(&refs);
+    const msg = try w9c3Message(&p);
+    defer ta.free(msg);
+    try std.testing.expectEqualStrings("-32002 " ++ upload_caller_gone_reason, msg);
+    var gone_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const op_dir = try std.fmt.bufPrintSentinel(&gone_buf, "{s}/upload-staging/76/{d}", .{ base, id }, 0);
+    try std.testing.expect(std.c.open(op_dir.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0)) < 0);
+}
+
+test "폴더 올리기(2026-11-20): 펼친 파일마다 사본(<뿌리>/<탭>/<op>/<i>/<펼친 이름>) — 10 개를 넘어도 잇는다, 숨긴 것은 사본도 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    upload_base_for_test = base;
+    defer {
+        upload_base_for_test = null;
+        if (upload_root) |r| allocator.free(r);
+        upload_root = null;
+    }
+    try tmp.dir.createDirPath(std.testing.io, "pics/sub");
+    var nb: [64]u8 = undefined;
+    for (0..12) |i| try w9c3Write(tmp.dir, try std.fmt.bufPrint(&nb, "pics/p{d:0>2}.jpg", .{i}), "JPG");
+    try w9c3Write(tmp.dir, "pics/sub/x.txt", "xx");
+    try w9c3Write(tmp.dir, "pics/.DS_Store", "ds");
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 78, .scope = .browser });
+    var arg_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    const arg = try std.fmt.bufPrint(&arg_buf, "{{\"selector\":\"#d\",\"folder\":\"{s}/pics\"}}", .{base});
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.upload\",\"params\":{\"id\":78,\"selector\":\"#d\",\"folder\":\"/x\"}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9c3StartArg(&p, req, 78, arg, 5);
+    const id = run.async_id;
+    pollUploadRuns(&refs); // 펼쳤다 → 곧 사본
+    try std.testing.expect(p.response == null);
+    const job = run.upload.?;
+    try std.testing.expectEqual(@as(usize, 13), job.staged.items.len);
+    try std.testing.expectEqual(@as(u32, 1), job.folder.?.skipped.hidden);
+    var want_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{s}/upload-staging/78/{d}/12/x.txt", .{ base, id }), job.staged.items[12]);
+    cdp_last_method_len = 0;
+    pollUploadRuns(&refs); // 잇는다(13 개 — 10 칸 스택 배열이면 넘쳤다, 공격 A3-2) — 엔진이 없어 다시 찾기에서 끝난다
+    try std.testing.expectEqualStrings("DOM.getDocument", cdp_last_method_buf[0..cdp_last_method_len]);
+    try std.testing.expect(p.response != null);
+    w9c3Drain(&.{&p});
+}
+
+test "폴더 올리기(2026-11-20): 펼치지 못한 폴더 — 없음·폴더 아님은 하나의 글, 빈 폴더는 그 까닭을 싣는다(사본 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    try tmp.dir.createDirPath(std.testing.io, "empty");
+    try w9c3Write(tmp.dir, "empty/.hidden", "h");
+    try w9c3Write(tmp.dir, "file.txt", "f");
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 77, .scope = .browser });
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.upload\",\"params\":{\"id\":77,\"selector\":\"#d\",\"folder\":\"/x\"}}";
+    for ([_]struct { name: []const u8, want: []const u8 }{
+        .{ .name = "none", .want = "-32603 " ++ upload_folder_refused_reason },
+        .{ .name = "file.txt", .want = "-32603 " ++ upload_folder_refused_reason },
+        .{ .name = "empty", .want = "-32603 cannot upload this folder — " ++ comptime web_upload_stage.FolderRefusal.empty.text() },
+    }) |cs| {
+        var arg_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+        const arg = try std.fmt.bufPrint(&arg_buf, "{{\"selector\":\"#d\",\"folder\":\"{s}/{s}\"}}", .{ base, cs.name });
+        var p: control_server_mod.PendingRequest = undefined;
+        _ = try w9c3StartArg(&p, req, 77, arg, 5);
+        pollUploadRuns(&refs);
+        const msg = try w9c3Message(&p);
+        defer ta.free(msg);
+        try std.testing.expectEqualStrings(cs.want, msg);
+        try std.testing.expect(upload_root == null); // 사본을 만들지 않았다
     }
 }
 

@@ -1735,13 +1735,25 @@ pub fn serializePermissionArg(gpa: std.mem.Allocator, p: PermissionParams) std.m
 pub const max_upload_files = 10;
 /// 경로 하나의 바이트 상한 — macOS 의 PATH_MAX(1024). 앱이 `realpath` 에 넘길 수 있는 길이다.
 pub const max_upload_path_bytes = 1024;
+/// 폴더 올리기(사용자 결정 2026-11-20 「iframe·폴더 둘 다」)의 보통 파일 수 상한 — 앱(`web_upload_stage.max_folder_files`)과 같다(앱이 컴파일 때 맞춘다).
+/// 답의 `files` 는 폴더면 이만큼까지.
+pub const max_upload_folder_files = 1000;
+/// iframe 안의 칸(사용자 결정 2026-11-20): `frame` 의 단계 수 상한(바깥 → 안)과 selector 하나의 바이트 상한 — 엔진(`web_cdp_upload.max_frames`)과 같다.
+pub const max_upload_frames = 4;
+pub const max_upload_frame_selector_bytes = 1024;
 
 /// `browser.upload` params(W9c③) — 대상(`selector`·`ref`·`locator` 가운데 하나)과 파일 경로들. 경로는 요청 arena 를 빌린다.
 pub const UploadParams = struct {
     id: u64,
-    locator: Locator,
+    /// 대상. `frame` 이 있으면 selector 이거나 없다(null — 그 frame 의 유일한 파일 칸).
+    locator: ?Locator,
+    /// iframe 안의 칸(사용자 결정 2026-11-20) — 바깥 → 안의 iframe CSS selector 들(요청 arena 를 빌린다).
+    frames: [max_upload_frames][]const u8 = undefined,
+    frame_count: usize = 0,
     files: [max_upload_files][]const u8 = undefined,
     count: usize = 0,
+    /// 폴더 하나(`files` 대신 — 둘 중 하나만). 칸이 `webkitdirectory` 여야 하고, 앱이 사람의 폴더 고르기처럼 펼친다.
+    folder: ?[]const u8 = null,
 
     pub fn paths(self: *const UploadParams) []const []const u8 {
         return self.files[0..self.count];
@@ -1810,8 +1822,45 @@ fn lexicalPath(path: []const u8, out: []u8) []const u8 {
 /// 거절한다. 대상은 click 과 같은 셋 가운데 하나. 파일 목록이 틀리면 `why` 에 몇 번째 파일·왜를 적는다(그 밖은 기본 글).
 pub fn parseUploadParams(params: ?std.json.Value, why: *UploadParamsWhy) ParamError!UploadParams {
     const obj = try paramsObject(params);
-    try onlyKeys(obj, &.{ "id", "selector", "ref", "locator", "files" });
-    var r: UploadParams = .{ .id = try idFromObj(obj), .locator = try parseLocator(obj) };
+    try onlyKeys(obj, &.{ "id", "selector", "ref", "locator", "files", "folder", "frame" });
+    var r: UploadParams = .{ .id = try idFromObj(obj), .locator = null };
+    if (obj.get("frame")) |fv| {
+        // iframe 안의 칸 — 대상은 그 frame 문서의 CSS selector 이거나 없다(snapshot·접근성 질의는 frame 안을 싣지 않는다).
+        const list = switch (fv) {
+            .array => |a| a.items,
+            else => return why.set("frame must be an array of 1 to {d} CSS selectors (outermost iframe first)", .{max_upload_frames}),
+        };
+        if (list.len == 0 or list.len > max_upload_frames) return why.set("frame must list 1 to {d} iframe selectors (got {d})", .{ max_upload_frames, list.len });
+        for (list, 0..) |x, i| {
+            const sel = switch (x) {
+                .string => |t| t,
+                else => return why.set("frame {d} is not a string", .{i + 1}),
+            };
+            if (sel.len == 0 or sel.len > max_upload_frame_selector_bytes) return why.set("frame {d} must be a CSS selector of 1 to {d} bytes", .{ i + 1, max_upload_frame_selector_bytes });
+            r.frames[i] = sel;
+        }
+        r.frame_count = list.len;
+        if (obj.get("ref") != null or obj.get("locator") != null) return why.set("inside a frame give the file input with selector, or no locator for the frame's only file input", .{});
+        if (try optStrFromObj(obj, "selector")) |sel| {
+            if (sel.len == 0) return error.InvalidParams;
+            r.locator = .{ .selector = sel };
+        }
+    } else r.locator = try parseLocator(obj);
+    // 폴더 — `files` 와 함께는 안 된다(파일과 폴더를 섞어 고르는 사람의 고르개는 없다).
+    if (obj.get("folder")) |fv| {
+        if (obj.get("files") != null) return why.set("give either files or folder, not both", .{});
+        const folder = switch (fv) {
+            .string => |x| x,
+            else => return why.set("folder must be an absolute path", .{}),
+        };
+        if (uploadPathProblem(folder)) |problem| return switch (problem) {
+            .not_absolute => why.set("the folder is not an absolute path (it must start with /)", .{}),
+            .too_long => why.set("the folder path is longer than {d} bytes (a relative path is counted after it is joined to the current folder)", .{max_upload_path_bytes}),
+            .bad_chars => why.set("the folder path is not valid UTF-8 or contains control characters (a relative path is checked after it is joined to the current folder)", .{}),
+        };
+        r.folder = folder;
+        return r;
+    }
     const list = switch (obj.get("files") orelse return why.set("files is missing — give 1 to {d} absolute paths", .{max_upload_files})) {
         .array => |a| a.items,
         else => return why.set("files must be an array of 1 to {d} absolute paths", .{max_upload_files}),
@@ -1845,11 +1894,22 @@ pub fn serializeUploadArg(gpa: std.mem.Allocator, p: UploadParams) std.mem.Alloc
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     (blk: {
         s.beginObject() catch |e| break :blk e;
-        writeLocatorFields(&s, p.locator) catch |e| break :blk e;
-        s.objectField("files") catch |e| break :blk e;
-        s.beginArray() catch |e| break :blk e;
-        for (p.paths()) |f| s.write(f) catch |e| break :blk e;
-        s.endArray() catch |e| break :blk e;
+        if (p.locator) |l| writeLocatorFields(&s, l) catch |e| break :blk e;
+        if (p.frame_count > 0) {
+            s.objectField("frame") catch |e| break :blk e;
+            s.beginArray() catch |e| break :blk e;
+            for (p.frames[0..p.frame_count]) |f| s.write(f) catch |e| break :blk e;
+            s.endArray() catch |e| break :blk e;
+        }
+        if (p.folder) |f| {
+            s.objectField("folder") catch |e| break :blk e;
+            s.write(f) catch |e| break :blk e;
+        } else {
+            s.objectField("files") catch |e| break :blk e;
+            s.beginArray() catch |e| break :blk e;
+            for (p.paths()) |f| s.write(f) catch |e| break :blk e;
+            s.endArray() catch |e| break :blk e;
+        }
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -3440,7 +3500,8 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
     return aw.toOwnedSlice();
 }
 
-/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …],"kept":<bool>,"navigated":<bool>,"dialog":<bool>}`(파일 1..10 개). 다른 키는
+/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …],"kept":<bool>,"navigated":<bool>,"dialog":<bool>}`(파일 1..10 개 — 폴더면
+/// `"folder":{"files":<수>,"bytes":<u64>,"skipped":{"hidden","links","packages","other"}}` 가 붙고 파일 1..1000 개). 다른 키는
 /// 버리고, 모양이 틀리면 거절.
 /// `kept`(적대 리뷰 1 회차): 넣을 때 페이지가 그 목록을 받았고(성공의 조건), 그 뒤에도 칸이 그 목록을 쥐고 있나 — 거짓이면 페이지 스스로 비우거나
 /// 다시 그렸다(다시 올리면 두 번 올라간다).
@@ -3462,7 +3523,27 @@ fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
     const navigated = parsed.value.object.get("navigated") orelse return error.InvalidUploadPayload;
     const dialog = parsed.value.object.get("dialog") orelse return error.InvalidUploadPayload;
     if (origin != .string or files != .array or kept != .bool or navigated != .bool or dialog != .bool) return error.InvalidUploadPayload;
-    if (files.array.items.len == 0 or files.array.items.len > max_upload_files) return error.InvalidUploadPayload;
+    // 폴더(사용자 결정 2026-11-20): `folder` 칸이 있으면 파일 수가 그 칸의 수와 같고 1..1000, 아니면 1..10(공격 A3-2 — 10 에 묶인 검사가 폴더의 성공을
+    // 내부 오류로 바꿨다).
+    const folder = parsed.value.object.get("folder");
+    const max_files: usize = if (folder != null) max_upload_folder_files else max_upload_files;
+    if (files.array.items.len == 0 or files.array.items.len > max_files) return error.InvalidUploadPayload;
+    var folder_bytes: i64 = 0;
+    var folder_skipped: [4]i64 = .{ 0, 0, 0, 0 };
+    const skipped_keys = [_][]const u8{ "hidden", "links", "packages", "other" };
+    if (folder) |fv| {
+        if (fv != .object) return error.InvalidUploadPayload;
+        const n = fv.object.get("files") orelse return error.InvalidUploadPayload;
+        const b = fv.object.get("bytes") orelse return error.InvalidUploadPayload;
+        const sk = fv.object.get("skipped") orelse return error.InvalidUploadPayload;
+        if (n != .integer or n.integer != @as(i64, @intCast(files.array.items.len)) or b != .integer or b.integer < 0 or sk != .object) return error.InvalidUploadPayload;
+        folder_bytes = b.integer;
+        for (skipped_keys, 0..) |k, i| {
+            const x = sk.object.get(k) orelse return error.InvalidUploadPayload;
+            if (x != .integer or x.integer < 0) return error.InvalidUploadPayload;
+            folder_skipped[i] = x.integer;
+        }
+    }
     for (files.array.items) |f| {
         if (f != .object) return error.InvalidUploadPayload;
         const name = f.object.get("name") orelse return error.InvalidUploadPayload;
@@ -3493,6 +3574,22 @@ fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
         s.write(navigated.bool) catch |e| break :blk e;
         s.objectField("dialog") catch |e| break :blk e;
         s.write(dialog.bool) catch |e| break :blk e;
+        if (folder != null) {
+            s.objectField("folder") catch |e| break :blk e;
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("files") catch |e| break :blk e;
+            s.write(files.array.items.len) catch |e| break :blk e;
+            s.objectField("bytes") catch |e| break :blk e;
+            s.write(folder_bytes) catch |e| break :blk e;
+            s.objectField("skipped") catch |e| break :blk e;
+            s.beginObject() catch |e| break :blk e;
+            for (skipped_keys, 0..) |k, i| {
+                s.objectField(k) catch |e| break :blk e;
+                s.write(folder_skipped[i]) catch |e| break :blk e;
+            }
+            s.endObject() catch |e| break :blk e;
+            s.endObject() catch |e| break :blk e;
+        }
         endResult(&s) catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -7123,6 +7220,110 @@ test "W9c③: uploadPathOk·lexicalPath — 절대·UTF-8·제어 문자 없음,
     try testing.expectEqualStrings("/tmp/a", lexicalPath("//tmp/./x/../a/", &buf));
     try testing.expectEqualStrings("/", lexicalPath("/..", &buf));
     try testing.expectEqualStrings("/a", lexicalPath("/../a", &buf));
+}
+
+test "폴더 올리기(2026-11-20): upload params 의 folder — 절대 경로 하나, files 와 함께는 안 된다, 글이 아니거나 상대·제어 문자면 그 까닭" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#d\",\"folder\":\"/tmp/photos\"}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqualStrings("{\"selector\":\"#d\",\"folder\":\"/tmp/photos\"}", op.arg);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    for ([_]struct { params: []const u8, why: []const u8 }{
+        .{ .params = "\"folder\":\"/tmp/p\",\"files\":[\"/a\"]", .why = "give either files or folder, not both" },
+        .{ .params = "\"folder\":[\"/tmp/p\"]", .why = "folder must be an absolute path" },
+        .{ .params = "\"folder\":\"photos\"", .why = "the folder is not an absolute path (it must start with /)" },
+        .{ .params = "\"folder\":\"/tmp/a\\nb\"", .why = "the folder path is not valid UTF-8 or contains control characters (a relative path is checked after it is joined to the current folder)" },
+    }) |c| {
+        const bytes = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{{\"id\":12,\"selector\":\"#d\",{s}}}}}", .{c.params});
+        defer testing.allocator.free(bytes);
+        switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
+                const m = try errMessage(e);
+                defer testing.allocator.free(m);
+                try testing.expectEqualStrings(c.why, m);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "iframe 안의 칸(2026-11-20): upload params 의 frame — 1..4 개의 비지 않은 CSS selector, 대상은 selector 이거나 없다(ref·role·text·label 은 그 까닭), 엔진 인자에 그대로" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    for ([_]struct { params: []const u8, arg: []const u8 }{
+        .{ .params = "\"frame\":[\"iframe#pay\"],\"selector\":\"#f\",\"files\":[\"/a\"]", .arg = "{\"selector\":\"#f\",\"frame\":[\"iframe#pay\"],\"files\":[\"/a\"]}" },
+        .{ .params = "\"frame\":[\"#outer\",\"iframe\"],\"folder\":\"/p\"", .arg = "{\"frame\":[\"#outer\",\"iframe\"],\"folder\":\"/p\"}" },
+    }) |c| {
+        const bytes = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{{\"id\":12,{s}}}}}", .{c.params});
+        defer testing.allocator.free(bytes);
+        switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+            .op => |op| {
+                defer testing.allocator.free(op.arg);
+                try testing.expectEqualStrings(c.arg, op.arg);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    for ([_]struct { params: []const u8, why: ?[]const u8 }{
+        .{ .params = "\"frame\":[\"i\"],\"ref\":\"n4\",\"files\":[\"/a\"]", .why = "inside a frame give the file input with selector, or no locator for the frame's only file input" },
+        .{ .params = "\"frame\":[\"i\"],\"locator\":{\"role\":\"button\"},\"files\":[\"/a\"]", .why = "inside a frame give the file input with selector, or no locator for the frame's only file input" },
+        .{ .params = "\"frame\":[],\"files\":[\"/a\"]", .why = "frame must list 1 to 4 iframe selectors (got 0)" },
+        .{ .params = "\"frame\":[\"a\",\"b\",\"c\",\"d\",\"e\"],\"files\":[\"/a\"]", .why = "frame must list 1 to 4 iframe selectors (got 5)" },
+        .{ .params = "\"frame\":[\"\"],\"files\":[\"/a\"]", .why = "frame 1 must be a CSS selector of 1 to 1024 bytes" },
+        .{ .params = "\"frame\":[7],\"files\":[\"/a\"]", .why = "frame 1 is not a string" },
+        .{ .params = "\"frame\":\"iframe\",\"files\":[\"/a\"]", .why = "frame must be an array of 1 to 4 CSS selectors (outermost iframe first)" },
+        .{ .params = "\"files\":[\"/a\"]", .why = null }, // frame 이 없으면 대상이 있어야 한다(지금처럼)
+    }) |c| {
+        const bytes = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{{\"id\":12,{s}}}}}", .{c.params});
+        defer testing.allocator.free(bytes);
+        switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
+                if (c.why) |w| {
+                    const m = try errMessage(e);
+                    defer testing.allocator.free(m);
+                    try testing.expectEqualStrings(w, m);
+                }
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "폴더 올리기(2026-11-20): 결과의 folder 칸 — 있으면 파일 1..1000 개이고 그 수가 folder.files 와 같아야, 없으면 10 개까지(공격 A3-2)" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#d\",\"folder\":\"/tmp/p\"}}";
+    var files: std.ArrayList(u8) = .empty;
+    defer files.deinit(testing.allocator);
+    for (0..11) |i| try files.print(testing.allocator, "{s}{{\"name\":\"f{d}\",\"size\":1}}", .{ if (i == 0) "" else ",", i });
+    const head = "{\"origin\":\"https://a.test\",\"files\":[";
+    const tail = "],\"kept\":true,\"navigated\":false,\"dialog\":false";
+    {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}{s}{s},\"folder\":{{\"files\":11,\"bytes\":11,\"skipped\":{{\"hidden\":2,\"links\":0,\"packages\":1,\"other\":0}}}}}}", .{ head, files.items, tail });
+        defer testing.allocator.free(p);
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, p);
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, "\"dialog\":false,\"folder\":{\"files\":11,\"bytes\":11,\"skipped\":{\"hidden\":2,\"links\":0,\"packages\":1,\"other\":0}}}") != null);
+    }
+    for ([_][]const u8{
+        "", // folder 칸 없이 11 개 — 보통 칸의 상한(10)
+        ",\"folder\":{\"files\":10,\"bytes\":11,\"skipped\":{\"hidden\":0,\"links\":0,\"packages\":0,\"other\":0}}", // 수가 다르다
+        ",\"folder\":{\"files\":11,\"bytes\":-1,\"skipped\":{\"hidden\":0,\"links\":0,\"packages\":0,\"other\":0}}",
+        ",\"folder\":{\"files\":11,\"bytes\":11,\"skipped\":{\"hidden\":0,\"links\":0,\"packages\":0}}",
+        ",\"folder\":true",
+    }) |extra| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}{s}{s}{s}}}", .{ head, files.items, tail, extra });
+        defer testing.allocator.free(p);
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, p);
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
+    }
 }
 
 test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀리면 internal_error, 거부는 -32002 와 그 글(철회의 unauthorized 는 균일 글)" {

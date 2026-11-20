@@ -374,6 +374,8 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     }
     // W9c③: 파일 입력칸들 — 넣은 파일의 이벤트(진짜인가)와 내용을 페이지가 읽어 둔다(`upload_check`).
     if (std.mem.eql(u8, path, "/upload")) return upload_page;
+    if (std.mem.eql(u8, path, "/upload-frames")) return upload_frames_page;
+    if (std.mem.eql(u8, path, "/upload-inner")) return upload_inner_page;
     if (std.mem.eql(u8, path, "/input")) return input_page;
     if (std.mem.eql(u8, path, "/keys")) return keys_page;
     if (std.mem.eql(u8, path, "/sel")) return select_page;
@@ -675,6 +677,17 @@ const keys_page =
     \\<script>function st(){var a=document.activeElement;var v=a&&a.value!==undefined?a.value.split(String.fromCharCode(10)).join('NL'):'';document.title='focus='+(a&&a.id)+' val='+v+' caret='+(a&&a.selectionStart)}
     \\addEventListener('input',function(){setTimeout(st,0)});addEventListener('keyup',function(){setTimeout(st,0)});document.addEventListener('focusin',function(){setTimeout(st,0)});
     \\requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='keys-ready'})});</script>
+;
+
+/// 2026-11-20 iframe 업로드(`upload_check` 의 up-frame-*): 같은 출처 iframe(`same`)과 다른 사이트 iframe(`cross` — localhost↔127.0.0.1 은 다른 사이트라
+/// 다른 렌더러 프로세스다). 안쪽 칸의 `change` 는 위 문서에 `postMessage` 로 알린다(다른 사이트 문서는 위에서 읽을 수 없다).
+const upload_frames_page =
+    \\<!doctype html><title>upf</title><iframe id=same src="/upload-inner"></iframe><iframe id=cross></iframe>
+    \\<script>window.__msgs=[];addEventListener('message',function(e){__msgs.push(e.data)});document.getElementById('cross').src='http://localhost:'+location.port+'/upload-inner'</script>
+;
+const upload_inner_page =
+    \\<!doctype html><title>upi</title><input type=file id=fi multiple><input type=file id=fd webkitdirectory><button>inner-btn</button>
+    \\<script>window.__ev=[];['fi','fd'].forEach(function(id){var e=document.getElementById(id);e.addEventListener('change',function(ev){var l=[];for(var i=0;i<e.files.length;i++){var f=e.files[i];l.push(f.name+':'+f.size+':'+f.webkitRelativePath)}var m=id+':'+ev.isTrusted+':'+l.join(',');__ev.push(m);parent.postMessage('ev|'+location.host+'|'+m,'*')})})</script>
 ;
 
 /// W9c③ `upload_check` 의 페이지 — 한 파일 칸(`one`·`two`), 폴더 칸(`dir`), 꺼진 칸(`dis`), 받은 뒤 비우는 칸(`clr` — 적대 리뷰 1 회차: 창의 캡처

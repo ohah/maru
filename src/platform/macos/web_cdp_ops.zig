@@ -83,7 +83,8 @@ pub const loading_reason = "the tab is loading a new page — wait for it (wait 
 pub const Step = union(enum) {
     /// `kick` — 바로 뒤에 작은 스크린샷을 함께 보낸다(`web_osr.devtoolsCallKick` 이 이 값을 그대로 받는다 — 숨은 탭의 접근성 질의·포인터 이동·rAF 가 그래야 돈다,
     /// W9b②-3). `Kick` 참고.
-    call: struct { method: []const u8, params: []u8, kick: Kick = .none },
+    /// `frame`(wire 30): 그 frame 세션으로 보낸다(다른 사이트 iframe — 업로드의 걷기만, 차례가 쥔 글을 빌린다 — 보내기 전까지 산다). null 이면 root.
+    call: struct { method: []const u8, params: []u8, kick: Kick = .none, frame: ?[]const u8 = null },
     done: struct { status: Status, result: []u8 },
     /// 이만큼(ms) 뒤에 `wake` 로 다시 부른다(wait 의 확인 간격 — 페이지 타이머를 쓰지 않는다: 숨긴 탭은 그것을 늦춘다).
     sleep: u32,
@@ -252,12 +253,15 @@ pub const Op = struct {
     upload: ?web_cdp_upload.Op = null,
     /// W9c③ 적대 리뷰 1 회차: 업로드가 마지막으로 낸 호출(params 소유). 승인 뒤 그 호출을 자리 없음(`busy_reason`)으로 못 보냈으면 잠깐 뒤
     /// 그대로 다시 보낸다 — 사용자가 승인한 업로드를 「retry shortly」 로 버리면 에이전트가 다시 불러 모달이 또 뜬다(click·type 의 kick 재시도와 같은 간격·횟수).
-    up_last: ?struct { method: []const u8, params: []u8, kick: Kick } = null,
+    up_last: ?struct { method: []const u8, params: []u8, kick: Kick, frame: ?[]u8 = null } = null,
     up_resend: bool = false,
     up_busy_retries: u8 = 0,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
-        if (self.up_last) |l| gpa.free(l.params);
+        if (self.up_last) |l| {
+            gpa.free(l.params);
+            if (l.frame) |f| gpa.free(f);
+        }
         if (self.upload) |*u| u.deinit(gpa);
         if (self.page) |*p| p.deinit(gpa);
         if (self.exec) |*e| e.deinit(gpa);
@@ -317,10 +321,32 @@ pub const Op = struct {
         const o = parsed.value.object;
         switch (kind) {
             .upload => {
-                // 파일 경로는 앱이 다룬다(열기·사본) — 이 차례는 수만 안다(여러 개면 `multiple` 칸이어야 한다).
-                const files = o.get("files") orelse return error.InvalidArg;
-                if (files != .array or files.array.items.len == 0 or files.array.items.len > web_cdp_upload.max_files) return error.InvalidArg;
-                op.upload = web_cdp_upload.Op.init(files.array.items.len, id);
+                // 파일 경로는 앱이 다룬다(열기·사본) — 이 차례는 수만 안다(여러 개면 `multiple` 칸이어야 한다). 폴더(`folder` — 사용자 결정 2026-11-20)는
+                // 파일 목록 대신 — 칸이 `webkitdirectory` 여야 하고 넣을 수는 펼친 뒤에 안다. 둘 다·둘 다 없음은 L2 가 막지만 엔진도.
+                const base: web_cdp_upload.Op = if (o.get("folder")) |f| blk: {
+                    if (f != .string or o.get("files") != null) return error.InvalidArg;
+                    break :blk web_cdp_upload.Op.initFolder(id);
+                } else blk: {
+                    const files = o.get("files") orelse return error.InvalidArg;
+                    if (files != .array or files.array.items.len == 0 or files.array.items.len > web_cdp_upload.max_files) return error.InvalidArg;
+                    break :blk web_cdp_upload.Op.init(files.array.items.len, id);
+                };
+                // iframe 안의 칸(사용자 결정 2026-11-20 — `frame`: 바깥 → 안의 iframe selector 1..4) — 대상은 selector 이거나 없다(그 frame 의 유일한
+                // 파일 칸). 걷기는 업로드 차례가 한다(이 Op 의 로케이터를 쓰지 않는다).
+                if (o.get("frame")) |fv| {
+                    if (fv != .array or fv.array.items.len == 0 or fv.array.items.len > web_cdp_upload.max_frames) return error.InvalidArg;
+                    if (o.get("ref") != null or o.get("locator") != null) return error.InvalidArg;
+                    var sels: [web_cdp_upload.max_frames][]const u8 = undefined;
+                    for (fv.array.items, 0..) |x, i| {
+                        if (x != .string or x.string.len == 0) return error.InvalidArg;
+                        sels[i] = x.string;
+                    }
+                    const target: ?[]const u8 = if (o.get("selector")) |t| (if (t == .string and t.string.len > 0) t.string else return error.InvalidArg) else null;
+                    op.upload = try web_cdp_upload.Op.initFrames(gpa, base, sels[0..fv.array.items.len], target);
+                    op.stage = .upload;
+                    return op;
+                }
+                op.upload = base;
             },
             .wait => {
                 const cond = o.get("condition") orelse return error.InvalidArg;
@@ -476,7 +502,7 @@ pub const Op = struct {
         if (self.up_resend) {
             self.up_resend = false;
             const l = self.up_last.?;
-            return .{ .call = .{ .method = l.method, .params = try gpa.dupe(u8, l.params), .kick = l.kick } };
+            return .{ .call = .{ .method = l.method, .params = try gpa.dupe(u8, l.params), .kick = l.kick, .frame = l.frame } };
         }
         return self.uploadRemember(gpa, try self.uploadFix(gpa, try self.wakeInner(gpa)));
     }
@@ -516,8 +542,17 @@ pub const Op = struct {
                     gpa.free(c.params);
                     return e;
                 };
-                if (self.up_last) |l| gpa.free(l.params);
-                self.up_last = .{ .method = c.method, .params = copy, .kick = c.kick };
+                // frame 은 따로 쥔다(차례가 그 글을 바꿀 수 있다 — 다시 보낼 때까지 산다).
+                const frame_copy: ?[]u8 = if (c.frame) |f| (gpa.dupe(u8, f) catch |e| {
+                    gpa.free(copy);
+                    gpa.free(c.params);
+                    return e;
+                }) else null;
+                if (self.up_last) |l| {
+                    gpa.free(l.params);
+                    if (l.frame) |f| gpa.free(f);
+                }
+                self.up_last = .{ .method = c.method, .params = copy, .kick = c.kick, .frame = frame_copy };
             },
             else => {},
         }
@@ -560,7 +595,17 @@ pub const Op = struct {
     /// W9c③: 승인 뒤 — 사본을 업로드 차례에 주고 로케이터를 **처음부터 다시** 푼다(같은 요소인지는 업로드 차례가 `located` 에서 본다).
     /// 모달 동안 쥔 것은 없다(모달 전에 놓았다).
     pub fn resumeUpload(self: *Op, gpa: std.mem.Allocator, staged: []const web_cdp_upload.Staged) !Step {
-        try self.upload.?.beginPost(gpa, staged);
+        return self.resumeUploadWith(gpa, staged, null);
+    }
+
+    /// `resumeUpload` 와 같되 폴더의 요약을 함께(답의 `folder` 칸 — 사용자 결정 2026-11-20).
+    pub fn resumeUploadWith(self: *Op, gpa: std.mem.Allocator, staged: []const web_cdp_upload.Staged, summary: ?web_cdp_upload.FolderSummary) !Step {
+        try self.upload.?.beginPostWith(gpa, staged, summary);
+        // iframe 안의 칸 — 걷기를 처음부터(같은 frame 들·같은 요소인지는 업로드 차례가 본다).
+        if (self.upload.?.framed()) {
+            self.stage = .upload;
+            return self.start(gpa);
+        }
         if (self.matched_name) |m| gpa.free(m);
         self.matched_name = null;
         if (self.frame_id) |f| gpa.free(f);
@@ -614,6 +659,8 @@ pub const Op = struct {
     }
 
     fn startInner(self: *Op, gpa: std.mem.Allocator) !Step {
+        // iframe 안의 칸 — 업로드 차례가 걷는다(W9c③ + 2026-11-20).
+        if (self.stage == .upload) if (self.upload) |*u| if (u.framed()) return u.start(gpa);
         if (self.page) |*p| {
             p.now_ms = self.now_ms;
             return p.start(gpa);
@@ -3947,7 +3994,7 @@ const UpPage = struct {
                     if (std.mem.eql(u8, verify, v)) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"" ++ v ++ "\"}}" };
                 return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"mismatch\"}}" };
             }
-            return .{ .ok = if (std.mem.eql(u8, check, "ok")) "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" else if (std.mem.eql(u8, check, "disabled")) "{\"result\":{\"type\":\"string\",\"value\":\"disabled\"}}" else if (std.mem.eql(u8, check, "directory")) "{\"result\":{\"type\":\"string\",\"value\":\"directory\"}}" else if (std.mem.eql(u8, check, "single")) "{\"result\":{\"type\":\"string\",\"value\":\"single\"}}" else if (std.mem.eql(u8, check, "frame")) "{\"result\":{\"type\":\"string\",\"value\":\"frame\"}}" else "{\"result\":{\"type\":\"string\",\"value\":\"not file\"}}" };
+            return .{ .ok = if (std.mem.eql(u8, check, "ok")) "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" else if (std.mem.eql(u8, check, "disabled")) "{\"result\":{\"type\":\"string\",\"value\":\"disabled\"}}" else if (std.mem.eql(u8, check, "directory")) "{\"result\":{\"type\":\"string\",\"value\":\"directory\"}}" else if (std.mem.eql(u8, check, "single")) "{\"result\":{\"type\":\"string\",\"value\":\"single\"}}" else if (std.mem.eql(u8, check, "frame")) "{\"result\":{\"type\":\"string\",\"value\":\"frame\"}}" else if (std.mem.eql(u8, check, "not directory")) "{\"result\":{\"type\":\"string\",\"value\":\"not directory\"}}" else "{\"result\":{\"type\":\"string\",\"value\":\"not file\"}}" };
         }
         return happyPage(method, params);
     }
@@ -4013,6 +4060,507 @@ test "W9c③: 업로드 — 찾기 → 프레임 트리·격리 world·노드·�
     try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "[\"a.txt\",\"b.txt\"]") != null);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "[3,5]") != null);
     try testing.expect(op.upload.?.given);
+}
+
+test "폴더 올리기(2026-11-20): 확인은 넷째 인자(dir)로 — 모달 전은 수 0, 승인 뒤 arm 은 key 뒤에 참; 넣을 수는 사본 수, 답에 folder 칸(수·크기·뺀 수)" {
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"selector\":\"#d\",\"folder\":\"/up\"}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    defer testing.allocator.free(paused.confirm.origin);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"arguments\":[{\"value\":0},{\"value\":false},{\"value\":\"\"},{\"value\":true}]") != null);
+    trail.reset();
+    UpPage.post = true;
+    const many = [_]web_cdp_upload.Staged{ .{ .path = "/stage/7/42/0/a.txt", .name = "a.txt", .size = 3 }, .{ .path = "/stage/7/42/1/b.txt", .name = "b.txt", .size = 5 }, .{ .path = "/stage/7/42/2/c.txt", .name = "c.txt", .size = 7 } };
+    const end = try driveUpload(&op, try op.resumeUploadWith(testing.allocator, &many, .{ .bytes = 15, .hidden = 2, .links = 1 }), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.success, end.done.status);
+    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"b.txt\",\"size\":5},{\"name\":\"c.txt\",\"size\":7}],\"kept\":true,\"navigated\":false,\"dialog\":false,\"folder\":{\"files\":3,\"bytes\":15,\"skipped\":{\"hidden\":2,\"links\":1,\"packages\":0,\"other\":0}}}", end.done.result);
+    // 승인 뒤 확인: 수 3·arm 참·key·dir 참.
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"arguments\":[{\"value\":3},{\"value\":true},{\"value\":\"maru-w9c-upload-42\"},{\"value\":true}]") != null);
+    try testing.expectEqualStrings("{\"files\":[\"/stage/7/42/0/a.txt\",\"/stage/7/42/1/b.txt\",\"/stage/7/42/2/c.txt\"],\"objectId\":\"o-1\"}", trail.params.items[8]);
+}
+
+test "폴더 올리기(2026-11-20): 폴더를 주었는데 칸이 폴더 칸이 아니면 not_directory_reason, 파일을 주었는데 폴더 칸이면 directory_reason(--folder 를 가리킨다) — 넣기 전에" {
+    for ([_]struct { arg: []const u8, check: []const u8, want: []const u8 }{
+        .{ .arg = "{\"selector\":\"#d\",\"folder\":\"/up\"}", .check = "not directory", .want = web_cdp_upload.not_directory_reason },
+        .{ .arg = "{\"selector\":\"#d\",\"files\":[\"/a.txt\"]}", .check = "directory", .want = web_cdp_upload.directory_reason },
+    }) |c| {
+        UpPage.reset();
+        UpPage.check = c.check;
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, c.arg, 42);
+        defer op.deinit(testing.allocator);
+        const end = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(Status.failed, end.done.status);
+        try testing.expectEqualStrings(c.want, end.done.result);
+        try testing.expectEqual(@as(usize, 0), trail.count("DOM.setFileInputFiles"));
+    }
+    // 스모크(`test-macos-web-cdp-smoke.sh`)가 이 구절을 찾는다.
+    try testing.expect(std.mem.indexOf(u8, web_cdp_upload.directory_reason, "takes a folder") != null);
+    // 폴더와 파일을 함께·폴더가 글이 아님은 시작하지 않는다(L2 가 막지만 엔진도).
+    for ([_][]const u8{ "{\"selector\":\"#d\",\"folder\":\"/up\",\"files\":[\"/a\"]}", "{\"selector\":\"#d\",\"folder\":1}" }) |bad|
+        try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .upload, bad, 1));
+}
+
+// ── iframe 안의 칸(사용자 결정 2026-11-20 — `frame`): 업로드 차례의 걷기 ─────────────────────────────────────────────────────────
+// 흉내 페이지: 주 frame F1(https://top.test) 안에 같은 사이트 iframe F2(https://widget.test). 걷기는 F1 의 격리 world 에서 iframe 을 찾고
+// (`describeNode` — frameId·contentDocument), F2 의 격리 world 에서 대상을 찾아 그 frame 에서 지금의 차례(tree … verify)를 돈다.
+const FramePage = struct {
+    var post: bool = false;
+    /// 사본 뒤 그 자리의 iframe 이 가리키는 frame(바꿔 끼우면 다른 id).
+    var frame_post: []const u8 = "F2";
+    var node_name: []const u8 = "IFRAME";
+    var has_frame_id: bool = true;
+    var has_doc: bool = true;
+    /// iframe 찾기의 답 — 요소·null·예외(문법 오류).
+    var frame_find: enum { found, none, syntax } = .found;
+    /// 대상이 없을 때(유일한 파일 칸) 그 frame 의 파일 칸 수.
+    var inputs: i64 = 1;
+    /// 넣기의 답을 바꾼다(다른 사이트 iframe 의 세션이 넣는 사이 사라졌다 등).
+    var set_reply: ?Reply = null;
+    /// 호출마다 실린 frame 세션(빈 글 = root) — 차례대로.
+    var frames_seen: [64][]const u8 = undefined;
+    var frames_n: usize = 0;
+    /// 실린 frame 글의 사본(호출의 frame 은 차례가 곧 놓는 글을 빌릴 수 있다 — 자리 없음의 다시 보내기).
+    var frames_copy: [64][16]u8 = undefined;
+
+    fn see(f: ?[]const u8) void {
+        if (frames_n >= frames_seen.len) return;
+        const v = f orelse "";
+        const n = @min(v.len, frames_copy[frames_n].len);
+        @memcpy(frames_copy[frames_n][0..n], v[0..n]);
+        frames_seen[frames_n] = frames_copy[frames_n][0..n];
+        frames_n += 1;
+    }
+    /// 지금 호출이 실린 세션(드라이버가 넣는다) — 그 세션의 프레임 트리를 답한다.
+    var cur_frame: []const u8 = "";
+    /// 두 겹: F2(다른 사이트) 안의 다른 사이트 iframe F4.
+    var nested: bool = false;
+    /// 읽기(verify)의 답을 바꾼다.
+    var verify_reply: ?Reply = null;
+    /// 사본 뒤 프레임 트리에서 F2 가 사라졌다.
+    var drop_f2_post: bool = false;
+    /// 넣기의 첫 답을 자리 없음(`busy_reason`)으로 — 잠깐 뒤 다시 보낸다.
+    var set_busy_once: bool = false;
+
+    fn reset() void {
+        cur_frame = "";
+        nested = false;
+        verify_reply = null;
+        drop_f2_post = false;
+        set_busy_once = false;
+        post = false;
+        frame_post = "F2";
+        node_name = "IFRAME";
+        has_frame_id = true;
+        has_doc = true;
+        frame_find = .found;
+        inputs = 1;
+        set_reply = null;
+        frames_n = 0;
+    }
+
+    fn answer(method: []const u8, params: []const u8) Reply {
+        if (std.mem.eql(u8, method, "Page.getFrameTree")) {
+            if (std.mem.eql(u8, cur_frame, "F4")) return .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F4\",\"loaderId\":\"L4\",\"securityOrigin\":\"https://deep.test\"}}}" };
+            // 그 frame 의 세션에서는 그 frame 이 뿌리다(실측 — 판정 `root_is_frame`): root 의 걷기가 그 세션으로 새면 iframe 을 찾지 못한다.
+            if (std.mem.eql(u8, cur_frame, "F2")) return .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F2\",\"loaderId\":\"L2\",\"securityOrigin\":\"https://widget.test\"}}}" };
+            if (post and drop_f2_post) return .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F1\",\"loaderId\":\"L1\",\"securityOrigin\":\"https://top.test\"}}}" };
+            return .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F1\",\"loaderId\":\"L1\",\"securityOrigin\":\"https://top.test\"},\"childFrames\":[{\"frame\":{\"id\":\"F2\",\"parentId\":\"F1\",\"loaderId\":\"L2\",\"securityOrigin\":\"https://widget.test\"}},{\"frame\":{\"id\":\"F3\",\"parentId\":\"F1\",\"loaderId\":\"L3\",\"securityOrigin\":\"https://other.test\"}}]}}" };
+        }
+        if (std.mem.eql(u8, method, "Page.createIsolatedWorld")) return .{ .ok = if (std.mem.indexOf(u8, params, "\"F1\"") != null) "{\"executionContextId\":71}" else if (std.mem.indexOf(u8, params, "\"F4\"") != null) "{\"executionContextId\":74}" else "{\"executionContextId\":72}" };
+        if (std.mem.eql(u8, method, "Runtime.evaluate")) {
+            // 두 겹이면 F2 의 world 에서 찾는 것은 안쪽 iframe(w-deep), 대상은 F4 의 world 에서.
+            if (nested and std.mem.indexOf(u8, params, "\"contextId\":72") != null) return .{ .ok = "{\"result\":{\"type\":\"object\",\"subtype\":\"node\",\"objectId\":\"w-deep\"}}" };
+            if (std.mem.indexOf(u8, params, "\"contextId\":71") != null) return switch (frame_find) {
+                .found => .{ .ok = "{\"result\":{\"type\":\"object\",\"subtype\":\"node\",\"objectId\":\"w-frame\"}}" },
+                .none => .{ .ok = "{\"result\":{\"type\":\"object\",\"subtype\":\"null\",\"value\":null}}" },
+                .syntax => .{ .ok = "{\"result\":{\"type\":\"object\",\"subtype\":\"error\"},\"exceptionDetails\":{\"text\":\"Uncaught\"}}" },
+            };
+            if (std.mem.indexOf(u8, params, "querySelectorAll") != null) {
+                if (inputs != 1) {
+                    var buf: [96]u8 = undefined;
+                    const s = std.fmt.bufPrint(&buf, "{{\"result\":{{\"type\":\"number\",\"value\":{d}}}}}", .{inputs}) catch unreachable;
+                    return .{ .ok = testing.allocator.dupe(u8, s) catch unreachable };
+                }
+            }
+            return .{ .ok = "{\"result\":{\"type\":\"object\",\"subtype\":\"node\",\"objectId\":\"w-input\"}}" };
+        }
+        if (std.mem.eql(u8, method, "DOM.describeNode")) {
+            if (std.mem.indexOf(u8, params, "w-deep") != null) return .{ .ok = "{\"node\":{\"backendNodeId\":41,\"nodeName\":\"IFRAME\",\"frameId\":\"F4\"}}" };
+            if (std.mem.indexOf(u8, params, "w-frame") != null) {
+                const fid = if (post) frame_post else "F2";
+                var buf: [256]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{{\"node\":{{\"backendNodeId\":40,\"nodeName\":\"{s}\"{s}{s}{s}{s}}}}}", .{
+                    node_name,
+                    if (has_frame_id) ",\"frameId\":\"" else "",
+                    if (has_frame_id) fid else "",
+                    if (has_frame_id) "\"" else "",
+                    if (has_doc) ",\"contentDocument\":{\"nodeId\":5,\"nodeName\":\"#document\"}" else "",
+                }) catch unreachable;
+                return .{ .ok = testing.allocator.dupe(u8, s) catch unreachable };
+            }
+            return .{ .ok = "{\"node\":{\"backendNodeId\":9,\"nodeName\":\"INPUT\"}}" };
+        }
+        if (std.mem.eql(u8, method, "DOM.resolveNode")) return .{ .ok = "{\"object\":{\"objectId\":\"o-1\"}}" };
+        if (std.mem.eql(u8, method, "DOM.setFileInputFiles")) {
+            if (set_busy_once) {
+                set_busy_once = false;
+                return .{ .not_sent = busy_reason };
+            }
+            return set_reply orelse .{ .ok = "{}" };
+        }
+        if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) {
+            if (std.mem.indexOf(u8, params, "function(names") != null) if (verify_reply) |r| return r;
+            return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" };
+        }
+        return .{ .ok = "{}" };
+    }
+};
+
+/// `FramePage` 로 업로드 차례를 모달이나 끝까지(만든 답 글은 시험 할당자가 소유 — 차례가 읽은 뒤 놓는다).
+fn driveFrameUpload(op: *Op, first: Step, trail: *Trail) !Step {
+    var step = first;
+    while (true) switch (step) {
+        .call => |c| {
+            try trail.methods.append(testing.allocator, c.method);
+            try trail.params.append(testing.allocator, c.params);
+            FramePage.see(c.frame);
+            FramePage.cur_frame = c.frame orelse "";
+            const r = FramePage.answer(c.method, c.params);
+            const owned = r == .ok and (std.mem.eql(u8, c.method, "DOM.describeNode") and std.mem.indexOf(u8, c.params, "w-frame") != null or
+                (std.mem.eql(u8, c.method, "Runtime.evaluate") and std.mem.indexOf(u8, c.params, "querySelectorAll") != null and FramePage.inputs != 1));
+            defer if (owned) testing.allocator.free(r.ok);
+            step = try op.feed(testing.allocator, r);
+        },
+        .done => {
+            while (try op.takeUploadCleanup(testing.allocator)) |cl| {
+                try trail.methods.append(testing.allocator, cl.call.method);
+                try trail.params.append(testing.allocator, cl.call.params);
+                trail.cleanup += 1;
+                FramePage.see(cl.call.frame);
+            }
+            return step;
+        },
+        .confirm => return step,
+        .sleep => step = try op.wake(testing.allocator),
+    };
+}
+
+test "iframe 안의 칸(2026-11-20): 주 frame 의 격리 world 에서 iframe 을 찾고 그 frame 의 격리 world 에서 칸을 찾아 그 frame 에서 확인·넣기 — 출처는 그 iframe 의 것" {
+    FramePage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\",\"/b.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+    defer testing.allocator.free(paused.confirm.origin);
+    try testing.expectEqualStrings("https://widget.test", paused.confirm.origin);
+    const pre = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "DOM.describeNode", "Page.createIsolatedWorld", "Runtime.evaluate", "DOM.describeNode", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(pre.len, trail.methods.items.len);
+    for (pre, trail.methods.items) |w, g| try testing.expectEqualStrings(w, g);
+    // 걷기는 주 frame 의 world 에서 iframe selector 를, 그 iframe 의 frame(F2)의 world 에서 대상 selector 를 — 격리 world 의 프로토타입으로.
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[1], "\"frameId\":\"F1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "Document.prototype.querySelector.call(document,s)})(\\\"iframe#w\\\")") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "\"contextId\":71") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[4], "\"frameId\":\"F2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[5], "(\\\"#f\\\")") != null);
+    // 칸의 확인·넣기는 그 frame(F2)의 새 격리 world 에서.
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "\"frameId\":\"F2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "\"backendNodeId\":9,\"executionContextId\":72") != null);
+    trail.reset();
+    FramePage.post = true;
+    const end = try driveFrameUpload(&op, try op.resumeUpload(testing.allocator, &up_staged), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.success, end.done.status);
+    try testing.expect(std.mem.startsWith(u8, end.done.result, "{\"origin\":\"https://widget.test\",\"files\":[{\"name\":\"a.txt\""));
+    try testing.expectEqual(@as(usize, 1), trail.count("DOM.setFileInputFiles"));
+    try testing.expectEqualStrings("Page.getFrameTree", trail.methods.items[0]); // 사본 뒤에도 걷기를 처음부터
+    // 같은 사이트 iframe 은 세션을 바꾸지 않는다 — 사본 전·뒤의 모든 호출이 root(적대 검증 14 회차: 바꾸면 sidecar 가 붙지 못해 늘 실패했다).
+    for (FramePage.frames_seen[0..FramePage.frames_n]) |f| try testing.expectEqualStrings("", f);
+}
+
+test "iframe 안의 칸(2026-11-20, wire 30): 다른 사이트 iframe(문서가 안 실린 frame)이면 그 frame 의 세션으로 들어가 걷고·확인하고·넣는다 — 묶음은 root 와 그 세션에서 모두 놓는다" {
+    FramePage.reset();
+    FramePage.has_doc = false; // OOPIF — 그 문서는 이 연결에서 보이지 않는다
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+    defer testing.allocator.free(paused.confirm.origin);
+    // 주 frame 의 걷기(넷)는 root, 그 iframe 안(격리 world 부터)은 F2 의 세션. 모달 앞 놓기는 root 와 F2 둘.
+    const want_frames = [_][]const u8{ "", "", "", "", "F2", "F2", "F2", "F2", "F2", "F2", "F2", "", "F2" };
+    const want_methods = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "DOM.describeNode", "Page.createIsolatedWorld", "Runtime.evaluate", "DOM.describeNode", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(want_methods.len, trail.methods.items.len);
+    for (want_methods, trail.methods.items) |w, g| try testing.expectEqualStrings(w, g);
+    try testing.expectEqual(want_frames.len, FramePage.frames_n);
+    for (want_frames, FramePage.frames_seen[0..FramePage.frames_n]) |w, g| try testing.expectEqualStrings(w, g);
+    try testing.expectEqualStrings("https://widget.test", paused.confirm.origin);
+    // 사본 뒤: 넣기가 보낸 뒤 그 세션이 사라졌다(위젯이 iframe 을 지웠다) — 처리기가 받았을 수 있다: 「넣었다 — 읽을 수 없다」(성공 navigated), 다시 올리라 하지 않는다.
+    trail.reset();
+    FramePage.frames_n = 0;
+    FramePage.post = true;
+    FramePage.set_reply = .{ .cdp_error = "{\"code\":-32001,\"message\":\"Session with given id not found.\"}" };
+    const end = try driveFrameUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.success, end.done.status);
+    try testing.expect(std.mem.indexOf(u8, end.done.result, "\"kept\":false,\"navigated\":true") != null);
+    try testing.expect(op.upload.?.given);
+    // 넣기는 F2 의 세션으로 갔다, 정리(놓기)는 root 와 F2 둘.
+    const set_at = for (trail.methods.items, 0..) |m, i| {
+        if (std.mem.eql(u8, m, "DOM.setFileInputFiles")) break i;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("F2", FramePage.frames_seen[set_at]);
+    try testing.expectEqual(@as(usize, 2), trail.count("Runtime.releaseObjectGroup"));
+    try testing.expectEqualStrings("", FramePage.frames_seen[FramePage.frames_n - 2]);
+    try testing.expectEqualStrings("F2", FramePage.frames_seen[FramePage.frames_n - 1]);
+    // 사본 뒤 걷기는 다시 root 부터(넷) — 그 뒤 넣기까지는 모두 F2 의 세션(적대 검증 14 회차: 세션을 되돌리지 않으면 root 걷기가 F2 로 샜다).
+    for (FramePage.frames_seen[0..4]) |f| try testing.expectEqualStrings("", f);
+    for (FramePage.frames_seen[4 .. set_at + 1]) |f| try testing.expectEqualStrings("F2", f);
+}
+
+test "iframe 안의 칸(적대 검증 11·14 회차): 다른 사이트 iframe 에서 넣은 뒤 — 읽기 전 대화상자는 dialog:true, 읽기가 세션 잃음 오류면 navigated, 넣기가 자리 없음이면 그 세션으로 다시 보낸다" {
+    const Case = struct { verify: ?Reply, busy: bool, want: []const u8 };
+    const cases = [_]Case{
+        .{ .verify = .{ .not_sent = dialog_reason }, .busy = false, .want = "\"kept\":false,\"navigated\":false,\"dialog\":true" },
+        .{ .verify = .{ .cdp_error = "{\"code\":-32001,\"message\":\"Session with given id not found.\"}" }, .busy = false, .want = "\"kept\":false,\"navigated\":true" },
+        .{ .verify = null, .busy = true, .want = "\"kept\":true" },
+    };
+    for (cases) |cs| {
+        FramePage.reset();
+        FramePage.has_doc = false;
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+        testing.allocator.free(paused.confirm.origin);
+        trail.reset();
+        FramePage.frames_n = 0;
+        FramePage.post = true;
+        FramePage.verify_reply = cs.verify;
+        FramePage.set_busy_once = cs.busy;
+        const end = try driveFrameUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(Status.success, end.done.status);
+        try testing.expect(std.mem.indexOf(u8, end.done.result, cs.want) != null);
+        var sets: usize = 0;
+        for (trail.methods.items, 0..) |m, i| if (std.mem.eql(u8, m, "DOM.setFileInputFiles")) {
+            sets += 1;
+            try testing.expectEqualStrings("F2", FramePage.frames_seen[i]);
+        };
+        try testing.expectEqual(@as(usize, if (cs.busy) 2 else 1), sets);
+    }
+}
+
+test "iframe 안의 칸(적대 검증 14 회차): 다른 사이트 iframe 에서 확인(듣는 이 달기)이 통과한 뒤 넣기가 실패하면 떼기는 그 세션으로" {
+    FramePage.reset();
+    FramePage.has_doc = false;
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    trail.reset();
+    FramePage.frames_n = 0;
+    FramePage.post = true;
+    FramePage.set_reply = .{ .cdp_error = "{\"code\":-32000,\"message\":\"No node with given id found\"}" };
+    const end = try driveFrameUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.failed, end.done.status);
+    try testing.expect(trail.cleanup >= 1);
+    const first = trail.methods.items.len - trail.cleanup;
+    try testing.expectEqualStrings("Runtime.callFunctionOn", trail.methods.items[first]);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[first], "removeEventListener") != null);
+    try testing.expectEqualStrings("F2", FramePage.frames_seen[first]);
+}
+
+test "iframe 안의 칸(적대 검증 2 회차): 다른 사이트 iframe 안의 다른 사이트 iframe — 세션을 두 번 바꿔 들어가고, 모달 앞 놓기는 root·바깥·안쪽 세션 셋" {
+    FramePage.reset();
+    FramePage.has_doc = false;
+    FramePage.nested = true;
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"#outer\",\"#inner\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+    defer testing.allocator.free(paused.confirm.origin);
+    try testing.expectEqualStrings("https://deep.test", paused.confirm.origin);
+    // 바깥 걷기(root 넷) → F2 세션에서 안쪽 iframe(셋) → F4 세션에서 대상과 확인 → 놓기 셋(root·F2·F4).
+    const last3 = FramePage.frames_seen[FramePage.frames_n - 3 .. FramePage.frames_n];
+    try testing.expectEqualStrings("", last3[0]);
+    try testing.expectEqualStrings("F2", last3[1]);
+    try testing.expectEqualStrings("F4", last3[2]);
+    try testing.expectEqual(@as(usize, 3), trail.count("Runtime.releaseObjectGroup"));
+    try testing.expectEqualStrings("F4", FramePage.frames_seen[FramePage.frames_n - 4]); // 확인은 안쪽 세션
+}
+
+test "iframe 안의 칸(적대 검증 1 회차 SEVERE): 다른 사이트 iframe 에 넣기가 끝난 뒤 읽기를 보내기 전에 그 세션이 사라지면(not_sent) 「넣었다 — 읽을 수 없다」 — 다시 올리지 않는다" {
+    FramePage.reset();
+    FramePage.has_doc = false;
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    trail.reset();
+    FramePage.post = true;
+    FramePage.verify_reply = .{ .not_sent = "DevTools request failed" };
+    const end = try driveFrameUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.success, end.done.status);
+    try testing.expect(std.mem.indexOf(u8, end.done.result, "\"kept\":false,\"navigated\":true") != null);
+    // 주 문서·같은 사이트 iframe 길(세션 없음)의 같은 not_sent 는 그대로 실패다(읽기를 못 보냈다 — 세션이 사라진 것이 아니다).
+    FramePage.reset();
+    trail.reset();
+    var op2 = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+    defer op2.deinit(testing.allocator);
+    const paused2 = try driveFrameUpload(&op2, try op2.start(testing.allocator), &trail);
+    testing.allocator.free(paused2.confirm.origin);
+    FramePage.post = true;
+    FramePage.verify_reply = .{ .not_sent = "DevTools request failed" };
+    const end2 = try driveFrameUpload(&op2, try op2.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end2.done.result);
+    try testing.expectEqual(Status.failed, end2.done.status);
+}
+
+test "iframe 안의 칸(적대 검증 1·2 회차 MED): 사본 뒤 대상 frame 이 트리에서 사라지면 page changed — 걷기가 쥔 묶음을 놓는다" {
+    FramePage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    trail.reset();
+    FramePage.post = true;
+    FramePage.drop_f2_post = true;
+    const end = try driveFrameUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqualStrings(web_cdp_upload.page_changed_reason, end.done.result);
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    // 철회도 — tree 단계에서 철회되면 놓고 끝낸다(주 문서 길은 쥔 것이 없어 null).
+    FramePage.reset();
+    var op2 = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 43);
+    defer op2.deinit(testing.allocator);
+    var step = try op2.start(testing.allocator);
+    while (step == .call and op2.upload.?.stage != .tree) {
+        const c = step.call;
+        defer testing.allocator.free(c.params);
+        FramePage.cur_frame = c.frame orelse "";
+        const r = FramePage.answer(c.method, c.params);
+        const owned = r == .ok and std.mem.eql(u8, c.method, "DOM.describeNode") and std.mem.indexOf(u8, c.params, "w-frame") != null;
+        defer if (owned) testing.allocator.free(r.ok);
+        step = try op2.feed(testing.allocator, r);
+    }
+    try testing.expect(step == .call);
+    testing.allocator.free(step.call.params);
+    const cancelled = (try op2.cancel(testing.allocator)).?;
+    defer testing.allocator.free(cancelled.done.result);
+    try testing.expectEqualStrings("the request was cancelled", cancelled.done.result);
+    const cl = (try op2.takeUploadCleanup(testing.allocator)).?;
+    defer testing.allocator.free(cl.call.params);
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", cl.call.method);
+}
+
+test "iframe 안의 칸(2026-11-20): 사본 뒤 그 자리의 iframe 이 다른 frame 이면(바꿔 끼움·주 문서 이동) page changed — 넣지 않는다" {
+    FramePage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    trail.reset();
+    FramePage.post = true;
+    FramePage.frame_post = "F3";
+    const end = try driveFrameUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.failed, end.done.status);
+    try testing.expectEqualStrings(web_cdp_upload.page_changed_reason, end.done.result);
+    try testing.expectEqual(@as(usize, 0), trail.count("DOM.setFileInputFiles"));
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]); // 쥔 묶음은 놓는다
+    try testing.expect(!op.upload.?.given);
+}
+
+test "iframe 안의 칸(2026-11-20): 찾지 못함·iframe 아님·문서 없음·다른 사이트(다른 프로세스)·selector 문법·유일한 칸이 아님 — 그 까닭으로 넣기 전에 끝난다(놓는다)" {
+    const Case = struct { setup: *const fn () void, arg: []const u8 = "{\"frame\":[\"iframe#w\"],\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", status: Status = .failed, want: []const u8 };
+    const S = struct {
+        fn none() void {
+            FramePage.frame_find = .none;
+        }
+        fn div() void {
+            FramePage.node_name = "DIV";
+        }
+        fn nofid() void {
+            FramePage.has_frame_id = false;
+        }
+        fn oopif() void {
+            FramePage.has_doc = false;
+        }
+        fn syntax() void {
+            FramePage.frame_find = .syntax;
+        }
+        fn two() void {
+            FramePage.inputs = 2;
+        }
+        fn zero() void {
+            FramePage.inputs = 0;
+        }
+        fn nothing() void {}
+    };
+    for ([_]Case{
+        .{ .setup = &S.none, .want = "no element matches the --frame selector at level 1" },
+        .{ .setup = &S.div, .want = "the --frame selector at level 1 matched an element that is not an iframe" },
+        .{ .setup = &S.nofid, .want = "the iframe at level 1 has no document yet — wait for it to load, then try again" },
+        .{ .setup = &S.syntax, .status = .invalid_params, .want = "the --frame selector at level 1 is not a valid CSS selector" },
+        .{ .setup = &S.two, .arg = "{\"frame\":[\"iframe#w\"],\"files\":[\"/a.txt\"]}", .want = "the frame has 2 file inputs — pick one with --selector" },
+        .{ .setup = &S.zero, .arg = "{\"frame\":[\"iframe#w\"],\"files\":[\"/a.txt\"]}", .want = "the frame has no file input (<input type=file>)" },
+    }) |c| {
+        FramePage.reset();
+        c.setup();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, c.arg, 42);
+        defer op.deinit(testing.allocator);
+        const end = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(c.status, end.done.status);
+        try testing.expectEqualStrings(c.want, end.done.result);
+        try testing.expectEqual(@as(usize, 0), trail.count("DOM.setFileInputFiles"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
+    // 대상이 없으면 그 frame 의 유일한 파일 칸 — 하나면 그것으로 간다.
+    FramePage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"frame\":[\"iframe#w\"],\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveFrameUpload(&op, try op.start(testing.allocator), &trail);
+    defer testing.allocator.free(paused.confirm.origin);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[5], "querySelectorAll.call(document,'input[type=file]')") != null);
+    // frame 과 함께 ref·role 등은 받지 않는다, frame 은 1..4 개의 비지 않은 글.
+    for ([_][]const u8{
+        "{\"frame\":[\"i\"],\"ref\":\"n4\",\"files\":[\"/a\"]}",
+        "{\"frame\":[\"i\"],\"locator\":{\"role\":\"button\"},\"files\":[\"/a\"]}",
+        "{\"frame\":[],\"files\":[\"/a\"]}",
+        "{\"frame\":[\"a\",\"b\",\"c\",\"d\",\"e\"],\"files\":[\"/a\"]}",
+        "{\"frame\":[\"\"],\"files\":[\"/a\"]}",
+        "{\"frame\":\"i\",\"files\":[\"/a\"]}",
+    }) |bad| try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .upload, bad, 1));
+}
+
+test "에이전트에게 가는 업로드 엔진의 글은 걷힌 확인(approval)을 말하지 않는다(문서 리뷰 2026-11-20)" {
+    for ([_][]const u8{ web_cdp_upload.page_changed_reason, web_cdp_upload.mismatch_reason, web_cdp_upload.removed_after_reason, web_cdp_upload.unseen_reason, web_cdp_upload.directory_reason, web_cdp_upload.not_directory_reason }) |t|
+        try testing.expect(std.mem.indexOf(u8, t, "approv") == null);
 }
 
 test "W9c③: 승인 뒤 다른 문서(loaderId)·다른 요소(backendNodeId)·확인과 넣기 사이의 이동이면 넣지 않고 「page changed」 — 쥔 것은 놓는다" {

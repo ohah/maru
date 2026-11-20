@@ -13,6 +13,7 @@ test {
     _ = @import("unsandboxed_policy.zig");
     _ = @import("datalist_page.zig");
     _ = @import("devtools_table.zig");
+    _ = @import("devtools_frames.zig"); // wire 30 — 다른 사이트 iframe 의 세션 표
     _ = @import("console_gate.zig");
     _ = @import("net_gate.zig");
     _ = @import("net_body_table.zig");

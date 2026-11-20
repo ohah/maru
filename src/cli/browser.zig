@@ -35,9 +35,9 @@ pub const browser_help =
     \\network-request --out takes only the temp folder, not the current folder (the body is the server's bytes).
     \\
     \\commands:
-    \\  list                                   list open web panels (id, url, title, engine — for discovery)
+    \\  list                                   list open web panels (id, url, title, engine — for discovery; a tab on an error page ends with [error page: ERR_…])
     \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load)
-    \\  get-url     --surface <id>             print the current document URL
+    \\  get-url     --surface <id>             print the tab's address (on an error page, the address it tried, plus a note on stderr)
     \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
     \\  get-cookies --surface <id>             print cookies for the current document host as JSON
     \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   set a cookie
@@ -2835,6 +2835,12 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     try writePageText(gpa, w, strField(e.object.get("summary")), false);
                     try w.writeAll(")");
                 };
+                // 2026-11-20 「더하기」: 오류 페이지를 보이는 탭(줄 끝 — 앞 칸을 읽던 대본이 그대로 돈다). 주소는 불러온 페이지가 아니다.
+                if (boolField(o.get("error_page"))) {
+                    try w.writeAll("  [error page: ");
+                    try writeErrorPageLabel(w, o);
+                    try w.writeAll("]");
+                }
                 try w.writeAll("\n");
             }
         },
@@ -2948,6 +2954,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             if (!boolField(result.get("visible"))) try w.writeAll("note: its workspace is not the one on screen — it is the front tab of its pane there (the workspace was not switched)\n");
             if (boolField(result.get("key_held"))) try w.writeAll("note: the user types in that pane — the page gets their keys only after they click it\n");
         },
+        // 주소 한 줄 그대로(`url=$(maru browser get-url …)` 대본). 오류 페이지 표시는 `writeGetUrlNote` 가 stderr 에(계획 공격 9).
         .get_url => {
             try writePageText(gpa, w, strField(result.get("url")), false);
             try w.writeAll("\n");
@@ -4020,6 +4027,32 @@ fn lineBreakLen(rest: []const u8) usize {
 /// 대화상자 글(W9c②) — 여러 줄을 보이게 바꿔 JSON 으로 인용한다.
 fn writeDialogText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8) !void {
     try writeLinesText(gpa, w, text, true);
+}
+
+/// 오류 페이지 표시의 이름 — `ERR_…`(서버가 준 이름, 표시 안전하게) 또는 `net error -N`, 막기 규칙이면 `, blocking rule R`.
+fn writeErrorPageLabel(w: *std.Io.Writer, o: std.json.ObjectMap) !void {
+    const name = strField(o.get("net_error_name"));
+    if (name.len > 0) {
+        var safe: [64]u8 = undefined;
+        try w.writeAll(safe[0..displaySafe(name[0..@min(name.len, safe.len)], &safe)]);
+    } else try w.print("net error {d}", .{intField(o.get("net_error")) orelse 0});
+    if (intField(o.get("blocked_rule"))) |r| if (r > 0) try w.print(", blocking rule {d}", .{r});
+}
+
+/// `get-url` 의 오류 페이지 안내 한 줄(2026-11-20 「더하기」) — 부른 쪽이 stderr 에 낸다(stdout 은 주소 한 줄 그대로 — 계획 공격 9; MCP 는 둘을
+/// 이어 붙여 에이전트가 함께 본다). 오류 페이지가 아니거나 응답을 못 읽으면 아무것도 쓰지 않는다.
+pub fn writeGetUrlNote(gpa: std.mem.Allocator, response_bytes: []const u8, w: *std.Io.Writer) !void {
+    var pm = cp.parseMessage(gpa, response_bytes) catch return;
+    defer pm.deinit();
+    const resp = switch (pm.message) {
+        .response => |r| r,
+        else => return,
+    };
+    const result = resp.result orelse return;
+    if (result != .object or !boolField(result.object.get("error_page"))) return;
+    try w.writeAll("note: error page (");
+    try writeErrorPageLabel(w, result.object);
+    try w.writeAll(") — the last navigation failed and no page is loaded; the address is the one it tried (the previous one if Chromium did not report it)\n");
 }
 
 fn boolField(v: ?std.json.Value) bool {
@@ -5438,9 +5471,9 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\network-request --out takes only the temp folder, not the current folder (the body is the server's bytes).
         \\
         \\commands:
-        \\  list                                   list open web panels (id, url, title, engine — for discovery)
+        \\  list                                   list open web panels (id, url, title, engine — for discovery; a tab on an error page ends with [error page: ERR_…])
         \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load)
-        \\  get-url     --surface <id>             print the current document URL
+        \\  get-url     --surface <id>             print the tab's address (on an error page, the address it tried, plus a note on stderr)
         \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
         \\  get-cookies --surface <id>             print cookies for the current document host as JSON
         \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   set a cookie
@@ -6800,6 +6833,43 @@ test "W9d②: browser list 는 응답 본문을 기록하는 탭 줄 끝에 ◉ 
     defer out.deinit();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://a.test/\",\"title\":\"A\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"recording\":true,\"methods\":[\"navigate\"]},{\"id\":4,\"url\":\"https://b.test/\",\"title\":\"B\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"methods\":[\"navigate\"]}]}}", .list, &out.writer));
     try testing.expectEqualStrings("surface 3  browser  https://a.test/  \"A\"  engine=chromium  ◉ recording\nsurface 4  browser  https://b.test/  \"B\"  engine=chromium\n", out.written());
+}
+
+test "오류 페이지 표시(2026-11-20 「더하기」): list 는 오류 페이지 탭 줄 끝에 [error page: …] — 이름·번호·막기 규칙, 옛 서버(칸 없음)는 그대로" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[" ++
+        "{\"id\":3,\"url\":\"https://a.test/x\",\"title\":\"A\",\"panel_kind\":\"browser\",\"error_page\":true,\"net_error\":-20,\"net_error_name\":\"ERR_BLOCKED_BY_CLIENT\",\"blocked_rule\":2,\"engine\":\"chromium\",\"controllable\":true,\"blocking\":{\"rules\":1,\"strict\":false},\"methods\":[\"navigate\"]}," ++
+        "{\"id\":4,\"url\":\"https://b.test/\",\"title\":\"B\",\"panel_kind\":\"browser\",\"error_page\":true,\"net_error\":-9999,\"engine\":\"chromium\",\"controllable\":true,\"methods\":[\"navigate\"]}," ++
+        "{\"id\":5,\"url\":\"https://c.test/\",\"title\":\"C\",\"panel_kind\":\"browser\",\"error_page\":true,\"net_error\":-105,\"net_error_name\":\"ERR_\\u001b[2J\\u202eX\",\"engine\":\"chromium\",\"controllable\":true,\"methods\":[\"navigate\"]}," ++
+        "{\"id\":6,\"url\":\"https://d.test/\",\"title\":\"D\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"methods\":[\"navigate\"]}]}}", .list, &out.writer));
+    try testing.expectEqualStrings("surface 3  browser  https://a.test/x  \"A\"  engine=chromium  ⊘ blocking (1 rule)  [error page: ERR_BLOCKED_BY_CLIENT, blocking rule 2]\n" ++
+        "surface 4  browser  https://b.test/  \"B\"  engine=chromium  [error page: net error -9999]\n" ++
+        "surface 5  browser  https://c.test/  \"C\"  engine=chromium  [error page: ERR_[2JX]\n" ++
+        "surface 6  browser  https://d.test/  \"D\"  engine=chromium\n", out.written());
+}
+
+test "오류 페이지 표시(2026-11-20 「더하기」): get-url 은 stdout 에 주소 한 줄 그대로, 안내는 따로(writeGetUrlNote — stderr) — 오류 페이지가 아니거나 옛 서버·오류 응답이면 안내 없음" {
+    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"url\":\"https://b.test/x\",\"error_page\":true,\"net_error\":-102,\"net_error_name\":\"ERR_CONNECTION_REFUSED\"}}";
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, resp, .get_url, &out.writer));
+    try testing.expectEqualStrings("https://b.test/x\n", out.written());
+    var note: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer note.deinit();
+    try writeGetUrlNote(testing.allocator, resp, &note.writer);
+    try testing.expectEqualStrings("note: error page (ERR_CONNECTION_REFUSED) — the last navigation failed and no page is loaded; the address is the one it tried (the previous one if Chromium did not report it)\n", note.written());
+    note.clearRetainingCapacity();
+    try writeGetUrlNote(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"url\":\"https://b.test/y\",\"error_page\":true,\"net_error\":-2,\"net_error_name\":\"ERR_FAILED\",\"blocked_rule\":7}}", &note.writer);
+    try testing.expect(std.mem.startsWith(u8, note.written(), "note: error page (ERR_FAILED, blocking rule 7) — "));
+    note.clearRetainingCapacity();
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"url\":\"https://a.test/\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"url\":\"https://a.test/\",\"error_page\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"x\"}}",
+        "not json",
+    }) |r| try writeGetUrlNote(testing.allocator, r, &note.writer);
+    try testing.expectEqualStrings("", note.written());
 }
 
 // W9d② 적대 리뷰 3 회차 재현 D1: 본문 글은 줄바꿈을 그대로 찍고 끝 표시가 없다 — 페이지가 본문 끝에 「more: --offset 0」 을 두면 maru 가 찍는

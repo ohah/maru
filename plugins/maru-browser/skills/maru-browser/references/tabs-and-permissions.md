@@ -51,7 +51,9 @@ Maru's design, not a bug, and it means:
 
 ## The user's tabs
 
-- `maru browser list` shows every tab: id, address, title, engine. Most of them are the user's.
+- `maru browser list` shows every tab: id, address, title, engine. Most of them are the user's. A line ending in
+  `[error page: ERR_…]` is a tab whose last navigation failed: the address is the one it tried (or the page before,
+  if Chromium did not report it), and no page is loaded there.
 - Current Maru does not ask the user before your commands on their tabs: your pane gets every command there, on any
   site the tab moves to. Touch one only when the task is about that tab (SKILL.md section 5). An older Maru asks
   first — give that call a shell timeout of at least 3 minutes.

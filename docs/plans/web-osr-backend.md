@@ -5264,6 +5264,15 @@ UA 지움도 쌓는다); `Page.setDeviceMetricsOverride`·`Page.setTouchEmulatio
   확인은 순수 시험 `dialog_table`(1 — 순수 시험 560 → 561), 오류 페이지를 보이는 탭의 쿠키·저장소 op 은 곧 실패(적대 검증 B R16 — `get_url` 은 실패 주소인데
   op 은 앞 문서의 저장소를 만졌다), 격리 앱 재실측 — 기록
   `$S/agent_equal/addr_failed/`.
+- **오류 페이지 표시(사용자 결정 2026-11-20 「더하기」, `feat/browser-error-page-flag`)**: `browser.list`·`browser.getUrl` 이 오류 페이지를 보이는 탭에
+  `error_page:true`·`net_error`(Chromium 번호)·`net_error_name`(`ERR_…`, 표에 있을 때)·`blocked_rule`(막기 규칙이 세웠을 때)을 싣는다 — 에이전트가 실패
+  주소를 불러온 페이지로 착각하지 않게. **wire 무변경**(번호는 wire 23 부터 `error_page.error_code`). `Surface.error_page_code`·`error_page_rule` 은 `error_page`
+  마다 세운다 — 실패 주소를 받지 못했어도(그때 주소는 앞 문서 주소다, 계획 공격 1) — 그리고 `failed_url` 과 같은 때 지운다(`endErrorPage`). 번호는 `NavUpdate`
+  로 주소와 한 번에 창 tick 의 nav 상태(`WebNavState.net_error`)에 들어가고 collector 는 거기서만 읽는다(주소와 표시가 tick 하나 어긋나지 않게, 공격 5). getUrl 은
+  app 이 주소와 번호를 한 곳에서 읽어 JSON 글로 주고 L2 가 엄격히 푼다. 이름 표는 L2 `web_sidecar/net_error.zig`(39 줄), sidecar `dialogs.zig` 의 comptime 이
+  `@field(c, name) == code` 로 CEF 와 맞춘다. CLI: list 줄 끝 `[error page: ERR_…]`, get-url 은 stdout 주소 한 줄 그대로 + stderr `note:`(대본 호환 — 공격 9).
+  쿠키·저장소 op 의 거절도 이 표시로(실패 주소를 받지 못한 오류 페이지에서도). 판정자 `--addr-failed` 에 `af-flag-holds`(오류 페이지 뒤 `url_changed`·
+  `page_started` 0 — 모든 갈래)·`ef-http-status`(본문 있는 404 는 문서; 본문 없는 404·500 은 Chromium 오류 페이지 -379 — obs). 기록 `$S/agent_equal/error_flag/`.
 - **A2 주인 넘기기**: 막기 규칙·막기 엄격·가짜 규칙·가짜 엄격·탭의 흉내·탭의 trace 는 각각 주인 pane 이 하나. 어느 pane 이든 바꾸고 지운다 — **실제로
   바꾼 호출의 pane 이 주인**, 그대로 두는 호출(같은 규칙·같은 응답(실행 사이트까지)·같은 사이트 엄격·같은 값의 흉내)은 주인을 옮기지 않는다. 철회·pane
   닫힘은 그 순간 주인인 것만 거둔다 — 20 회 검증 B DEF-3·W9d④ v2 R13(다시 켠 pane 이 주인이 되고 그 pane 의 철회가 처음 pane 의 엄격을 지웠다)을 이

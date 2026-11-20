@@ -85,6 +85,12 @@ comptime {
     std.debug.assert(c.FILE_DIALOG_SAVE == @backingInt(message.FileDialogMode.save));
 }
 
+// 오류 페이지 표시의 이름 표(L2 `net_error`, 2026-11-20)가 CEF 의 번호와 같다 — CEF 를 올려 바뀌면 빌드가 멈춘다.
+comptime {
+    @setEvalBranchQuota(20_000);
+    for (protocol.net_error.table) |e| std.debug.assert(@field(c, e.name) == e.code);
+}
+
 pub fn browserId(browser: [*c]c.cef_browser_t) ?BrowserId {
     if (browser == null) return null;
     const entry = browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) orelse return null;

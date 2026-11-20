@@ -50,6 +50,7 @@ const cpg = @import("control_pane_grant.zig");
 const new_tab = @import("web_sidecar/new_tab.zig");
 const ws_wire = @import("web_sidecar/wire.zig");
 const ws_net_policy = @import("web_sidecar/net_policy.zig"); // W9d①: browser.network 의 종류 이름
+const ws_net_error = @import("web_sidecar/net_error.zig"); // 2026-11-20: 오류 페이지 표시의 net 오류 이름
 /// W9d①: 목록 한 쪽의 최대 줄 수 — 보관(`web_osr_network.max_page_size`)과 같다(L2 순수끼리라 직접 import 하지 않고 시험이 같은지 본다).
 pub const net_ring_max_page_size: u32 = 200; // W9c②: 대화상자 답 글 상한(sidecar 가 받는 것과 같다) // W9b③: browser.open 의 주소 규칙(페이지가 여는 새 탭과 같다) // 1e-confirm-1b: pane-bound confirm-grant 조회(§9.2 Model B — 세션 cap OR pane grant 가법)
 
@@ -2314,19 +2315,57 @@ fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool, b
     try endResult(s);
 }
 
-/// `browser.getUrl` 성공 result: `{"jsonrpc":"2.0","id":<id>,"result":{"url":<url>}}`.
+/// 오류 페이지 표시의 칸(2026-11-20 「더하기」 — `browser.list`·`getUrl` 같은 꼴): `error_page:true`, `net_error`(Chromium 번호), 표에 있으면
+/// `net_error_name`, 막기 규칙이 세웠으면 `blocked_rule`.
+fn writeErrorPageFields(s: *std.json.Stringify, net_error: i32, blocked_rule: u32) !void {
+    try s.objectField("error_page");
+    try s.write(true);
+    try s.objectField("net_error");
+    try s.write(net_error);
+    if (ws_net_error.name(net_error)) |n| {
+        try s.objectField("net_error_name");
+        try s.write(n);
+    }
+    if (blocked_rule != 0) {
+        try s.objectField("blocked_rule");
+        try s.write(blocked_rule);
+    }
+}
+
+/// app 이 getUrl 의 결과로 주는 오류 페이지 꼴(`getUrlErrorPageResult`) — 주소는 늘 스킴으로 시작해 `{` 로 시작하는 결과는 이것뿐이다.
+const GetUrlErrorPage = struct { url: []const u8, net_error: i32, blocked_rule: u32 = 0 };
+
+/// app 쪽: 오류 페이지를 보이는 탭의 getUrl 결과 글 — `serializeGetUrlResult` 가 풀어 칸을 싣는다. caller free.
+pub fn getUrlErrorPageResult(gpa: std.mem.Allocator, url: []const u8, net_error: i32, blocked_rule: u32) std.mem.Allocator.Error![]u8 {
+    return std.json.Stringify.valueAlloc(gpa, GetUrlErrorPage{ .url = url, .net_error = net_error, .blocked_rule = blocked_rule }, .{});
+}
+
+/// `browser.getUrl` 성공 result: `{"jsonrpc":"2.0","id":<id>,"result":{"url":<url>}}`. 2026-11-20 「더하기」: app 이 오류 페이지 꼴
+/// (`getUrlErrorPageResult` — `{` 로 시작)을 주면 `error_page`·`net_error`·`net_error_name`·`blocked_rule` 도 싣는다. 그 꼴을 풀지 못하면
+/// internal_error — JSON 덩이를 주소로 내지 않는다(계획 공격 6).
 pub fn serializeGetUrlResult(gpa: std.mem.Allocator, id: cp.Id, url: []const u8) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    (writeGetUrlResult(&s, id, url)) catch return error.OutOfMemory;
+    if (url.len > 0 and url[0] == '{') {
+        const parsed = std.json.parseFromSlice(GetUrlErrorPage, gpa, url, .{}) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return cp.serializeError(gpa, id, .internal_error, "browser getUrl result was malformed", null),
+        };
+        defer parsed.deinit();
+        if (parsed.value.net_error >= 0) return cp.serializeError(gpa, id, .internal_error, "browser getUrl result was malformed", null);
+        (writeGetUrlResult(&s, id, parsed.value.url, parsed.value.net_error, parsed.value.blocked_rule)) catch return error.OutOfMemory;
+        return aw.toOwnedSlice();
+    }
+    (writeGetUrlResult(&s, id, url, 0, 0)) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeGetUrlResult(s: *std.json.Stringify, id: cp.Id, url: []const u8) !void {
+fn writeGetUrlResult(s: *std.json.Stringify, id: cp.Id, url: []const u8, net_error: i32, blocked_rule: u32) !void {
     try beginResult(s, id);
     try s.objectField("url");
     try s.write(url);
+    if (net_error != 0) try writeErrorPageFields(s, net_error, blocked_rule);
     try endResult(s);
 }
 
@@ -2926,6 +2965,8 @@ fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.Collec
                     .markdown => "markdown",
                     .browser => "browser",
                 });
+                // 2026-11-20 「더하기」: 오류 페이지를 보이는 탭만(다른 표시처럼 있을 때만 — 옛 클라이언트·대본 그대로).
+                if (w.net_error != 0) try writeErrorPageFields(s, w.net_error, w.blocked_rule);
                 // W9-0: 엔진과 그 탭에서 실행할 수 있는 메서드(에이전트가 「이 탭은 못 한다」를 미리 안다 — Aside 의 탭 목록처럼).
                 try s.objectField("engine");
                 try s.write(w.engine.wireName());
@@ -7317,6 +7358,75 @@ test "W9d②: browser.list 는 응답 본문을 기록하는 탭에만 recording
     const arr = pm.message.response.result.?.object.get("surfaces").?.array.items;
     try testing.expect(arr[0].object.get("recording").?.bool);
     try testing.expect(arr[1].object.get("recording") == null);
+}
+
+test "오류 페이지 표시(2026-11-20 「더하기」): browser.list 는 오류 페이지를 보이는 탭에만 error_page·net_error·net_error_name(표에 있을 때)·blocked_rule(있을 때)을 싣는다" {
+    const loaded: cs.WebMeta = .{ .url = "https://a.test/", .panel_kind = .browser, .trust = .untrusted, .engine = .chromium, .controllable = true };
+    var blocked = loaded;
+    blocked.net_error = -20;
+    blocked.blocked_rule = 5;
+    var unknown = loaded;
+    unknown.net_error = -9999;
+    const surfaces = [_]cs.SurfaceDto{
+        .{ .surface_id = 41, .title = "ok", .window = 1, .detail = .{ .web = loaded } },
+        .{ .surface_id = 42, .title = "blocked", .window = 1, .detail = .{ .web = blocked } },
+        .{ .surface_id = 43, .title = "unknown", .window = 1, .detail = .{ .web = unknown } },
+    };
+    const w = try serializeBrowserListResult(testing.allocator, .{ .number = 1 }, .{ .surfaces = &surfaces, .windows = &.{} });
+    defer testing.allocator.free(w);
+    var pm = try cp.parseMessage(testing.allocator, w);
+    defer pm.deinit();
+    const arr = pm.message.response.result.?.object.get("surfaces").?.array.items;
+    for ([_][]const u8{ "error_page", "net_error", "net_error_name", "blocked_rule" }) |k| try testing.expect(arr[0].object.get(k) == null);
+    try testing.expect(arr[1].object.get("error_page").?.bool);
+    try testing.expectEqual(@as(i64, -20), arr[1].object.get("net_error").?.integer);
+    try testing.expectEqualStrings("ERR_BLOCKED_BY_CLIENT", arr[1].object.get("net_error_name").?.string);
+    try testing.expectEqual(@as(i64, 5), arr[1].object.get("blocked_rule").?.integer);
+    try testing.expect(arr[2].object.get("error_page").?.bool);
+    try testing.expectEqual(@as(i64, -9999), arr[2].object.get("net_error").?.integer);
+    try testing.expect(arr[2].object.get("net_error_name") == null and arr[2].object.get("blocked_rule") == null);
+}
+
+test "오류 페이지 표시(2026-11-20 「더하기」): getUrl 은 app 이 준 오류 페이지 꼴을 풀어 url 과 표시를 싣고, 보통 주소는 그대로, 풀지 못하면 주소로 내지 않고 internal_error" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.getUrl\",\"params\":{\"id\":3}}";
+    const body = try getUrlErrorPageResult(testing.allocator, "https://b.test/x?q=\"{", -105, 0);
+    defer testing.allocator.free(body);
+    // 완료 길(실제 라우팅)로.
+    const ok = try serializeBrowserResponseStatus(testing.allocator, req, .success, body);
+    defer testing.allocator.free(ok);
+    var pm = try cp.parseMessage(testing.allocator, ok);
+    defer pm.deinit();
+    const r = pm.message.response.result.?.object;
+    try testing.expectEqualStrings("https://b.test/x?q=\"{", r.get("url").?.string);
+    try testing.expect(r.get("error_page").?.bool);
+    try testing.expectEqual(@as(i64, -105), r.get("net_error").?.integer);
+    try testing.expectEqualStrings("ERR_NAME_NOT_RESOLVED", r.get("net_error_name").?.string);
+    try testing.expect(r.get("blocked_rule") == null);
+    // 막기 규칙.
+    const body2 = try getUrlErrorPageResult(testing.allocator, "https://b.test/y", -20, 2);
+    defer testing.allocator.free(body2);
+    const w2 = try serializeGetUrlResult(testing.allocator, .{ .number = 1 }, body2);
+    defer testing.allocator.free(w2);
+    var pm2 = try cp.parseMessage(testing.allocator, w2);
+    defer pm2.deinit();
+    try testing.expectEqual(@as(i64, 2), pm2.message.response.result.?.object.get("blocked_rule").?.integer);
+    // 보통 주소 — 칸이 없다.
+    const plain = try serializeBrowserResponseStatus(testing.allocator, req, .success, "https://a.test/");
+    defer testing.allocator.free(plain);
+    var pm3 = try cp.parseMessage(testing.allocator, plain);
+    defer pm3.deinit();
+    const r3 = pm3.message.response.result.?.object;
+    try testing.expectEqualStrings("https://a.test/", r3.get("url").?.string);
+    try testing.expect(r3.get("error_page") == null and r3.get("net_error") == null);
+    // 풀지 못하는 꼴(모르는 칸·번호 없음·0 이상 번호) — JSON 덩이를 주소로 내지 않는다.
+    for ([_][]const u8{ "{\"url\":\"https://a.test/\"}", "{\"url\":\"https://a.test/\",\"net_error\":-2,\"x\":1}", "{\"url\":\"https://a.test/\",\"net_error\":0}", "{" }) |bad| {
+        const e = try serializeGetUrlResult(testing.allocator, .{ .number = 1 }, bad);
+        defer testing.allocator.free(e);
+        var pe = try cp.parseMessage(testing.allocator, e);
+        defer pe.deinit();
+        try testing.expect(pe.message.response.result == null);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), pe.message.response.err.?.code);
+    }
 }
 
 // W9d② 적대 리뷰 3 회차 D6: 사용자가 메뉴에서 네트워크 grant 만 철회하면 본문 grant 는 남는다 — 그 grant 로 인가된 켜기도 모달 전 검사처럼

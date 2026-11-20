@@ -205,6 +205,11 @@ pub const WebNavState = struct {
     can_go_back: bool,
     can_go_forward: bool,
     url: []u8, // gpa 소유(빈 문자열이면 len 0)
+    /// Chromium 탭이 오류 페이지를 보이면 그 net 오류 번호(음수), 아니면 0(WebKit 탭은 늘 0). 주소와 같은 tick 에 함께 바뀐다(`web_osr.NavUpdate` —
+    /// 2026-11-20 「더하기」: `browser.list` 의 `error_page`).
+    net_error: i32 = 0,
+    /// 그 오류 페이지를 세운 막기 규칙 번호(아니면 0).
+    blocked_rule: u32 = 0,
 };
 
 /// 사용자가 활성화한 외부 링크(http/https)를 platform이 **어떻게** 열지. in_app=`surface_id`의 WKWebView에
@@ -5243,6 +5248,9 @@ pub const AppSession = struct {
     /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
     pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can_go_forward: bool, url: []const u8) void {
         return web_ops.setWebNavState(self, surface_id, can_go_back, can_go_forward, url);
+    }
+    pub fn setWebNavStateWithError(self: *AppSession, surface_id: u64, can_go_back: bool, can_go_forward: bool, url: []const u8, net_error: i32, blocked_rule: u32) void {
+        return web_ops.setWebNavStateWithError(self, surface_id, can_go_back, can_go_forward, url, net_error, blocked_rule);
     }
     /// 본문 분리: app_session/web.zig(F11). ABI가 직접 부르므로 진입만 남긴다.
     pub fn takeWebAddrFocusPull(self: *AppSession) ?u64 {
@@ -19573,7 +19581,8 @@ pub const AppSession = struct {
                     if (term.kind == .web) {
                         const web_sid = term.surface.id;
                         // 콘텐츠 URL: nav 상태 맵에서 조회(§9.6 browser.list·주소창이 같은 출처). arena 복사(snapshot 수명).
-                        const web_url: ?[]const u8 = if (self.web_nav_states.get(web_sid)) |ns|
+                        const web_nav = self.web_nav_states.get(web_sid);
+                        const web_url: ?[]const u8 = if (web_nav) |ns|
                             (if (ns.url.len == 0) null else try arena.dupe(u8, ns.url))
                         else
                             null;
@@ -19594,6 +19603,9 @@ pub const AppSession = struct {
                                     .url = web_url, // Phase 7e-1a nav 상태(로드 전엔 null)
                                     .doc_url = doc_url,
                                     .doc_url_set = osr_doc != null,
+                                    // 2026-11-20 「더하기」: 오류 페이지 표시 — 주소와 같은 nav 상태에서(한 tick 에 함께 바뀐다, 계획 공격 5).
+                                    .net_error = if (web_nav) |ns| ns.net_error else 0,
+                                    .blocked_rule = if (web_nav) |ns| ns.blocked_rule else 0,
                                     .panel_kind = switch (term.web_panel_kind) {
                                         .markdown => .markdown,
                                         .browser => .browser,
@@ -67208,6 +67220,52 @@ test "collector(2026-11-18 「사람이 친 주소」, 적대 검증 A R2·B R17
     const dto = snapshot.find(sid) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("https://bank.test/login", dto.detail.web.url.?);
     try std.testing.expectEqualStrings("a.test", maru.session.control_browser.targetHost(snapshot, sid).?);
+}
+
+test "collector(2026-11-20 「더하기」): 창 tick 이 주소와 오류 페이지 표시(net 오류 번호·막기 규칙)를 한 번에 nav 상태로 옮기고 snapshot 이 그것을 싣는다 — 새 문서가 지우고, WebKit 탭은 늘 0" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    _ = web_osr.setDecidedForTest(true);
+    const sid = try pane_ops.appendWebTermInActivePane(session, .browser);
+    try web_osr.testHold(allocator, sid);
+    web_osr.testRunning(sid);
+    web_osr.testApply(allocator, .{ .url_changed = .{ .browser = sid, .url = "https://a.test/page" } });
+    web_osr.testApply(allocator, .{ .error_page = .{ .browser = sid, .error_code = -20, .blocked_rule = 6, .url = "https://b.test/blocked" } });
+    web_ops.tickWebOsr(session); // 실제 배선(`takeNavUpdate` → nav 상태)
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    {
+        var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+        var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+        try session.collectSessionInto(a, 100, .normal, &surfaces, &windows);
+        const snapshot: maru.session.CollectorSnapshot = .{ .surfaces = surfaces.items, .windows = windows.items };
+        const w = (snapshot.find(sid) orelse return error.TestUnexpectedResult).detail.web;
+        try std.testing.expectEqualStrings("https://b.test/blocked", w.url.?);
+        try std.testing.expectEqual(@as(i32, -20), w.net_error);
+        try std.testing.expectEqual(@as(u32, 6), w.blocked_rule);
+    }
+    // 새 문서 — 다음 tick 에 표시가 내려간다.
+    web_osr.testApply(allocator, .{ .page_started = sid });
+    web_osr.testApply(allocator, .{ .url_changed = .{ .browser = sid, .url = "https://a.test/next" } });
+    web_ops.tickWebOsr(session);
+    {
+        var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+        var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+        try session.collectSessionInto(a, 100, .normal, &surfaces, &windows);
+        const snapshot: maru.session.CollectorSnapshot = .{ .surfaces = surfaces.items, .windows = windows.items };
+        const w = (snapshot.find(sid) orelse return error.TestUnexpectedResult).detail.web;
+        try std.testing.expectEqualStrings("https://a.test/next", w.url.?);
+        try std.testing.expect(w.net_error == 0 and w.blocked_rule == 0);
+    }
+    // WebKit 의 nav 상태(Swift KVO 길 — `setWebNavState`)는 표시가 없다 — 같은 탭에 옛 번호가 있어도 덮는다.
+    web_ops.setWebNavStateWithError(session, sid, false, false, "https://c.test/", -105, 0);
+    web_ops.setWebNavState(session, sid, false, false, "https://c.test/");
+    try std.testing.expectEqual(@as(i32, 0), session.webNavState(sid).?.net_error);
 }
 
 test "P0-1: 보이는 Chromium 탭이 아직 배치 전이면 링크를 그 탭의 첫 주소(pending_url)로 싣는다" {

@@ -404,6 +404,12 @@ pub fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layou
 /// 기존 엔트리가 있으면 옛 url을 free하고 새 url을 dup해 교체한다. url dup 또는 맵 성장이 OOM이면 조용히 무시한다
 /// (nav 상태는 best-effort 표시용 — 실패해도 옛 상태 유지, 크래시 없음). 저장·정책은 Zig 단일 출처.
 pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can_go_forward: bool, url: []const u8) void {
+    setWebNavStateWithError(self, surface_id, can_go_back, can_go_forward, url, 0, 0);
+}
+
+/// Chromium 탭의 nav 상태 — 주소와 오류 페이지 표시(net 오류 번호·막기 규칙)를 한 번에 바꾼다(2026-11-20 — `browser.list` 가 「옛 주소 + 오류
+/// 페이지」를 tick 하나라도 답하지 않게, 계획 공격 5). 실패하면(OOM) 둘 다 옛 값 그대로다.
+pub fn setWebNavStateWithError(self: *AppSession, surface_id: u64, can_go_back: bool, can_go_forward: bool, url: []const u8, net_error: i32, blocked_rule: u32) void {
     const dup = self.allocator.dupe(u8, url) catch return; // OOM: 상태 미갱신(조용히 무시)
     const gop = self.web_nav_states.getOrPut(self.allocator, surface_id) catch {
         self.allocator.free(dup); // 맵 성장 OOM: dup 회수 후 미갱신
@@ -416,6 +422,8 @@ pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can
         // KVO push는 navStateDirty로 throttle돼 핫루프는 아니지만, 무변화 push(같은 값 재관측)는 재렌더 안 한다.
         const changed = gop.value_ptr.can_go_back != can_go_back or
             gop.value_ptr.can_go_forward != can_go_forward or
+            gop.value_ptr.net_error != net_error or
+            gop.value_ptr.blocked_rule != blocked_rule or
             !std.mem.eql(u8, gop.value_ptr.url, url);
         persisted_url_changed = !std.mem.eql(u8, gop.value_ptr.url, url);
         self.allocator.free(gop.value_ptr.url); // 옛 url 해제 후 교체
@@ -424,7 +432,7 @@ pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can
         self.metal_dirty = true; // 새 상태 = 첫 주소 표시 → 재렌더
         persisted_url_changed = url.len > 0;
     }
-    gop.value_ptr.* = .{ .can_go_back = can_go_back, .can_go_forward = can_go_forward, .url = dup };
+    gop.value_ptr.* = .{ .can_go_back = can_go_back, .can_go_forward = can_go_forward, .url = dup, .net_error = net_error, .blocked_rule = blocked_rule };
     if (persisted_url_changed and app_session_mod.app_runtime.workspace_checkpoint.armed and term_ops.findTermWhere(self, surface_id, struct {
         fn pred(id: u64, term: *Term) bool {
             return term.surfaceId() == id and isBrowserTerm(term);
@@ -536,7 +544,7 @@ pub fn tickWebOsr(self: *AppSession) void {
                     new_tab_openers[new_tab_count] = sid;
                     new_tab_count += 1;
                 }
-                if (web_osr.takeNavUpdate(sid)) |nav| setWebNavState(self, sid, nav.can_go_back, nav.can_go_forward, nav.url);
+                if (web_osr.takeNavUpdate(sid)) |nav| setWebNavStateWithError(self, sid, nav.can_go_back, nav.can_go_forward, nav.url, nav.net_error, nav.blocked_rule);
                 if (web_osr.takeGpuNotice(sid)) self.showNoticeKey(.web_osr_gpu_unavailable);
                 // W9d③: 에이전트 규칙이 이 탭의 요청을 막는다(사용자가 몬 탭의 이동이 막혔다·규칙이 있는 탭을 처음 몰았다 — 세대마다 한 번).
                 if (web_osr.takeBlockNotice(sid)) self.showNoticeKey(.web_osr_block_notice);

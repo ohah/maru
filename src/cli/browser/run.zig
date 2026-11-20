@@ -766,6 +766,11 @@ fn runPlainRequest(
     defer allocator.free(resp);
     if (!try browser.renderResponse(allocator, resp, kind, stdout)) return error.UnknownCommand;
     try stdout.flush();
+    // 2026-11-20 「더하기」: 오류 페이지면 안내 한 줄을 stderr 에(주소 한 줄은 stdout 그대로).
+    if (kind == .get_url) {
+        try browser.writeGetUrlNote(allocator, resp, stderr);
+        try stderr.flush();
+    }
 }
 
 fn runExecuteScript(

@@ -50,7 +50,8 @@ pub const Op = struct {
     /// 사라졌으면 null).
     deadline_ms: i64 = 0,
     nav: ?NavState = null,
-    /// navigate — 이동할 주소(소유). getUrl — 부른 쪽이 start 전에 넣는 지금 주소(빌림).
+    /// navigate — 이동할 주소(소유). getUrl — 부른 쪽이 start 전에 넣는 지금 주소(빌림). 오류 페이지면 부른 쪽이 그 결과 글
+    /// (`control_browser.getUrlErrorPageResult` — 주소와 net 오류 번호)을 `target` 에 맡기고 `url` 이 그것을 가리킨다(2026-11-20).
     target: ?[]u8 = null,
     url: []const u8 = "",
     /// screenshot — 보기 좌표의 rect(x, y, width, height)와 출력 배율.

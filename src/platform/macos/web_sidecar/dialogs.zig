@@ -85,10 +85,58 @@ comptime {
     std.debug.assert(c.FILE_DIALOG_SAVE == @backingInt(message.FileDialogMode.save));
 }
 
-// 오류 페이지 표시의 이름 표(L2 `net_error`, 2026-11-20)가 CEF 의 번호와 같다 — CEF 를 올려 바뀌면 빌드가 멈춘다.
+// 오류 페이지 표시의 이름 표(L2 `net_error`, 2026-11-20)가 CEF 의 번호와 같다 — CEF 를 올려 바뀌면 빌드가 멈춘다. 반사(`@field`)로 이름을
+// 찾지 않는다(그러면 이 파일이 `tests/boundary/imports.zig` 의 반사 재고에 들어온다 — 적대 검증 뒤 check-boundaries) — CEF 의 이름과 그 글을 한 줄에
+// 나란히 적고 표와 차례대로 맞춘다(번호·이름·줄 수가 갈리면 빌드가 멈춘다).
 comptime {
     @setEvalBranchQuota(20_000);
-    for (protocol.net_error.table) |e| std.debug.assert(@field(c, e.name) == e.code);
+    const cef = [_]struct { c_int, []const u8 }{
+        .{ c.ERR_FAILED, "ERR_FAILED" },
+        .{ c.ERR_FILE_NOT_FOUND, "ERR_FILE_NOT_FOUND" },
+        .{ c.ERR_TIMED_OUT, "ERR_TIMED_OUT" },
+        .{ c.ERR_ACCESS_DENIED, "ERR_ACCESS_DENIED" },
+        .{ c.ERR_INSUFFICIENT_RESOURCES, "ERR_INSUFFICIENT_RESOURCES" },
+        .{ c.ERR_BLOCKED_BY_CLIENT, "ERR_BLOCKED_BY_CLIENT" },
+        .{ c.ERR_NETWORK_CHANGED, "ERR_NETWORK_CHANGED" },
+        .{ c.ERR_BLOCKED_BY_ADMINISTRATOR, "ERR_BLOCKED_BY_ADMINISTRATOR" },
+        .{ c.ERR_BLOCKED_BY_RESPONSE, "ERR_BLOCKED_BY_RESPONSE" },
+        .{ c.ERR_CONNECTION_CLOSED, "ERR_CONNECTION_CLOSED" },
+        .{ c.ERR_CONNECTION_RESET, "ERR_CONNECTION_RESET" },
+        .{ c.ERR_CONNECTION_REFUSED, "ERR_CONNECTION_REFUSED" },
+        .{ c.ERR_CONNECTION_ABORTED, "ERR_CONNECTION_ABORTED" },
+        .{ c.ERR_CONNECTION_FAILED, "ERR_CONNECTION_FAILED" },
+        .{ c.ERR_NAME_NOT_RESOLVED, "ERR_NAME_NOT_RESOLVED" },
+        .{ c.ERR_INTERNET_DISCONNECTED, "ERR_INTERNET_DISCONNECTED" },
+        .{ c.ERR_SSL_PROTOCOL_ERROR, "ERR_SSL_PROTOCOL_ERROR" },
+        .{ c.ERR_ADDRESS_INVALID, "ERR_ADDRESS_INVALID" },
+        .{ c.ERR_ADDRESS_UNREACHABLE, "ERR_ADDRESS_UNREACHABLE" },
+        .{ c.ERR_SSL_VERSION_OR_CIPHER_MISMATCH, "ERR_SSL_VERSION_OR_CIPHER_MISMATCH" },
+        .{ c.ERR_CONNECTION_TIMED_OUT, "ERR_CONNECTION_TIMED_OUT" },
+        .{ c.ERR_PROXY_CONNECTION_FAILED, "ERR_PROXY_CONNECTION_FAILED" },
+        .{ c.ERR_NAME_RESOLUTION_FAILED, "ERR_NAME_RESOLUTION_FAILED" },
+        .{ c.ERR_CERT_COMMON_NAME_INVALID, "ERR_CERT_COMMON_NAME_INVALID" },
+        .{ c.ERR_CERT_DATE_INVALID, "ERR_CERT_DATE_INVALID" },
+        .{ c.ERR_CERT_AUTHORITY_INVALID, "ERR_CERT_AUTHORITY_INVALID" },
+        .{ c.ERR_CERT_INVALID, "ERR_CERT_INVALID" },
+        .{ c.ERR_INVALID_URL, "ERR_INVALID_URL" },
+        .{ c.ERR_DISALLOWED_URL_SCHEME, "ERR_DISALLOWED_URL_SCHEME" },
+        .{ c.ERR_UNKNOWN_URL_SCHEME, "ERR_UNKNOWN_URL_SCHEME" },
+        .{ c.ERR_INVALID_REDIRECT, "ERR_INVALID_REDIRECT" },
+        .{ c.ERR_TOO_MANY_REDIRECTS, "ERR_TOO_MANY_REDIRECTS" },
+        .{ c.ERR_UNSAFE_REDIRECT, "ERR_UNSAFE_REDIRECT" },
+        .{ c.ERR_UNSAFE_PORT, "ERR_UNSAFE_PORT" },
+        .{ c.ERR_INVALID_RESPONSE, "ERR_INVALID_RESPONSE" },
+        .{ c.ERR_EMPTY_RESPONSE, "ERR_EMPTY_RESPONSE" },
+        .{ c.ERR_CONTENT_DECODING_FAILED, "ERR_CONTENT_DECODING_FAILED" },
+        .{ c.ERR_HTTP_RESPONSE_CODE_FAILURE, "ERR_HTTP_RESPONSE_CODE_FAILURE" },
+        .{ c.ERR_INSECURE_RESPONSE, "ERR_INSECURE_RESPONSE" },
+    };
+    const names = protocol.net_error.table;
+    std.debug.assert(cef.len == names.len);
+    for (names, cef) |e, x| {
+        std.debug.assert(e.code == x[0]);
+        std.debug.assert(std.mem.eql(u8, e.name, x[1]));
+    }
 }
 
 pub fn browserId(browser: [*c]c.cef_browser_t) ?BrowserId {

@@ -6056,6 +6056,9 @@ pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64, by_user: bool) 
     }
     s.page_opened = false; // W10c: 빈 다운로드 탭으로 닫지 않는다(사용자가 쓰는 보통 탭이다 — 적대 리뷰 2 회차)
     s.download_blank = false;
+    // 2026-11-20 적대 검증 A LOW-2: 빈 탭이 된다 — 닫힌 페이지의 오류 페이지 표시도 끝났다(창은 nav 상태를 빈 글로 덮는데 getUrl 이 옛 실패
+    // 주소·표시를 답했다).
+    endErrorPage(gpa, s);
     s.composing = false; // 닫힌 페이지의 조합은 끝났다(창이 입력기 쪽을 버린다 — `osr_discard_marked`)
     dropDialogs(gpa, s);
     dropDeferredCalls(gpa, s);
@@ -9657,6 +9660,9 @@ test "오류 페이지 표시(2026-11-20 「더하기」): error_page 의 번호
     try std.testing.expectEqual(@as(u32, 4), blocked.blocked_rule);
     try std.testing.expectEqual(ErrorPage{ .net_error = -20, .blocked_rule = 4 }, errorPage(72).?);
     try std.testing.expect(showsErrorPage(72));
+    // 같은 번호로 막기 규칙만 바뀌었다(새로 고침에 다른 규칙이 걸렸다) — 다시 낸다(적대 검증 B R20-1).
+    testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = -20, .blocked_rule = 9, .url = "https://b.test/x" } });
+    try std.testing.expectEqual(@as(u32, 9), takeNavUpdate(72).?.blocked_rule);
     // 같은 실패 주소로 번호만 바뀌었다(DNS → 접속 거부) — 다시 낸다(계획 공격 5), 막기 규칙은 내려간다.
     testApply(gpa, .{ .error_page = .{ .browser = 72, .error_code = -102, .url = "https://b.test/x" } });
     const refused = takeNavUpdate(72).?;
@@ -9694,6 +9700,10 @@ test "오류 페이지 표시(2026-11-20 「더하기」): error_page 의 번호
     _ = takeNavUpdate(72);
     testApply(gpa, .{ .renderer_gone = .{ .browser = 72, .reason = .crashed } });
     try std.testing.expect(showsErrorPage(72));
+    // 페이지가 닫은 탭을 빈 탭으로 되살리면 지운다(적대 검증 A LOW-2 — 창은 nav 상태를 빈 글로 덮는다).
+    revivePageClosed(gpa, 72, false);
+    try std.testing.expect(!showsErrorPage(72) and errorPage(72) == null);
+    try std.testing.expectEqual(@as(i32, 0), takeNavUpdate(72).?.net_error);
 }
 
 test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오류 페이지가 문서를 가르고, 버린 수는 표지로, 모르는 탭은 버린다" {

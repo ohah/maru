@@ -116,7 +116,7 @@ fn withSurface(comptime extra: []const Arg) []const Arg {
 }
 
 pub const tools = [_]Tool{
-    .{ .name = "browser_list", .subcommand = "list", .description = "List the browser tabs of this maru instance (id, url, title, engine, controllable methods). A tab whose line ends in [error page: ERR_…] shows Chromium's error page — its last navigation failed and no page is loaded; the url is the address it tried.", .args = &.{} },
+    .{ .name = "browser_list", .subcommand = "list", .description = "List the browser tabs of this maru instance (id, url, title, engine, controllable methods). A tab whose line ends in [error page: ERR_…] (or net error -N) shows Chromium's error page — its last navigation failed and no page is loaded; the url is the address it tried.", .args = &.{} },
     .{ .name = "browser_open", .subcommand = "open", .description = "Open a Chromium tab behind the current one in this pane and wait for its first load. Returns the new tab id. Only from a maru pane; up to 8 tabs per pane. The tab uses the user's logged-in sites (maru does not ask the user).", .args = &.{
         .{ .key = "url", .kind = .string, .flag = "--url", .description = "http(s) address to load (omit for a blank tab)" },
         .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)", .min = 1, .max = 25000 },

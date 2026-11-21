@@ -56,15 +56,15 @@
 #                   표준 출력은 JSON-RPC 줄뿐이고 입력 끝에 0 으로 끝난다
 #   repl            (W9f) `maru browser repl` 에 open → click(--surface 없이) → close 를 파이프로 — open 이 고른 탭에 명령이 간다
 #   w9c-dialog      (W9c②) 에이전트가 JS 대화상자를 보고 답한다: 누름 뒤 alert — 다음 op 은 handle-dialog 를 가리키며 곧 실패, `dialog` 가
-#                   종류·원인(agent)·답해도 되나·줄바꿈을 보이고, 답하면 페이지가 이어 간다 · prompt 글이 페이지에 닿는다 · confirm 닫기는 false ·
+#                   종류·원인(agent)·답하는 길(`answer with:`)·줄바꿈을 보이고, 답하면 페이지가 이어 간다 · prompt 글이 페이지에 닿는다 · confirm 닫기는 false ·
 #                   confirm 뒤 alert(사슬)도 에이전트 것 · 누름 뒤 setTimeout 의 alert 도 에이전트 것 · 모르는 번호는 실패 · 같은 출처 팝업의
 #                   alert 는 연 탭에서 번호로 답한다(번호 없이는 「no dialog」) · 에이전트가 물은 닫기의 떠나기 확인에 떠나기로 답하면 탭이
 #                   닫힌다 · navigate 가 떠나기 확인으로 실패한 탭에 떠나기로 답하면 이동이 이어진다 · 사람 탭(이 pane 이 열지 않았다)의 누가
-#                   띄웠는지 모르는 alert(스크립트 6.5 초 뒤)는 거절한다(C13). 「사용자가 손댄 문서」 의 떠나기 거절은 사람 입력이 필요해 단위
+#                   띄웠는지 모르는 alert(스크립트 6.5 초 뒤)도 답한다(`cause=unknown` — 사용자 결정 2026-11-17 A4). 「사용자가 손댄 문서」 의 떠나기는 사람 입력이 필요해 단위
 #                   시험(web_osr)이 본다
 #   w9c-console     (W9c①) Chromium 탭의 콘솔: 수준(log·info → log·warn·error·debug), 누름의 동기 줄은 곧 이은 console 에 있다, 처음 읽은 뒤에는
 #                   이동을 넘어 남는다, --clear 는 비운다, 쏟아지면 maru 표지(버린 수)를 남기고 다 싣지 않는다(남은 줄 + 버린 수 = 3000 — 끝의 버린 수만 실은 frame), alert 가 떠 있어도 읽는다,
-#                   잡히지 않은 예외는 (source:line) 을 단다. 사용자의 탭(확인 모달로 허락)을 다른 사이트 A → B(다른 출처 iframe 셋 — 적대
+#                   잡히지 않은 예외는 (source:line) 을 단다. 사용자의 탭(묻지 않는다 — 사용자 결정 2026-11-16)을 다른 사이트 A → B(다른 출처 iframe 셋 — 적대
 #                   리뷰 2 회차 F2) 뒤 처음 읽으면 A 의 줄이 보이지 않고, 곧 C 로 옮긴 뒤(빠른 사슬 — 2 회차 F1) 다시 읽어도 C 에 늦게 온 A 의
 #                   unload 줄은 보이지 않는다 — 대조: 앞 사이트에서 먼저 읽은 탭은 그 unload 줄을 이동 뒤에도 본다(줄은 와 있었다). 에이전트가
 #                   연 탭은 태어날 때 묶인다(3 회차 F1): 오류를 남기고 곧 다른 사이트로 옮기는 페이지의 그 오류가 첫 읽기에 있다. 떠날 때 300 줄을
@@ -81,24 +81,23 @@
 #                   지난 실행이 남긴 사본은 이 실행이 처음 프로필을 잡을 때 지운다(적대 리뷰 5 회차) ·
 #                   change 처리기가 곧 같은 출처로 옮기는 칸은
 #                   성공에 navigated:true(「try again」 없음 — 적대 리뷰 2 회차) · change 처리기가 alert 를 띄우는 칸은 성공에 dialog:true(「try
-#                   again」 없음 — 적대 리뷰 3 회차), 그 alert 는 에이전트 것(cause=agent)이라 handle-dialog 로 답하면 페이지가 내용을 한 번 받는다 ·
+#                   again」 없음 — 적대 리뷰 3 회차), 그 alert 는 에이전트 것(cause=agent)이고 handle-dialog 로 답하면 페이지가 내용을 한 번 받는다 ·
 #                   change 처리기가 응답이 40 초 걸리는 주소로 옮기는 칸도 요청 시한 전에 성공에 navigated:true(3 회차 T1) ·
 #                   탭을 닫으면 그 탭의 사본 폴더가 사라진다
 #   w9c-upload-frame-folder (2026-11-20 사용자 결정 「iframe·폴더 둘 다」) 폴더 칸에 `--folder` — 펼친 파일들(숨긴 `.env` 는 빼고)이 진짜
 #                   change 로 · 다른 사이트 iframe(127.0.0.1 위의 localhost) 안의 칸에 `--frame` — 그 iframe 의 세션으로 넣고 출처는 그 iframe 의 것
 #   w9d-network     (W9d①) Chromium 탭의 네트워크 기록: 에이전트가 연 탭은 묻지 않고 태어날 때부터 적는다 — 쿠키를 심고 옮겨 간 첫 페이지,
-#                   다른 사이트 iframe 안의 요청(`[cross-site iframe]`), 인증 헤더 fetch 의 자세히는 쿠키 권한 전에는 `Cookie`·`Authorization` 이 이름만
-#                   (적대 리뷰 3 회차 D1 — 설정 켬이어도), get-cookies 로 그 사이트를 허락받은 뒤(확인 모달, 자동 승인)에는 값 ·
-#                   서비스 워커가 다스리는 페이지의 fetch 는 `[service worker of <출처>]` · 둘째 pane(첫 pane 이 연 탭은 그에게 사용자의 탭과 같다 —
-#                   확인 모달, 자동 승인)에게 grant 전에 간 페이지는 보이지 않고(숨김 수로만) 그 뒤 페이지는 보인다 · 그 탭이 다른 사이트(localhost)에
-#                   갔다 돌아오면 다른 사이트에 있던 동안의 요청은 숨김 수로만(W9d① 적대 리뷰 1 회차 F2 — 실제 CEF 의 첫 사이트로 가른다) · 첫 pane 이
-#                   그 탭을 다른 사이트의 리다이렉트(localhost 의 302 → 127.0.0.1, 쿠키를 심는다)로 옮겨도 그 이동은 숨김 수로만(2 회차 N1 — 처음
-#                   주소가 덮이지 않는다) · 모든 grant 를 철회하면(앱 대본 `revokegrants`) 다시 허락받은 읽기에 앞 요청이 없다
+#                   다른 사이트 iframe 안의 요청(`[cross-site iframe]`), 인증 헤더 fetch 의 자세히는 첫 읽기부터 `Cookie`·`Authorization` 값(전권 —
+#                   사용자 결정 2026-11-16 — 설정과 무관; get-cookies 뒤에도 그대로) · 서비스 워커가 다스리는 페이지의 fetch 는 `[service worker of <출처>]` ·
+#                   둘째 pane(첫 pane 이 연 탭은 그에게 사용자의 탭과 같다)은 묻지 않고 첫 읽기로 grant 가 생긴다 — 그 전에 간 페이지는 보이지 않고
+#                   (숨김 수로만) 그 뒤 페이지는 보인다 · 그 grant 는 어느 호스트든이라 그 탭이 다른 사이트(localhost)에 갔다 돌아와도 그동안의 요청과
+#                   다른 사이트의 리다이렉트(localhost 의 302 → 127.0.0.1)로 온 이동이 보인다 · 모든 grant 를 철회하면(앱 대본 `revokegrants`) 기록이
+#                   지워져 다시 읽어도 앞 요청이 없다
 #   w9d-body        (W9d②) 응답 본문 기록: 에이전트가 연 탭은 묻지 않고 켠다(`network-record --on`, 목록에 ◉ recording) — chunked JSON 은 본문 그대로,
 #                   2 MiB JSON 은 over_cap, PNG 는 not_text, 글 MIME 의 잘못된 UTF-8 은 바이너리라 `--body` 만으로는 거절(--out 이면 0600 파일),
-#                   다른 사이트(localhost)에서 쿠키가 실린 스크립트는 그 사이트의 쿠키 권한 전에는 needs_cookie_permission, get-cookies 뒤에는 본문 ·
-#                   본문 권한이 없는 둘째 pane 에게는 needs_body_permission, 그 pane 이 기록을 허락받은 뒤(확인 모달, 자동 승인)에는 그 뒤 요청만
-#                   (그 전 요청은 before_body_permission) · 모든 grant 를 철회하면 ◉ 이 사라지고 본문도 지워진다
+#                   다른 사이트(localhost)에서 쿠키가 실린 스크립트의 본문도 곧 보인다(전권 — 쿠키 권한을 따로 묻지 않는다, get-cookies 뒤에도 그대로) ·
+#                   둘째 pane 은 첫 `network` 읽기로 본문 권한까지 받아 그 뒤 요청의 본문을 곧 본다(기록을 켜도 같다) · 모든 grant 를 철회하면 ◉ 이
+#                   사라지고 본문도 지워진다
 #   w9d-block       (W9d③) 요청 막기: 에이전트가 연 탭은 묻지 않고 규칙을 둔다(`network-block --add`, 목록에 ⊘ blocking) — 막힌 fetch 는 페이지에
 #                   TypeError 이고 서버에 닿지 않는다, 기록에 `[blocked rule N 패턴]`·`network --blocked` 는 막힌 것만, 막힌 이동은 `blocked:` 줄 ·
 #                   서비스 워커가 다스리는 페이지의 fetch 는 그 출처를 보이는 규칙 없는 탭이 있으면 막지 않고 「not applied」 로 세고(없으면 막는다),
@@ -106,20 +105,21 @@
 #                   닿는다 · 규칙을 다시 두고 모든 grant 를 철회하면(앱 대본 `revokegrants`) ⊘ 가 사라진다
 #   w9d-mock        (W9d④) 가짜 응답: 에이전트가 연 탭은 묻지 않고 규칙을 둔다(`network-mock --add`, 목록에 ▣ mocking) — 맞는 fetch 는 준 본문을
 #                   받고 서버에 닿지 않는다, `network --mocked` 는 `[mocked rule N 패턴]` 인 것만 · 주 프레임 문서의 가짜(`--body-file` 의 HTML)로
-#                   navigate 하면 `mocked:` 줄이고 페이지는 그 문서다(제목) · `--clear` 뒤 ▣ 가 사라지고 fetch 가 서버에 닿는다 · 둘째 pane(사용자의
-#                   탭과 같다)은 네트워크 권한 전에는 network permission, 그 뒤 제어 권한 전에는 `needs_browser_permission`(모달 없이), get-url 로
-#                   제어 권한을 받은 뒤(확인 모달, 자동 승인) 가짜 grant 를 물어(자동 승인) 규칙을 두고 그 fetch 가 가짜를 받는다 · 모든 grant 를
+#                   navigate 하면 `mocked:` 줄이고 페이지는 그 문서다(제목) · `--clear` 뒤 ▣ 가 사라지고 fetch 가 서버에 닿는다 · 둘째 pane 도
+#                   첫 pane 이 연 탭에 묻지 않고 규칙을 둔다(신원 판정을 지난 pane 은 전권 — 사용자 결정 2026-11-16) — 그 fetch 가 가짜를 받고, 같은
+#                   패턴을 다시 두면 그 규칙을 바꾼다 · 모든 grant 를
 #                   철회하면(앱 대본 `revokegrants`) ▣ 가 두 탭에서 사라진다. 서비스 워커·sidecar 재시작·본문 32 MiB·사람의 누름(Q2)은 판정자
 #                   (`--network-mock`)가 본다
 #   w9e-emulate     (W9e①) 기기 흉내: 에이전트가 연 탭은 묻지 않고 건다(`emulate --viewport 390x844@3,mobile --user-agent … --locale fr-FR
 #                   --timezone Asia/Kolkata --geolocation … --reload`) — 서버가 받은 문서 요청이 그 UA·Accept-Language, 페이지는 390 폭·fr-FR·
 #                   Kolkata, 위치는 숨은 에이전트 탭에선 보일 때까지 붙잡히고(Chromium) 보이는 사용자 탭은 묻지 않고 에이전트 좌표,
 #                   `--get` 의 fit_scale(줄여 보임), 목록의 ◫ emulating, `browser click` 이 줄인 화면의 맞는 요소(#b — 좌표 × fit) · sidecar 를 죽이면 재생 이동 앞에 흉내가 다시 선다(다시 받은 문서 요청이 그 UA) · 둘째 pane(사용자의
-#                   탭과 같다)은 사이트마다 묻고(자동 승인) 걸고, 다른 사이트로 가면 목록에 `off-site`(걸려 있지 않다 — 그 pane 의 `--get` 은 그
-#                   사이트의 grant 가 없어 거절) · 모든 grant 를 철회하면 ◫ 가 사라진다.
+#                   탭과 같다)은 묻지 않고(전권 — 사용자 결정 2026-11-16) 그 사이트에만 걸고, 다른 사이트로 가면 목록에 `off-site`(걸려 있지 않다 —
+#                   그 pane 의 `--get` 도 off-site 로 보인다) · 모든 grant 를 철회하면 ◫ 가 사라진다.
 #                   렌더러가 죽은 탭·사이트 묶기의 리다이렉트 홉·팝업·화면 픽셀은 판정자(`--emulation`)가 본다
 #
-# 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
+# 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버(와 그 자손)만 끈다. `MARU_SMOKE_KEEP_OUT=<새 폴더>` 면 끝날 때 각 단계의 출력(`out`)을
+# 그 폴더로 옮겨 둔다(실패한 단계를 다시 보려고 — 기본은 지운다; 이미 있는 폴더면 옛 출력과 섞이지 않게 시작에서 거절한다).
 set -eu
 
 app=${MARU_APP:-./zig-out/bin/maru-macos-app}
@@ -129,18 +129,34 @@ test -x "$app" || { echo "web cdp smoke: build the app first (zig build macos-ap
 test -x "$cli" || { echo "web cdp smoke: build the cli first (zig build)" >&2; exit 2; }
 test -x "$sidecar_dir/maru-web-host" || { echo "web cdp smoke: build the sidecar first (mise run web-sidecar)" >&2; exit 2; }
 
+[ -z "${MARU_SMOKE_KEEP_OUT:-}" ] || [ ! -e "$MARU_SMOKE_KEEP_OUT" ] || { echo "web cdp smoke: MARU_SMOKE_KEEP_OUT=$MARU_SMOKE_KEEP_OUT already exists — give a new folder" >&2; exit 2; }
 root=$(mktemp -d "/tmp/maru-web-cdp.XXXXXX")
 app_pid=""
+# 앱을 끄기 전에 모은 그 자손(sidecar·CEF helper·pane 셸) — 앱이 죽으면 launchd 아래로 넘어가 자손으로 찾을 수 없다.
+app_kids=""
 server_pid=""
 iframe_pids=""
+# 이 대본이 띄운 프로세스와 그 자손만 끈다(이름·명령줄로 찾지 않는다 — 같은 기계의 다른 실행·다른 maru 를 건드리지 않게).
+descendants() { for k in $(ps -ax -o pid=,ppid= | awk -v p="$1" '$2==p {print $1}'); do echo "$k"; descendants "$k"; done; }
 cleanup() {
+    trap '' INT HUP TERM # 정리 도중 또 온 시그널이 정리를 끊지 않게(EXIT trap 안의 exit 는 정리를 다시 돌리지 않는다)
+    kids="$app_kids"
+    for p in $app_pid $server_pid $iframe_pids; do kids="$kids $(descendants "$p")"; done
     [ -n "$app_pid" ] && kill "$app_pid" 2>/dev/null || true
     [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null || true
     for p in $iframe_pids; do kill "$p" 2>/dev/null || true; done
-    pkill -KILL -f "$root" 2>/dev/null || true
-    rm -rf "$root"
+    sleep 2
+    for k in $kids; do kill -KILL "$k" 2>/dev/null || true; done
+    if [ -n "${MARU_SMOKE_KEEP_OUT:-}" ]; then cp -R "$root/out" "$MARU_SMOKE_KEEP_OUT" 2>/dev/null || echo "web cdp smoke: could not keep the step outputs in $MARU_SMOKE_KEEP_OUT" >&2; fi
+    rm -rf "$root" || true
+    # 두 번 돌아도(시그널 뒤 EXIT) 같은 pid 를 다시 겨누지 않게 비운다.
+    app_pid="" app_kids="" server_pid="" iframe_pids=""
 }
-trap cleanup EXIT HUP INT TERM
+# 시그널이면 곧 끝낸다(EXIT 가 한 번 정리한다) — trap 이 돌아온 뒤 지운 폴더로 기다리기를 이어 가지 않게.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap 'exit 143' TERM
 fail() { echo "web cdp smoke failed: $1" >&2; exit 1; }
 
 port=$((22000 + $$ % 20000))
@@ -262,8 +278,9 @@ printf '<!doctype html><title>k2c</title><script>console.log("k2-c-head")</scrip
 printf 'for(var i=0;i<300;i++)console.log("k2-old-a-"+i)' > "$root/www/k2fa.js"
 printf 'for(var i=0;i<300;i++)console.log("k2-old-b-"+i)' > "$root/www/k2fb.js"
 printf '<!doctype html><title>con3</title><script>console.log("con3-head")</script><iframe src="http://127.0.0.1:%s/f.html"></iframe><iframe src="http://127.0.0.1:%s/f.html"></iframe><iframe src="http://127.0.0.1:%s/f.html"></iframe>' "$((port + 1))" "$((port + 2))" "$((port + 3))" > "$root/www/con3.html"
-# W9c③: 파일 입력칸 — 넣은 파일을 읽어(FileReader) 이름·크기·내용을 신호로 보낸다. up2 는 같은 칸을 가진 다음 문서(모달 동안 옮겨 간다).
-for pg in up up2 upin; do
+# W9c③: 파일 입력칸 — 넣은 파일을 읽어(FileReader) 이름·크기·내용을 신호로 보낸다(신호의 머리는 문서 이름 — upin 은 다른 사이트 iframe 안의 같은 칸들).
+# 확인 모달이 있던 때는 모달 동안 다음 문서(up2)로 옮겨 가는 단추가 있었다 — 모달이 걷힌 뒤(사용자 결정 2026-11-16) 쓰이지 않아 뺐다.
+for pg in up upin; do
 cat > "$root/www/$pg.html" <<HTML
 <!doctype html><title>$pg</title><script>
 function rep(el,ev){var fs=Array.prototype.slice.call(el.files),n=fs.length,left=n,parts=[],tag='$pg-'+el.id+'-'+n+'-'+ev.isTrusted;if(!n){new Image().src='/hit?'+tag;return}
@@ -280,7 +297,6 @@ for(var i=0;i<n;i++)(function(f){var r=new FileReader();r.onload=function(){part
 <input type=file id=slow onchange="var f=this.files[0];location.href='/upslow?'+this.files.length+'-'+event.isTrusted+'-'+encodeURIComponent(f.name+':'+f.size)">
 <input type=file id=busy onchange="rep(this,event);setTimeout(function(){var t=Date.now();while(Date.now()-t<15000){}},0)">
 <input type=file id=busy2 onchange="setTimeout(function(){var t=Date.now();while(Date.now()-t<7000){}setTimeout(function(){var u=Date.now();while(Date.now()-u<12000){}},0)},0)">
-<button id=later style="position:absolute;left:30px;top:200px;width:120px;height:40px" onclick="setTimeout(function(){location='up2.html'},1200)">Later</button>
 HTML
 done
 # 적대 리뷰 2 회차: change 처리기가 곧 옮겨 가는 칸(nav)의 도착지 — 주소에 받은 파일의 이름·크기를 싣는다(옮겨 가면 이미지 신호는 끊긴다).
@@ -543,8 +559,8 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     sleep 1.5
     "\$cli" browser console --surface "\$k2" > "\$out/cn-k2-c" 2>&1; echo "rc=\$?" >> "\$out/cn-k2-c"
     touch "\$out/p2-done"
-    # W9d①: 둘째 읽는 쪽 — 첫 pane 이 연 탭(이 pane 에게는 사용자의 탭과 같다 — 확인 모달, 자동 승인)의 네트워크 기록. 허락 전 요청은 보이지 않고
-    # 숨김 수로만, 허락 뒤 요청은 보인다, 모든 grant 를 철회한 뒤 다시 허락받은 읽기에는 지운 요청이 없다.
+    # W9d①: 둘째 읽는 쪽 — 첫 pane 이 연 탭(이 pane 에게는 사용자의 탭과 같다 — 첫 읽기로 grant 가 생긴다, 묻지 않는다)의 네트워크 기록. grant 전
+    # 요청은 보이지 않고 숨김 수로만, 그 뒤 요청은 보인다(다른 사이트에 간 동안의 것도 — 어느 호스트든), 모든 grant 를 철회한 뒤의 읽기에는 지운 요청이 없다.
     n=0; while [ ! -f "\$out/p2-net-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
     [ -f "\$out/p2-net-go" ] || exec sleep 600
     ux=\$(cat "\$out/p2-net-go")
@@ -560,8 +576,8 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     n=0; while [ ! -f "\$out/p2-net-revoked" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
     "\$cli" browser network --surface "\$ux" > "\$out/nw-u-revoked" 2>&1; echo "rc=\$?" >> "\$out/nw-u-revoked"
     touch "\$out/p2-net-done"
-    # W9d②: 둘째 pane — 첫 pane 이 연 에이전트 탭(이 pane 에게는 사용자의 탭과 같다). 본문 권한이 없으면 needs_body_permission, 기록을 허락받은
-    # 뒤(확인 모달, 자동 승인)에는 그 뒤 요청의 본문만 보인다.
+    # W9d②: 둘째 pane — 첫 pane 이 연 에이전트 탭(이 pane 에게는 사용자의 탭과 같다). 첫 「network」 읽기로 본문 권한까지
+    # 받아(묻지 않는다 — 전권) 그 뒤 요청의 본문을 곧 본다, 기록을 켜도 같다.
     n=0; while [ ! -f "\$out/p2-body-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
     [ -f "\$out/p2-body-go" ] || exec sleep 600
     bt=\$(cat "\$out/p2-body-go")
@@ -587,8 +603,8 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     r2=\$(sed -n 's/^#\([0-9]*\) GET [0-9-]* xhr .*bodyc\.json?p2b.*/\1/p' "\$out/bd2-list2" | head -1)
     "\$cli" browser network-request --surface "\$bt" --req "\$r2" --body > "\$out/bd2-after" 2>&1; echo "rc=\$?" >> "\$out/bd2-after"
     touch "\$out/p2-body-done"
-    # W9d④: 둘째 pane — 첫 pane 이 연 탭(이 pane 에게는 사용자의 탭과 같다). 네트워크 권한 전에는 거절, 그 뒤 제어 권한 전에는 모달 없이
-    # needs_browser_permission, get-url 로 제어 권한을 받은 뒤 가짜 grant 를 물어(자동 승인) 규칙을 둔다.
+    # W9d④: 둘째 pane — 첫 pane 이 연 탭. 신원 판정을 지난 pane 은 그 탭에 전권(사용자 결정 2026-11-16 「AI 가 모든 접근」) — 묻지 않고 규칙을
+    # 둔다(전에는 네트워크·제어 권한을 차례로 물었다). 같은 패턴을 다시 두면 새 규칙이 아니라 그 규칙을 바꾼다.
     n=0; while [ ! -f "\$out/p2-mock-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
     [ -f "\$out/p2-mock-go" ] || exec sleep 600
     mu=\$(cat "\$out/p2-mock-go")
@@ -596,11 +612,9 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     madd > "\$out/mku-add0" 2>&1; echo "rc=\$?" >> "\$out/mku-add0"
     "\$cli" browser network --surface "\$mu" > "\$out/mku-net" 2>&1; echo "rc=\$?" >> "\$out/mku-net"
     madd > "\$out/mku-add1" 2>&1; echo "rc=\$?" >> "\$out/mku-add1"
-    "\$cli" browser get-url --surface "\$mu" > "\$out/mku-url" 2>&1; echo "rc=\$?" >> "\$out/mku-url"
-    madd > "\$out/mku-add2" 2>&1; echo "rc=\$?" >> "\$out/mku-add2"
     "\$cli" browser exec --surface "\$mu" 'fetch("/mku/x.txt?u1").then(function(r){return r.text().then(function(t){return r.status+" "+t})},function(e){return "reject "+e.name})' > "\$out/mku-fetch" 2>&1
     touch "\$out/p2-mock-done"
-    # W9e①: 둘째 pane — 첫 pane 이 연 탭(사용자의 탭과 같다). 흉내는 사이트마다 묻고(자동 승인) 그 사이트에서만 걸린다.
+    # W9e①: 둘째 pane — 첫 pane 이 연 탭(사용자의 탭과 같다). 흉내는 묻지 않고(전권) 그 사이트에서만 걸린다.
     n=0; while [ ! -f "\$out/p2-emu-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
     [ -f "\$out/p2-emu-go" ] || exec sleep 600
     eu=\$(cat "\$out/p2-emu-go")
@@ -663,7 +677,7 @@ run click-ref-real click --ref "\$ref"
 hit_seen rb-true && echo yes > "\$out/ref-hit" || echo no > "\$out/ref-hit"
 run type type --selector '#in' --text '새 값'
 hit_seen 'in-true-%EC%83%88%20%EA%B0%92' && echo yes > "\$out/type-hit" || echo no > "\$out/type-hit"
-# W9e①(검사는 w9e-emulate): 보이는 사용자 탭의 위치 흉내 — 사이트마다 묻고(자동 승인) 걸면 위치는 묻지 않고 에이전트 좌표다. 곧 지운다(대신
+# W9e①(검사는 w9e-emulate): 보이는 사용자 탭의 위치 흉내 — 묻지 않고(전권) 걸면 위치는 묻지 않고 에이전트 좌표다. 곧 지운다(대신
 # 허용한 출처도 되돌린다). 끝의 W9e 칸에서는 이 탭의 가족에 대화상자가 남아 있고, 에이전트가 연 탭은 숨어 있어 위치 요청이 붙잡힌다.
 "\$cli" browser emulate --surface "\$sid" --geolocation 48.8584,2.2945,10 > "\$out/em-vgeo-set" 2>&1; echo "rc=\$?" >> "\$out/em-vgeo-set"
 "\$cli" browser exec --surface "\$sid" 'new Promise(function(res){navigator.geolocation.getCurrentPosition(function(p){res("ok "+p.coords.latitude+","+p.coords.longitude)},function(e){res("err "+e.code)},{timeout:6000})})' > "\$out/em-geo" 2>&1
@@ -1047,7 +1061,7 @@ b0=\$(date +%s)
 "\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/a.html?bu" > "\$out/nv-bu" 2>&1; echo "rc=\$?" >> "\$out/nv-bu"
 b1=\$(date +%s)
 echo "\$((b1 - b0))" > "\$out/nv-bu-secs"
-# W9c②: 에이전트가 JS 대화상자를 보고 답한다. 대화상자가 남은 에이전트 탭(capt·da·sh 의 팝업·ag·nv)을 먼저 답해 자리를 낸다.
+# W9c②: 에이전트가 JS 대화상자를 보고 답한다. 대화상자가 남은 에이전트 탭(capt·da·sh 의 팝업·ag·nv)을 먼저 답한다(상한의 자리는 아래에서 닫아 낸다).
 "\$cli" browser handle-dialog --surface "\$capt" --accept > "\$out/dg-capt" 2>&1; echo "rc=\$?" >> "\$out/dg-capt"
 "\$cli" browser handle-dialog --surface "\$da" --accept > "\$out/dg-da" 2>&1; echo "rc=\$?" >> "\$out/dg-da"
 # 같은 출처 팝업의 alert — 연 탭(sh)에는 대화상자가 없다(번호 없이는 실패), 목록이 팝업의 번호를 주고 그 번호로 답하면 연 탭이 다시 움직인다.
@@ -1070,6 +1084,10 @@ done
 "\$cli" browser handle-dialog --surface "\$nv" --accept > "\$out/dg-nv" 2>&1; echo "rc=\$?" >> "\$out/dg-nv"
 "\$cli" browser wait --surface "\$nv" --load > "\$out/dg-nv-wait" 2>&1
 "\$cli" browser get-url --surface "\$nv" > "\$out/dg-nv-url" 2>&1; echo "rc=\$?" >> "\$out/dg-nv-url"
+# 위의 에이전트 탭(capt·da·sh 와 그 팝업·nv)은 다 썼다 — 닫아 이 pane 의 상한(8)에 자리를 낸다. 철회가 에이전트 탭을 세지 않게 하던 때에는 뒤 단계의
+# 「revokegrants」 가 자리를 냈지만, 철회 뒤에도 ◈ 를 남긴 뒤(사용자 결정 2026-11-17 B — 5ded45c9b)로는 닫지 않으면 뒤 단계의 open 이 상한에 걸렸다(w9d-mock).
+ftab=\$(sed -n 's/^alert tab=\([0-9]*\) .*/\1/p' "\$out/dg-fam-list" | head -1)
+for t in "\$capt" "\$da" "\$sh" "\$ftab" "\$nv"; do [ -n "\$t" ] && "\$cli" browser close --surface "\$t" > /dev/null 2>&1 || true; done
 # 새 에이전트 탭의 alert·prompt·confirm·사슬·setTimeout.
 "\$cli" browser open --url "http://127.0.0.1:$port/dlg.html" > "\$out/dg-open" 2>&1
 dg=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/dg-open")
@@ -1096,7 +1114,7 @@ n=0; while [ \$n -lt 32 ]; do "\$cli" browser dialog --surface "\$dg" > "\$out/d
 "\$cli" browser handle-dialog --surface "\$dg" --accept > "\$out/dg-st" 2>&1; echo "rc=\$?" >> "\$out/dg-st"
 hit_seen dst-done && echo yes > "\$out/dg-st-hit" || echo no > "\$out/dg-st-hit"
 "\$cli" browser close --surface "\$dg" > /dev/null 2>&1 || true
-# W9c①: 사용자의 탭(이 pane 이 열지 않았다 — 확인 모달로 허락해 태어날 때 묶이지 않는다)을 처음 읽는다. 다른 사이트 A(떠날 때 400 ms 동안 줄을
+# W9c①: 사용자의 탭(이 pane 이 열지 않았다 — 태어날 때 묶이지 않는다, 묻지 않고 읽는다)을 처음 읽는다. 다른 사이트 A(떠날 때 400 ms 동안 줄을
 # 남긴다) → B(다른 출처 iframe 셋 — 적대 리뷰 2 회차 F2: B 의 출처들이 A 의 출처를 밀어내 A 의 늦은 줄이 지금 문서의 줄이 되었다) → 이동 직후 처음
 # 읽어 묶는다 → 곧 C(빠른 사슬 — 2 회차 F1: C 가 시작한 뒤 온 A 의 unload 줄이 B 에서 묶인 쪽에게 보였다) → 늦은 줄이 다 온 뒤 다시 읽는다. 첫 읽기는
 # 이 탭에 한 번뿐이라(같은 grant) 한 사슬에 담는다. 그 탭은 위에서 스스로 새로고침하는 hop 문서에 있다.
@@ -1107,8 +1125,8 @@ sleep 1.5
 "\$cli" browser navigate --surface "\$sid" "http://127.0.0.1:$port/con.html?uc" > "\$out/cn-u-nav3" 2>&1
 sleep 1.5
 "\$cli" browser console --surface "\$sid" > "\$out/cn-u-second" 2>&1; echo "rc=\$?" >> "\$out/cn-u-second"
-# 사람의 탭(이 pane 이 열지 않았다 — 조작 허락만) — 누가 띄웠는지 모르는 alert(스크립트 뒤 6.5 초 — 창 5 초 밖)는 답하지 않는다(C13). 타이머가 돌 수
-# 있게 가만히 있는 문서로 옮긴다.
+# 사람의 탭(이 pane 이 열지 않았다 — 묻지 않는다) — 누가 띄웠는지 모르는 alert(스크립트 뒤 6.5 초 — 창 5 초 밖)도 답한다(cause=unknown —
+# 사용자 결정 2026-11-17 A4, 전에는 거절 — C13). 타이머가 돌 수 있게 가만히 있는 문서로 옮긴다.
 "\$cli" browser navigate --surface "\$sid" "http://127.0.0.1:$port/ag2.html?user" > "\$out/dg-user-nav" 2>&1
 "\$cli" browser exec --surface "\$sid" 'setTimeout(function(){alert("late user")},6500), 1' > "\$out/dg-user-exec" 2>&1
 n=0; while [ \$n -lt 48 ]; do "\$cli" browser dialog --surface "\$sid" > "\$out/dg-user-list" 2>&1; grep -q '^alert ' "\$out/dg-user-list" && break; sleep 0.25; n=\$((n + 1)); done
@@ -1202,15 +1220,15 @@ hit_seen 'up-rr-1-true-b.txt%3A6%3Abravo' && echo yes > "\$out/up-rr-hit" || ech
 "\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/a.txt" "$root/files/b.txt" > "\$out/up-single" 2>&1; echo "rc=\$?" >> "\$out/up-single"
 # 폴더 칸(webkitdirectory) — Chromium 은 그 칸에 파일을 조용히 넣지 않았다(실측 i): 넣기 전에 그 이유로 거절(그 검사는 페이지의 JS 라 단위 시험이 못 본다 — 5 회차 변이 JSdir 를 덮는 단계가 없었다).
 "\$cli" browser upload --surface "\$up" --selector '#dir' "$root/files/a.txt" > "\$out/up-dir" 2>&1; echo "rc=\$?" >> "\$out/up-dir"
-# 적대 리뷰 3 회차: 넣자 change 처리기가 alert 를 띄운다(탭은 지금 up2) — 넣기의 답은 대화상자가 답해질 때까지 붙잡힌다. 받았다는 성공(dialog:true)이어야
+# 적대 리뷰 3 회차: 넣자 change 처리기가 alert 를 띄운다(탭은 그대로 up — 확인 모달이 걷힌 뒤에는 옮겨 가지 않는다) — 넣기의 답은 대화상자가 답해질 때까지 붙잡힌다. 받았다는 성공(dialog:true)이어야
 # 한다(실패면 에이전트가 답한 뒤 다시 올려 두 번 올라간다). 그 alert 는 에이전트 것이다(넣기 바로 앞에 에이전트 시각을 적었다) — 답하면
 # 처리기가 이어 내용을 읽어 보낸다(FileReader 는 alert 뒤에 돈다). 한 번만.
 "\$cli" browser upload --surface "\$up" --selector '#dlg' "$root/files/a.txt" > "\$out/up-dlg" 2>&1; echo "rc=\$?" >> "\$out/up-dlg"
 "\$cli" browser dialog --surface "\$up" > "\$out/up-dlg-list" 2>&1; echo "rc=\$?" >> "\$out/up-dlg-list"
 "\$cli" browser handle-dialog --surface "\$up" --accept > "\$out/up-dlg-answer" 2>&1; echo "rc=\$?" >> "\$out/up-dlg-answer"
-hit_seen 'up2-dlg-1-true-a.txt%3A6%3Aalpha' && echo yes > "\$out/up-dlg-hit" || echo no > "\$out/up-dlg-hit"
+hit_seen 'up-dlg-1-true-a.txt%3A6%3Aalpha' && echo yes > "\$out/up-dlg-hit" || echo no > "\$out/up-dlg-hit"
 sleep 0.5
-grep -c 'GET /hit?up2-dlg-' "$root/http.log" > "\$out/up-dlg-hits" || true
+grep -c 'GET /hit?up-dlg-' "$root/http.log" > "\$out/up-dlg-hits" || true
 # 적대 리뷰 2 회차: 넣자 change 처리기가 같은 출처로 옮겨 간다 — 넣은 뒤 읽기는 문서가 사라져 못 한다. 받았다는 성공(navigated:true)이어야 한다
 # (실패·「then try again」 이면 에이전트가 다시 불러 두 번 올라간다). 이 호출 하나뿐이다 — 옮겨 간 문서의 요청 수로 두 번 넣지 않았음을 본다.
 "\$cli" browser upload --surface "\$up" --selector '#nav' "$root/files/a.txt" > "\$out/up-nav" 2>&1; echo "rc=\$?" >> "\$out/up-nav"
@@ -1277,7 +1295,7 @@ n=0; while [ \$n -lt 40 ]; do
 done
 api=\$(sed -n 's/^#\([0-9]*\) GET [0-9-]* xhr .*netapi\.json.*/\1/p' "\$out/nw-agent" | head -1)
 "\$cli" browser network-request --surface "\$nw" --req "\$api" > "\$out/nw-api" 2>&1; echo "rc=\$?" >> "\$out/nw-api"
-# 적대 리뷰 3 회차 D1: 쿠키 권한 전에는 자격 증명 값이 이름만이다(위). get-cookies 가 그 사이트의 쿠키 권한을 묻고(확인 모달, 자동 승인) 그 뒤 같은 요청의 값이 보인다.
+# 전권(사용자 결정 2026-11-16): 자격 증명 값은 첫 자세히부터 보인다(위) — get-cookies 뒤에도 같은 요청의 값이 그대로 보인다(적대 리뷰 3 회차 D1 의 쿠키 권한은 걷혔다).
 "\$cli" browser get-cookies --surface "\$nw" > "\$out/nw-ck" 2>&1; echo "rc=\$?" >> "\$out/nw-ck"
 "\$cli" browser network-request --surface "\$nw" --req "\$api" > "\$out/nw-api2" 2>&1; echo "rc=\$?" >> "\$out/nw-api2"
 # 서비스 워커가 다스리는 페이지의 fetch — 브라우저가 없는 요청으로 와서 그 출처를 연 이 탭에 붙는다.
@@ -1288,7 +1306,7 @@ n=0; while [ \$n -lt 60 ]; do
     sleep 0.25; n=\$((n + 1))
 done
 "\$cli" browser close --surface "\$nw" > "\$out/nw-close" 2>&1
-# 둘째 pane 에게는 사용자의 탭과 같은 탭(이 pane 이 연 탭 — 둘째 pane 은 확인 모달로 허락받는다): 둘째 pane 이 허락받기 전에 간 페이지는 그에게
+# 둘째 pane 에게는 사용자의 탭과 같은 탭(이 pane 이 연 탭 — 둘째 pane 은 첫 읽기로 grant 가 생긴다, 묻지 않는다): 그 grant 전에 간 페이지는 그에게
 # 보이지 않고(숨김 수로만), 그 뒤에 간 페이지는 보인다. 그다음 모든 grant 를 철회한다(앱 대본 「revokegrants」) — 지켜보기를 끄고 적은 것을 지운다.
 "\$cli" browser open --url "http://127.0.0.1:$port/net-before.html" > "\$out/nw-u-open" 2>&1
 ux=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/nw-u-open")
@@ -1298,8 +1316,8 @@ n=0; while [ ! -f "\$out/p2-net-read1" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$
 sleep 0.5
 touch "\$out/p2-net-after"
 n=0; while [ ! -f "\$out/p2-net-read2" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
-# 적대 리뷰 1 회차 F2: 이 pane(제어 grant — 사이트에 묶이지 않는다)이 그 탭을 다른 사이트로 옮겼다 되돌린다. 둘째 pane 의 127.0.0.1 grant 는
-# localhost 에 있던 동안의 요청(인증 헤더 fetch)을 돌아온 뒤에도 보지 못한다.
+# 적대 리뷰 1 회차 F2: 이 pane(제어 grant — 사이트에 묶이지 않는다)이 그 탭을 다른 사이트로 옮겼다 되돌린다. 둘째 pane 의 grant 는
+# 전권이라 어느 호스트든(사용자 결정 2026-11-16) — localhost 에 있던 동안의 요청(인증 헤더 fetch)도 돌아온 뒤 보인다.
 "\$cli" browser navigate --surface "\$ux" "http://localhost:$port/net-away.html" > "\$out/nw-u-away-nav" 2>&1
 sleep 0.5
 "\$cli" browser navigate --surface "\$ux" "http://127.0.0.1:$port/net-back.html" > "\$out/nw-u-back-nav" 2>&1
@@ -1313,6 +1331,7 @@ touch "\$out/net-revoke-now"
 sleep 1.5
 touch "\$out/p2-net-revoked"
 n=0; while [ ! -f "\$out/p2-net-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser close --surface "\$ux" > /dev/null 2>&1 || true # 다 썼다(둘째 pane 도 — p2-net-done) — 상한에 자리를 낸다
 # ── W9d②: 응답 본문 기록 ──
 # 에이전트가 연 탭 — 쿠키를 심는 localhost 페이지에서 시작한다(다른 사이트 쿠키). 기록은 묻지 않고 켠다.
 "\$cli" browser open --url "http://localhost:$port/bodysetck" > "\$out/bd-open" 2>&1
@@ -1338,12 +1357,12 @@ rm -f "\$out/bd-bin.out" "\$out/bd-c.json"
 stat -f %Lp "\$out/bd-c.json" > "\$out/bd-cout-mode" 2>&1
 od -An -tx1 "\$out/bd-bin.out" | tr -d ' \n' > "\$out/bd-bin-head" 2>&1
 "\$cli" browser network-request --surface "\$bt" --req "\$bk" --body > "\$out/bd-cred" 2>&1; echo "rc=\$?" >> "\$out/bd-cred"
-# 다른 사이트(localhost)의 쿠키 권한 — 그 사이트에서 get-cookies 가 묻는다(확인 모달, 자동 승인). 그 뒤 같은 본문이 보인다.
+# 다른 사이트(localhost)에서 get-cookies — 전권이라 본문은 그 전에도 보였다(위), 그 뒤에도 같은 본문이 보인다.
 "\$cli" browser navigate --surface "\$bt" "http://localhost:$port/bodyhome.html" > "\$out/bd-home" 2>&1
 "\$cli" browser get-cookies --surface "\$bt" > "\$out/bd-ck" 2>&1; echo "rc=\$?" >> "\$out/bd-ck"
 "\$cli" browser navigate --surface "\$bt" "http://127.0.0.1:$port/bodyhome.html?back" > "\$out/bd-back" 2>&1
 "\$cli" browser network-request --surface "\$bt" --req "\$bk" --body > "\$out/bd-cred2" 2>&1; echo "rc=\$?" >> "\$out/bd-cred2"
-# 둘째 pane — 그 pane 의 첫 읽기(네트워크 권한) 뒤 한 번, 그 pane 이 기록을 허락받은 뒤 한 번 옮긴다.
+# 둘째 pane — 그 pane 의 첫 읽기(grant 가 생긴다) 뒤 한 번, 그 pane 이 기록을 켠 뒤 한 번 옮긴다.
 echo "\$bt" > "\$out/p2-body-go.tmp" && mv "\$out/p2-body-go.tmp" "\$out/p2-body-go"
 n=0; while [ ! -f "\$out/p2-body-read1" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
 "\$cli" browser exec --surface "\$bt" 'fetch("/bodyc.json?p2a").then(function(r){return r.text()})' > "\$out/bd-p2a" 2>&1
@@ -1360,6 +1379,7 @@ sleep 1.5
 "\$cli" browser list > "\$out/bd-blist2" 2>&1
 "\$cli" browser network --surface "\$bt" > "\$out/bd-revoked" 2>&1; echo "rc=\$?" >> "\$out/bd-revoked"
 "\$cli" browser network-request --surface "\$bt" --req "\$bc" --body > "\$out/bd-revoked-req" 2>&1; echo "rc=\$?" >> "\$out/bd-revoked-req"
+"\$cli" browser close --surface "\$bt" > /dev/null 2>&1 || true # 다 썼다 — 상한에 자리를 낸다
 # ── W9d③: 요청 막기 ──
 # 에이전트가 연 탭 — 묻지 않고 규칙을 둔다(막기는 네트워크 기록 위에 선다 — 먼저 한 번 읽는다).
 fx() { printf 'fetch("%s").then(function(r){return "ok "+r.status},function(e){return "reject "+e.name})' "\$1"; }
@@ -1403,6 +1423,7 @@ sleep 1
 touch "\$out/block-revoke-now"
 sleep 1.5
 "\$cli" browser list > "\$out/bk-list5" 2>&1
+"\$cli" browser close --surface "\$kt" > /dev/null 2>&1 || true # 다 썼다 — 상한에 자리를 낸다
 # ── W9d④: 가짜 응답 ──
 # 에이전트가 연 탭 — 묻지 않고 규칙을 둔다(가짜는 네트워크 기록 위에 선다 — 먼저 한 번 읽는다).
 fm() { printf 'fetch("%s").then(function(r){return r.text().then(function(t){return r.status+" "+t})},function(e){return "reject "+e.name})' "\$1"; }
@@ -1425,7 +1446,7 @@ sleep 0.5
 "\$cli" browser navigate --surface "\$mt" "http://127.0.0.1:$port/mkhome.html?2" > "\$out/mk-nav2" 2>&1
 "\$cli" browser exec --surface "\$mt" "\$(fm /mk/api.txt?t3)" > "\$out/mk-fetch3" 2>&1
 "\$cli" browser list > "\$out/mk-list3" 2>&1
-# 규칙을 다시 둔다. 둘째 pane 에게 사용자의 탭과 같은 탭을 넘긴다 — 그 pane 은 권한을 차례로 받고 제 규칙을 둔다.
+# 규칙을 다시 둔다. 둘째 pane 에게 사용자의 탭과 같은 탭을 넘긴다 — 그 pane 은 묻지 않고(전권) 제 규칙을 둔다.
 "\$cli" browser network-mock --surface "\$mt" --add "http://127.0.0.1:$port/mk/api*" --body again > "\$out/mk-add2" 2>&1; echo "rc=\$?" >> "\$out/mk-add2"
 "\$cli" browser open --url "http://127.0.0.1:$port/mkuser.html" > "\$out/mku-open" 2>&1
 mu=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/mku-open")
@@ -1436,6 +1457,7 @@ n=0; while [ ! -f "\$out/p2-mock-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$
 touch "\$out/mock-revoke-now"
 sleep 1.5
 "\$cli" browser list > "\$out/mk-list5" 2>&1
+for t in "\$mt" "\$mu"; do "\$cli" browser close --surface "\$t" > /dev/null 2>&1 || true; done # 다 썼다 — 상한에 자리를 낸다
 # ── W9e①: 기기 흉내 ──
 # 에이전트가 연 탭 — 묻지 않고 건다. 새로고침까지(첫 문서 요청부터 그 UA·언어).
 android_ua='Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36'
@@ -1504,6 +1526,7 @@ while [ ! -f "$out/done" ] && [ $i -lt 1200 ]; do
     sleep 0.5; i=$((i + 1))
 done
 [ -f "$out/done" ] || { sed -n '1,40p' "$root/app.log" >&2; fail "the pane script did not finish ($(cat "$out/list" 2>/dev/null | tr '\n' ' '))"; }
+app_kids=$(descendants "$app_pid")
 kill "$app_pid" 2>/dev/null || true
 wait "$app_pid" 2>/dev/null || true
 app_pid=""
@@ -1577,6 +1600,7 @@ grep -q '(-32004)' "$out/wv-off" && grep -q '^hint: 1 matching' "$out/wv-off" ||
 echo "PASS wait-visible: a role wait sees a button made 2 s later (matched), two matches answer with an ambiguous warning, an off-canvas button times out with a hidden hint"
 [ "$(cat "$out/hid-vis")" = yes ] || fail "the Chromium tab was not hidden by the new tab (no visibilitychange to hidden) — the hidden-tab cases would prove nothing"
 set -- $(cat "$out/hid-secs")
+hid_role_secs=$1 hid_hover_secs=$2 # 아래 `set --` 가 위치 인자를 덮는다 — PASS 글은 이 값을 쓴다
 ok hid-role && [ "$(cat "$out/hb-hit")" = yes ] && [ "$1" -le 3 ] || fail "a role click on a hidden tab did not press for real within 3 s (${1}s · $(tr '\n' ' ' < "$out/hid-role"))"
 ok hid-hover && [ "$(cat "$out/hh-hit")" = yes ] && [ "$2" -le 3 ] || fail "a hover on a hidden tab did not reach the page within 3 s (${2}s · $(tr '\n' ' ' < "$out/hid-hover"))"
 ok hid-wait || fail "a text wait on a hidden tab did not see a button made in an animation frame ($(tr '\n' ' ' < "$out/hid-wait"))"
@@ -1602,7 +1626,7 @@ for k in 1 2 3 4 5 6 7; do grep -q '^opened [0-9]*' "$out/ag-cap-$k" && grep -q 
 ok ag-cap-pop && [ "$(grep -c 'GET /hit?ab-true' "$root/http.log")" -ge 2 ] || fail "the click on a capped agent tab did not reach the page — the popup check proves nothing ($(tr '\n' ' ' < "$out/ag-cap-pop"))"
 ok ag-al && grep -q 'showing a dialog' "$out/ag-dlg-wait" && [ "$(cat "$out/ag-dlg-secs")" -le 6 ] || fail "a wait on a tab whose page showed an alert mid-way did not end at once with the dialog reason ($(cat "$out/ag-dlg-secs")s · $(tr '\n' ' ' < "$out/ag-dlg-wait"))"
 [ "$(grep -c '^surface ' "$out/ag-cap-list0")" = "$(grep -c '^surface ' "$out/ag-cap-list1")" ] || fail "a popup from the agent's tab opened past the cap of 8 ($(grep -c '^surface ' "$out/ag-cap-list0") → $(grep -c '^surface ' "$out/ag-cap-list1") tabs)"
-grep -q 'already has 8 tabs' "$out/ag-cap-8" || fail "a ninth agent tab was not refused ($(tr '\n' ' ' < "$out/ag-cap-8"))"
+grep -q 'already has 8 agent tabs' "$out/ag-cap-8" || fail "a ninth agent tab was not refused ($(tr '\n' ' ' < "$out/ag-cap-8"))"
 # W9b③ 적대 리뷰 3 회차
 [ "$(cat "$out/r3-p1-hit")" = yes ] && grep -q '^ok$' "$out/r3-p1" || fail "Enter on an element of a new hidden tab did not submit the form ($(tr '\n' ' ' < "$out/r3-p1") · $(tr '\n' ' ' < "$out/r3-p1-open"))"
 [ "$(cat "$out/r3-p2-hit")" = yes ] && grep -q '^ok$' "$out/r3-p2" || fail "Enter where the focus is on a new hidden tab did not submit the form ($(tr '\n' ' ' < "$out/r3-p2") · $(tr '\n' ' ' < "$out/r3-p2-type"))"
@@ -1762,7 +1786,7 @@ grep -q '^alert tab=[0-9]* token=[0-9]* cause=agent' "$out/up-dlg-list" && grep 
     || fail "the alert the change handler showed after an upload was not listed as the agent's with the handler's text ($(tr '\n' ' ' < "$out/up-dlg-list"))"
 # 없는 경로(/hit)의 요청은 http.log 에 두 줄이다(404 — send_error 의 log_error 와 log_request 가 둘 다 log_message 로 온다). 한 번이면 둘, 두 번이면 넷.
 grep -q '^answered alert$' "$out/up-dlg-answer" && grep -q '^rc=0$' "$out/up-dlg-answer" && [ "$(cat "$out/up-dlg-hit")" = yes ] && [ "$(cat "$out/up-dlg-hits")" -le 2 ] \
-    || fail "answering the upload's alert did not let the page read the file once ($(tr '\n' ' ' < "$out/up-dlg-answer") · hit $(cat "$out/up-dlg-hit") · $(grep 'GET /hit?up2-dlg' "$root/http.log" | tr '\n' ' '))"
+    || fail "answering the upload's alert did not let the page read the file once ($(tr '\n' ' ' < "$out/up-dlg-answer") · hit $(cat "$out/up-dlg-hit") · $(grep 'GET /hit?up-dlg' "$root/http.log" | tr '\n' ' '))"
 grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-slow" && grep -q '^rc=0$' "$out/up-slow" && grep -q 'navigated: true' "$out/up-slow" && ! grep -q 'try again' "$out/up-slow" \
     && [ "$(cat "$out/up-slow-secs")" -le 25 ] && [ "$(cat "$out/up-slow-loads")" = 1 ] \
     || fail "an input whose change handler navigated to a server that answers after 40 s was not reported as received with navigated:true before the request deadline ($(tr '\n' ' ' < "$out/up-slow") · $(cat "$out/up-slow-secs")s · loads $(cat "$out/up-slow-loads"))"
@@ -1886,11 +1910,9 @@ grep -q '/mk/api.txt?t3' "$root/http.log" || mbad "after clear the server did no
 grep -q "^surface $mt_id .*▣" "$out/mk-list3" && mbad "the list still showed ▣ after clear ($(mshow mk-list3))"
 grep -q '^rc=0$' "$out/mk-add2" || mbad "re-adding the rule failed ($(mshow mk-add2))"
 [ -f "$out/p2-mock-done" ] || mbad "the second pane did not finish its mock steps ($(ls "$out" | grep -E '^(mku-|p2-mock)' | tr '\n' ' '))"
-grep -q '^rc=1$' "$out/mku-add0" && grep -q "network permission first" "$out/mku-add0" || mbad "the second pane mocked a tab before its network permission ($(mshow mku-add0))"
-grep -q '^rc=0$' "$out/mku-net" || mbad "the second pane's network read was not allowed by the dialog ($(mshow mku-net))"
-grep -q '^rc=1$' "$out/mku-add1" && grep -q "control permission first" "$out/mku-add1" || mbad "the second pane mocked a tab before its control permission (needs_browser_permission) ($(mshow mku-add1))"
-grep -q '^rc=0$' "$out/mku-url" || mbad "get-url did not get the control permission ($(mshow mku-url))"
-grep -q '^rc=0$' "$out/mku-add2" && grep -q '^added: [0-9]' "$out/mku-add2" || mbad "after both permissions the mock dialog did not let the second pane add its rule ($(mshow mku-add2))"
+grep -q '^rc=0$' "$out/mku-add0" && grep -q '^added: [0-9]' "$out/mku-add0" || mbad "the second pane could not mock the first pane's tab without asking (full access — user decision 2026-11-16) ($(mshow mku-add0))"
+grep -q '^rc=0$' "$out/mku-net" || mbad "the second pane's network read was refused ($(mshow mku-net))"
+grep -q '^rc=0$' "$out/mku-add1" && grep -q '^replaced: [0-9]' "$out/mku-add1" && grep -q '^1 mock rule on this tab' "$out/mku-add1" || mbad "adding the same pattern again did not replace the rule ($(mshow mku-add1))"
 grep -q '200 mocked-user' "$out/mku-fetch" || mbad "the second pane's rule did not answer the fetch ($(mshow mku-fetch))"
 grep -q '/mku/x.txt?u1' "$root/http.log" && mbad "the server saw the fetch the second pane mocked"
 grep -q "^surface $mt_id .*▣ mocking (1 rule)" "$out/mk-list4" && grep -q "^surface $mu_id .*▣ mocking (1 rule)" "$out/mk-list4" || mbad "the list did not show ▣ on both tabs ($(mshow mk-list4))"
@@ -1918,20 +1940,20 @@ grep -q 'GET /emu-hit?g' "$root/http.log" && ebad "click on the scaled phone scr
 [ "$(grep 'EMU /emu.html?o ' "$root/http.log" | wc -l)" -ge 3 ] && grep 'EMU /emu.html?o ' "$root/http.log" | tail -1 | grep -qF "ua=[$android]" || ebad "after the sidecar restart the replayed document request did not carry the emulated user agent ($(grep 'EMU /emu.html?o' "$root/http.log" | tr '\n' ' '))"
 grep -q '^rc=0$' "$out/em-get2" && grep -q 'state active' "$out/em-get2" || ebad "after the restart get did not show the emulation active ($(eshow em-get2))"
 [ -f "$out/p2-emu-done" ] || ebad "the second pane did not finish its emulation steps ($(ls "$out" | grep -E '^(eu-|p2-emu)' | tr '\n' ' '))"
-grep -q '^rc=0$' "$out/eu-set" && grep -q 'only on 127.0.0.1' "$out/eu-set" || ebad "the second pane could not emulate the user's tab after the dialog ($(eshow eu-set))"
+grep -q '^rc=0$' "$out/eu-set" && grep -q 'only on 127.0.0.1' "$out/eu-set" || ebad "the second pane could not emulate the user's tab without asking ($(eshow eu-set))"
 epage eu-page | grep -q '"tz":"Asia/Tokyo"' || ebad "the user's tab did not get the time zone on its site ($(eshow eu-page))"
-grep -q '^rc=0$' "$out/eu-get-off" && ebad "on another site get answered without a grant for that site ($(eshow eu-get-off))"
+grep -q '^rc=0$' "$out/eu-get-off" && grep -q 'off-site — not applied now' "$out/eu-get-off" || ebad "on another site get did not show the emulation as off-site ($(eshow eu-get-off))"
 epage eu-page-off | grep -q '"tz":"Asia/Tokyo"' && ebad "the emulation stayed on another site ($(eshow eu-page-off))"
 grep -qF "surface $eu_id " "$out/eu-list-off" && grep -qF '◫ emulating (Asia/Tokyo, off-site)' "$out/eu-list-off" || ebad "the list did not show the user's tab as emulating off-site ($(eshow eu-list-off))"
 [ "$(grep -c '◫ emulating' "$out/em-list2")" -ge 2 ] || ebad "the list did not show ◫ on both tabs ($(eshow em-list2))"
 grep -q '◫' "$out/em-list3" && ebad "the list still showed ◫ after revoking all grants ($(eshow em-list3))"
 [ -z "$emu_bad" ] || fail "w9e-emulate:$emu_bad"
-echo "PASS w9e-emulate: the agent's tab took a phone viewport, user agent, language, time zone and location without asking (◫ emulating in the list), the reloaded document request carried the emulated user agent and Accept-Language, the page saw 390 px, fr-FR and Asia/Kolkata a hidden agent tab's location request was held (Chromium) while a shown tab got the agent's coordinates without a prompt, a click on the scaled screen hit #b, after killing the sidecar the replayed document request was emulated again, a second pane emulated the user's tab only on its site (asked once, approved; off-site elsewhere), and revoking all grants removed ◫"
-echo "PASS w9d-mock: the agent's tab took a mock rule without asking (▣ mocking in the list), a matching fetch got the given body and the server never saw it, network --mocked listed it with its rule, a document mock from --body-file became the page and navigate said mocked, clear brought the server's answers back and removed ▣, a second pane needed the network then the control permission before its own mock rule (asked once, approved) answered a fetch, and revoking all grants removed ▣ from both tabs"
+echo "PASS w9e-emulate: the agent's tab took a phone viewport, user agent, language, time zone and location without asking (◫ emulating in the list), the reloaded document request carried the emulated user agent and Accept-Language, the page saw 390 px, fr-FR and Asia/Kolkata, a hidden agent tab's location request was held (Chromium) while a shown tab got the agent's coordinates without a prompt, a click on the scaled screen hit #b, after killing the sidecar the replayed document request was emulated again, a second pane emulated the user's tab without asking, only on its site (off-site elsewhere, and its get says so), and revoking all grants removed ◫"
+echo "PASS w9d-mock: the agent's tab took a mock rule without asking (▣ mocking in the list), a matching fetch got the given body and the server never saw it, network --mocked listed it with its rule, a document mock from --body-file became the page and navigate said mocked, clear brought the server's answers back and removed ▣, a second pane mocked the first pane's tab without asking (full access) and its rule answered a fetch (the same pattern again replaced it), and revoking all grants removed ▣ from both tabs"
 echo "PASS w9d-block: the agent's tab took a rule without asking (⊘ blocking in the list), a blocked fetch was a TypeError the server never saw, network --blocked listed it with its rule and pattern and nothing else, a blocked navigation said blocked, a service-worker page's fetch was handled as the shared-worker rule says, strict on blocked the same fetch (strict in the list), clear brought the requests back and removed ⊘, and revoking all grants removed ⊘"
-echo "PASS w9d-body: the agent's tab recorded bodies without asking (◉ recording in the list), a chunked JSON body came back as sent, a 2 MiB JSON was over_cap, a PNG not_text, a binary JSON body was refused without --out and written with it, --out wrote a 0600 file, a script sent with another site's cookies stayed hidden until get-cookies allowed that site, a pane without the body permission saw needs_body_permission and after its own permission only later bodies, and revoking all grants cleared the mark and the bodies"
-echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization by name only until get-cookies allowed the site and then their values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back) nor a navigation that started on another site and was redirected back, and revoking all grants wiped the record"
-echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
+echo "PASS w9d-body: the agent's tab recorded bodies without asking (◉ recording in the list), a chunked JSON body came back as sent, a 2 MiB JSON was over_cap, a PNG not_text, a binary JSON body was refused without --out and written with it, --out wrote a 0600 file, a script sent with another site's cookies was shown at once (full access — no separate cookie permission) and still after get-cookies, a second pane got the body permission with its first read and saw later bodies at once (turning recording on changed nothing), and revoking all grants cleared the mark and the bodies"
+echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed the Cookie and Authorization values at once (full access) and still after get-cookies, a service-worker page's fetch was labelled, a second pane granted on its first read without a dialog saw only requests after its grant (earlier ones counted as hidden) and, its grant covering any host, also the requests made while the tab was on another site and a navigation that started on another site and was redirected back, and revoking all grants wiped the record"
+echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is answered (cause unknown)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f
 grep -q '^rc=0$' "$out/mcp-py" || fail "the MCP driver failed ($(tr '\n' ' ' < "$out/mcp-py" | cut -c1-600) · $(tail -3 "$out/mcp-log" 2>/dev/null | tr '\n' ' ' | cut -c1-600))"
@@ -1953,8 +1975,8 @@ echo "PASS mcp: an MCP server started in a new session (no terminal) opens, clic
 # 첫 줄은 틀린 `use`(표준 오류) — 같은 파일로 받아도 줄이 서로 덮이지 않고(W9f 적대 리뷰 1 회차), 실패가 있었으니 종료 상태 1.
 grep -q '^(the picked tab was closed' "$out/repl" && grep -q '^hint: pick a tab with `use <id>`' "$out/repl" && grep -q '^error: use needs one tab id' "$out/repl" && grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html?repl$' "$out/repl" && grep -q '^ok$' "$out/repl" && grep -q '^closed$' "$out/repl" && grep -q '^rc=1$' "$out/repl" && [ "$(cat "$out/rb2-hit")" = yes ] || fail "repl did not open a tab, click it without --surface and close it, or its output lines overwrote each other ($(tr '\n' ' ' < "$out/repl"))"
 echo "PASS repl: open picked the new tab, click and close ran on it without --surface"
-echo "PASS agent-tabs: open answers after the first load with the tab behind the current one, its first click lands, a tab its page opens goes behind and is the agent's, a user tab cannot be closed, a page asking before leaving answers 'not closed' at once, a closed tab leaves the list, the ninth tab is refused"
-echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"
+echo "PASS agent-tabs: open answers after the first load with the tab behind the current one, its first click lands, a tab its page opens goes behind and is the agent's, a page asking before leaving answers 'not closed' at once, a closed tab leaves the list, the ninth tab is refused"
+echo "PASS hidden-tab: on a hidden tab a role click presses for real (${hid_role_secs}s), hover reaches the page (${hid_hover_secs}s), a wait sees a button made in an animation frame"
 echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"
 grep -q 'not ok' "$out/hover-missing" || fail "hovering a missing element was not not ok ($(tr '\n' ' ' < "$out/hover-missing"))"

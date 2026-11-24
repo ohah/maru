@@ -2,23 +2,64 @@
 # W3b 로컬 스모크(CI 밖 — CEF SDK 가 필요하다): 앱이 Chromium sidecar 를 띄워 browser 탭을 만들고 이동시키며, 끝나면 남기지
 # 않는다. 제품에 결과를 읽는 훅을 두지 않고 바깥에서 본다 — 앱의 자식 프로세스, 시험 HTTP 서버가 받은 요청, 프로필 권한,
 # 종료 뒤 남은 sidecar.
+# 끝나면 이 대본이 띄운 프로세스(와 그 자손), 이 실행의 session host, 이 실행의 폴더 안 경로로 뜬 프로세스(launchd 아래로 넘어간
+# sidecar·helper)만 끈다. `MARU_SMOKE_KEEP_OUT=<새 폴더>` 면 끝날 때 `$root` 맨 위의 파일(앱·단계 로그, 보고, 요약, 설정·입력 대본 —
+# hardened 사본은 빼고)을 그 폴더에 복사해 둔다(실패한 단계를 다시 보려고 — 기본은 지운다; 이미 있는 폴더면 시작에서 거절한다).
 set -eu
+# 시험 앱이 격리 HOME 밖에 쓰지 않게 — 이 변수들은 HOME 보다 먼저 읽힌다(에이전트 훅 설치 자리 `CLAUDE_CONFIG_DIR`·`CODEX_HOME`, 컨트롤
+# 소켓·캐시 `XDG_CACHE_HOME`, 설정 `MARU_CONFIG`). 필요한 단계는 제 값을 따로 준다.
+unset CLAUDE_CONFIG_DIR CODEX_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME MARU_CONFIG MARU_PANE_ID
 
 sidecar_dir="$PWD/zig-out/web-sidecar"
 app=./zig-out/bin/maru-macos-app
 test -x "$sidecar_dir/maru-web-host" || { echo "web-osr smoke: build the sidecar first (mise run web-sidecar)" >&2; exit 2; }
 test -x "$app" || { echo "web-osr smoke: build the app first (zig build macos-app-build)" >&2; exit 2; }
 
+[ -z "${MARU_SMOKE_KEEP_OUT:-}" ] || [ ! -e "$MARU_SMOKE_KEEP_OUT" ] || { echo "web-osr smoke: MARU_SMOKE_KEEP_OUT=$MARU_SMOKE_KEEP_OUT already exists — give a new folder" >&2; exit 2; }
 root=$(mktemp -d "/tmp/maru-web-osr-smoke.XXXXXX")
 server_pid=""
 app_pid=""
+# 어떤 프로세스의 자손 pid 들(정리가 쓴다 — 이름으로 찾지 않는다; 같은 기계의 다른 실행·다른 maru 를 건드리지 않게).
+descendants() { for k in $(ps -ax -o pid=,ppid= | awk -v p="$1" '$2==p {print $1}'); do echo "$k"; descendants "$k"; done; }
 cleanup() {
+    trap '' INT HUP TERM # 정리 도중 또 온 시그널이 정리를 끊지 않게(EXIT trap 안의 exit 는 정리를 다시 돌리지 않는다)
+    [ -n "${root:-}" ] || return 0 # 빈 root 면 아래 경로 쓸기가 「/」 로 모든 프로세스와 맞는다
+    # 이 대본의 자손 전부 — 단계마다 뒤에 띄운 앱(실패로 기다리지 못한 것)과 그 sidecar·CEF helper·pane 셸, 시험 서버.
+    kids=$(descendants $$)
+    # session host 는 앱에서 떨어져 나간다(부모가 launchd) — 이 실행의 host 소유 잠금을 쥔 프로세스와 그 자손(남은 시험 셸)도 끈다.
+    for h in $(lsof -t "$root"/session-host/session-host/hosts/*/owner.lock 2>/dev/null); do kids="$kids $h $(descendants "$h")"; done
     [ -n "$app_pid" ] && kill "$app_pid" 2>/dev/null || true
     [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null || true
-    pkill -KILL -f "$root" 2>/dev/null || true
-    rm -rf "$root"
+    sleep 2
+    # 그 2 초 사이에 단계 앱이 새로 띄운 것(다시 띄운 sidecar·helper, 막 뜬 session host)도
+    kids="$kids $(descendants $$)"
+    for h in $(lsof -t "$root"/session-host/session-host/hosts/*/owner.lock 2>/dev/null); do kids="$kids $h $(descendants "$h")"; done
+    for k in $kids; do kill -KILL "$k" 2>/dev/null || true; done
+    # 부모가 먼저 죽어 launchd 아래로 넘어간 것(앱이 끝난 뒤 남은 sidecar·CEF helper — 그 회귀를 잡는 단계가 실패한 길)은 자손으로
+    # 찾을 수 없다 — argv[0](`ps comm`)이 이 실행의 폴더 안 경로인 프로세스(sidecar 실행 사본·helper·hardened 사본 — 앱과 Chromium 은
+    # 절대 경로로 띄운다)만 끈다(이름이 아니라 위치). helper 는 `/private/tmp` 표기로 뜬다. comm 은 마지막 열이어야 잘리지 않는다.
+    for k in $(ps -ax -o pid=,comm= | awk -v a="$root/" -v b="/private$root/" '{p = $1; sub(/^ *[0-9]+ /, ""); if (index($0, a) == 1 || index($0, b) == 1) print p}'); do
+        kill -KILL "$k" 2>/dev/null || true
+    done
+    if [ -n "${MARU_SMOKE_KEEP_OUT:-}" ]; then
+        # 맨 위의 파일만(앱·단계 로그, 보고, 요약, 설정·입력 대본) — 홈·프로필·가짜 brew keg·hardened 사본은 크고 다시 볼 일이 없다.
+        kept=0
+        if mkdir -p "$MARU_SMOKE_KEEP_OUT"; then
+            kept=1
+            for f in "$root"/*; do
+                if [ -f "$f" ] && [ "$f" != "$root/maru-hardened" ]; then cp "$f" "$MARU_SMOKE_KEEP_OUT/" || kept=0; fi
+            done
+        fi
+        [ "$kept" = 1 ] || echo "web-osr smoke: could not keep the logs in $MARU_SMOKE_KEEP_OUT" >&2
+    fi
+    rm -rf "$root" || true
+    app_pid="" server_pid=""
 }
-trap cleanup EXIT HUP INT TERM
+# 시그널이면 곧 끝낸다(EXIT 가 한 번 정리한다) — trap 이 돌아온 뒤 지운 폴더로 단계를 이어 가지 않게.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap 'exit 143' TERM
 
 port=$((20000 + $$ % 20000))
 cat > "$root/server.py" <<'PY'
@@ -1584,7 +1625,9 @@ sleep 3500
 downloads
 SCRIPT
 dl_check() { # $1=이름 — 대본의 목록 보고와 `~/Downloads` 를 남긴다
-    grep -ao 'osr-test downloads* [^|]*\(|[^|]*\)\{0,6\}' "$root/app-$1.log" | sed 's/^osr-test //' > "$root/$1.report" || true
+    # 목록 보고(`downloads …`·`download N|…`)만 — 받기 시작 줄(`download N <시작> state=… agent_action=…`, 2026-11-17 a8bc3a82b)은 뺀다.
+    grep -ao 'osr-test downloads* [^|]*\(|[^|]*\)\{0,6\}' "$root/app-$1.log" | sed 's/^osr-test //' \
+        | grep -v '^download [0-9]* [a-z_]* state=' > "$root/$1.report" || true
     ls -A "$root/home/Downloads" > "$root/$1.files" 2>/dev/null || true
     for f in "$root/home/Downloads"/*; do
         [ -f "$f" ] && printf '%s\t%s\n' "$(basename "$f")" "$(xattr -p com.apple.quarantine "$f" 2>/dev/null | cut -c1-4)"
@@ -2112,10 +2155,12 @@ else
     fail "a window whose only shell already ended did not close cleanly when the app quit (exit $ended_rc)"
 fi
 
-# ── W9-0: 컨트롤 플레인이 Chromium 탭을 엔진과 함께 알리고, 지원하지 않는 명령은 확인 모달 전에 답한다 ──────────────
-# 실제 앱에서 `maru browser list` 가 이 탭을 engine=chromium 으로 보이고, `maru browser navigate` 가 허용
-# 판정이 아니라 엔진 검사의 답(-32008 unsupported_by_engine)을 받는지 본다 — 엔진 검사가 허용 판정보다 앞이다. 이 대본은
-# pane 밖이라 예전 코드에서도 모달은 뜨지 않고 unauthorized 를 받았다. 「pane 안의 호출자에게 모달을 띄우기 전에 답한다」는
+# ── W9-0: 컨트롤 플레인이 Chromium 탭을 엔진과 함께 알리고, pane 밖의 제어는 거절한다 ─────────────────────────────
+# 실제 앱에서 `maru browser list`(발견 — 인가 없이 열린다)가 이 탭을 engine=chromium 으로 보이고, pane 밖(이 대본)의
+# `maru browser navigate` 는 균일 unauthorized(-32002 — 까닭 없는 거절에만 붙는 안내 줄까지)로 거절돼 페이지가 이동하지 않는지 본다
+# (신원 판정 — control-plane-security §8.4 1g; pane 안의 호출자는 묻지 않고 전권 — §8.9, 사용자 결정 2026-11-16). 처음(W9-0)에는
+# Chromium 이 navigate 를 지원하지 않아 엔진
+# 검사의 답(-32008)을 단언했다 — W9a①(2026-10-13)부터 지원한다. 「지원하지 않는 메서드는 인가 판정 전에 -32008」 은
 # control_browser 의 W9-0 단위 시험이 본다.
 cli_bin="$PWD/zig-out/bin/maru"
 # 엔진 칸을 모르는 옛 CLI 면 이 단계를 판정할 수 없다(목록 줄에 engine= 이 없다) — 건너뛴다고 알린다.
@@ -2124,6 +2169,7 @@ if [ -x "$cli_bin" ] && "$cli_bin" browser --help 2>&1 | grep -q 'title, engine'
     printf 'sleep 14000\n' > "$root/w90.txt"
     # 기본 설정(개발자 셸의 MARU_CONFIG 를 물려받지 않게 빈 설정 파일을 준다).
     printf '# W9-0 smoke: defaults\n' > "$root/w90.conf"
+    : > "$root/requests.log"
     env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
         MARU_CONFIG="$root/w90.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/solid" \
         MARU_MACOS_APP_SMOKE_MS=16000 MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel MARU_WEB_OSR_TEST_INPUT="$root/w90.txt" \
@@ -2133,16 +2179,21 @@ if [ -x "$cli_bin" ] && "$cli_bin" browser --help 2>&1 | grep -q 'title, engine'
     HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" "$cli_bin" browser list > "$root/w90-list" 2>&1 || true
     w90_sid=$(awk '/^surface .*engine=chromium/{print $2; exit}' "$root/w90-list")
     w90_start=$(date +%s)
-    HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" "$cli_bin" browser navigate --surface "${w90_sid:-0}" "http://127.0.0.1:$port/solid" > "$root/w90-nav" 2>&1 || true
+    w90_rc=0
+    HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" "$cli_bin" browser navigate --surface "${w90_sid:-0}" "http://127.0.0.1:$port/w90-nav" > "$root/w90-nav" 2>&1 || w90_rc=$?
     w90_elapsed=$(( $(date +%s) - w90_start ))
     wait "$w90_pid" 2>/dev/null || true
     cat "$root/w90-list"
     grep -q 'engine=chromium' "$root/w90-list" \
         || fail "the Chromium tab was not listed with its engine ($(tr '\n' ' ' < "$root/w90-list"))"
     echo "PASS the Chromium tab is listed with engine=chromium"
-    grep -q '(-32008) \[engine=chromium\]' "$root/w90-nav" \
-        || fail "navigate on the Chromium tab was not answered by the engine check ($w90_elapsed s · $(tr '\n' ' ' < "$root/w90-nav"))"
-    echo "PASS navigate on the Chromium tab was answered by the engine check (-32008, engine=chromium) before the permission check ($w90_elapsed s)"
+    [ -n "$w90_sid" ] || fail "no Chromium tab id in the list ($(tr '\n' ' ' < "$root/w90-list"))"
+    [ "$w90_rc" != 0 ] && grep -q 'Unauthorized (-32002)' "$root/w90-nav" && grep -q '^hint: maru does not say why it refused' "$root/w90-nav" \
+        || fail "navigate from outside a maru pane was not refused as unauthorized (rc $w90_rc · $w90_elapsed s · $(tr '\n' ' ' < "$root/w90-nav"))"
+    # 양성 대조 — 시험 서버가 이 앱의 탭 요청을 받고 있었다(아니면 아래 「요청 없음」 이 아무것도 보지 않는다).
+    grep -qx '/solid' "$root/requests.log" || fail "the test server did not see this app's tab load /solid — the no-request check below would see nothing"
+    ! grep -q '^/w90-nav' "$root/requests.log" || fail "navigate from outside a maru pane was refused but the tab still loaded the page"
+    echo "PASS navigate on the Chromium tab from outside a maru pane is refused uniformly (Unauthorized -32002, no reason given) and the tab does not load it ($w90_elapsed s)"
 else
     echo "WARN W9-0 stage skipped: build the current maru cli first (zig build)"
 fi

@@ -16,23 +16,28 @@ test -x "$sidecar_dir/maru-web-host" || { echo "web-osr smoke: build the sidecar
 test -x "$app" || { echo "web-osr smoke: build the app first (zig build macos-app-build)" >&2; exit 2; }
 
 [ -z "${MARU_SMOKE_KEEP_OUT:-}" ] || [ ! -e "$MARU_SMOKE_KEEP_OUT" ] || { echo "web-osr smoke: MARU_SMOKE_KEEP_OUT=$MARU_SMOKE_KEEP_OUT already exists — give a new folder" >&2; exit 2; }
+# 이 셸이 무엇이든 띄우기 전부터 있던 자식 — 부른 쪽이 `&` 로 띄운 작업(zsh 가 `-c` 의 마지막 명령을 exec 하면 그 작업이 이
+# 대본의 자식이 된다 — 실측)은 이 실행의 것이 아니니 정리에서 뺀다.
+inherited=" $(ps -ax -o pid=,ppid= | awk -v p=$$ '$2==p {printf "%s ", $1}')"
 root=$(mktemp -d "/tmp/maru-web-osr-smoke.XXXXXX")
 server_pid=""
 app_pid=""
 # 어떤 프로세스의 자손 pid 들(정리가 쓴다 — 이름으로 찾지 않는다; 같은 기계의 다른 실행·다른 maru 를 건드리지 않게).
 descendants() { for k in $(ps -ax -o pid=,ppid= | awk -v p="$1" '$2==p {print $1}'); do echo "$k"; descendants "$k"; done; }
+# 이 대본이 띄운 것과 그 자손(물려받은 자식과 그 아래는 뺀다).
+own_descendants() { for k in $(ps -ax -o pid=,ppid= | awk -v p=$$ '$2==p {print $1}'); do case "$inherited" in *" $k "*) continue ;; esac; echo "$k"; descendants "$k"; done; }
 cleanup() {
     trap '' INT HUP TERM # 정리 도중 또 온 시그널이 정리를 끊지 않게(EXIT trap 안의 exit 는 정리를 다시 돌리지 않는다)
     [ -n "${root:-}" ] || return 0 # 빈 root 면 아래 경로 쓸기가 「/」 로 모든 프로세스와 맞는다
     # 이 대본의 자손 전부 — 단계마다 뒤에 띄운 앱(실패로 기다리지 못한 것)과 그 sidecar·CEF helper·pane 셸, 시험 서버.
-    kids=$(descendants $$)
+    kids=$(own_descendants)
     # session host 는 앱에서 떨어져 나간다(부모가 launchd) — 이 실행의 host 소유 잠금을 쥔 프로세스와 그 자손(남은 시험 셸)도 끈다.
     for h in $(lsof -t "$root"/session-host/session-host/hosts/*/owner.lock 2>/dev/null); do kids="$kids $h $(descendants "$h")"; done
     [ -n "$app_pid" ] && kill "$app_pid" 2>/dev/null || true
     [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null || true
     sleep 2
     # 그 2 초 사이에 단계 앱이 새로 띄운 것(다시 띄운 sidecar·helper, 막 뜬 session host)도
-    kids="$kids $(descendants $$)"
+    kids="$kids $(own_descendants)"
     for h in $(lsof -t "$root"/session-host/session-host/hosts/*/owner.lock 2>/dev/null); do kids="$kids $h $(descendants "$h")"; done
     for k in $kids; do kill -KILL "$k" 2>/dev/null || true; done
     # 부모가 먼저 죽어 launchd 아래로 넘어간 것(앱이 끝난 뒤 남은 sidecar·CEF helper — 그 회귀를 잡는 단계가 실패한 길)은 자손으로

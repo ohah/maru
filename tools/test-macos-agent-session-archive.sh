@@ -1,6 +1,9 @@
 #!/bin/sh
 # All GUI-accessed paths live outside Documents. Only the parent shell publishes evidence.
 set -eu
+# 시험 앱이 격리 HOME 밖에 쓰지 않게 — 이 변수들은 HOME 보다 먼저 읽힌다(에이전트 훅 설치 자리 `CLAUDE_CONFIG_DIR`·`CODEX_HOME`, 컨트롤
+# 소켓·캐시 `XDG_CACHE_HOME`, 설정 `MARU_CONFIG`). 필요한 단계는 제 값을 따로 준다.
+unset CLAUDE_CONFIG_DIR CODEX_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME MARU_CONFIG MARU_PANE_ID
 
 app_path=${1:?Maru app executable path is required}
 workspace=$(pwd -P)

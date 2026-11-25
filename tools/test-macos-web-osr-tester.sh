@@ -16,6 +16,9 @@
 # maru 를 앞으로 올리고 시스템 입력 소스를 한글 2벌식으로 바꾸고 진짜 키·포인터·클립보드(⌘C·⌘V)를 쓴다 — **자리를 비웠을
 # 때만** 돌린다. 끝나면(앱이 죽어도) 입력 소스·클립보드·앞 앱을 되돌린다 — 사용자가 그 사이 바꾼 것은 덮지 않는다.
 set -eu
+# 시험 앱이 격리 HOME 밖에 쓰지 않게 — 이 변수들은 HOME 보다 먼저 읽힌다(에이전트 훅 설치 자리 `CLAUDE_CONFIG_DIR`·`CODEX_HOME`, 컨트롤
+# 소켓·캐시 `XDG_CACHE_HOME`, 설정 `MARU_CONFIG`). 필요한 단계는 제 값을 따로 준다.
+unset CLAUDE_CONFIG_DIR CODEX_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME MARU_CONFIG MARU_PANE_ID
 
 live=0
 [ "${1:-}" = "--live" ] && live=1
@@ -31,17 +34,44 @@ fi
 keep=${MARU_WEB_OSR_TESTER_KEEP:-}
 [ -z "$keep" ] || [ ! -e "$keep" ] || { echo "web-osr tester: MARU_WEB_OSR_TESTER_KEEP=$keep already exists" >&2; exit 2; }
 
+# 이 셸이 무엇이든 띄우기 전부터 있던 자식 — 부른 쪽이 `&` 로 띄운 작업(zsh 가 `-c` 의 마지막 명령을 exec 하면 그 작업이 이
+# 대본의 자식이 된다 — 실측)은 이 실행의 것이 아니니 정리에서 뺀다.
+inherited=" $(ps -ax -o pid=,ppid= | awk -v p=$$ '$2==p {printf "%s ", $1}')"
 root=$(mktemp -d "/tmp/maru-web-osr-tester.XXXXXX")
 server_pid=""
 app_pid=""
 watchdog_pid=""
 clip_saved=0
 restore_exe="$root/input-source-restore"
+# 어떤 프로세스의 자손 pid 들(정리가 쓴다 — 이름으로 찾지 않는다; 같은 기계의 다른 실행·다른 maru 를 건드리지 않게).
+descendants() { for k in $(ps -ax -o pid=,ppid= | awk -v p="$1" '$2==p {print $1}'); do echo "$k"; descendants "$k"; done; }
+# 이 대본이 띄운 것과 그 자손(물려받은 자식과 그 아래는 뺀다).
+own_descendants() { for k in $(ps -ax -o pid=,ppid= | awk -v p=$$ '$2==p {print $1}'); do case "$inherited" in *" $k "*) continue ;; esac; echo "$k"; descendants "$k"; done; }
+# 이 실행의 session host(인자로 준 owner.lock 을 쥔 pid — 앱에서 떨어져 launchd 아래로 간다)와 그 자손(pane 셸).
+# 인자가 없으면 아무것도 내지 않는다(`lsof -t` 는 이름 없이 부르면 기계의 모든 pid 를 낸다).
+session_hosts() { [ $# -gt 0 ] || return 0; for h in $(lsof -t "$@" 2>/dev/null); do echo "$h"; descendants "$h"; done; }
+# argv[0](`ps comm` — 마지막 열이어야 잘리지 않는다)이 $1 폴더 안 경로인 프로세스(launchd 아래로 넘어간 것도 — 이름이 아니라 위치).
+# `/tmp` 는 `/private/tmp` 로도 뜬다. $2 가 있으면 argv[0] 이 그것으로 끝나는 것만.
+procs_under() {
+    [ -n "$1" ] || return 0
+    ps -ax -o pid=,comm= | awk -v a="$1/" -v b="/private$1/" -v s="${2:-}" '{p = $1; sub(/^ *[0-9]+ /, "");
+        if ((index($0, a) == 1 || index($0, b) == 1) && (s == "" || substr($0, length($0) - length(s) + 1) == s)) print p}'
+}
 cleanup() {
+    trap '' INT HUP TERM # 정리 도중 또 온 시그널이 정리를 끊지 않게(EXIT trap 안의 exit 는 정리를 다시 돌리지 않는다)
+    [ -n "${root:-}" ] || return 0
+    # 이 실행이 띄운 것만 끈다: 이 대본의 자손, 이 실행의 session host 와 그 자손, argv[0] 이 이 실행의 폴더 안인 것(앱보다 오래
+    # 남아 launchd 아래로 넘어간 sidecar 실행 사본·CEF helper). `--live` 의 앱은 `open` 으로 떠 자손이 아니다 —
+    # 전처럼 `app_pid` 에 TERM 만 보낸다(TERM 도 앱의 복원을 부르지 않는다 — 아래 복원 도구·pbcopy 가 되돌린다).
+    kids="$(own_descendants) $(session_hosts "$root"/session-host/session-host/hosts/*/owner.lock)"
     [ -n "$watchdog_pid" ] && kill "$watchdog_pid" 2>/dev/null || true
     [ -n "$app_pid" ] && kill "$app_pid" 2>/dev/null || true
     [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null || true
-    pkill -KILL -f "$root" 2>/dev/null || true
+    sleep 2
+    # 그 2 초 사이에 새로 뜬 것(다시 띄운 sidecar·막 뜬 session host)도
+    kids="$kids $(own_descendants) $(session_hosts "$root"/session-host/session-host/hosts/*/owner.lock)"
+    for k in $kids; do kill -KILL "$k" 2>/dev/null || true; done
+    for k in $(procs_under "$root"); do kill -KILL "$k" 2>/dev/null || true; done # 그 KILL 뒤에 남은 것을 본다
     if [ "$live" = 1 ]; then
         # 앱이 되돌리지 못하고 죽었으면(SIGTERM·SIGKILL 은 applicationWillTerminate 를 안 부른다) 입력 소스(우리가 고른
         # 소스일 때만 — 복원 도구의 규칙)를 되돌린다. 클립보드 글은 앱이 ⌘C 를 보냈는데(`live clipboard-touched`) 되돌렸다는
@@ -55,7 +85,7 @@ cleanup() {
     fi
     # 실패를 들여다볼 때: MARU_WEB_OSR_TESTER_KEEP=<없는 디렉터리> 면 로그를 거기 남긴다.
     [ -n "$keep" ] && cp -R "$root" "$keep" || true
-    rm -rf "$root"
+    rm -rf "$root" || true # 정리 안에서도 set -e 가 걸린다 — 지우기 실패가 통과한 실행을 1 로 바꾸지 않게
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -625,7 +655,7 @@ SCRIPT
 # sidecar 를 죽여 떠 있던 sheet 가 답 없이 닫히는지 본다(`mark crash` 를 보고 죽인다). sidecar 는 임시 홈 아래 실행 사본에서
 # 돈다(W7a2 — `~/Library/Caches/maru/web-osr-run/run-*`).
 ( while ! grep -q '^mark crash' "$root/report" 2>/dev/null; do sleep 0.2; done
-  pkill -KILL -f "$root/home/Library/Caches/maru/web-osr-run/run-[^/]*/maru-web-host" 2>/dev/null || true ) &
+  for k in $(procs_under "$root/home/Library/Caches/maru/web-osr-run" /maru-web-host); do kill -KILL "$k" 2>/dev/null || true; done ) &
 crash_pid=$!
 page_path=/dialogs run_app "$root/dialogs.txt" 100000
 kill "$crash_pid" 2>/dev/null || true

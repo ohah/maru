@@ -121,6 +121,9 @@
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버(와 그 자손)만 끈다. `MARU_SMOKE_KEEP_OUT=<새 폴더>` 면 끝날 때 각 단계의 출력(`out`)을
 # 그 폴더로 옮겨 둔다(실패한 단계를 다시 보려고 — 기본은 지운다; 이미 있는 폴더면 옛 출력과 섞이지 않게 시작에서 거절한다).
 set -eu
+# 시험 앱이 격리 HOME 밖에 쓰지 않게 — 이 변수들은 HOME 보다 먼저 읽힌다(에이전트 훅 설치 자리 `CLAUDE_CONFIG_DIR`·`CODEX_HOME`, 컨트롤
+# 소켓·캐시 `XDG_CACHE_HOME`, 설정 `MARU_CONFIG`). 필요한 단계는 제 값을 따로 준다.
+unset CLAUDE_CONFIG_DIR CODEX_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME MARU_CONFIG MARU_PANE_ID
 
 app=${MARU_APP:-./zig-out/bin/maru-macos-app}
 cli=${MARU_CLI:-$PWD/zig-out/bin/maru}

@@ -11,24 +11,57 @@
 #   다른 작업이 foreground 일 때의 `&`      → 거절(그 pane 의 foreground 작업에서 나오지 않았다 — grant 가 기억돼 있어도)
 #   pane 밖에서 pane 번호를 댐             → 거절(1g 전에는 in-process pane 의 기억된 grant 를 모달 없이 탔다)
 #
-# 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·session host·셸만 끈다.
+# 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 것(그 자손), 이 실행의 session host(와 그 셸), argv[0] 이 이 실행의 폴더 안인
+# 프로세스만 끈다.
 set -eu
+# 시험 앱이 격리 HOME 밖에 쓰지 않게 — 이 변수들은 HOME 보다 먼저 읽힌다(에이전트 훅 설치 자리 `CLAUDE_CONFIG_DIR`·`CODEX_HOME`, 컨트롤
+# 소켓·캐시 `XDG_CACHE_HOME`, 설정 `MARU_CONFIG`). 필요한 단계는 제 값을 따로 준다.
+unset CLAUDE_CONFIG_DIR CODEX_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME MARU_CONFIG MARU_PANE_ID
 
 app=${MARU_APP:-./zig-out/bin/maru-macos-app}
 cli=${MARU_CLI:-$PWD/zig-out/bin/maru}
 test -x "$app" || { echo "self-origin smoke: build the app first (zig build macos-app-build)" >&2; exit 2; }
 test -x "$cli" || { echo "self-origin smoke: build the cli first (zig build)" >&2; exit 2; }
 
+# 이 셸이 무엇이든 띄우기 전부터 있던 자식 — 부른 쪽이 `&` 로 띄운 작업(zsh 가 `-c` 의 마지막 명령을 exec 하면 그 작업이 이
+# 대본의 자식이 된다 — 실측)은 이 실행의 것이 아니니 정리에서 뺀다.
+inherited=" $(ps -ax -o pid=,ppid= | awk -v p=$$ '$2==p {printf "%s ", $1}')"
 root=$(mktemp -d "/tmp/maru-self-origin.XXXXXX")
 app_pid=""
 server_pid=""
+app_kids="" # run_mode 가 앱을 끄기 전에 모은 앱의 자손 — 그 사이에 신호가 와도 정리가 끈다
+# 어떤 프로세스의 자손 pid 들(정리가 쓴다 — 이름으로 찾지 않는다; 같은 기계의 다른 실행·다른 maru 를 건드리지 않게).
+descendants() { for k in $(ps -ax -o pid=,ppid= | awk -v p="$1" '$2==p {print $1}'); do echo "$k"; descendants "$k"; done; }
+# 이 대본이 띄운 것과 그 자손(물려받은 자식과 그 아래는 뺀다).
+own_descendants() { for k in $(ps -ax -o pid=,ppid= | awk -v p=$$ '$2==p {print $1}'); do case "$inherited" in *" $k "*) continue ;; esac; echo "$k"; descendants "$k"; done; }
+# 이 실행의 session host(인자로 준 owner.lock 을 쥔 pid — 앱에서 떨어져 launchd 아래로 간다)와 그 자손(pane 셸).
+# 인자가 없으면 아무것도 내지 않는다(`lsof -t` 는 이름 없이 부르면 기계의 모든 pid 를 낸다).
+session_hosts() { [ $# -gt 0 ] || return 0; for h in $(lsof -t "$@" 2>/dev/null); do echo "$h"; descendants "$h"; done; }
+# argv[0](`ps comm` — 마지막 열이어야 잘리지 않는다)이 $1 폴더 안 경로인 프로세스(launchd 아래로 넘어간 것도 — 이름이 아니라 위치).
+# `/tmp` 는 `/private/tmp` 로도 뜬다. $2 가 있으면 argv[0] 이 그것으로 끝나는 것만.
+procs_under() {
+    [ -n "$1" ] || return 0
+    ps -ax -o pid=,comm= | awk -v a="$1/" -v b="/private$1/" -v s="${2:-}" '{p = $1; sub(/^ *[0-9]+ /, "");
+        if ((index($0, a) == 1 || index($0, b) == 1) && (s == "" || substr($0, length($0) - length(s) + 1) == s)) print p}'
+}
 cleanup() {
+    trap '' INT HUP TERM # 정리 도중 또 온 시그널이 정리를 끊지 않게(EXIT trap 안의 exit 는 정리를 다시 돌리지 않는다)
+    [ -n "${root:-}" ] || return 0
+    kids="$(own_descendants) $(session_hosts "$root"/session-host-*/session-host/hosts/*/owner.lock)"
     [ -n "$app_pid" ] && kill "$app_pid" 2>/dev/null || true
     [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null || true
-    pkill -KILL -f "$root" 2>/dev/null || true
-    rm -rf "$root"
+    sleep 2
+    kids="$kids $(own_descendants) $(session_hosts "$root"/session-host-*/session-host/hosts/*/owner.lock)"
+    for k in $kids $app_kids; do kill -KILL "$k" 2>/dev/null || true; done
+    for k in $(procs_under "$root"); do kill -KILL "$k" 2>/dev/null || true; done # 그 KILL 뒤에 남은 것을 본다
+    rm -rf "$root" || true
+    app_pid="" server_pid="" app_kids=""
 }
-trap cleanup EXIT HUP INT TERM
+# 시그널이면 곧 끝낸다(EXIT 가 한 번 정리한다) — trap 이 돌아온 뒤 지운 폴더로 단계를 이어 가지 않게.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap 'exit 143' TERM
 fail() { echo "self-origin smoke failed: $1" >&2; exit 1; }
 
 port=$((21000 + $$ % 20000))
@@ -100,10 +133,14 @@ run_mode() { # $1=이름 $2=session.keep-alive-after-quit
     [ -n "$pane_id" ] || fail "$mode: could not find the terminal pane id ($(cat "$out/sessions" 2>/dev/null))"
     HOME="$root/home-$mode" XDG_CACHE_HOME="$root/home-$mode/.cache" MARU_PANE_ID="$pane_id" "$cli" browser navigate --surface "$web_id" "$url" > "$out/outside" 2>&1 \
         && echo "rc=0" >> "$out/outside" || echo "rc=$?" >> "$out/outside"
+    # 앱의 자손(in-process 모드의 pane 셸 — login → sleep)은 앱을 끄기 전에 모은다 — 앱이 죽으면 launchd 아래로 넘어가 찾을 수 없다.
+    app_kids=$(descendants "$app_pid")
     kill "$app_pid" 2>/dev/null || true
     wait "$app_pid" 2>/dev/null || true
     app_pid=""
-    pkill -KILL -f "$root/session-host-$mode" 2>/dev/null || true
+    # 세션 유지 모드의 host 는 앱이 끝나도 pane 셸을 쥐고 남는다 — 그 host 와 셸을 끈다.
+    for k in $app_kids $(session_hosts "$root/session-host-$mode"/session-host/hosts/*/owner.lock); do kill -KILL "$k" 2>/dev/null || true; done
+    app_kids=""
     # 허용 = 종료 코드 0 이고 오류 응답이 없다(CLI 는 unauthorized 응답에도 0 으로 끝난다 — 출력으로 가른다).
     pass() { grep -q '^rc=0$' "$out/$1" && ! grep -q 'error:' "$out/$1"; }
     # 거절 = 서버의 unauthorized 응답(연결 실패·시간 초과 같은 다른 실패를 거절로 세지 않는다).
